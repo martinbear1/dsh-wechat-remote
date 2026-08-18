@@ -1,0 +1,5 @@
+# Harness Remote 微信版 bundle 层：单包双角色（微信认证网关 + 浏览器配对按钮）。
+# 与官方客户端插件行同理：一行即宿主行，也是浏览器清单的一部分。
+- insert:
+    - id: gate
+      name: '@harness-remote/dsh-wechat-remote'

@@ -144,6 +144,19 @@
    可改。
 5. **旧 iOS 插件不动**：两个仓库独立演进，确认？
 
+## 5b. 已拍板（2026-08-18）
+
+1. **错开端口**：微信版默认 **3092（公网门）/ 3093（本地门）**，与 iOS 插件
+   3090/3091 完全共存；env 覆盖 `WECHAT_GATE_PORT` / `WECHAT_GATE_LOCAL_PORT`。
+2. **方案 B（扫一扫直达）**：同意列 **v2**（小程序发布后做，PC 端拉取
+   getUnlimited 小程序码）。
+3. **凭证滚动**：**要**。verify 成功即轮换 token；开发态（未配置
+   gate-wechat.json）保持 `{valid: true, dev: true}` 不轮换。
+4. **命名**：包名 `@harness-remote/dsh-wechat-remote`、仓库
+   `martinbear1/dsh-wechat-remote` ✓。
+5. **两插件独立互不影响** ✓；Web UI 侧边栏按钮显示为「**微信连接**」；
+   小程序端代码由小程序侧开发者自行修改，插件侧只提供适配清单。
+
 ## 6. 参考
 
 - 微信官方：`code2session` / `wx.login` / 获取小程序码 `getUnlimited` / URL Link /

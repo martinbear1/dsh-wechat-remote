@@ -1,0 +1,171 @@
+.button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+}
+
+.button:hover {
+  background: rgba(128, 140, 160, 0.14);
+}
+
+.buttonLabel {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(4, 6, 12, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.modal {
+  background: var(--ds-color-surface-raised, #101625);
+  border: 1px solid rgba(128, 140, 160, 0.25);
+  border-radius: 18px;
+  padding: 20px 24px;
+  color: #e8ecf4;
+  max-width: 92vw;
+  text-align: center;
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.head h3 {
+  margin: 0;
+  font-size: 16px;
+  color: #e8ecf4;
+}
+
+.close {
+  border: none;
+  background: transparent;
+  color: #e8ecf4;
+  cursor: pointer;
+  font-size: 14px;
+  opacity: 0.7;
+}
+
+.close:hover {
+  opacity: 1;
+}
+
+.hint {
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: #9aa4b8;
+}
+
+.qr {
+  width: 224px;
+  height: 224px;
+  border-radius: 12px;
+  background: #fff;
+  padding: 8px;
+}
+
+.code {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: #9aa4b8;
+}
+
+.code code {
+  color: #7aa2ff;
+  letter-spacing: 2px;
+}
+
+.err {
+  color: #e58f8f;
+  font-size: 12px;
+}
+
+.channels {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  text-align: left;
+}
+
+.channel {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+}
+
+.dotOk {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #3ecf8e;
+  flex: none;
+}
+
+.dotOff {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #6b7385;
+  flex: none;
+}
+
+.channelLabel {
+  font-weight: 600;
+  flex: none;
+  color: #e8ecf4;
+}
+
+.channelDetail {
+  color: #9aa4b8;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.footnote {
+  margin: 10px 0 0;
+  font-size: 11px;
+  color: #6b7385;
+}
+
+/* ── 官方侧边栏脚部布局（仅宽屏）：设置区在左、本插件在右 ──
+   官方 SidebarRoot 把 sidebar.footer.action 与 sidebar.settings 上下堆叠；
+   这里复刻我们早期 fork 版 ui-sidebar 的 footRow 设计，用全局选择器把
+   宽屏下的脚部排成一行（设置左、动作右）。
+   选择器只匹配官方类名的局部名（class*=），不依赖官方构建的哈希前缀，
+   rc 升级后仍生效；万一官方改名，失效也只是退回官方堆叠布局，不会报错。 */
+:global([class*=_root]:not([class*=_collapsed]) [class*=_footArea]) {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+}
+
+:global([class*=_root]:not([class*=_collapsed]) [class*=_settingsArea]) {
+  order: 1;
+  flex: 1;
+  width: auto;
+}
+
+:global([class*=_root]:not([class*=_collapsed]) [class*=_footerActions]) {
+  order: 2;
+  width: auto;
+}

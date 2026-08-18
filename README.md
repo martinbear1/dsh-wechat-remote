@@ -104,6 +104,17 @@ dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.0.0
 **Q：和 iOS 插件同时装会冲突吗？** 不会：两插件端口（3090/3091 vs 3092/3093）
 与状态文件相互独立；Web UI 侧边栏会同时出现「手机连接」与「微信连接」两个按钮。
 
+**Q：openid 泄露了会被冒名登录吗？** 不会。openid 只是**身份标识**不是**凭证**：
+登录靠的是「微信登录态 → wx.login 换 jsCode → 服务端 code2session 解析」这条链，
+攻击者拿不到被绑定微信账号的登录态就伪造不出有效的 jsCode，知道 openid 字符串
+本身没有任何用（好比知道别人家门牌号不等于有钥匙）。真正要保护的是电脑上的
+`gate-wechat.json`（appid/secret，已自动 0600）和配对的屏幕秘密。
+
+**Q：需要手动开防火墙吗？** 一般不用：Node.js 自带程序级放行规则（按 node.exe
+放行、覆盖所有端口），DSH 跑在 node.exe 上，3092 自动可用。只有在你机器上存在
+「仅 3090」的端口级规则等特殊情况下才需手动加（命令见
+docs/MINIPROGRAM-ADAPTATION.md）。
+
 **Q：如何卸载？**
 ```bash
 dsh plugin --profile web remove @harness-remote/dsh-wechat-remote

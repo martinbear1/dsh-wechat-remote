@@ -39,10 +39,29 @@
 即：`verifyWechatBinding` 成功且返回里带 `token` 字段时，调用 `request.setToken()`
 并持久化到 storage，再继续连接；`dev: true` 时不替换。
 
-### 3. 防火墙放行新端口（真机验证前）
+### 3. 防火墙：一般无需任何操作（已实测确认）
 
-Windows 防火墙若已为 3090 建立过入站规则，需**新增 3092** 的放行规则
-（插件不会自动开墙）。
+**结论：绝大多数机器不用手动开墙。** Windows 防火墙的放行规则分两种：
+
+- **程序级规则**（按 node.exe 放行）：一旦存在，**覆盖该程序的所有端口**。
+  安装 Node.js 时系统已内置 "Node.js JavaScript Runtime" 入站允许规则；
+  DSH 跑在 node.exe 上，因此 3092 随程序自动放行 —— 与当年 3090 能通
+  是同一机制（你机器上已实测确认：无任何 3090 端口规则，但有 node.exe
+  程序级规则，手机照样连上）。
+- 端口级规则（按 3092 放行）：只有当你机器上存在"仅 3090"的端口规则、
+  或网络被标记为「公用网络」且 node 程序规则被禁用/删除时，才需要手动加。
+
+**排查方法**（真机连不上时）：
+
+```powershell
+# 查看 node 程序级规则是否存在（存在即无需开墙）
+Get-NetFirewallApplicationFilter | Where-Object { $_.Program -like '*node*' } | Get-NetFirewallRule | Select DisplayName, Action, Profile
+# 真没有时，管理员 PowerShell 加一条端口规则（一次性）：
+New-NetFirewallRule -DisplayName "DSH WeChat Gate 3092" -Direction Inbound -LocalPort 3092 -Protocol TCP -Action Allow
+```
+
+> 首次在新网络使用且无规则时，Windows 也可能自动弹出「允许访问」询问框，
+> 点允许即可（效果等同程序级规则）。
 
 ## 建议改（文案与体验）
 

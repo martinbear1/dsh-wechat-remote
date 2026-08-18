@@ -47,6 +47,9 @@ check(host.includes('timingSafeEqual'), 'lib/index.js 缺少常数时间 token �
 check(host.includes('rotated'), 'lib/index.js 缺少凭证滚动逻辑')
 check(host.includes('rateBuckets'), 'lib/index.js 缺少每 IP 限速')
 check(host.includes('icacls'), 'lib/index.js 缺少 Windows ACL 收紧')
+check(host.includes('plugin keeps DSH alive'), 'lib/index.js 缺少端口占用的崩溃隔离（server error 处理器）')
+check(host.includes('wechat: {'), 'lib/index.js 缺少 /gate/status 的微信身份字段')
+check(client.includes('微信身份'), 'lib/client.js 弹窗缺少「微信身份」状态行')
 
 // 3. bundle 补丁行必须引用本包名（否则插不进 cordis 图）。
 const patch = readFileSync(path.join(root, 'cordis.patch.yml'), 'utf8')

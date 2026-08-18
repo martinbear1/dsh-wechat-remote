@@ -18,6 +18,7 @@ interface GateStatusResp {
   lan: { ip: string; port: number }
   tailscale: { installed: boolean; loggedIn: boolean; ip: string | null }
   funnel: { enabled: boolean; url: string | null }
+  wechat: { configured: boolean; bindings: number }
 }
 
 export interface PairingButtonProps {
@@ -96,6 +97,13 @@ export function PairingButton({ wide }: PairingButtonProps): JSX.Element {
     return '已登录（未开启 Funnel）'
   })()
 
+  const wechatDetail = ((): string => {
+    if (status === null) return '检测中…'
+    const w = status.wechat || { configured: false, bindings: 0 }
+    if (!w.configured) return '开发态身份（电脑未配置 appid/secret）'
+    return `已绑定 ${w.bindings} 个微信账号（真实 openid）`
+  })()
+
   return (
     <>
       <button
@@ -115,7 +123,7 @@ export function PairingButton({ wide }: PairingButtonProps): JSX.Element {
               <h3>扫码连接微信</h3>
               <button type="button" className={styles.close} onClick={() => setOpen(false)} aria-label="关闭">✕</button>
             </div>
-            <p className={styles.hint}>打开微信小程序「Harness Remote」→ 设置 → 扫码配对，扫描电脑上的二维码</p>
+            <p className={styles.hint}>打开微信小程序「Harness Remote」→ 点「扫码配对」扫此二维码；开发者工具模拟器可手动输入下方配对码</p>
             {qr !== null && error === null
               ? (
                 <>
@@ -130,6 +138,11 @@ export function PairingButton({ wide }: PairingButtonProps): JSX.Element {
                 label="公网"
                 detail={tailscaleDetail}
                 ok={status !== null && status.funnel.enabled && status.funnel.url !== null}
+              />
+              <ChannelRow
+                label="微信身份"
+                detail={wechatDetail}
+                ok={status !== null && status.wechat && status.wechat.bindings > 0}
               />
             </div>
             <p className={styles.footnote}>二维码 15 分钟内有效，扫码成功后自动刷新</p>

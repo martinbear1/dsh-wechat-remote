@@ -66,6 +66,21 @@ Start-Process -WindowStyle Hidden cmd -ArgumentList '/c dsh web'
 
 > 按 3080 端口精确停进程，不会误伤其他 Node 程序；**不要**用
 > `Stop-Process -Name node`。
+
+**一条龙（新用户首选）**：安装 + 重启合成一条命令，粘贴进 PowerShell 回车即可 ——
+
+```powershell
+dsh plugin --profile web add github:martinbear1/dsh-wechat-remote; Get-NetTCPConnection -LocalPort 3080 -State Listen | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }; Start-Process -WindowStyle Hidden cmd -ArgumentList '/c dsh web'
+```
+
+> ⚠️ 重启会中断正在进行的对话/任务（历史已落盘不丢，刷新页面继续）。
+> 如果你的 DSH 正有重要任务在跑，请改用上面的手动两步，自己挑时间重启。
+
+**随包附带的重启脚本**：插件安装后，本包自带重启脚本（双击即用）——
+
+```
+%USERPROFILE%\.dsh\profiles\web\node_modules\@harness-remote\dsh-wechat-remote\scripts\restart-dsh.cmd
+```
 >
 > **版本策略**：本仓库 `main` 分支只合并「已通过完整测试」的代码（开发在特性分支，
 > 测试通过才合并并打版本标签），所以不带 `#版本号` 安装 = 安装那一刻的最新正式版。

@@ -59,6 +59,11 @@ check(patch.includes(name), `cordis.patch.yml 未引用包名 "${name}"`)
 check(pkg.exports?.['./client']?.default === './lib/client.js', 'package.json exports["./client"] 未指向 lib/client.js')
 check(pkg.dsh?.bundle?.patch === './cordis.patch.yml', 'package.json dsh.bundle.patch 未指向 cordis.patch.yml')
 
+// 5. 随包附带的重启脚本必须列入 files（用户装完即可双击重启）。
+for (const s of ['scripts/restart-dsh.cmd', 'scripts/restart-dsh.ps1']) {
+  check(Array.isArray(pkg.files) && pkg.files.includes(s), `package.json files 缺少 ${s}`)
+}
+
 if (fails.length > 0) {
   console.error('VERIFY FAILED:\n- ' + fails.join('\n- '))
   process.exit(1)

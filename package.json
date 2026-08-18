@@ -52,6 +52,8 @@
     "lib/index.js",
     "lib/client.js",
     "lib/types",
-    "cordis.patch.yml"
+    "cordis.patch.yml",
+    "scripts/restart-dsh.cmd",
+    "scripts/restart-dsh.ps1"
   ]
 }

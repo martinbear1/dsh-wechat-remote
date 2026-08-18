@@ -49,10 +49,23 @@ dsh plugin --profile web add github:martinbear1/dsh-wechat-remote
 dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.0.1
 ```
 
-然后**重启 DSH**（退出并重新运行 `dsh web`），打开 `http://127.0.0.1:3080`，
-侧边栏底部出现 **「微信连接」** 按钮即安装成功。
+然后**重启 DSH**，打开 `http://127.0.0.1:3080`，侧边栏底部出现
+**「微信连接」** 按钮即安装成功。
 
 > 其他 profile 同样适用：把 `--profile web` 换成你的 profile 名。
+
+**怎么重启 DSH（通用）**：
+
+- 若 `dsh web` 正开在一个终端窗口里：那个窗口按 **Ctrl + C**，再重新运行 `dsh web`；
+- 若窗口已关/后台运行：PowerShell 两步 ——
+
+```powershell
+Get-NetTCPConnection -LocalPort 3080 -State Listen | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }
+Start-Process -WindowStyle Hidden cmd -ArgumentList '/c dsh web'
+```
+
+> 按 3080 端口精确停进程，不会误伤其他 Node 程序；**不要**用
+> `Stop-Process -Name node`。
 >
 > **版本策略**：本仓库 `main` 分支只合并「已通过完整测试」的代码（开发在特性分支，
 > 测试通过才合并并打版本标签），所以不带 `#版本号` 安装 = 安装那一刻的最新正式版。

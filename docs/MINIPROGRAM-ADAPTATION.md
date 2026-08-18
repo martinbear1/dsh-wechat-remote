@@ -1,87 +1,77 @@
-# 微信小程序端适配清单（v1.0.1 · 已逐文件核实）
+# 微信小程序端适配清单（v2 修订 · 已按小程序侧实施反馈修订）
 
-> 本清单基于对小程序的**逐文件阅读**（app.js / utils/request.js / utils/store.js /
-> utils/pair.js / pages/settings/settings.js），由小程序侧开发者执行。
-> 插件侧不修改小程序代码。
+> 修订说明：v1 由插件侧基于逐文件阅读产出；v2 根据小程序侧实施提交
+> （`f6c86bc`）的反馈修订 —— 修正 v1 的四处不足（verify 第四态、硬编码排查
+> 范围、旧配置迁移策略、配置判定口径），并记录小程序侧已采纳的独立判断。
+> 本清单是历史记录 + 维护依据，实施已完成。
 
-## 结论先行：端口零改动 ✅
+## 状态总览
 
-全工程 **没有任何硬编码的 3090/3091**。baseUrl 由二维码载荷构建：
+✅ **已实施**（小程序侧 `f6c86bc`，模拟器 23/23 PASS）：verify 四态处理、
+启动「先连后验」自动复核、并发复核锁、初始化页（onboarding 三段式）、
+手动配对码（大写规范化 + 字母表校验 + 端口可编辑）、:3090 软迁移提示、
+设置页「校验并轮换凭证」。
 
-```js
-// pages/settings/settings.js:151
-bases.push('http://' + payload.host + ':' + payload.port)
-```
+## 1. 端口：JS 零硬编码；WXML/README 占位符已改
 
-新插件的二维码载荷自动带 `port: 3092`（`/pair/code` 返回），扫码路径**自动适配**。
-手动配置（settings.js:199-214）是整串 URL 输入，也不含端口默认值。
+- utils/、pages/*.js、app.js 中**没有硬编码端口**：baseUrl 由二维码载荷
+  `'http://' + payload.host + ':' + payload.port` 构建（新插件二维码自动带 3092）。
+- v1 清单「全工程无硬编码」的表述过宽：`pages/settings/settings.wxml` 占位符与
+  README 架构图原为 3090 —— **小程序侧已改为 3092** ✅。
+- 手动配置的端口**可编辑**（默认 3092）：插件支持 `WECHAT_GATE_PORT` 环境变量
+  覆盖，硬编码会坑到改过端口的人 ✅。
 
-**唯一例外**：已配对过的老用户，其本地存储
-（`harness-remote-config-v1`）里可能存着 `:3090` 的旧 baseUrl —— 建议在启动时
-检测：若 `config.baseUrl` 含 `:3090`，提示「请重新扫码配对」或自动替换为 `:3092`
-后重连（二选一，写进初始化页设计即可）。
-
-## 必改 1：`verify-wechat` 响应升级（凭证滚动）
-
-现状：verify 只在设置页的手动按钮触发（settings.js:190-195），
-`pair.verifyWechatBinding()`（pair.js:76-80）只返回 boolean；
-启动流程（store.bootstrap → connect）不校验身份。
-
-新协议下 verify 有三种返回，必须全部处理：
+## 2. verify 响应：**四态**（v1 漏了暂时性故障态）
 
 ```js
-{ valid: true, token: '<新token>' }  // 真实身份模式，绑定有效 → 旧 token 已作废
-{ valid: true, dev: true }           // 开发态（电脑未配 gate-wechat.json）→ token 不变
-{ valid: false }                     // 身份不匹配 → 需重新配对
+{ valid: true, token: '<新token>' }   // 真实身份 + 绑定有效 → 旧 token 已作废，必须轮换
+{ valid: true, dev: true }            // 开发态（未配 gate-wechat.json）→ token 不变
+{ valid: false }                      // 明确身份不匹配 → 提示重新配对
+HTTP 401（+ error 字段）              // 真实身份模式下电脑访问 code2session 暂时失败（断网等）
+                                      // → 「暂时无法校验」，保留 token 与连接，可稍后重试
 ```
 
-改动点：
+小程序侧已实现：**只有明确的 `{valid:false}` 才提示重新配对**；401/网络错误按
+暂时性故障处理（v1 若按三态一律当不匹配，一次电脑断网就会误毁配对）✅。
 
-1. **utils/pair.js** `verifyWechatBinding()`：改为返回完整结果
-   （`{ valid, token?, dev? }`），不再只返回 boolean。
-2. **pages/settings/settings.js** `onVerifyBinding()`：若返回带 `token` 字段 ——
-   用 `store.loadConfig()` 读出配置 → 替换 `cfg.token` → `store.saveConfig(cfg)` →
-   `request.configure(当前baseUrl, 新token)` → toast 提示「校验通过（凭证已轮换）」。
-   `dev: true` 时维持现状。
-3. **启动自动复核（建议实现，安全性的核心）**：在 `store.connect()` 成功建立连接
-   之后（此时旧 token 仍有效、WebSocket 已握手），异步调用
-   `pair.verifyWechatBinding()`：
-   - `dev: true` → 跳过；
-   - `valid: false` → 置 `state.lastError = '微信身份校验失败，请重新扫码配对'`；
-   - `token` 存在 → 同上替换并持久化（**轮换成功后旧 token 立即失效**，
-     已建立的 WebSocket 不受影响，后续 HTTP 请求用新 token；下次启动直接用新 token）。
-   注意顺序：**先连后验**（连接前验证会因旧 token 已被上轮轮换而 401）。
+时序：**先连后验**（连接成功后再异步复核；轮换成功即替换并持久化 token，
+已建立的 WebSocket 不受影响）+ **in-flight 锁**（防两次并发轮换竞争把作废的
+旧 token 存回去）✅。
 
-## 必改 2：电脑端配置真实微信身份（用户文档）
+## 3. 旧配置（:3090）迁移：采纳软迁移方案
 
-电脑上创建 `%USERPROFILE%\.dsh\gate-wechat.json`：
+v1 给的两个方案（自动替换 / 强制跳初始化页）均**废弃**，采纳小程序侧独立判断：
 
-```json
-{ "appid": "wxaf6cee80f99753bc", "secret": "从小程序后台获取的 AppSecret" }
-```
+- 自动替换必坏：旧 token 对新网关无效，换端口只会全线 401；
+- 强制拦截过激：两插件可共存，旧通道未必损坏。
 
-重启 DSH 后生效：配对即绑定真实 openid、每次启动复核 + 轮换。
-未配置时功能全通（开发态：verify 返回 `dev:true`、不轮换）。
+现方案：设置页黄字提示 + 连接失败时定向文案「请重新扫码配对」，**不拦截、
+不改端口** ✅。（此为该侧唯一保留余地的决策 —— 插件侧认可，维持现状。）
 
-## 建议改：文案
+## 4. 配对码输入兜底
 
-| 位置 | 内容 |
-|---|---|
-| 设置页/README | 电脑端侧边栏按钮名称：「手机连接」→「**微信连接**」 |
-| 配对说明 | 电脑端安装命令：`dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.0.1` |
-| 防火墙说明 | 无需手动开墙（Node 程序级规则覆盖所有端口）；真机连不上时再查 docs |
+- 服务端精确匹配；客户端已做 `toUpperCase()` + 字母表正则校验 ✅。
+- 8 位配对码来自电脑端弹窗 / `http://127.0.0.1:3093/pair` 页面。
+- 模拟器无摄像头，手动输入是开发期硬需求。
 
-## 不用改的（协议保持兼容）
+## 5. 「已配置」判定：以 baseUrl 为准
+
+v1 写的是 `baseUrl || funnelUrl`；小程序侧改为**仅 baseUrl** —— funnel 在小程序
+里是关闭通道（`ENABLE_FUNNEL=false` 且不保存 funnelUrl），按 v1 写法会把只存了
+funnelUrl 的存量用户卡死在报错主页 ✅。
+
+## 6. 电脑端配置真实微信身份（用户文档，未变）
+
+`~/.dsh/gate-wechat.json`：`{"appid":"wxaf6cee80f99753bc","secret":"..."}`，
+重启 DSH 生效。未配置 = 开发态（verify 返回 `dev:true`、不轮换）。
+
+## 7. 无需改动（协议兼容，未变）
 
 `/api/*` RPC 信封、WebSocket 双流（events.mux / events.host）、
 `/pair/claim-wechat` 请求/响应、二维码载荷结构 `{code, host, port, funnelUrl?}`、
-`ENABLE_FUNNEL` 公网预留开关。
+`ENABLE_FUNNEL` 开关。
 
-## 验证路径
+## 8. 遗留待办（插件侧记录）
 
-1. **开发态**：模拟器（域名校验关闭）→ 设置 → 扫码配对（或手动输入配对码）→
-   连接成功；重启小程序 → 手动「身份复核」返回 `dev:true`。
-2. **真实身份**：电脑配好 gate-wechat.json + 重启 DSH → 真机（同 Wi-Fi）扫码 →
-   配对成功；每次启动自动复核 + token 轮换，连接不断、旧 token 作废。
-3. 模拟器没有摄像头：**手动输入 8 位配对码是开发期硬需求**（电脑端弹窗与
-   `http://127.0.0.1:3093/pair` 页面均显示配对码）。
+- [ ] 插件后续版本可在 claim 端点做服务端大小写规范化（防御性，非必须）。
+- [ ] 方案 B（扫一扫直达，getUnlimited 小程序码）列 v2。

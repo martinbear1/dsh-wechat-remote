@@ -103,12 +103,12 @@
 单包三角色，与 iOS 插件同构：
 
 - `cordis.patch.yml`：`- insert: - id: gate, name: '@harness-remote/dsh-wechat-remote'`
-- 宿主插件（lib/index.js）：进程内网关，两个门：
-  - 本地门 `127.0.0.1:3091`：`GET /pair`（电脑端配对页+二维码）、`GET /pair/code`
+- 宿主插件（lib/index.js）：进程内网关，两个门（**已拍板端口，见 §5b**）：
+  - 本地门 `127.0.0.1:3093`：`GET /pair`（电脑端配对页+二维码）、`GET /pair/code`
     （官方 Web UI 侧边栏按钮）、`GET /gate/status`
-  - 公网门 `0.0.0.0:3090`：除 `POST /pair/claim-wechat` 外全部要求 Bearer；验过即反代
+  - 公网门 `0.0.0.0:3092`：除 `POST /pair/claim-wechat` 外全部要求 Bearer；验过即反代
     到 `127.0.0.1:3080`（Host 重写走官方栅栏合法通道）
-- 客户端插件（lib/client.js）：侧边栏「手机连接」配对按钮（注册官方 `sidebar.footer.action`
+- 客户端插件（lib/client.js）：侧边栏「微信连接」配对按钮（注册官方 `sidebar.footer.action`
   插槽 + 宽屏布局 CSS，直接复用 v1.0.3 的产物与经验）
 - 端点**完全对齐小程序现有 `utils/pair.js`**：`/pair/claim-wechat {code, jsCode}`、
   `/pair/verify-wechat {jsCode}`、二维码载荷 `{code, host, port, funnelUrl?}` —— 小程序零改动
@@ -134,7 +134,7 @@
 二维码载荷与小程序配置保留 `funnelUrl` 字段 + `ENABLE_FUNNEL` 开关；README 写清楚
 发布版真机必须 HTTPS+备案域名反代。本插件不做任何公网暴露动作。
 
-## 5. 待决策点（请拍板）
+## 5. 待决策点（历史提案 —— 已全部拍板，见 §5b）
 
 1. **端口与共存**：默认沿用 3090/3091（小程序零改动、与旧 gate 协议无缝替换）；
    若要和 iOS 插件同时安装，两插件需错开端口（env 覆盖）。倾向：默认 3090/3091。

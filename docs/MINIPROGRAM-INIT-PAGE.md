@@ -32,8 +32,9 @@ const configured = !!(cfg.baseUrl)
 按序 3 步，每步带状态描述（完成与否由用户自行确认）：
 
 1. **安装插件**：可复制命令卡片
-   `dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.0.1`
-   （附小字：需已装 git；若提示 pnpm 不存在，先执行 `npm install -g pnpm`）
+   `dsh plugin --profile web add github:martinbear1/dsh-wechat-remote`
+   （默认装最新正式版；附小字：需已装 git；若提示 pnpm 不存在，
+   先执行 `npm install -g pnpm`）
 2. **重启 DSH**：退出并重新运行 `dsh web`（小字：必须重启才生效，
    因为 DSH 插件在启动时加载；重启不会丢失会话记录）
 3. **打开二维码**：浏览器开 `http://127.0.0.1:3080` → 侧边栏底部点

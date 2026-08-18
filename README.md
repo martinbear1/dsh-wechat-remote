@@ -37,6 +37,14 @@
 
 ## 安装（一条命令）
 
+**默认装最新正式版**（推荐）：
+
+```bash
+dsh plugin --profile web add github:martinbear1/dsh-wechat-remote
+```
+
+**或指定版本**（稳定复现，如 `#v1.0.1`）：
+
 ```bash
 dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.0.1
 ```
@@ -45,6 +53,11 @@ dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.0.1
 侧边栏底部出现 **「微信连接」** 按钮即安装成功。
 
 > 其他 profile 同样适用：把 `--profile web` 换成你的 profile 名。
+>
+> **版本策略**：本仓库 `main` 分支只合并「已通过完整测试」的代码（开发在特性分支，
+> 测试通过才合并并打版本标签），所以不带 `#版本号` 安装 = 安装那一刻的最新正式版。
+> 无论哪种写法，装完都会锁定具体提交，**不会自动更新**；升级 = 重跑上面的命令 +
+> 重启 DSH。所有历史版本标签保留在仓库 Tags 里，可随时回退到任意指定版本。
 
 **为什么必须重启（且不能自动重启）？** DSH 的官方插件模型是「启动时加载」——
 所有官方/第三方插件都是装完重启生效，本插件遵守同一规范，不越权做任何热插拔或

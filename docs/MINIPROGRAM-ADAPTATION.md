@@ -1,88 +1,87 @@
-# 微信小程序端适配清单（v1.0.0 插件）
+# 微信小程序端适配清单（v1.0.1 · 已逐文件核实）
 
-> 本清单列的是**小程序代码工程（`E:\Deepseek Harness`）需要修改的全部位置**，
-> 由小程序侧开发者执行。插件的协议除下列几处外与旧网关完全一致。
+> 本清单基于对小程序的**逐文件阅读**（app.js / utils/request.js / utils/store.js /
+> utils/pair.js / pages/settings/settings.js），由小程序侧开发者执行。
+> 插件侧不修改小程序代码。
 
-## 必改（不改正则无法连上新插件）
+## 结论先行：端口零改动 ✅
 
-### 1. 端口：3090 → 3092，3091 → 3093
-
-新插件为与 iOS 插件共存，采用独立端口。全局搜索 `3090`、`3091`，核对以下位置：
-
-| 位置 | 改动 |
-|---|---|
-| `utils/request.js`（或任何构造 base URL 的地方） | 默认/手动配置的端口 `3090` → `3092` |
-| `utils/store.js` 手动配置的默认 host/port 与帮助文案 | 同上 |
-| `pages/settings/*` 手动配置表单的端口默认值、占位符、示例文案 | 同上 |
-| 任何硬编码的 `:3090` / `:3091` 字符串 | 核对后替换 |
-
-> 注意：**二维码载荷里的 `port` 字段不用改** —— 它来自电脑端插件的二维码
-> （`/pair/code` 返回 `port: 3092`），扫码后自动生效。只有「手动输入/默认值」
-> 的地方需要动。
-
-### 2. `/pair/verify-wechat` 响应升级（凭证滚动）
-
-`utils/pair.js` 的 `verifyWechatBinding()` 现在有三种返回，必须处理：
+全工程 **没有任何硬编码的 3090/3091**。baseUrl 由二维码载荷构建：
 
 ```js
-// 1. 配置了真实 appid/secret 且绑定有效（新行为）：
-{ valid: true, token: '<轮换后的新 token>' }
-//    → 必须立刻用新 token 覆盖存储里的旧 token（旧 token 已作废！）
-// 2. 开发态（未配置 gate-wechat.json，无 token 字段）：
-{ valid: true, dev: true }
-//    → 保持现有 token 不变（旧行为，兼容）
-// 3. 身份不匹配：
-{ valid: false }
-//    → 现有「重新配对」处理不变
+// pages/settings/settings.js:151
+bases.push('http://' + payload.host + ':' + payload.port)
 ```
 
-即：`verifyWechatBinding` 成功且返回里带 `token` 字段时，调用 `request.setToken()`
-并持久化到 storage，再继续连接；`dev: true` 时不替换。
+新插件的二维码载荷自动带 `port: 3092`（`/pair/code` 返回），扫码路径**自动适配**。
+手动配置（settings.js:199-214）是整串 URL 输入，也不含端口默认值。
 
-### 3. 防火墙：一般无需任何操作（已实测确认）
+**唯一例外**：已配对过的老用户，其本地存储
+（`harness-remote-config-v1`）里可能存着 `:3090` 的旧 baseUrl —— 建议在启动时
+检测：若 `config.baseUrl` 含 `:3090`，提示「请重新扫码配对」或自动替换为 `:3092`
+后重连（二选一，写进初始化页设计即可）。
 
-**结论：绝大多数机器不用手动开墙。** Windows 防火墙的放行规则分两种：
+## 必改 1：`verify-wechat` 响应升级（凭证滚动）
 
-- **程序级规则**（按 node.exe 放行）：一旦存在，**覆盖该程序的所有端口**。
-  安装 Node.js 时系统已内置 "Node.js JavaScript Runtime" 入站允许规则；
-  DSH 跑在 node.exe 上，因此 3092 随程序自动放行 —— 与当年 3090 能通
-  是同一机制（你机器上已实测确认：无任何 3090 端口规则，但有 node.exe
-  程序级规则，手机照样连上）。
-- 端口级规则（按 3092 放行）：只有当你机器上存在"仅 3090"的端口规则、
-  或网络被标记为「公用网络」且 node 程序规则被禁用/删除时，才需要手动加。
+现状：verify 只在设置页的手动按钮触发（settings.js:190-195），
+`pair.verifyWechatBinding()`（pair.js:76-80）只返回 boolean；
+启动流程（store.bootstrap → connect）不校验身份。
 
-**排查方法**（真机连不上时）：
+新协议下 verify 有三种返回，必须全部处理：
 
-```powershell
-# 查看 node 程序级规则是否存在（存在即无需开墙）
-Get-NetFirewallApplicationFilter | Where-Object { $_.Program -like '*node*' } | Get-NetFirewallRule | Select DisplayName, Action, Profile
-# 真没有时，管理员 PowerShell 加一条端口规则（一次性）：
-New-NetFirewallRule -DisplayName "DSH WeChat Gate 3092" -Direction Inbound -LocalPort 3092 -Protocol TCP -Action Allow
+```js
+{ valid: true, token: '<新token>' }  // 真实身份模式，绑定有效 → 旧 token 已作废
+{ valid: true, dev: true }           // 开发态（电脑未配 gate-wechat.json）→ token 不变
+{ valid: false }                     // 身份不匹配 → 需重新配对
 ```
 
-> 首次在新网络使用且无规则时，Windows 也可能自动弹出「允许访问」询问框，
-> 点允许即可（效果等同程序级规则）。
+改动点：
 
-## 建议改（文案与体验）
+1. **utils/pair.js** `verifyWechatBinding()`：改为返回完整结果
+   （`{ valid, token?, dev? }`），不再只返回 boolean。
+2. **pages/settings/settings.js** `onVerifyBinding()`：若返回带 `token` 字段 ——
+   用 `store.loadConfig()` 读出配置 → 替换 `cfg.token` → `store.saveConfig(cfg)` →
+   `request.configure(当前baseUrl, 新token)` → toast 提示「校验通过（凭证已轮换）」。
+   `dev: true` 时维持现状。
+3. **启动自动复核（建议实现，安全性的核心）**：在 `store.connect()` 成功建立连接
+   之后（此时旧 token 仍有效、WebSocket 已握手），异步调用
+   `pair.verifyWechatBinding()`：
+   - `dev: true` → 跳过；
+   - `valid: false` → 置 `state.lastError = '微信身份校验失败，请重新扫码配对'`；
+   - `token` 存在 → 同上替换并持久化（**轮换成功后旧 token 立即失效**，
+     已建立的 WebSocket 不受影响，后续 HTTP 请求用新 token；下次启动直接用新 token）。
+   注意顺序：**先连后验**（连接前验证会因旧 token 已被上轮轮换而 401）。
 
-| 位置 | 改动 |
+## 必改 2：电脑端配置真实微信身份（用户文档）
+
+电脑上创建 `%USERPROFILE%\.dsh\gate-wechat.json`：
+
+```json
+{ "appid": "wxaf6cee80f99753bc", "secret": "从小程序后台获取的 AppSecret" }
+```
+
+重启 DSH 后生效：配对即绑定真实 openid、每次启动复核 + 轮换。
+未配置时功能全通（开发态：verify 返回 `dev:true`、不轮换）。
+
+## 建议改：文案
+
+| 位置 | 内容 |
 |---|---|
-| `pages/settings/*` 配对帮助文案 | 「手机/iOS 共用二维码」等旧说法 → 微信版说明（电脑侧边栏按钮现在叫**「微信连接」**） |
-| `README.md` | 端口表 3090/3091 → 3092/3093；电脑端按钮名称「手机连接」→「微信连接」 |
-| 安装指引文案 | 电脑端安装命令改为：`dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.0.0` |
+| 设置页/README | 电脑端侧边栏按钮名称：「手机连接」→「**微信连接**」 |
+| 配对说明 | 电脑端安装命令：`dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.0.1` |
+| 防火墙说明 | 无需手动开墙（Node 程序级规则覆盖所有端口）；真机连不上时再查 docs |
 
 ## 不用改的（协议保持兼容）
 
-- `/api/*` RPC 信封、`/api/events.mux` + `/api/events.host` WebSocket 事件流
-- `/pair/claim-wechat` 请求/响应（`{code, jsCode}` → `{token, openId}`）
-- 二维码载荷结构 `{code, host, port, funnelUrl?}`
-- `ENABLE_FUNNEL` 公网预留字段
+`/api/*` RPC 信封、WebSocket 双流（events.mux / events.host）、
+`/pair/claim-wechat` 请求/响应、二维码载荷结构 `{code, host, port, funnelUrl?}`、
+`ENABLE_FUNNEL` 公网预留开关。
 
 ## 验证路径
 
-1. **开发态**（电脑未配 `gate-wechat.json`）：模拟器全流程 —— 扫码配对 →
-   连接 → 重启小程序 → verify 返回 `{valid:true, dev:true}` → 正常连接。
-2. **真实身份**（电脑配好 `gate-wechat.json`，appid=你注册的小程序，
-   secret 从 mp.weixin.qq.com 获取）：真机配对后，每次启动 verify 都会返回
-   新 token —— 确认小程序换 token 后连接不中断，且旧 token 立即失效。
-3. 真机需：同 Wi-Fi + 防火墙放行 3092 + 开发者工具关闭域名校验（开发期）。
+1. **开发态**：模拟器（域名校验关闭）→ 设置 → 扫码配对（或手动输入配对码）→
+   连接成功；重启小程序 → 手动「身份复核」返回 `dev:true`。
+2. **真实身份**：电脑配好 gate-wechat.json + 重启 DSH → 真机（同 Wi-Fi）扫码 →
+   配对成功；每次启动自动复核 + token 轮换，连接不断、旧 token 作废。
+3. 模拟器没有摄像头：**手动输入 8 位配对码是开发期硬需求**（电脑端弹窗与
+   `http://127.0.0.1:3093/pair` 页面均显示配对码）。

@@ -43,10 +43,10 @@
 dsh plugin --profile web add github:martinbear1/dsh-wechat-remote
 ```
 
-**或指定版本**（稳定复现，如 `#v1.0.1`）：
+**或指定版本**（稳定复现，如 `#v1.0.2`）：
 
 ```bash
-dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.0.1
+dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.0.2
 ```
 
 然后**重启 DSH**，打开 `http://127.0.0.1:3080`，侧边栏底部出现

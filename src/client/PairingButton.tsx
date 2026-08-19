@@ -123,7 +123,7 @@ export function PairingButton({ wide }: PairingButtonProps): JSX.Element {
               <h3>扫码连接微信</h3>
               <button type="button" className={styles.close} onClick={() => setOpen(false)} aria-label="关闭">✕</button>
             </div>
-            <p className={styles.hint}>打开微信小程序「Harness Remote」→ 点「扫码配对」扫此二维码；开发者工具模拟器可手动输入下方配对码</p>
+            <p className={styles.hint}>打开微信小程序「Harness Remote」→ 点「扫码配对」扫此二维码</p>
             {qr !== null && error === null
               ? (
                 <>

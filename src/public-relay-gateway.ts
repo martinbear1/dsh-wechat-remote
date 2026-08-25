@@ -29,7 +29,7 @@ export interface PublicRelayGatewayOptions {
   readonly dshPort?: number
   readonly maxClients?: number
   readonly maxStreamsPerClient?: number
-  readonly issueLanCredential?: () => { readonly baseUrl: string; readonly token: string }
+  readonly issueLanCredential?: (rotate?: boolean) => { readonly baseUrl: string; readonly token: string }
   readonly onStatus?: (status: AgentStatus) => void
   readonly fetchImpl?: typeof fetch
   readonly identityPath?: string

@@ -13,7 +13,7 @@ export interface PublicRelayGatewayOptions {
     readonly dshPort?: number;
     readonly maxClients?: number;
     readonly maxStreamsPerClient?: number;
-    readonly issueLanCredential?: () => {
+    readonly issueLanCredential?: (rotate?: boolean) => {
         readonly baseUrl: string;
         readonly token: string;
     };

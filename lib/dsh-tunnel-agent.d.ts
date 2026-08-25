@@ -7,7 +7,7 @@ export interface DshTunnelAgentOptions {
      * Public-E2EE-only route bootstrap. It is handled inside this virtual tunnel
      * and is never forwarded to DSH/WebUI or exposed on the LAN HTTP door.
      */
-    readonly issueLanCredential?: () => {
+    readonly issueLanCredential?: (rotate?: boolean) => {
         readonly baseUrl: string;
         readonly token: string;
     };

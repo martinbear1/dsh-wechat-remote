@@ -21,6 +21,7 @@ const SEND_QUEUE_PAUSE_BYTES = 2 * 1024 * 1024
 const SEND_QUEUE_RESUME_BYTES = 512 * 1024
 const MAX_SEND_QUEUE_BYTES = 4 * 1024 * 1024
 const LAN_CREDENTIAL_PATH = '/api/wechat-remote/lan-credential'
+const LAN_CREDENTIAL_ROTATE_PATH = '/api/wechat-remote/lan-credential/rotate'
 type ByteArray = Uint8Array<ArrayBufferLike>
 
 function concat(...parts: readonly ByteArray[]): Uint8Array {
@@ -144,7 +145,7 @@ export interface DshTunnelAgentOptions {
    * Public-E2EE-only route bootstrap. It is handled inside this virtual tunnel
    * and is never forwarded to DSH/WebUI or exposed on the LAN HTTP door.
    */
-  readonly issueLanCredential?: () => { readonly baseUrl: string; readonly token: string }
+  readonly issueLanCredential?: (rotate?: boolean) => { readonly baseUrl: string; readonly token: string }
 }
 
 export class DshTunnelAgent {
@@ -192,18 +193,18 @@ export class DshTunnelAgent {
     if (this.streams.size >= this.maxStreams) throw new Error('Too many concurrent DSH streams')
     const kind = value.kind
     const path = safePath(value.path)
-    if (path === LAN_CREDENTIAL_PATH) {
+    if (path === LAN_CREDENTIAL_PATH || path === LAN_CREDENTIAL_ROTATE_PATH) {
       if (kind !== KIND_HTTP || safeMethod(value.method) !== 'POST') throw new Error('LAN credential route requires POST')
-      return this.openLanCredential(streamId)
+      return this.openLanCredential(streamId, path === LAN_CREDENTIAL_ROTATE_PATH)
     }
     if (kind === KIND_HTTP) this.openHttp(streamId, path, value)
     else if (kind === KIND_WEBSOCKET) this.openWebSocket(streamId, path, value)
     else throw new Error('Tunnel stream kind is not allowed')
   }
 
-  private openLanCredential(streamId: number): void {
+  private openLanCredential(streamId: number, rotate: boolean): void {
     if (!this.issueLanCredential) throw new Error('LAN route bootstrap is unavailable')
-    const credential = this.issueLanCredential()
+    const credential = this.issueLanCredential(rotate)
     if (!credential || typeof credential.baseUrl !== 'string' || typeof credential.token !== 'string') {
       throw new Error('LAN route bootstrap returned invalid data')
     }

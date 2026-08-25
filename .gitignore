@@ -4,4 +4,5 @@ miniprogram_npm/
 .DS_Store
 *.tsbuildinfo
 *.map
+lib/index.d.ts
 backups/

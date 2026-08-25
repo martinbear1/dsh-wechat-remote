@@ -103,6 +103,8 @@ check(!publicRelay.includes('createServer('), '公网 Agent 不得创建入站 H
 check(host.includes('loadPublicRelayConfig()'), '宿主没有通过显式配置门禁启用公网 Agent')
 check(host.includes('if (relayConfig)'), '缺少公网 Agent 默认关闭分支')
 check(host.includes('new PublicRelayGateway'), '宿主未挂载加密公网网关')
+check(host.includes('issueLanCredential:'), '宿主入口未把 E2EE 局域网凭证能力挂载到公网网关')
+check(host.includes('authenticated E2EE client requested LAN route bootstrap'), '宿主制品缺少局域网凭证安全诊断点')
 const e2ee = readFileSync(path.join(root, 'lib/e2ee-session.js'), 'utf8')
 for (const required of ['AgentE2EESession', 'sign(null', 'nacl.box.before', 'nacl.secretbox']) {
   check(e2ee.includes(required), `E2EE 实现缺少安全原语：${required}`)

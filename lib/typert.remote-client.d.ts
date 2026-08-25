@@ -4,6 +4,7 @@ import type {
   TypertRemoteContribution,
 } from '@deepseek-ai/dsh-typert-protocol'
 import type { WechatDirectoryCreateRequest, WechatDirectoryCreateResult, WechatDirectoryListRequest, WechatDirectoryListResult, WechatDirectoryRootsRequest, WechatDirectoryRootsResult } from '@harness-remote/dsh-wechat-remote/directory'
+import type { WechatHostDescribeRequest, WechatHostDescribeResult } from '@harness-remote/dsh-wechat-remote/host-info'
 
 declare module '@deepseek-ai/dsh-typert-protocol' {
   interface TypertRemoteNamespace$7765636861744469726563746f7279 {
@@ -11,13 +12,18 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     list: (request: WechatDirectoryListRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatDirectoryListResult>>
     roots: (request: WechatDirectoryRootsRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatDirectoryRootsResult>>
   }
+  interface TypertRemoteNamespace$776563686174486f7374 {
+    describe: (request: WechatHostDescribeRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatHostDescribeResult>>
+  }
   interface TypertRemoteMap {
     'wechatDirectory/create': (request: WechatDirectoryCreateRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatDirectoryCreateResult>>
     'wechatDirectory/list': (request: WechatDirectoryListRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatDirectoryListResult>>
     'wechatDirectory/roots': (request: WechatDirectoryRootsRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatDirectoryRootsResult>>
+    'wechatHost/describe': (request: WechatHostDescribeRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatHostDescribeResult>>
   }
   interface TypertRemoteNamespaceMap {
     'wechatDirectory': TypertRemoteNamespace$7765636861744469726563746f7279
+    'wechatHost': TypertRemoteNamespace$776563686174486f7374
   }
 }
 

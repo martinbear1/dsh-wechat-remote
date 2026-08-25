@@ -33,10 +33,18 @@ try {
     path.join(root, 'src', 'directory-service.ts'),
     path.join(packageRoot, 'src', 'directory-service.ts'),
   )
+  copyFileSync(
+    path.join(root, 'src', 'host-info-service.ts'),
+    path.join(packageRoot, 'src', 'host-info-service.ts'),
+  )
   copyFileSync(path.join(root, 'src', 'index.ts'), path.join(packageRoot, 'src', 'index.ts'))
   copyFileSync(
     path.join(root, 'lib', 'directory-service.d.ts'),
     path.join(packageRoot, 'lib', 'directory-service.d.ts'),
+  )
+  copyFileSync(
+    path.join(root, 'lib', 'host-info-service.d.ts'),
+    path.join(packageRoot, 'lib', 'host-info-service.d.ts'),
   )
   const protocolPackage = path.join(root, 'node_modules', '@deepseek-ai', 'dsh-typert-protocol')
   copyFileSync(
@@ -82,7 +90,7 @@ try {
         '@deepseek-ai/dsh-typert-protocol/types': ['../dsh-typert-protocol/src/types.ts'],
       },
     },
-    include: ['src/index.ts', 'src/directory-service.ts'],
+    include: ['src/index.ts', 'src/directory-service.ts', 'src/host-info-service.ts'],
   }, null, 2))
   writeFileSync(path.join(temp, 'tsconfig.host.json'), JSON.stringify({
     compilerOptions: {

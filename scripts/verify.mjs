@@ -60,6 +60,7 @@ check(!patch.includes('dsh-host-directory-picker-browse'), 'cordis.patch.yml 不
 // 4. 客户端入口必须在 exports 里可被官方扫描器发现。
 check(pkg.exports?.['./client']?.default === './lib/client.js', 'package.json exports["./client"] 未指向 lib/client.js')
 check(pkg.exports?.['./directory']?.default === './lib/directory-service.js', 'package.json exports["./directory"] 未指向目录服务')
+check(pkg.exports?.['./host-info']?.default === './lib/host-info-service.js', 'package.json exports["./host-info"] 未指向微信 Host 信息服务')
 check(pkg.exports?.['./typert']?.default === './lib/typert.host.js', 'package.json exports["./typert"] 未指向严格 Host 契约')
 check(pkg.dsh?.bundle?.patch === './cordis.patch.yml', 'package.json dsh.bundle.patch 未指向 cordis.patch.yml')
 
@@ -79,6 +80,14 @@ const typert = readFileSync(path.join(root, 'lib/typert.host.js'), 'utf8')
 for (const method of ['roots', 'list', 'create']) {
   check(typert.includes(`wechatDirectory/${method}`), `严格 Typert 契约缺少 wechatDirectory/${method}`)
 }
+
+// 4c. 电脑名通过微信端隔离的只读 Remote 提供，不能伪造进 DSH host.describe。
+check(host.includes("from './host-info-service.js'"), 'lib/index.js 未挂载微信 Host 信息 Remote')
+check(host.includes('ctx.plugin(WechatHostInfoService'), 'lib/index.js 未在 gate fiber 下挂载 Host 信息服务')
+const hostInfo = readFileSync(path.join(root, 'lib/host-info-service.js'), 'utf8')
+check(hostInfo.includes('super(ctx, "wechatHost")') || hostInfo.includes("super(ctx, 'wechatHost')"), 'Host 信息服务的 Typert key 不是 wechatHost')
+check(hostInfo.includes('computerName: hostname()'), 'Host 信息服务未从操作系统读取真实电脑名')
+check(typert.includes('wechatHost/describe'), '严格 Typert 契约缺少 wechatHost/describe')
 
 // 5. 随包附带的重启脚本必须列入 files（用户装完即可双击重启）。
 for (const s of ['scripts/restart-dsh.cmd', 'scripts/restart-dsh.ps1']) {

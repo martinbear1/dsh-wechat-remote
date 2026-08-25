@@ -1,6 +1,6 @@
 {
   "name": "@harness-remote/dsh-wechat-remote",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "Harness Remote 微信版：微信小程序扫码配对（openid 一对一身份绑定 + 每次启动复核 + 凭证滚动），局域网直连本机 DeepSeek Harness（认证网关宿主插件 + 侧边栏配对按钮客户端插件 + bundle 聚合，单包安装）",
   "private": true,
   "license": "MIT",
@@ -18,6 +18,10 @@
     "./directory": {
       "types": "./lib/directory-service.d.ts",
       "default": "./lib/directory-service.js"
+    },
+    "./host-info": {
+      "types": "./lib/host-info-service.d.ts",
+      "default": "./lib/host-info-service.js"
     },
     "./typert": {
       "types": "./lib/typert.host.d.ts",
@@ -77,6 +81,8 @@
     "lib/client.js",
     "lib/directory-service.js",
     "lib/directory-service.d.ts",
+    "lib/host-info-service.js",
+    "lib/host-info-service.d.ts",
     "lib/typert.host.js",
     "lib/typert.host.d.ts",
     "lib/typert.remote-client.js",

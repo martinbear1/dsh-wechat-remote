@@ -1,6 +1,6 @@
 {
   "name": "@harness-remote/dsh-wechat-remote",
-  "version": "1.1.0-public-research.1",
+  "version": "1.1.0-public-research.2",
   "description": "Harness Remote 微信版：微信小程序扫码配对（openid 一对一身份绑定 + 每次启动复核 + 凭证滚动），局域网直连本机 DeepSeek Harness（认证网关宿主插件 + 侧边栏配对按钮客户端插件 + bundle 聚合，单包安装）",
   "private": true,
   "license": "MIT",

@@ -17,6 +17,7 @@ const HEADER_BYTES = 8
 const MAX_METADATA_BYTES = 16 * 1024
 const MAX_CHUNK_BYTES = 192 * 1024
 const MAX_REQUEST_BYTES = 16 * 1024 * 1024
+const LAN_CREDENTIAL_PATH = '/api/wechat-remote/lan-credential'
 type ByteArray = Uint8Array<ArrayBufferLike>
 
 function concat(...parts: readonly ByteArray[]): Uint8Array {
@@ -133,12 +134,18 @@ export interface DshTunnelAgentOptions {
   readonly send: (frame: ByteArray) => void | Promise<void>
   readonly dshPort?: number
   readonly maxStreams?: number
+  /**
+   * Public-E2EE-only route bootstrap. It is handled inside this virtual tunnel
+   * and is never forwarded to DSH/WebUI or exposed on the LAN HTTP door.
+   */
+  readonly issueLanCredential?: () => { readonly baseUrl: string; readonly token: string }
 }
 
 export class DshTunnelAgent {
   private readonly sendCallback: DshTunnelAgentOptions['send']
   private readonly dshPort: number
   private readonly maxStreams: number
+  private readonly issueLanCredential?: DshTunnelAgentOptions['issueLanCredential']
   private readonly streams = new Map<number, Stream>()
   private sendChain: Promise<void> = Promise.resolve()
   private closed = false
@@ -147,6 +154,7 @@ export class DshTunnelAgent {
     this.sendCallback = options.send
     this.dshPort = options.dshPort || 3080
     this.maxStreams = options.maxStreams || 128
+    this.issueLanCredential = options.issueLanCredential
   }
 
   receive(rawFrame: ByteArray): void {
@@ -177,9 +185,28 @@ export class DshTunnelAgent {
     if (this.streams.size >= this.maxStreams) throw new Error('Too many concurrent DSH streams')
     const kind = value.kind
     const path = safePath(value.path)
+    if (path === LAN_CREDENTIAL_PATH) {
+      if (kind !== KIND_HTTP || safeMethod(value.method) !== 'POST') throw new Error('LAN credential route requires POST')
+      return this.openLanCredential(streamId)
+    }
     if (kind === KIND_HTTP) this.openHttp(streamId, path, value)
     else if (kind === KIND_WEBSOCKET) this.openWebSocket(streamId, path, value)
     else throw new Error('Tunnel stream kind is not allowed')
+  }
+
+  private openLanCredential(streamId: number): void {
+    if (!this.issueLanCredential) throw new Error('LAN route bootstrap is unavailable')
+    const credential = this.issueLanCredential()
+    if (!credential || typeof credential.baseUrl !== 'string' || typeof credential.token !== 'string') {
+      throw new Error('LAN route bootstrap returned invalid data')
+    }
+    const body = json({ ok: true, value: credential })
+    this.queue(encode(ACCEPT, streamId, 0, json({
+      statusCode: 200,
+      headers: { 'content-type': 'application/json; charset=utf-8' },
+    })))
+    for (const part of pieces(body)) this.queue(encode(DATA, streamId, 0, part))
+    this.queue(encode(END, streamId))
   }
 
   private openHttp(streamId: number, path: string, value: Record<string, unknown>): void {

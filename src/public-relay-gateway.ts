@@ -21,6 +21,7 @@ export interface PublicRelayGatewayOptions {
   readonly dshPort?: number
   readonly maxClients?: number
   readonly maxStreamsPerClient?: number
+  readonly issueLanCredential?: () => { readonly baseUrl: string; readonly token: string }
   readonly onStatus?: (status: AgentStatus) => void
   readonly fetchImpl?: typeof fetch
   readonly identityPath?: string
@@ -32,6 +33,7 @@ export class PublicRelayGateway {
   private readonly dshPort: number
   private readonly maxClients: number
   private readonly maxStreamsPerClient: number
+  private readonly issueLanCredential?: PublicRelayGatewayOptions['issueLanCredential']
 
   constructor(config: PublicRelayConfig, options: PublicRelayGatewayOptions) {
     this.dshPort = options.dshPort || 3080
@@ -40,6 +42,7 @@ export class PublicRelayGateway {
     // exhaust the desktop DSH process.
     this.maxClients = options.maxClients || 8
     this.maxStreamsPerClient = options.maxStreamsPerClient || 32
+    this.issueLanCredential = options.issueLanCredential
     const agentOptions: PublicRelayAgentOptions = {
       agentVersion: options.agentVersion,
       displayName: options.displayName,
@@ -95,6 +98,7 @@ export class PublicRelayGateway {
         client.tunnel = new DshTunnelAgent({
           dshPort: this.dshPort,
           maxStreams: this.maxStreamsPerClient,
+          issueLanCredential: this.issueLanCredential,
           send: clearFrame => client!.reply(client!.e2ee.seal(clearFrame)),
         })
       }

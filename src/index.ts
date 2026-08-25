@@ -629,6 +629,13 @@ export function apply(ctx) {
       publicRelayGateway = new PublicRelayGateway(relayConfig, {
         agentVersion: installedPluginVersion(),
         dshPort: UPSTREAM_PORT,
+        // This credential is released only inside an authenticated, identity-
+        // pinned E2EE relay tunnel. It is not a DSH Remote and cannot be called
+        // by WebUI or unauthenticated LAN clients.
+        issueLanCredential: () => ({
+          baseUrl: `http://${lanIPv4()}:${PUBLIC_PORT}`,
+          token: state.token,
+        }),
         onStatus: (status) => { publicRelayStatus = status },
       })
       void publicRelayGateway.start()

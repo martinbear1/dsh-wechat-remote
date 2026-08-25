@@ -70,6 +70,7 @@
     "verify": "node scripts/verify.mjs",
     "test:directory": "node scripts/test-directory.mjs",
     "test:history": "node scripts/test-history.mjs",
+    "test:gate-ports": "node scripts/test-gate-ports.mjs",
     "test:public-relay": "node scripts/test-public-relay.mjs"
   },
   "dependencies": {
@@ -118,6 +119,12 @@
     "lib/dsh-tunnel-agent.d.ts",
     "lib/public-relay-gateway.js",
     "lib/public-relay-gateway.d.ts",
+    "lib/agent-metadata.js",
+    "lib/agent-metadata.d.ts",
+    "lib/gate-ports.js",
+    "lib/gate-ports.d.ts",
+    "lib/secure-file.js",
+    "lib/secure-file.d.ts",
     "lib/typert.host.js",
     "lib/typert.host.d.ts",
     "lib/typert.remote-client.js",

@@ -19,8 +19,9 @@
   XSalsa20-Poly1305；中继服务器只能路由密文
 - **默认关闭**：没有显式公网配置时不生成公网身份、不发起出站连接、不改变 DSH/WebUI
 - **双门安全**（与 iOS 插件同款防线）：
-  - 公网门 `0.0.0.0:3092` —— 除 `POST /pair/claim-wechat` 外一律要求 Bearer token
-  - 本地门 `127.0.0.1:3093` —— 配对二维码 / 状态，仅本机可访问
+  - `web/default` profile 的局域网门继续使用 `0.0.0.0:3092`，兼容所有旧安装
+  - `web/default` profile 的本地门继续使用 `127.0.0.1:3093`，配对二维码仅本机可访问
+  - 同机其他 DSH profile 自动使用稳定的高位端口对，避免争抢 3092/3093
   - 每 IP 限速（429）、常数时间 token 比较、凭据文件 0600 + Windows icacls 收紧、
     CORS 仅放行官方 UI
 - **透明反向代理**：验过 token 即转发到官方 `127.0.0.1:3080`（Host 重写走官方
@@ -100,8 +101,9 @@ dsh plugin --profile web add github:martinbear1/dsh-wechat-remote; Get-NetTCPCon
 不会丢**。
 
 **插件坏了会影响 DSH 吗？** 不会。本插件所有运行时错误都在进程内消化：端口被占、
-网络异常、WeChat API 失败等任何故障都只让插件自己静默失效并记日志，**原生 DSH
-照常运行**（已实测：占用 3092/3093 后启动 DSH，Web 与原生功能一切正常）。
+网络异常、WeChat API 失败等任何故障都只让对应功能降级并记日志，**原生 DSH
+照常运行**。端口占用会在 `wechatHost/describe` 与配对按钮中明确显示占用端口、
+错误码和可用的环境变量，不会以未处理 `EADDRINUSE` 拖垮 DSH。
 
 ## 使用
 
@@ -121,7 +123,7 @@ dsh plugin --profile web add github:martinbear1/dsh-wechat-remote; Get-NetTCPCon
 ```
 
 重启 DSH 后，插件生成本机独立 Ed25519 身份并只向该域名发起出站 WSS。公网中继必须
-使用配套 `cloud-relay`，不能把域名直接反代到用户电脑的 3092 或 DSH 3080。
+使用配套 `cloud-relay`，不能把域名直接反代到用户电脑的局域网门或 DSH 3080。
 未配置时局域网功能保持原样，公网代码没有任何网络副作用。
 
 ## 端口约定（与 iOS 插件共存）
@@ -130,10 +132,17 @@ dsh plugin --profile web add github:martinbear1/dsh-wechat-remote; Get-NetTCPCon
 |---|---|---|
 | 3080 | DeepSeek Harness 官方 Web | 官方（不变） |
 | 3090 / 3091 | iOS 版插件（公网门 / 本地门） | iOS 插件（若安装） |
-| **3092** | **微信版公网门**（API + 配对认领） | 本插件，token 必填 |
-| **3093** | **微信版配对二维码 + 状态** | 本插件，仅本机 |
+| **3092** | **微信版 web/default 局域网门**（API + 配对认领） | 本插件，token 必填 |
+| **3093** | **微信版 web/default 配对二维码 + 状态** | 本插件，仅本机 |
+| **32000–39999** | 其他 DSH profile 的稳定偶/奇端口对 | 本插件，按 profile + Agent 实例推导 |
 
-环境变量覆盖：`WECHAT_GATE_PORT` / `WECHAT_GATE_LOCAL_PORT`。
+兼容规则：`web` 与 `default` 始终默认 `3092/3093`；其他 profile 用
+`profileScope + agentInstanceId` 的 SHA-256 稳定映射选择偶数局域网门及紧邻的奇数
+本地门。该区间明确低于 Windows 默认从 49152 开始的动态/临时端口段，避免与系统临时
+连接争抢。插件不扫描、不抢占随机端口；极低概率发生碰撞时只停用冲突的那一扇门并给出
+可操作错误。`WECHAT_GATE_PORT` / `WECHAT_GATE_LOCAL_PORT` 可分别显式覆盖默认值。
+二维码、`/pair/code`、`/gate/status`、`wechatHost/describe` 和 WebUI 配对按钮都使用并
+展示本 profile 的实际端口。
 
 ## 安全模型
 
@@ -162,7 +171,7 @@ dsh plugin --profile web add github:martinbear1/dsh-wechat-remote; Get-NetTCPCon
 **Q：想换微信账号 / 解绑？** 停 DSH → 删除 `~/.dsh/gate-wechat-state.json` →
 重启 DSH → 重新扫码配对。
 
-**Q：和 iOS 插件同时装会冲突吗？** 不会：两插件端口（3090/3091 vs 3092/3093）
+**Q：和 iOS 插件同时装会冲突吗？** 不会：默认两插件端口（3090/3091 vs 3092/3093）
 与状态文件相互独立；Web UI 侧边栏会同时出现「手机连接」与「微信连接」两个按钮。
 
 **Q：openid 泄露了会被冒名登录吗？** 不会。openid 只是**身份标识**不是**凭证**：
@@ -172,7 +181,7 @@ dsh plugin --profile web add github:martinbear1/dsh-wechat-remote; Get-NetTCPCon
 Agent 私钥（自动收紧为当前用户专属 ACL）和配对的屏幕秘密。
 
 **Q：需要手动开防火墙吗？** 一般不用：Node.js 自带程序级放行规则（按 node.exe
-放行、覆盖所有端口），DSH 跑在 node.exe 上，3092 自动可用。只有在你机器上存在
+放行、覆盖所有端口），DSH 跑在 node.exe 上，实际局域网门通常自动可用。只有在你机器上存在
 「仅 3090」的端口级规则等特殊情况下才需手动加（命令见
 docs/MINIPROGRAM-ADAPTATION.md）。
 

@@ -10,6 +10,8 @@ import {
   publicPairingPayload,
 } from '../lib/public-relay-agent.js'
 import PublicRelayGateway from '../lib/public-relay-gateway.js'
+import { DshTunnelAgent } from '../lib/dsh-tunnel-agent.js'
+import { writePrivateJsonAtomic } from '../lib/secure-file.js'
 
 const root = mkdtempSync(path.join(tmpdir(), 'harness-public-relay-test-'))
 try {
@@ -44,6 +46,64 @@ try {
   assert.match(decoded.identityPublicKey, /BEGIN PUBLIC KEY/)
   assert.equal(decoded.ticket, 'single-use-ticket')
 
+  const metadataPayload = JSON.parse(publicPairingPayload({
+    enabled: true,
+    state: 'online',
+    nodeId: first.nodeId,
+    identityPublicKey: first.publicKeyPem,
+    relayOrigin: 'https://relay.example.test',
+    pairingTicket: 'single-use-ticket',
+    pairingExpiresAt: 123456,
+    hostId: 'host-id-1234567890123456',
+    agentInstanceId: 'agent-id-123456789012345',
+    hostName: 'Peach',
+    agentKind: 'deepseek-harness',
+    agentName: 'DeepSeek Harness',
+    agentVersion: '0.1.1-rc.2',
+    adapterVersion: '1.1.0-public-research.6',
+    capabilities: [{ id: 'dsh.rpc', version: 1 }],
+  }))
+  assert.equal(metadataPayload.v, 1, 'metadata extensions must preserve QR protocol v1')
+  assert.equal(metadataPayload.hostId, 'host-id-1234567890123456')
+  assert.equal(metadataPayload.agentInstanceId, 'agent-id-123456789012345')
+  assert.equal(metadataPayload.agentVersion, '0.1.1-rc.2')
+  assert.deepEqual(metadataPayload.capabilities, [{ id: 'dsh.rpc', version: 1 }])
+
+  let enrollmentBody = null
+  const metadataAgent = new PublicRelayAgent(
+    { enabled: true, relayOrigin: 'https://relay.example.test' },
+    {
+      agentVersion: '0.1.1-rc.2',
+      adapterVersion: '1.1.0-public-research.6',
+      hostId: 'host-id-1234567890123456',
+      agentInstanceId: 'agent-id-123456789012345',
+      agentKind: 'deepseek-harness',
+      agentName: 'DeepSeek Harness',
+      hostName: 'Peach',
+      capabilities: [{ id: 'dsh.rpc', version: 1 }],
+      identityPath: path.join(root, 'metadata-identity.json'),
+      onFrame() {},
+      async fetchImpl(_url, options) {
+        enrollmentBody = JSON.parse(options.body)
+        return new Response(JSON.stringify({ ticket: 'ticket', expiresAt: Date.now() + 60000 }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      },
+    },
+  )
+  await metadataAgent.enroll()
+  assert.equal(enrollmentBody.agentVersion, '0.1.1-rc.2')
+  assert.equal(enrollmentBody.adapterVersion, '1.1.0-public-research.6')
+  assert.equal(enrollmentBody.hostId, 'host-id-1234567890123456')
+  assert.equal(enrollmentBody.agentInstanceId, 'agent-id-123456789012345')
+  assert.deepEqual(enrollmentBody.capabilities, [{ id: 'dsh.rpc', version: 1 }])
+
+  const atomicPath = path.join(root, 'atomic-state.json')
+  writePrivateJsonAtomic(atomicPath, { generation: 1 })
+  writePrivateJsonAtomic(atomicPath, { generation: 2 })
+  assert.deepEqual(JSON.parse(readFileSync(atomicPath, 'utf8')), { generation: 2 })
+
   // Regression: a synchronous gateway error must be isolated to that client.
   // Promise.resolve(callback()) does not catch a synchronous callback throw
   // and previously terminated the entire DSH process after reconnect churn.
@@ -76,6 +136,22 @@ try {
   await draining
   assert.equal(routed, true)
   assert.equal(closedByBackpressure, false)
+
+  // The per-client virtual tunnel owns an explicit promise-backlog ceiling.
+  // A stalled relay send must close only that tunnel instead of accumulating
+  // unbounded response buffers inside the DSH process.
+  let releaseBlockedSend
+  const blockedSend = new Promise(resolve => { releaseBlockedSend = resolve })
+  const boundedTunnel = new DshTunnelAgent({ send: () => blockedSend })
+  boundedTunnel.queue(new Uint8Array(512 * 1024))
+  await Promise.resolve()
+  for (let index = 0; index < 9; index += 1) {
+    boundedTunnel.queue(new Uint8Array(512 * 1024))
+  }
+  assert.equal(boundedTunnel.closed, true)
+  assert.ok(boundedTunnel.pendingSendBytes <= 4 * 1024 * 1024)
+  releaseBlockedSend()
+  await boundedTunnel.sendChain
 
   // Regression: when the physical Agent socket drops, every cloud client id
   // from that socket is stale and must be removed before reconnecting.

@@ -1,6 +1,14 @@
 import { PublicRelayAgent, type AgentStatus, type PublicRelayConfig } from './public-relay-agent.js';
+import type { AgentCapability } from './agent-metadata.js';
 export interface PublicRelayGatewayOptions {
     readonly agentVersion: string;
+    readonly adapterVersion?: string;
+    readonly hostId?: string;
+    readonly agentInstanceId?: string;
+    readonly agentKind?: string;
+    readonly agentName?: string;
+    readonly hostName?: string;
+    readonly capabilities?: readonly AgentCapability[];
     readonly displayName?: string;
     readonly dshPort?: number;
     readonly maxClients?: number;

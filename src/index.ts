@@ -3,7 +3,8 @@
  * dsh-wechat-remote gate — WeChat 小程序专用认证网关（原生 DSH 宿主插件）。
  *
  * 与 iOS 插件（dsh-harness-remote，端口 3090/3091）完全独立、可共存：
- * 本插件默认占用 3092/3093，可用环境变量覆盖（见 apply 部分）。
+ * web/default profile 保持占用 3092/3093；其他 profile 使用稳定推导的
+ * 高位端口对。全部仍可用环境变量覆盖（见 apply 部分）。
  *
  * 进程内两个监听器：
  *
@@ -35,7 +36,8 @@ import path from 'node:path'
 import os from 'node:os'
 import crypto from 'node:crypto'
 import zlib from 'node:zlib'
-import { execFileSync } from 'node:child_process'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import httpProxy from 'http-proxy'
 import QRCode from 'qrcode'
 import WechatDirectoryService from './directory-service.js'
@@ -43,9 +45,10 @@ import WechatHostInfoService from './host-info-service.js'
 import WechatHistoryService from './history-service.js'
 import PublicRelayGateway from './public-relay-gateway.js'
 import { loadPublicRelayConfig, publicPairingPayload } from './public-relay-agent.js'
+import { agentProfileScope, loadAgentDescriptor } from './agent-metadata.js'
+import { deriveGatePorts, describeGateListenFailure } from './gate-ports.js'
+import { tightenPrivateFile, writePrivateJsonAtomic } from './secure-file.js'
 
-const PUBLIC_PORT = Number(process.env.WECHAT_GATE_PORT || 3092)
-const LOCAL_PORT = Number(process.env.WECHAT_GATE_LOCAL_PORT || 3093)
 const UPSTREAM_PORT = Number(process.env.DSH_PORT || 3080)
 const STATE_FILE = path.join(os.homedir(), '.dsh', 'gate-wechat-state.json')
 const TARGET = { target: 'http://127.0.0.1:' + UPSTREAM_PORT, changeOrigin: true }
@@ -56,8 +59,64 @@ const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
 const RATE_WINDOW_MS = 60 * 1000
 const RATE_MAX_PER_IP = 120 // general requests per IP per minute on the public door
 const CLAIM_MAX_PER_IP = 10 // claim attempts per IP per minute (brute-force brake)
+const execFileAsync = promisify(execFile)
 let publicRelayGateway = null
 let publicRelayStatus = { enabled: false, state: 'disabled' }
+let agentDescriptor
+try {
+  agentDescriptor = loadAgentDescriptor()
+} catch (error) {
+  // A damaged optional metadata file must not prevent DSH itself from booting.
+  // Keep this process usable but do not overwrite evidence needed for repair.
+  console.error('[wechat-gate] Agent metadata unavailable; using process-local identity:', error.message)
+  agentDescriptor = {
+    schemaVersion: 1,
+    hostId: crypto.randomBytes(18).toString('base64url'),
+    agentInstanceId: crypto.randomBytes(18).toString('base64url'),
+    hostName: os.hostname(),
+    agentKind: 'deepseek-harness',
+    agentName: 'DeepSeek Harness',
+    agentVersion: 'unknown',
+    capabilities: [],
+  }
+}
+const selectedGatePorts = deriveGatePorts(
+  agentProfileScope(),
+  agentDescriptor.agentInstanceId,
+  process.env,
+)
+const PUBLIC_PORT = selectedGatePorts.publicPort
+const LOCAL_PORT = selectedGatePorts.localPort
+for (const warning of selectedGatePorts.warnings) {
+  console.warn(`[wechat-gate] ${warning}`)
+}
+const doorRuntime = {
+  profileScope: selectedGatePorts.profileScope,
+  source: selectedGatePorts.source,
+  publicDoor: {
+    bind: '0.0.0.0',
+    port: PUBLIC_PORT,
+    state: 'starting',
+    errorCode: null,
+    message: null,
+  },
+  localDoor: {
+    bind: '127.0.0.1',
+    port: LOCAL_PORT,
+    state: 'starting',
+    errorCode: null,
+    message: null,
+  },
+}
+
+function gateRuntimeSnapshot() {
+  return {
+    profileScope: doorRuntime.profileScope,
+    source: doorRuntime.source,
+    publicDoor: { ...doorRuntime.publicDoor },
+    localDoor: { ...doorRuntime.localDoor },
+  }
+}
 
 function installedPluginVersion() {
   try {
@@ -73,15 +132,7 @@ function installedPluginVersion() {
  * 全部尽力而为 —— 失败不阻断配对流程。
  */
 function tightenFilePerms(file) {
-  try { fs.chmodSync(file, 0o600) } catch (e) { /* best-effort */ }
-  if (process.platform !== 'win32') return
-  try {
-    execFileSync('icacls', [file, '/inheritance:r', '/grant:r', os.userInfo().username + ':F'], {
-      timeout: 5000,
-      windowsHide: true,
-      stdio: 'ignore',
-    })
-  } catch (e) { /* best-effort */ }
+  tightenPrivateFile(file)
 }
 
 function loadState() {
@@ -102,10 +153,9 @@ function loadState() {
 
 function saveState(state) {
   try {
-    fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true })
-    fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2))
-    // 文件里同时躺着长期令牌与待配对码，收敛为仅属主可读。
-    tightenFilePerms(STATE_FILE)
+    // 文件里同时躺着长期令牌与待配对码。临时文件落盘后同卷原子替换，
+    // 避免断电/进程终止把原有效凭据截断成半份 JSON。
+    writePrivateJsonAtomic(STATE_FILE, state)
   } catch (e) {
     console.error('[wechat-gate] failed to save state:', e.message)
   }
@@ -135,12 +185,21 @@ function lanIPv4() {
 }
 
 /**
- * Allow the official web UI (127.0.0.1:3080) to fetch the LOCAL door's
- * endpoints (127.0.0.1:3093). The local door is loopback-bound, so this
- * never widens the fence beyond the local browser.
+ * Allow this profile's official Web UI to fetch its LOCAL door. Multiple DSH
+ * profiles may use different upstream and local ports; only the configured
+ * loopback WebUI origin is echoed, never an arbitrary website origin.
  */
-function setCors(res) {
-  res.setHeader('Access-Control-Allow-Origin', 'http://127.0.0.1:3080')
+function setCors(req, res) {
+  const origin = typeof req.headers.origin === 'string' ? req.headers.origin : ''
+  try {
+    const parsed = new URL(origin)
+    const loopback = parsed.hostname === '127.0.0.1' || parsed.hostname === 'localhost' || parsed.hostname === '[::1]'
+    const port = parsed.port || (parsed.protocol === 'https:' ? '443' : '80')
+    if (loopback && parsed.protocol === 'http:' && port === String(UPSTREAM_PORT)) {
+      res.setHeader('Access-Control-Allow-Origin', origin)
+      res.setHeader('Vary', 'Origin')
+    }
+  } catch { /* requests without a browser Origin are still allowed locally */ }
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
 }
@@ -281,7 +340,8 @@ async function makePairEntry() {
   // The phone claims over the PUBLIC door (LAN / Funnel), so the payload
   // carries the public port; the funnel URL (when enabled) rides along so
   // the app can auto-fallback to the public channel outside the LAN.
-  const funnel = probeFunnel()
+  scheduleNetworkDiagnosticsRefresh()
+  const funnel = networkDiagnostics.funnel
   const payloadObj = { code, host: lanIPv4(), port: PUBLIC_PORT }
   if (funnel.enabled && funnel.url) payloadObj.funnelUrl = funnel.url
   let payload = JSON.stringify(payloadObj)
@@ -326,6 +386,8 @@ code{color:#7aa2ff;font-size:15px;letter-spacing:3px}
 <p>打开微信小程序「Harness Remote」→ 设置 → 扫码配对，扫下面的二维码</p>
 <img src="${entry.qrDataUrl}" alt="pairing QR">
 <p>配对码：<code>${entry.code}</code></p>
+<p>Agent：${agentDescriptor.agentName} · ${agentDescriptor.hostName} · ${selectedGatePorts.profileScope}<br>
+局域网门：http://${lanIPv4()}:${PUBLIC_PORT} · 本机配对门：127.0.0.1:${LOCAL_PORT}</p>
 <p>${entry.publicMode ? '已启用端到端加密公网连接；局域网可用时仍会优先直连' : '当前为局域网连接'}；二维码 15 分钟内有效</p>
 </body></html>`
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
@@ -333,14 +395,17 @@ code{color:#7aa2ff;font-size:15px;letter-spacing:3px}
 }
 
 async function servePairCode(req, res) {
-  setCors(res)
+  setCors(req, res)
   const entry = await makePairEntry()
-  const funnel = probeFunnel()
+  const funnel = networkDiagnostics.funnel
   res.writeHead(200, { 'Content-Type': 'application/json' })
   res.end(JSON.stringify({
     code: entry.code,
     host: lanIPv4(),
     port: PUBLIC_PORT,
+    localPort: LOCAL_PORT,
+    profileScope: selectedGatePorts.profileScope,
+    gate: gateRuntimeSnapshot(),
     qrDataUrl: entry.qrDataUrl,
     mode: entry.publicMode ? 'public-relay' : 'lan',
     payload: entry.payload,
@@ -348,14 +413,14 @@ async function servePairCode(req, res) {
   }))
 }
 
-function probeTailscale() {
+async function probeTailscale() {
   try {
-    const out = execFileSync('tailscale', ['status', '--json'], {
+    const { stdout } = await execFileAsync('tailscale', ['status', '--json'], {
       timeout: 4000,
       windowsHide: true,
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).toString()
-    const s = JSON.parse(out)
+      encoding: 'utf8',
+    })
+    const s = JSON.parse(String(stdout))
     const self = s && s.Self
     const ips = self && Array.isArray(self.TailscaleIPs) ? self.TailscaleIPs : []
     const ip = ips.find((a) => a.startsWith('100.')) || ips[0] || null
@@ -365,14 +430,14 @@ function probeTailscale() {
   }
 }
 
-function probeFunnel() {
+async function probeFunnel() {
   try {
-    const out = execFileSync('tailscale', ['funnel', 'status', '--json'], {
+    const { stdout } = await execFileAsync('tailscale', ['funnel', 'status', '--json'], {
       timeout: 4000,
       windowsHide: true,
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).toString()
-    const s = JSON.parse(out)
+      encoding: 'utf8',
+    })
+    const s = JSON.parse(String(stdout))
     const hosts = Object.keys((s && s.Web) || {})
     const host = hosts.find((h) => h.endsWith(':443')) || hosts[0] || null
     if (!host) return { enabled: false, url: null }
@@ -383,18 +448,58 @@ function probeFunnel() {
   }
 }
 
+const NETWORK_DIAGNOSTIC_TTL_MS = 60_000
+let networkDiagnostics = {
+  expiresAt: 0,
+  refreshing: false,
+  tailscale: { installed: false, loggedIn: false, ip: null },
+  funnel: { enabled: false, url: null },
+}
+
+/** Pairing/status return immediately; optional legacy diagnostics refresh off-path. */
+function scheduleNetworkDiagnosticsRefresh() {
+  if (networkDiagnostics.refreshing || networkDiagnostics.expiresAt > Date.now()) return
+  networkDiagnostics.refreshing = true
+  void Promise.all([probeTailscale(), probeFunnel()])
+    .then(([tailscale, funnel]) => {
+      networkDiagnostics = {
+        expiresAt: Date.now() + NETWORK_DIAGNOSTIC_TTL_MS,
+        refreshing: false,
+        tailscale,
+        funnel,
+      }
+    })
+    .catch(() => {
+      networkDiagnostics = {
+        ...networkDiagnostics,
+        expiresAt: Date.now() + NETWORK_DIAGNOSTIC_TTL_MS,
+        refreshing: false,
+      }
+    })
+}
+
 function serveGateStatus(req, res) {
-  setCors(res)
+  setCors(req, res)
+  scheduleNetworkDiagnosticsRefresh()
   res.writeHead(200, { 'Content-Type': 'application/json' })
   res.end(JSON.stringify({
+    gate: gateRuntimeSnapshot(),
     lan: { ip: lanIPv4(), port: PUBLIC_PORT },
-    tailscale: probeTailscale(),
-    funnel: probeFunnel(),
+    tailscale: networkDiagnostics.tailscale,
+    funnel: networkDiagnostics.funnel,
     wechat: {
       configured: Boolean(loadWechatConfig()),
       bindings: Object.keys(state.wechatBindings).length,
     },
-    publicRelay: publicRelayStatus,
+    // Status must not echo the active pairing ticket or identity key. The QR
+    // endpoint is the sole local surface that releases those screen secrets.
+    publicRelay: {
+      enabled: publicRelayStatus.enabled === true,
+      state: publicRelayStatus.state || 'disabled',
+      relayOrigin: publicRelayStatus.relayOrigin,
+      lastError: publicRelayStatus.lastError,
+    },
+    agent: agentDescriptor,
   }))
 }
 
@@ -519,7 +624,7 @@ async function serveVerifyWechat(req, res) {
 
 const localServer = http.createServer((req, res) => {
   if (req.method === 'OPTIONS') {
-    setCors(res)
+    setCors(req, res)
     res.writeHead(204)
     return res.end()
   }
@@ -616,12 +721,15 @@ export const name = 'gate'
  * @param ctx - host context.
  */
 export function apply(ctx) {
+  // Optional Tailscale/Funnel diagnostics are warmed in a child process and
+  // never delay DSH startup, the QR endpoint, or WebUI interaction.
+  scheduleNetworkDiagnosticsRefresh()
   // 独立的 Host-only Typert 服务。它不占用 DSH 的全局 directoryPicker，
   // 因而 WebUI 继续使用官方 auto/native 目录选择器。
   ctx.plugin(WechatDirectoryService, { maxEntries: 1000 })
   // 电脑名不在 DSH 原生 host.describe 契约里；以微信端隔离的只读 Remote
   // 提供，避免为了一个客户端字段污染 DSH/WebUI 的 Host API。
-  ctx.plugin(WechatHostInfoService)
+  ctx.plugin(WechatHostInfoService, { gateRuntime: gateRuntimeSnapshot })
   // 公网历史性能适配：只读 DSH 原生 session.history，在电脑端补齐轮次
   // 并删除已完成轮次的冗余流式增量。独立 Remote 不修改 WebUI/DSH。
   ctx.plugin(WechatHistoryService, { dshPort: UPSTREAM_PORT })
@@ -631,12 +739,22 @@ export function apply(ctx) {
     const relayConfig = loadPublicRelayConfig()
     if (relayConfig) {
       publicRelayGateway = new PublicRelayGateway(relayConfig, {
-        agentVersion: installedPluginVersion(),
+        agentVersion: agentDescriptor.agentVersion,
+        adapterVersion: installedPluginVersion(),
+        hostId: agentDescriptor.hostId,
+        agentInstanceId: agentDescriptor.agentInstanceId,
+        agentKind: agentDescriptor.agentKind,
+        agentName: agentDescriptor.agentName,
+        hostName: agentDescriptor.hostName,
+        capabilities: agentDescriptor.capabilities,
         dshPort: UPSTREAM_PORT,
         // This credential is released only inside an authenticated, identity-
         // pinned E2EE relay tunnel. It is not a DSH Remote and cannot be called
         // by WebUI or unauthenticated LAN clients.
         issueLanCredential: () => {
+          if (doorRuntime.publicDoor.state !== 'listening') {
+            throw new Error(doorRuntime.publicDoor.message || `局域网门 ${PUBLIC_PORT} 当前不可用`)
+          }
           console.log('[wechat-gate] authenticated E2EE client requested LAN route bootstrap')
           return {
             baseUrl: `http://${lanIPv4()}:${PUBLIC_PORT}`,
@@ -653,7 +771,17 @@ export function apply(ctx) {
   }
   let disposed = false
   const failDoor = (which, err) => {
-    console.error(`[wechat-gate] ${which} failed (plugin keeps DSH alive): ${err && (err.code || err.message) || err}`)
+    const runtime = which === 'local door' ? doorRuntime.localDoor : doorRuntime.publicDoor
+    const failure = describeGateListenFailure(
+      which === 'local door' ? 'local' : 'public',
+      runtime.bind,
+      runtime.port,
+      err,
+    )
+    runtime.state = disposed ? 'stopped' : 'unavailable'
+    runtime.errorCode = failure.code
+    runtime.message = failure.message
+    console.error(`[wechat-gate] ${runtime.message} DSH 本体继续运行。`)
     if (disposed) return
     try {
       if (which === 'local door') localServer.close()
@@ -664,6 +792,9 @@ export function apply(ctx) {
   publicServer.on('error', (err) => failDoor('public door', err))
   try {
     localServer.listen(LOCAL_PORT, '127.0.0.1', () => {
+      doorRuntime.localDoor.state = 'listening'
+      doorRuntime.localDoor.errorCode = null
+      doorRuntime.localDoor.message = null
       console.log(`[wechat-gate] local door (pairing/status): http://127.0.0.1:${LOCAL_PORT}`)
     })
   } catch (e) {
@@ -671,6 +802,9 @@ export function apply(ctx) {
   }
   try {
     publicServer.listen(PUBLIC_PORT, '0.0.0.0', () => {
+      doorRuntime.publicDoor.state = 'listening'
+      doorRuntime.publicDoor.errorCode = null
+      doorRuntime.publicDoor.message = null
       console.log(`[wechat-gate] public door (wechat token required): 0.0.0.0:${PUBLIC_PORT} -> ${TARGET.target}`)
     })
   } catch (e) {
@@ -678,6 +812,8 @@ export function apply(ctx) {
   }
   ctx.on('dispose', () => {
     disposed = true
+    doorRuntime.localDoor.state = 'stopped'
+    doorRuntime.publicDoor.state = 'stopped'
     try { localServer.close() } catch (e) { /* best-effort */ }
     try { publicServer.close() } catch (e) { /* best-effort */ }
     try { publicRelayGateway?.stop() } catch (e) { /* best-effort */ }

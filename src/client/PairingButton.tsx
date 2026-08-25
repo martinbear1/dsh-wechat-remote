@@ -11,11 +11,29 @@ interface PairCodeResp {
   code: string
   host: string
   port: number
+  localPort?: number
+  profileScope?: string
   qrDataUrl: string
   mode: 'lan' | 'public-relay'
 }
 
+interface GateDoorInfo {
+  bind: string
+  port: number
+  state: 'starting' | 'listening' | 'unavailable' | 'stopped'
+  errorCode: string | null
+  message: string | null
+}
+
+interface GateRuntimeInfo {
+  profileScope: string
+  source: 'legacy-default' | 'profile-derived' | 'environment-override'
+  publicDoor: GateDoorInfo
+  localDoor: GateDoorInfo
+}
+
 interface GateStatusResp {
+  gate?: GateRuntimeInfo
   lan: { ip: string; port: number }
   tailscale: { installed: boolean; loggedIn: boolean; ip: string | null }
   funnel: { enabled: boolean; url: string | null }
@@ -25,6 +43,13 @@ interface GateStatusResp {
     state: 'disabled' | 'enrolling' | 'connecting' | 'online' | 'offline'
     relayOrigin?: string
     lastError?: string
+  }
+}
+
+interface HostDescribeEnvelope {
+  result?: {
+    ok?: boolean
+    value?: { gate?: GateRuntimeInfo }
   }
 }
 
@@ -57,24 +82,74 @@ export function PairingButton({ wide }: PairingButtonProps): JSX.Element {
   const [open, setOpen] = useState(false)
   const [qr, setQr] = useState<PairCodeResp | null>(null)
   const [status, setStatus] = useState<GateStatusResp | null>(null)
+  const [runtime, setRuntime] = useState<GateRuntimeInfo | null>(null)
   const [error, setError] = useState<string | null>(null)
   const timer = useRef<number | null>(null)
 
   const refresh = async (): Promise<void> => {
+    let localOrigin = 'http://127.0.0.1:3093'
+    let discovered = false
     try {
-      // Absolute loopback URL on the gate's LOCAL door (127.0.0.1:3093,
-      // loopback-bound): pairing codes are screen secrets and must never be
-      // network-readable (the public 3092 door would leak them via Funnel).
-      const codeRes = await fetch('http://127.0.0.1:3093/pair/code')
-      if (!codeRes.ok) throw new Error(`pair/code ${codeRes.status}`)
-      setQr(await codeRes.json() as PairCodeResp)
-      setError(null)
-    } catch (err) {
-      setError('获取配对码失败：门卫服务未运行？')
+      // Ask this WebUI profile's authenticated Host Remote for the selected
+      // LOCAL door. New non-default profiles must never accidentally display
+      // the web/default profile's QR from legacy port 3093.
+      const rpcId = `wechat-pairing-${Date.now().toString(36)}`
+      const describeRes = await fetch('/api/wechatHost.describe', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          type: 'client-request',
+          rpcId,
+          method: 'wechatHost.describe',
+          payload: {},
+        }),
+      })
+      if (describeRes.ok) {
+        const envelope = await describeRes.json() as HostDescribeEnvelope
+        const gate = envelope.result?.ok === true ? envelope.result.value?.gate : undefined
+        if (gate && Number.isSafeInteger(gate.localDoor.port)) {
+          discovered = true
+          setRuntime(gate)
+          localOrigin = `http://127.0.0.1:${gate.localDoor.port}`
+          if (gate.localDoor.state !== 'listening') {
+            setQr(null)
+            setStatus(null)
+            setError(gate.localDoor.message || `本机配对门 ${gate.localDoor.port} 尚未就绪`)
+            return
+          }
+        }
+      }
+    } catch {
+      // Older .5 hosts do not expose gate runtime metadata; their documented
+      // web/default endpoint remains 127.0.0.1:3093.
     }
     try {
-      const statusRes = await fetch('http://127.0.0.1:3093/gate/status')
-      if (statusRes.ok) setStatus(await statusRes.json() as GateStatusResp)
+      // The LOCAL door is loopback-bound: pairing codes are screen secrets and
+      // must never be fetched from the LAN/public door.
+      const codeRes = await fetch(`${localOrigin}/pair/code`)
+      if (!codeRes.ok) throw new Error(`pair/code ${codeRes.status}`)
+      const code = await codeRes.json() as PairCodeResp
+      setQr(code)
+      if (!discovered && code.profileScope) {
+        setRuntime(previous => previous || {
+          profileScope: code.profileScope || 'web',
+          source: 'legacy-default',
+          publicDoor: { bind: '0.0.0.0', port: code.port, state: 'listening', errorCode: null, message: null },
+          localDoor: { bind: '127.0.0.1', port: code.localPort || 3093, state: 'listening', errorCode: null, message: null },
+        })
+      }
+      setError(null)
+    } catch (err) {
+      setQr(null)
+      setError(`获取配对码失败：本机配对门 ${localOrigin.replace('http://127.0.0.1:', '')} 不可用`)
+    }
+    try {
+      const statusRes = await fetch(`${localOrigin}/gate/status`)
+      if (statusRes.ok) {
+        const nextStatus = await statusRes.json() as GateStatusResp
+        setStatus(nextStatus)
+        if (nextStatus.gate) setRuntime(nextStatus.gate)
+      }
     } catch {
       // status is best-effort
     }
@@ -90,9 +165,14 @@ export function PairingButton({ wide }: PairingButtonProps): JSX.Element {
     }
   }, [open])
 
-  const lanDetail = status === null
+  const publicDoor = runtime?.publicDoor || status?.gate?.publicDoor
+  const lanDetail = publicDoor?.state === 'unavailable'
+    ? publicDoor.message || `局域网门 ${publicDoor.port} 不可用`
+    : status === null ? '检测中…' : `http://${status.lan.ip}:${status.lan.port}`
+
+  const localDetail = runtime === null
     ? '检测中…'
-    : `http://${status.lan.ip}:${status.lan.port}`
+    : `http://127.0.0.1:${runtime.localDoor.port} · ${runtime.profileScope}`
 
   const publicDetail = ((): string => {
     if (status === null) return '检测中…'
@@ -141,7 +221,16 @@ export function PairingButton({ wide }: PairingButtonProps): JSX.Element {
               )
               : <p className={styles.err}>{error ?? '加载中…'}</p>}
             <div className={styles.channels}>
-              <ChannelRow label="局域网" detail={lanDetail} ok={status !== null && status.lan.ip.length > 0} />
+              <ChannelRow
+                label="局域网"
+                detail={lanDetail}
+                ok={status !== null && status.lan.ip.length > 0 && publicDoor?.state !== 'unavailable'}
+              />
+              <ChannelRow
+                label="本机配对门"
+                detail={localDetail}
+                ok={runtime?.localDoor.state === 'listening'}
+              />
               <ChannelRow
                 label="公网"
                 detail={publicDetail}

@@ -5,7 +5,6 @@
  * public port, does not change DSH/WebUI configuration, and is disabled unless
  * ~/.dsh/harness-remote-public.json explicitly contains { "enabled": true }.
  */
-import { execFileSync } from 'node:child_process'
 import {
   createHash,
   generateKeyPairSync,
@@ -14,16 +13,16 @@ import {
 } from 'node:crypto'
 import {
   existsSync,
-  mkdirSync,
   readFileSync,
-  writeFileSync,
 } from 'node:fs'
-import { hostname, homedir, userInfo } from 'node:os'
+import { homedir, hostname } from 'node:os'
 import path from 'node:path'
 import { WebSocket } from 'ws'
 
+import { defaultAgentIdentityPath, type AgentCapability } from './agent-metadata.js'
+import { readPrivateJson, writePrivateJsonAtomic } from './secure-file.js'
+
 const CONFIG_PATH = path.join(homedir(), '.dsh', 'harness-remote-public.json')
-const IDENTITY_PATH = path.join(homedir(), '.dsh', 'harness-remote-public-identity.json')
 const ROUTING_HEADER_BYTES = 18
 const MAX_AGENT_BUFFERED_BYTES = 2 * 1024 * 1024
 const AGENT_BUFFER_DRAIN_TIMEOUT_MS = 15_000
@@ -52,6 +51,14 @@ export interface AgentStatus {
   readonly pairingTicket?: string
   readonly pairingExpiresAt?: number
   readonly lastError?: string
+  readonly hostId?: string
+  readonly agentInstanceId?: string
+  readonly hostName?: string
+  readonly agentKind?: string
+  readonly agentName?: string
+  readonly agentVersion?: string
+  readonly adapterVersion?: string
+  readonly capabilities?: readonly AgentCapability[]
 }
 
 export interface RelayClientFrame {
@@ -62,6 +69,13 @@ export interface RelayClientFrame {
 
 export interface PublicRelayAgentOptions {
   readonly agentVersion: string
+  readonly adapterVersion?: string
+  readonly hostId?: string
+  readonly agentInstanceId?: string
+  readonly agentKind?: string
+  readonly agentName?: string
+  readonly hostName?: string
+  readonly capabilities?: readonly AgentCapability[]
   readonly displayName?: string
   readonly onFrame: (frame: RelayClientFrame) => void | Promise<void>
   readonly onStatus?: (status: AgentStatus) => void
@@ -72,18 +86,6 @@ export interface PublicRelayAgentOptions {
   readonly fetchImpl?: typeof fetch
   /** Test/portable profile override; production defaults to ~/.dsh. */
   readonly identityPath?: string
-}
-
-function tighten(file: string): void {
-  try { writeFileSync(file, readFileSync(file), { mode: 0o600 }) } catch { /* best effort */ }
-  if (process.platform !== 'win32') return
-  try {
-    execFileSync('icacls', [file, '/inheritance:r', '/grant:r', `${userInfo().username}:F`], {
-      timeout: 5000,
-      windowsHide: true,
-      stdio: 'ignore',
-    })
-  } catch { /* best effort */ }
 }
 
 export function agentNodeIdForPublicKey(publicKeyPem: string): string {
@@ -107,21 +109,18 @@ export function loadPublicRelayConfig(configPath = CONFIG_PATH): PublicRelayConf
   return { enabled: true, relayOrigin: url.origin }
 }
 
-export function loadOrCreateAgentIdentity(identityPath = IDENTITY_PATH): AgentIdentity {
+export function loadOrCreateAgentIdentity(identityPath = defaultAgentIdentityPath()): AgentIdentity {
   if (existsSync(identityPath)) {
-    const stored = JSON.parse(readFileSync(identityPath, 'utf8')) as AgentIdentity
+    const stored = readPrivateJson<AgentIdentity>(identityPath)
     const expected = agentNodeIdForPublicKey(stored.publicKeyPem)
     if (stored.nodeId !== expected || !stored.privateKeyPem) throw new Error('Public relay identity file is invalid')
-    tighten(identityPath)
     return stored
   }
   const pair = generateKeyPairSync('ed25519')
   const publicKeyPem = pair.publicKey.export({ type: 'spki', format: 'pem' }).toString()
   const privateKeyPem = pair.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString()
   const identity = { nodeId: agentNodeIdForPublicKey(publicKeyPem), publicKeyPem, privateKeyPem }
-  mkdirSync(path.dirname(identityPath), { recursive: true, mode: 0o700 })
-  writeFileSync(identityPath, JSON.stringify(identity, null, 2), { mode: 0o600, flag: 'wx' })
-  tighten(identityPath)
+  writePrivateJsonAtomic(identityPath, identity)
   return identity
 }
 
@@ -148,6 +147,14 @@ export class PublicRelayAgent {
       nodeId: this.identity.nodeId,
       identityPublicKey: this.identity.publicKeyPem,
       relayOrigin: config.relayOrigin,
+      hostId: options.hostId,
+      agentInstanceId: options.agentInstanceId,
+      hostName: options.hostName || hostname(),
+      agentKind: options.agentKind || 'deepseek-harness',
+      agentName: options.agentName || 'DeepSeek Harness',
+      agentVersion: options.agentVersion,
+      adapterVersion: options.adapterVersion,
+      capabilities: options.capabilities,
     }
   }
 
@@ -210,10 +217,15 @@ export class PublicRelayAgent {
           timestamp,
           nonce,
           signature,
-          displayName: this.options.displayName || `DeepSeek Harness · ${hostname()}`,
-          agentKind: 'deepseek-harness',
+          displayName: this.options.displayName || `${this.options.agentName || 'DeepSeek Harness'} · ${this.options.hostName || hostname()}`,
+          agentKind: this.options.agentKind || 'deepseek-harness',
+          agentName: this.options.agentName || 'DeepSeek Harness',
           agentVersion: this.options.agentVersion,
-          hostName: hostname(),
+          adapterVersion: this.options.adapterVersion,
+          hostId: this.options.hostId,
+          agentInstanceId: this.options.agentInstanceId,
+          capabilities: this.options.capabilities,
+          hostName: this.options.hostName || hostname(),
         }),
         signal: AbortSignal.timeout(10_000),
       })
@@ -337,5 +349,13 @@ export function publicPairingPayload(status: AgentStatus): string | null {
     identityPublicKey: status.identityPublicKey,
     ticket: status.pairingTicket,
     expiresAt: status.pairingExpiresAt,
+    ...(status.hostId ? { hostId: status.hostId } : {}),
+    ...(status.agentInstanceId ? { agentInstanceId: status.agentInstanceId } : {}),
+    ...(status.hostName ? { hostName: status.hostName } : {}),
+    ...(status.agentKind ? { agentKind: status.agentKind } : {}),
+    ...(status.agentName ? { agentName: status.agentName } : {}),
+    ...(status.agentVersion ? { agentVersion: status.agentVersion } : {}),
+    ...(status.adapterVersion ? { adapterVersion: status.adapterVersion } : {}),
+    ...(status.capabilities ? { capabilities: status.capabilities } : {}),
   })
 }

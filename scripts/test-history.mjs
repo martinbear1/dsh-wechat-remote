@@ -65,6 +65,25 @@ const interrupted = await buildHistoryWindow({ sessionId: 'session-error' }, asy
 assert.equal(interrupted.ok, true)
 assert.equal(interrupted.value.events.some(entry => entry.event.type === 'assistant/chunk'), true)
 
+const completedWithoutDurableMessage = await buildHistoryWindow({ sessionId: 'session-no-final' }, async () => ({
+  ok: true,
+  value: {
+    hasMore: false,
+    events: [
+      { event: { type: 'turn/start', seq: 30, data: { turn: 9 } } },
+      { event: { type: 'assistant/chunk', seq: 31, data: { turn: 9, chunk: { type: 'text-delta', text: 'only durable copy' } } } },
+      { event: { type: 'turn/end', seq: 32, data: { turn: 9, reason: { kind: 'completed' } } } },
+    ],
+  },
+}), signal)
+
+assert.equal(completedWithoutDurableMessage.ok, true)
+assert.equal(
+  completedWithoutDurableMessage.value.events.some(entry => entry.event.type === 'assistant/chunk'),
+  true,
+  'completed turns without assistant/message must retain their only output',
+)
+
 const invalid = await buildHistoryWindow({ sessionId: '', maxMessages: 1000 }, async () => {
   throw new Error('invalid request must not hit DSH')
 }, signal)

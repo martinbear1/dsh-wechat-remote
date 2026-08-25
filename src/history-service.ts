@@ -208,6 +208,7 @@ export async function buildHistoryWindow(
   const maxMessages = request.maxMessages ?? DEFAULT_PAGE_MESSAGES
   const pages: HistoryEntry[][] = []
   const completedTurns = new Set<string>()
+  const durableMessageTurns = new Set<string>()
   let cursor = request.beforeSeq
   let previousCursor: number | undefined
   let targetTurn: string | undefined
@@ -248,7 +249,8 @@ export async function buildHistoryWindow(
     const firstSeq = eventSeqOf(entries[0])
     if (firstSeq !== undefined) historyStartSeq = firstSeq
     markCompletedTurns(entries, completedTurns)
-    pages.unshift(compactEntries(entries, completedTurns))
+    markDurableMessageTurns(entries, durableMessageTurns)
+    pages.unshift(entries)
 
     if (targetTurn === undefined || hasTurnStart(entries, targetTurn)
       || value.hasMore !== true || entries.length === 0) {
@@ -256,7 +258,7 @@ export async function buildHistoryWindow(
         ok: true,
         value: {
           ...(tailValue || {}),
-          events: pages.flat(),
+          events: compactEntries(pages.flat(), completedTurns, durableMessageTurns),
           hasMore: oldestValue?.hasMore === true,
           historyStartSeq,
           historyEndSeq,
@@ -328,15 +330,26 @@ function markCompletedTurns(entries: readonly HistoryEntry[], completedTurns: Se
   }
 }
 
+function markDurableMessageTurns(entries: readonly HistoryEntry[], durableTurns: Set<string>): void {
+  for (const entry of entries) {
+    const event = entry.event
+    if (event?.type === 'assistant/message' && event.data?.turn !== undefined) {
+      durableTurns.add(String(event.data.turn))
+    }
+  }
+}
+
 function compactEntries(
   entries: readonly HistoryEntry[],
   completedTurns: ReadonlySet<string>,
+  durableMessageTurns: ReadonlySet<string>,
 ): HistoryEntry[] {
-  if (completedTurns.size === 0) return Array.from(entries)
+  if (completedTurns.size === 0 || durableMessageTurns.size === 0) return Array.from(entries)
   return entries.filter(entry => {
     const event = entry.event
     return event?.type !== 'assistant/chunk'
       || !completedTurns.has(String(event.data?.turn))
+      || !durableMessageTurns.has(String(event.data?.turn))
   })
 }
 

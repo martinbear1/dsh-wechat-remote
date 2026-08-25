@@ -1,5 +1,5 @@
 /** Multiplexes authenticated E2EE streams onto the local DSH HTTP/WebSocket API. */
-import http, { type ClientRequest, type IncomingHttpHeaders } from 'node:http'
+import http, { type ClientRequest, type IncomingHttpHeaders, type IncomingMessage } from 'node:http'
 import { WebSocket } from 'ws'
 
 const VERSION = 1
@@ -17,6 +17,9 @@ const HEADER_BYTES = 8
 const MAX_METADATA_BYTES = 16 * 1024
 const MAX_CHUNK_BYTES = 192 * 1024
 const MAX_REQUEST_BYTES = 16 * 1024 * 1024
+const SEND_QUEUE_PAUSE_BYTES = 2 * 1024 * 1024
+const SEND_QUEUE_RESUME_BYTES = 512 * 1024
+const MAX_SEND_QUEUE_BYTES = 4 * 1024 * 1024
 const LAN_CREDENTIAL_PATH = '/api/wechat-remote/lan-credential'
 type ByteArray = Uint8Array<ArrayBufferLike>
 
@@ -118,6 +121,8 @@ function pieces(data: ByteArray): readonly ByteArray[] {
 interface HttpStream {
   readonly kind: 'http'
   readonly request: ClientRequest
+  response?: IncomingMessage
+  paused: boolean
   bytes: number
 }
 
@@ -126,6 +131,7 @@ interface WebSocketStream {
   readonly socket: WebSocket
   fragments: ByteArray[]
   fragmentBytes: number
+  paused: boolean
 }
 
 type Stream = HttpStream | WebSocketStream
@@ -148,6 +154,7 @@ export class DshTunnelAgent {
   private readonly issueLanCredential?: DshTunnelAgentOptions['issueLanCredential']
   private readonly streams = new Map<number, Stream>()
   private sendChain: Promise<void> = Promise.resolve()
+  private pendingSendBytes = 0
   private closed = false
 
   constructor(options: DshTunnelAgentOptions) {
@@ -218,12 +225,19 @@ export class DshTunnelAgent {
       headers: requestHeaders(value.headers),
       timeout: 30_000,
     }, response => {
+      const active = this.streams.get(streamId)
+      if (active?.kind === KIND_HTTP) active.response = response
       this.queue(encode(ACCEPT, streamId, 0, json({
         statusCode: response.statusCode || 502,
         headers: responseHeaders(response.headers),
       })))
       response.on('data', chunk => {
         for (const part of pieces(Buffer.from(chunk))) this.queue(encode(DATA, streamId, 0, part))
+        const current = this.streams.get(streamId)
+        if (this.pendingSendBytes >= SEND_QUEUE_PAUSE_BYTES && current?.kind === KIND_HTTP && !current.paused) {
+          current.paused = true
+          response.pause()
+        }
       })
       response.on('end', () => {
         this.streams.delete(streamId)
@@ -231,7 +245,7 @@ export class DshTunnelAgent {
       })
       response.on('error', error => this.fail(streamId, error))
     })
-    const stream: HttpStream = { kind: KIND_HTTP, request, bytes: 0 }
+    const stream: HttpStream = { kind: KIND_HTTP, request, paused: false, bytes: 0 }
     this.streams.set(streamId, stream)
     request.on('timeout', () => request.destroy(new Error('Local DSH request timed out')))
     request.on('error', error => this.fail(streamId, error))
@@ -244,7 +258,7 @@ export class DshTunnelAgent {
       perMessageDeflate: false,
       handshakeTimeout: 10_000,
     })
-    const stream: WebSocketStream = { kind: KIND_WEBSOCKET, socket, fragments: [], fragmentBytes: 0 }
+    const stream: WebSocketStream = { kind: KIND_WEBSOCKET, socket, fragments: [], fragmentBytes: 0, paused: false }
     this.streams.set(streamId, stream)
     socket.on('open', () => this.queue(encode(ACCEPT, streamId, 0, json({ opened: true }))))
     socket.on('message', (data, isBinary) => {
@@ -258,6 +272,11 @@ export class DshTunnelAgent {
         const flags = (isBinary ? FLAG_BINARY : 0) | (index === messagePieces.length - 1 ? FLAG_FINAL : 0)
         this.queue(encode(DATA, streamId, flags, part))
       })
+      const current = this.streams.get(streamId)
+      if (this.pendingSendBytes >= SEND_QUEUE_PAUSE_BYTES && current?.kind === KIND_WEBSOCKET && !current.paused) {
+        current.paused = true
+        socket.pause()
+      }
     })
     socket.on('close', (code, reason) => {
       this.streams.delete(streamId)
@@ -313,9 +332,32 @@ export class DshTunnelAgent {
   }
 
   private queue(frame: ByteArray): void {
+    if (this.closed) return
+    const bytes = frame.byteLength
+    if (this.pendingSendBytes + bytes > MAX_SEND_QUEUE_BYTES) {
+      // An authenticated client can request a very large DSH response. Bound
+      // the promise backlog inside the DSH process instead of buffering until
+      // the desktop is out of memory.
+      this.close()
+      return
+    }
+    this.pendingSendBytes += bytes
     this.sendChain = this.sendChain
       .then(() => this.closed ? undefined : this.sendCallback(frame))
       .then(() => undefined)
       .catch(() => this.close())
+      .finally(() => {
+        this.pendingSendBytes = Math.max(0, this.pendingSendBytes - bytes)
+        if (!this.closed && this.pendingSendBytes <= SEND_QUEUE_RESUME_BYTES) this.resumeSources()
+      })
+  }
+
+  private resumeSources(): void {
+    for (const stream of this.streams.values()) {
+      if (!stream.paused) continue
+      stream.paused = false
+      if (stream.kind === KIND_HTTP) stream.response?.resume()
+      else stream.socket.resume()
+    }
   }
 }

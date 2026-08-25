@@ -1,7 +1,7 @@
 /**
  * 制品一致性守卫（微信版插件）：客户端 bundle 必须用包自身的名字注册
  * （window.__ModuleLoader__.load({ id })），宿主网关必须是微信专用表面
- * （3092/3093、claim-wechat/verify-wechat、滚动 token、独立状态文件）。
+ * （兼容 3092/3093、多 profile 端口、claim/verify、滚动 token、独立状态文件）。
  * DSH 的 client-modules 加载器会拒绝「注册 id 与启动条目 id 不一致」的
  * bundle，直接打崩 Web UI —— 本脚本把这类硬约束变成可执行的回归检查。
  *
@@ -24,9 +24,11 @@ check(client.includes(`id: "${name}"`), `lib/client.js 注册 id 不是 "${name}
 for (const legacy of ['@deepseek-ai/dsh-client-ui-pairing', '@harness-remote/dsh-harness-remote']) {
   check(!client.includes(legacy), `lib/client.js 残留异包注册 id（${legacy}）`)
 }
-// 1b. 按钮文案与本地门端口必须是微信版。
+// 1b. 按钮从本 profile 的 Host Remote 发现实际本地门；3093 只作旧版回退。
 check(client.includes('微信连接'), 'lib/client.js 按钮文案不是「微信连接」')
-check(client.includes('http://127.0.0.1:3093/pair/code'), 'lib/client.js 本地门端口不是 3093')
+check(client.includes('/api/wechatHost.describe'), 'lib/client.js 没有动态发现当前 profile 的本地门')
+check(client.includes('http://127.0.0.1:3093'), 'lib/client.js 缺少旧 web/default 3093 回退')
+check(client.includes('本机配对门'), 'lib/client.js 未展示实际本地门端口')
 check(!client.includes('127.0.0.1:3091'), 'lib/client.js 残留 iOS 本地门端口 3091')
 // 1c. 侧边栏脚部布局选择器（宽屏：设置左、配对按钮右）必须在注入的 CSS 里。
 for (const sel of ['[class*=_footArea]', '[class*=_settingsArea]', '[class*=_footerActions]']) {
@@ -37,8 +39,9 @@ for (const sel of ['[class*=_footArea]', '[class*=_settingsArea]', '[class*=_foo
 const host = readFileSync(path.join(root, 'lib/index.js'), 'utf8')
 check(host.includes('export function apply'), 'lib/index.js 缺少 apply 导出（宿主插件不会加载）')
 check(host.includes("export const name = 'gate'"), 'lib/index.js 缺少 gate name 导出')
-check(host.includes('WECHAT_GATE_PORT || 3092'), 'lib/index.js 公网门默认端口不是 3092')
-check(host.includes('WECHAT_GATE_LOCAL_PORT || 3093'), 'lib/index.js 本地门默认端口不是 3093')
+check(host.includes("from './gate-ports.js'"), 'lib/index.js 未使用多 profile 端口推导')
+check(host.includes('selectedGatePorts.publicPort'), 'lib/index.js 未使用推导出的局域网门')
+check(host.includes('selectedGatePorts.localPort'), 'lib/index.js 未使用推导出的本地门')
 check(host.includes('gate-wechat-state.json'), 'lib/index.js 状态文件不是独立的 gate-wechat-state.json')
 check(host.includes("url.pathname === '/pair/claim-wechat'"), 'lib/index.js 缺少 /pair/claim-wechat 端点')
 check(host.includes("url.pathname === '/pair/verify-wechat'"), 'lib/index.js 缺少 /pair/verify-wechat 端点')
@@ -47,7 +50,8 @@ check(host.includes('timingSafeEqual'), 'lib/index.js 缺少常数时间 token �
 check(host.includes('rotated'), 'lib/index.js 缺少凭证滚动逻辑')
 check(host.includes('rateBuckets'), 'lib/index.js 缺少每 IP 限速')
 check(host.includes('icacls'), 'lib/index.js 缺少 Windows ACL 收紧')
-check(host.includes('plugin keeps DSH alive'), 'lib/index.js 缺少端口占用的崩溃隔离（server error 处理器）')
+check(host.includes('DSH 本体继续运行'), 'lib/index.js 缺少端口占用的崩溃隔离（server error 处理器）')
+check(host.includes("runtime.state = disposed ? 'stopped' : 'unavailable'"), '端口错误没有降级成可诊断状态')
 check(host.includes('wechat: {'), 'lib/index.js 缺少 /gate/status 的微信身份字段')
 check(client.includes('微信身份'), 'lib/client.js 弹窗缺少「微信身份」状态行')
 
@@ -92,6 +96,9 @@ check(host.includes('ctx.plugin(WechatHostInfoService'), 'lib/index.js 未在 ga
 const hostInfo = readFileSync(path.join(root, 'lib/host-info-service.js'), 'utf8')
 check(hostInfo.includes('super(ctx, "wechatHost")') || hostInfo.includes("super(ctx, 'wechatHost')"), 'Host 信息服务的 Typert key 不是 wechatHost')
 check(hostInfo.includes('computerName: hostname()'), 'Host 信息服务未从操作系统读取真实电脑名')
+for (const field of ['hostId', 'agentInstanceId', 'agentKind', 'agentName', 'agentVersion', 'capabilities']) {
+  check(hostInfo.includes(field), `Host 信息服务缺少 Agent 元数据字段 ${field}`)
+}
 check(typert.includes('wechatHost/describe'), '严格 Typert 契约缺少 wechatHost/describe')
 
 // 4d. 公网长会话历史只在微信端独立 Remote 内做无损语义压缩；数据源仍是
@@ -108,7 +115,7 @@ check(typert.includes('wechatHistory/window'), '严格 Typert 契约缺少 wecha
 // 4e. 公网模块必须是显式启用、出站连接、独立身份和端到端加密；
 // 不得向 DSH/WebUI 写配置或新增公网监听端口。
 const publicRelay = readFileSync(path.join(root, 'lib/public-relay-agent.js'), 'utf8')
-for (const required of ['harness-remote-public.json', 'harness-remote-public-identity.json', "enabled !== true", "protocol === 'https:' ? 'wss:'", "generateKeyPairSync('ed25519')"]) {
+for (const required of ['harness-remote-public.json', "enabled !== true", "protocol === 'https:' ? 'wss:'", "generateKeyPairSync('ed25519')"]) {
   check(publicRelay.includes(required), `公网 Agent 缺少安全约束：${required}`)
 }
 check(!publicRelay.includes('createServer('), '公网 Agent 不得创建入站 HTTP 监听器')
@@ -117,6 +124,8 @@ check(host.includes('if (relayConfig)'), '缺少公网 Agent 默认关闭分支'
 check(host.includes('new PublicRelayGateway'), '宿主未挂载加密公网网关')
 check(host.includes('issueLanCredential:'), '宿主入口未把 E2EE 局域网凭证能力挂载到公网网关')
 check(host.includes('authenticated E2EE client requested LAN route bootstrap'), '宿主制品缺少局域网凭证安全诊断点')
+check(!host.includes("execFileSync('tailscale'"), '配对主路径不得同步阻塞探测 Tailscale')
+check(host.includes('scheduleNetworkDiagnosticsRefresh'), '可选网络诊断缺少异步缓存')
 const e2ee = readFileSync(path.join(root, 'lib/e2ee-session.js'), 'utf8')
 for (const required of ['AgentE2EESession', 'sign(null', 'nacl.box.before', 'nacl.secretbox']) {
   check(e2ee.includes(required), `E2EE 实现缺少安全原语：${required}`)
@@ -125,14 +134,31 @@ const tunnel = readFileSync(path.join(root, 'lib/dsh-tunnel-agent.js'), 'utf8')
 check(tunnel.includes("startsWith('/api/')"), '公网隧道没有限制到 DSH /api 表面')
 check(tunnel.includes("host: '127.0.0.1'"), '公网隧道上游不是固定 loopback DSH')
 check(!tunnel.includes('createServer('), '公网隧道不得新增入站监听器')
+check(tunnel.includes('MAX_SEND_QUEUE_BYTES'), '公网隧道缺少明确的待发队列字节上限')
+check(tunnel.includes('response.pause()'), '公网 HTTP 隧道缺少上游背压暂停')
+
+const secureFile = readFileSync(path.join(root, 'lib/secure-file.js'), 'utf8')
+check(secureFile.includes('renameSync(temporary, file)'), '私密状态文件没有同卷原子替换')
+const metadata = readFileSync(path.join(root, 'lib/agent-metadata.js'), 'utf8')
+check(metadata.includes('harness-remote-public-identity.json'), '默认实例没有兼容 public-research.5 的 Agent 身份')
+check(metadata.includes('agentInstanceId'), 'Agent 元数据缺少实例标识')
+const gatePorts = readFileSync(path.join(root, 'lib/gate-ports.js'), 'utf8')
+check(gatePorts.includes('LEGACY_PUBLIC_PORT = 3092'), 'web/default 没有保持 3092 兼容')
+check(gatePorts.includes('LEGACY_LOCAL_PORT = 3093'), 'web/default 没有保持 3093 兼容')
+check(/DYNAMIC_PORT_BASE = (?:32_000|32000|32e3)/.test(gatePorts), '其他 profile 未使用 32000..39999 端口区间')
+check(/DYNAMIC_PORT_PAIRS = (?:4_000|4000|4e3)/.test(gatePorts), 'profile 端口区间可能越入 Windows ephemeral range')
+check(gatePorts.includes('EADDRINUSE'), '端口推导模块缺少占用错误的可读诊断')
 
 // 5. 随包附带的重启脚本必须列入 files（用户装完即可双击重启）。
 for (const s of ['scripts/restart-dsh.cmd', 'scripts/restart-dsh.ps1']) {
   check(Array.isArray(pkg.files) && pkg.files.includes(s), `package.json files 缺少 ${s}`)
+}
+for (const artifact of ['lib/agent-metadata.js', 'lib/gate-ports.js', 'lib/secure-file.js']) {
+  check(Array.isArray(pkg.files) && pkg.files.includes(artifact), `package.json files 缺少 ${artifact}`)
 }
 
 if (fails.length > 0) {
   console.error('VERIFY FAILED:\n- ' + fails.join('\n- '))
   process.exit(1)
 }
-console.log(`verify ok: ${name} 制品一致（注册 id / 微信端点 / 3092·3093 / 滚动 token / 加固基线）`)
+console.log(`verify ok: ${name} 制品一致（注册 id / 多 profile 实际端口 / 滚动 token / 加固基线）`)

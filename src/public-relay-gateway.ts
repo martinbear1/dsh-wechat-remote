@@ -8,6 +8,7 @@ import {
   type PublicRelayConfig,
   type RelayClientFrame,
 } from './public-relay-agent.js'
+import type { AgentCapability } from './agent-metadata.js'
 
 interface ClientContext {
   readonly e2ee: AgentE2EESession
@@ -17,6 +18,13 @@ interface ClientContext {
 
 export interface PublicRelayGatewayOptions {
   readonly agentVersion: string
+  readonly adapterVersion?: string
+  readonly hostId?: string
+  readonly agentInstanceId?: string
+  readonly agentKind?: string
+  readonly agentName?: string
+  readonly hostName?: string
+  readonly capabilities?: readonly AgentCapability[]
   readonly displayName?: string
   readonly dshPort?: number
   readonly maxClients?: number
@@ -45,6 +53,13 @@ export class PublicRelayGateway {
     this.issueLanCredential = options.issueLanCredential
     const agentOptions: PublicRelayAgentOptions = {
       agentVersion: options.agentVersion,
+      adapterVersion: options.adapterVersion,
+      hostId: options.hostId,
+      agentInstanceId: options.agentInstanceId,
+      agentKind: options.agentKind,
+      agentName: options.agentName,
+      hostName: options.hostName,
+      capabilities: options.capabilities,
       displayName: options.displayName,
       fetchImpl: options.fetchImpl,
       identityPath: options.identityPath,

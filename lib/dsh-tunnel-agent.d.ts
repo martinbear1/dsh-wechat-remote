@@ -19,6 +19,7 @@ export declare class DshTunnelAgent {
     private readonly issueLanCredential?;
     private readonly streams;
     private sendChain;
+    private pendingSendBytes;
     private closed;
     constructor(options: DshTunnelAgentOptions);
     receive(rawFrame: ByteArray): void;
@@ -33,5 +34,6 @@ export declare class DshTunnelAgent {
     private fail;
     private sendError;
     private queue;
+    private resumeSources;
 }
 export {};

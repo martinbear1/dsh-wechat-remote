@@ -1,3 +1,4 @@
+import { type AgentCapability } from './agent-metadata.js';
 export interface PublicRelayConfig {
     readonly enabled: boolean;
     readonly relayOrigin: string;
@@ -16,6 +17,14 @@ export interface AgentStatus {
     readonly pairingTicket?: string;
     readonly pairingExpiresAt?: number;
     readonly lastError?: string;
+    readonly hostId?: string;
+    readonly agentInstanceId?: string;
+    readonly hostName?: string;
+    readonly agentKind?: string;
+    readonly agentName?: string;
+    readonly agentVersion?: string;
+    readonly adapterVersion?: string;
+    readonly capabilities?: readonly AgentCapability[];
 }
 export interface RelayClientFrame {
     readonly clientId: string;
@@ -24,6 +33,13 @@ export interface RelayClientFrame {
 }
 export interface PublicRelayAgentOptions {
     readonly agentVersion: string;
+    readonly adapterVersion?: string;
+    readonly hostId?: string;
+    readonly agentInstanceId?: string;
+    readonly agentKind?: string;
+    readonly agentName?: string;
+    readonly hostName?: string;
+    readonly capabilities?: readonly AgentCapability[];
     readonly displayName?: string;
     readonly onFrame: (frame: RelayClientFrame) => void | Promise<void>;
     readonly onStatus?: (status: AgentStatus) => void;

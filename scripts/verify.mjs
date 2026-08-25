@@ -62,6 +62,9 @@ check(pkg.exports?.['./client']?.default === './lib/client.js', 'package.json ex
 check(pkg.exports?.['./directory']?.default === './lib/directory-service.js', 'package.json exports["./directory"] 未指向目录服务')
 check(pkg.exports?.['./host-info']?.default === './lib/host-info-service.js', 'package.json exports["./host-info"] 未指向微信 Host 信息服务')
 check(pkg.exports?.['./public-relay']?.default === './lib/public-relay-agent.js', 'package.json exports["./public-relay"] 未指向公网出站 Agent')
+check(pkg.exports?.['./e2ee']?.default === './lib/e2ee-session.js', 'package.json exports["./e2ee"] 未指向 E2EE 会话')
+check(pkg.exports?.['./dsh-tunnel']?.default === './lib/dsh-tunnel-agent.js', 'package.json exports["./dsh-tunnel"] 未指向 DSH 隧道')
+check(pkg.exports?.['./public-gateway']?.default === './lib/public-relay-gateway.js', 'package.json exports["./public-gateway"] 未指向公网网关')
 check(pkg.exports?.['./typert']?.default === './lib/typert.host.js', 'package.json exports["./typert"] 未指向严格 Host 契约')
 check(pkg.dsh?.bundle?.patch === './cordis.patch.yml', 'package.json dsh.bundle.patch 未指向 cordis.patch.yml')
 
@@ -90,14 +93,24 @@ check(hostInfo.includes('super(ctx, "wechatHost")') || hostInfo.includes("super(
 check(hostInfo.includes('computerName: hostname()'), 'Host 信息服务未从操作系统读取真实电脑名')
 check(typert.includes('wechatHost/describe'), '严格 Typert 契约缺少 wechatHost/describe')
 
-// 4d. 公网研究模块必须是显式启用、出站连接和独立身份；不得向 DSH/WebUI
-// 写配置或新增公网监听端口。真正接管流量前仍由发布门禁要求 E2EE 完成。
+// 4d. 公网模块必须是显式启用、出站连接、独立身份和端到端加密；
+// 不得向 DSH/WebUI 写配置或新增公网监听端口。
 const publicRelay = readFileSync(path.join(root, 'lib/public-relay-agent.js'), 'utf8')
-for (const required of ['harness-remote-public.json', 'harness-remote-public-identity.json', "enabled !== true", "protocol = 'wss:'", "generateKeyPairSync('ed25519')"]) {
+for (const required of ['harness-remote-public.json', 'harness-remote-public-identity.json', "enabled !== true", "protocol === 'https:' ? 'wss:'", "generateKeyPairSync('ed25519')"]) {
   check(publicRelay.includes(required), `公网 Agent 缺少安全约束：${required}`)
 }
 check(!publicRelay.includes('createServer('), '公网 Agent 不得创建入站 HTTP 监听器')
-check(!host.includes("from './public-relay-agent.js'"), 'E2EE 完成前不得把公网研究模块自动挂进稳定插件 apply')
+check(host.includes('loadPublicRelayConfig()'), '宿主没有通过显式配置门禁启用公网 Agent')
+check(host.includes('if (relayConfig)'), '缺少公网 Agent 默认关闭分支')
+check(host.includes('new PublicRelayGateway'), '宿主未挂载加密公网网关')
+const e2ee = readFileSync(path.join(root, 'lib/e2ee-session.js'), 'utf8')
+for (const required of ['AgentE2EESession', 'sign(null', 'nacl.box.before', 'nacl.secretbox']) {
+  check(e2ee.includes(required), `E2EE 实现缺少安全原语：${required}`)
+}
+const tunnel = readFileSync(path.join(root, 'lib/dsh-tunnel-agent.js'), 'utf8')
+check(tunnel.includes("startsWith('/api/')"), '公网隧道没有限制到 DSH /api 表面')
+check(tunnel.includes("host: '127.0.0.1'"), '公网隧道上游不是固定 loopback DSH')
+check(!tunnel.includes('createServer('), '公网隧道不得新增入站监听器')
 
 // 5. 随包附带的重启脚本必须列入 files（用户装完即可双击重启）。
 for (const s of ['scripts/restart-dsh.cmd', 'scripts/restart-dsh.ps1']) {

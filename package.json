@@ -27,6 +27,18 @@
       "types": "./lib/public-relay-agent.d.ts",
       "default": "./lib/public-relay-agent.js"
     },
+    "./e2ee": {
+      "types": "./lib/e2ee-session.d.ts",
+      "default": "./lib/e2ee-session.js"
+    },
+    "./dsh-tunnel": {
+      "types": "./lib/dsh-tunnel-agent.d.ts",
+      "default": "./lib/dsh-tunnel-agent.js"
+    },
+    "./public-gateway": {
+      "types": "./lib/public-relay-gateway.d.ts",
+      "default": "./lib/public-relay-gateway.js"
+    },
     "./typert": {
       "types": "./lib/typert.host.d.ts",
       "default": "./lib/typert.host.js"
@@ -58,6 +70,7 @@
   "dependencies": {
     "http-proxy": "^1.18.1",
     "qrcode": "^1.5.4",
+    "tweetnacl": "^1.0.3",
     "ws": "^8.18.3",
     "zod": "^4.4.3"
   },
@@ -92,6 +105,12 @@
     "lib/host-info-service.d.ts",
     "lib/public-relay-agent.js",
     "lib/public-relay-agent.d.ts",
+    "lib/e2ee-session.js",
+    "lib/e2ee-session.d.ts",
+    "lib/dsh-tunnel-agent.js",
+    "lib/dsh-tunnel-agent.d.ts",
+    "lib/public-relay-gateway.js",
+    "lib/public-relay-gateway.d.ts",
     "lib/typert.host.js",
     "lib/typert.host.d.ts",
     "lib/typert.remote-client.js",

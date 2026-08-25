@@ -2,7 +2,7 @@
 
 让**微信小程序**安全接入电脑上的 DeepSeek Harness：电脑安装本插件后，用微信扫一扫
 完成「**微信用户 ↔ DSH**」一对一身份绑定，之后在微信里即可实时控制 DSH
-（局域网直连；公网通道预留，暂不暴露）。
+（局域网直连；显式启用后可使用端到端加密公网中继）。
 
 > 纯插件实现：不改动 DeepSeek Harness 的任何官方代码，卸载即还原。
 > 与 iOS 版插件（`martinbear1/dsh-harness-remote`，端口 3090/3091）**完全独立、
@@ -10,12 +10,14 @@
 
 ## 特性
 
-- **微信身份认证**：扫码配对时用 `wx.login` 的 jsCode 经微信 `code2session`
-  解析出 **openid**，与 token 一对一绑定；**每次启动都用新的 jsCode 复核身份**，
-  复核成功即**轮换 token**（旧凭证立即作废，泄露窗口 = 一次会话）
+- **微信身份认证**：公网扫码时由开发者云端用 `wx.login` 临时代码调用
+  `code2session`，只保存 OpenID 的不可逆 subject；15 分钟短期客户端令牌不落盘
 - **零成本登录**：用户不用记密码、不用填任何东西 —— 微信登录态即身份
-- **开发态降级**：电脑上未配置微信 appid/secret 时自动降级为开发态身份
-  （功能全通，配好 `gate-wechat.json` 后自动启用真实 openid 绑定）
+- **公网真实身份**：AppSecret 只保存在开发者云端；电脑和小程序都不保存 OpenID、
+  session_key 或 AppSecret，云端只保存 OpenID 的不可逆 HMAC 标识
+- **公网端到端加密**：二维码钉扎 Ed25519 Agent 身份，每次连接使用临时 X25519 与
+  XSalsa20-Poly1305；中继服务器只能路由密文
+- **默认关闭**：没有显式公网配置时不生成公网身份、不发起出站连接、不改变 DSH/WebUI
 - **双门安全**（与 iOS 插件同款防线）：
   - 公网门 `0.0.0.0:3092` —— 除 `POST /pair/claim-wechat` 外一律要求 Bearer token
   - 本地门 `127.0.0.1:3093` —— 配对二维码 / 状态，仅本机可访问
@@ -37,7 +39,7 @@
 | git | 安装插件时用到（Windows 需装 Git for Windows） |
 | pnpm | `dsh plugin` 内部调用；报 "pnpm is not recognized" 时执行 `npm install -g pnpm` |
 | 微信小程序 | 你已注册的小程序（个人主体即可；`wx.login` 可用） |
-| Tailscale（可选） | 仅当未来启用公网通道 |
+| 公网服务（可选） | 需要开发者提供已备案 HTTPS/WSS 域名；用户电脑不开放公网端口 |
 
 ## 安装（一条命令）
 
@@ -105,21 +107,22 @@ dsh plugin --profile web add github:martinbear1/dsh-wechat-remote; Get-NetTCPCon
 
 1. 电脑上打开 `http://127.0.0.1:3080` → 点侧边栏底部「微信连接」→ 弹出配对弹窗：
    标题「扫码连接微信」、二维码 + 8 位配对码、三行状态（局域网 / 公网 /
-   **微信身份**：显示开发态或已绑定的微信账号数）
+   **微信身份**：公网模式由云端真实校验，电脑不保存 AppSecret）
 2. 微信小程序「Harness Remote」→ 首次进入按初始化页引导 →「扫码配对」扫二维码
    （开发者工具模拟器无摄像头，可手动输入配对码）→ 自动完成 openid 绑定与登录
-3. 之后每次打开小程序即自动复核身份并连接（局域网）
+3. 之后每次打开小程序即自动复核身份并连接
 
-### 启用真实微信身份（可选但推荐）
+### 启用端到端加密公网连接（研究分支）
 
-在电脑上创建 `%USERPROFILE%\.dsh\gate-wechat.json`（权限会自动收紧为仅属主可读）：
+在电脑上创建 `%USERPROFILE%\.dsh\harness-remote-public.json`：
 
 ```json
-{ "appid": "你的小程序AppID", "secret": "你的小程序AppSecret" }
+{ "enabled": true, "relayOrigin": "https://你的已备案中继域名" }
 ```
 
-重启 DSH 后生效。未配置时功能全通，但身份层降级为开发态
-（verify 不再轮换 token）。
+重启 DSH 后，插件生成本机独立 Ed25519 身份并只向该域名发起出站 WSS。公网中继必须
+使用配套 `cloud-relay`，不能把域名直接反代到用户电脑的 3092 或 DSH 3080。
+未配置时局域网功能保持原样，公网代码没有任何网络副作用。
 
 ## 端口约定（与 iOS 插件共存）
 
@@ -142,8 +145,8 @@ dsh plugin --profile web add github:martinbear1/dsh-wechat-remote; Get-NetTCPCon
 - **凭证滚动**：每次启动复核成功即轮换 token，旧 token 立即作废
 - 配对码：一次性、15 分钟过期、最多 5 次尝试 + 每 IP 限速
 - 局域网明文 HTTP 提示：介意可用 SSH 隧道（官方对齐路径）或等公网通道
-- 公网（预留）：二维码载荷与小程序配置保留 `funnelUrl` 字段；小程序发布版
-  真机必须 HTTPS + 备案域名反代
+- 公网：电脑主动出站，云端短期用户凭证 + Agent 签名证明 + 端到端密文；单 Agent 默认
+  最多 8 个手机会话，Agent 解密后只允许访问 loopback DSH 的 `/api/*`
 
 ## 小程序端适配
 
@@ -153,8 +156,8 @@ dsh plugin --profile web add github:martinbear1/dsh-wechat-remote; Get-NetTCPCon
 
 ## 常见问题
 
-**Q：配对失败？** 二维码 15 分钟有效且一次性；扫码后若提示微信身份解析失败，
-确认电脑能访问 api.weixin.qq.com，或先不配 `gate-wechat.json` 走开发态。
+**Q：公网配对失败？** 二维码 15 分钟有效且一次性；确认电脑和手机都能访问配置的
+中继域名。微信 `code2session` 只由云端调用，用户电脑无需保存 AppSecret。
 
 **Q：想换微信账号 / 解绑？** 停 DSH → 删除 `~/.dsh/gate-wechat-state.json` →
 重启 DSH → 重新扫码配对。
@@ -166,7 +169,7 @@ dsh plugin --profile web add github:martinbear1/dsh-wechat-remote; Get-NetTCPCon
 登录靠的是「微信登录态 → wx.login 换 jsCode → 服务端 code2session 解析」这条链，
 攻击者拿不到被绑定微信账号的登录态就伪造不出有效的 jsCode，知道 openid 字符串
 本身没有任何用（好比知道别人家门牌号不等于有钥匙）。真正要保护的是电脑上的
-`gate-wechat.json`（appid/secret，已自动 0600）和配对的屏幕秘密。
+Agent 私钥（自动收紧为当前用户专属 ACL）和配对的屏幕秘密。
 
 **Q：需要手动开防火墙吗？** 一般不用：Node.js 自带程序级放行规则（按 node.exe
 放行、覆盖所有端口），DSH 跑在 node.exe 上，3092 自动可用。只有在你机器上存在

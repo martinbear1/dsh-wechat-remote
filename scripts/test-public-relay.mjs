@@ -24,6 +24,8 @@ try {
     enabled: true,
     relayOrigin: 'https://relay.example.test',
   })
+  writeFileSync(configPath, JSON.stringify({ enabled: true, relayOrigin: 'https://relay.example.test:8443/' }))
+  assert.throws(() => loadPublicRelayConfig(configPath), /bare HTTPS origin/)
 
   const payload = publicPairingPayload({
     enabled: true,

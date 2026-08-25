@@ -27,7 +27,11 @@ export interface PublicRelayAgentOptions {
     readonly displayName?: string;
     readonly onFrame: (frame: RelayClientFrame) => void | Promise<void>;
     readonly onStatus?: (status: AgentStatus) => void;
+    readonly onClientDisconnect?: (clientId: string) => void;
+    readonly onClientError?: (clientId: string, error: unknown) => void;
     readonly fetchImpl?: typeof fetch;
+    /** Test/portable profile override; production defaults to ~/.dsh. */
+    readonly identityPath?: string;
 }
 export declare function agentNodeIdForPublicKey(publicKeyPem: string): string;
 export declare function loadPublicRelayConfig(configPath?: string): PublicRelayConfig | null;
@@ -41,12 +45,16 @@ export declare class PublicRelayAgent {
     private stopped;
     private reconnectAttempt;
     private reconnectTimer;
+    private enrollment;
     private status;
     constructor(config: PublicRelayConfig, options: PublicRelayAgentOptions);
     snapshot(): AgentStatus;
     start(): Promise<void>;
+    /** Ensure a desktop pairing surface never serves an expired cloud ticket. */
+    ensurePairingTicket(minValidityMs?: number): Promise<AgentStatus>;
     stop(): void;
     private enrollAndConnect;
+    private enroll;
     private connect;
     private scheduleReconnect;
     private update;

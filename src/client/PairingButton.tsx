@@ -12,6 +12,7 @@ interface PairCodeResp {
   host: string
   port: number
   qrDataUrl: string
+  mode: 'lan' | 'public-relay'
 }
 
 interface GateStatusResp {
@@ -19,6 +20,12 @@ interface GateStatusResp {
   tailscale: { installed: boolean; loggedIn: boolean; ip: string | null }
   funnel: { enabled: boolean; url: string | null }
   wechat: { configured: boolean; bindings: number }
+  publicRelay: {
+    enabled: boolean
+    state: 'disabled' | 'enrolling' | 'connecting' | 'online' | 'offline'
+    relayOrigin?: string
+    lastError?: string
+  }
 }
 
 export interface PairingButtonProps {
@@ -87,21 +94,22 @@ export function PairingButton({ wide }: PairingButtonProps): JSX.Element {
     ? '检测中…'
     : `http://${status.lan.ip}:${status.lan.port}`
 
-  const tailscaleDetail = ((): string => {
+  const publicDetail = ((): string => {
     if (status === null) return '检测中…'
-    const ts = status.tailscale
-    if (!ts.installed) return '未安装 Tailscale'
-    if (!ts.loggedIn) return '未登录 Tailscale'
-    if (status.funnel.enabled && status.funnel.url) return status.funnel.url
-    if (ts.ip) return `Tailscale ${ts.ip}`
-    return '已登录（未开启 Funnel）'
+    const relay = status.publicRelay || { enabled: false, state: 'disabled' }
+    if (!relay.enabled) return '未启用（当前二维码仅供局域网）'
+    if (relay.state === 'online') return relay.relayOrigin || '端到端加密中继已在线'
+    if (relay.state === 'enrolling') return '正在注册电脑 Agent 身份…'
+    if (relay.state === 'connecting') return '正在连接加密中继…'
+    return relay.lastError ? `离线：${relay.lastError}` : '公网 Agent 离线'
   })()
 
   const wechatDetail = ((): string => {
     if (status === null) return '检测中…'
+    if (status.publicRelay?.enabled) return '扫码时由云端 wx.login 真实校验；电脑不保存 AppSecret'
     const w = status.wechat || { configured: false, bindings: 0 }
-    if (!w.configured) return '开发态身份（电脑未配置 appid/secret）'
-    return `已绑定 ${w.bindings} 个微信账号（真实 openid）`
+    if (!w.configured) return '局域网旧模式尚未配置微信身份校验'
+    return `局域网已绑定 ${w.bindings} 个微信账号`
   })()
 
   return (
@@ -136,8 +144,8 @@ export function PairingButton({ wide }: PairingButtonProps): JSX.Element {
               <ChannelRow label="局域网" detail={lanDetail} ok={status !== null && status.lan.ip.length > 0} />
               <ChannelRow
                 label="公网"
-                detail={tailscaleDetail}
-                ok={status !== null && status.funnel.enabled && status.funnel.url !== null}
+                detail={publicDetail}
+                ok={status !== null && status.publicRelay?.state === 'online'}
               />
               <ChannelRow
                 label="微信身份"
@@ -145,7 +153,7 @@ export function PairingButton({ wide }: PairingButtonProps): JSX.Element {
                 ok={status !== null && status.wechat && status.wechat.bindings > 0}
               />
             </div>
-            <p className={styles.footnote}>二维码 15 分钟内有效，扫码成功后自动刷新</p>
+            <p className={styles.footnote}>{qr?.mode === 'public-relay' ? '公网流量端到端加密；中继无法读取 DSH 内容' : '二维码 15 分钟内有效，扫码成功后自动刷新'}</p>
           </div>
         </div>
       ) : null}

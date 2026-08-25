@@ -40,6 +40,8 @@ import httpProxy from 'http-proxy'
 import QRCode from 'qrcode'
 import WechatDirectoryService from './directory-service.js'
 import WechatHostInfoService from './host-info-service.js'
+import PublicRelayGateway from './public-relay-gateway.js'
+import { loadPublicRelayConfig, publicPairingPayload } from './public-relay-agent.js'
 
 const PUBLIC_PORT = Number(process.env.WECHAT_GATE_PORT || 3092)
 const LOCAL_PORT = Number(process.env.WECHAT_GATE_LOCAL_PORT || 3093)
@@ -53,6 +55,16 @@ const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
 const RATE_WINDOW_MS = 60 * 1000
 const RATE_MAX_PER_IP = 120 // general requests per IP per minute on the public door
 const CLAIM_MAX_PER_IP = 10 // claim attempts per IP per minute (brute-force brake)
+let publicRelayGateway = null
+let publicRelayStatus = { enabled: false, state: 'disabled' }
+
+function installedPluginVersion() {
+  try {
+    return JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version || 'unknown'
+  } catch (e) {
+    return 'unknown'
+  }
+}
 
 /**
  * 收紧凭据文件权限：POSIX 上 0600；Windows 上 chmod 只映射只读位、
@@ -271,9 +283,26 @@ async function makePairEntry() {
   const funnel = probeFunnel()
   const payloadObj = { code, host: lanIPv4(), port: PUBLIC_PORT }
   if (funnel.enabled && funnel.url) payloadObj.funnelUrl = funnel.url
-  const payload = JSON.stringify(payloadObj)
+  let payload = JSON.stringify(payloadObj)
+  let publicMode = false
+  if (publicRelayGateway) {
+    try {
+      publicRelayStatus = await publicRelayGateway.ensurePairingStatus()
+      const raw = publicPairingPayload(publicRelayStatus)
+      if (raw) {
+        const publicPayload = JSON.parse(raw)
+        // A single scan can bind the public identity and, when the phone is on
+        // the same LAN, also obtain the direct path for LAN-first routing.
+        publicPayload.lan = payloadObj
+        payload = JSON.stringify(publicPayload)
+        publicMode = true
+      }
+    } catch (e) {
+      console.warn('[wechat-gate] public pairing ticket unavailable; serving LAN QR:', e.message)
+    }
+  }
   const qrDataUrl = await QRCode.toDataURL(payload, { width: 320, margin: 1 })
-  return { code, payload, qrDataUrl }
+  return { code, payload, qrDataUrl, publicMode }
 }
 
 // ── LOCAL door (127.0.0.1:3093): pairing surface + status ──
@@ -296,7 +325,7 @@ code{color:#7aa2ff;font-size:15px;letter-spacing:3px}
 <p>打开微信小程序「Harness Remote」→ 设置 → 扫码配对，扫下面的二维码</p>
 <img src="${entry.qrDataUrl}" alt="pairing QR">
 <p>配对码：<code>${entry.code}</code></p>
-<p>二维码 15 分钟内有效；配对成功后会自动绑定当前微信账号</p>
+<p>${entry.publicMode ? '已启用端到端加密公网连接；局域网可用时仍会优先直连' : '当前为局域网连接'}；二维码 15 分钟内有效</p>
 </body></html>`
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
   res.end(html)
@@ -312,6 +341,8 @@ async function servePairCode(req, res) {
     host: lanIPv4(),
     port: PUBLIC_PORT,
     qrDataUrl: entry.qrDataUrl,
+    mode: entry.publicMode ? 'public-relay' : 'lan',
+    payload: entry.payload,
     ...(funnel.enabled && funnel.url ? { funnelUrl: funnel.url } : {}),
   }))
 }
@@ -362,6 +393,7 @@ function serveGateStatus(req, res) {
       configured: Boolean(loadWechatConfig()),
       bindings: Object.keys(state.wechatBindings).length,
     },
+    publicRelay: publicRelayStatus,
   }))
 }
 
@@ -589,6 +621,22 @@ export function apply(ctx) {
   // 电脑名不在 DSH 原生 host.describe 契约里；以微信端隔离的只读 Remote
   // 提供，避免为了一个客户端字段污染 DSH/WebUI 的 Host API。
   ctx.plugin(WechatHostInfoService)
+  // Public mode is strictly opt-in. With no enabled config file this branch
+  // does not generate an identity, open an outbound socket, or alter LAN/WebUI.
+  try {
+    const relayConfig = loadPublicRelayConfig()
+    if (relayConfig) {
+      publicRelayGateway = new PublicRelayGateway(relayConfig, {
+        agentVersion: installedPluginVersion(),
+        dshPort: UPSTREAM_PORT,
+        onStatus: (status) => { publicRelayStatus = status },
+      })
+      void publicRelayGateway.start()
+    }
+  } catch (e) {
+    publicRelayStatus = { enabled: true, state: 'offline', lastError: e.message }
+    console.error('[wechat-gate] public relay disabled after configuration error:', e.message)
+  }
   let disposed = false
   const failDoor = (which, err) => {
     console.error(`[wechat-gate] ${which} failed (plugin keeps DSH alive): ${err && (err.code || err.message) || err}`)
@@ -618,5 +666,7 @@ export function apply(ctx) {
     disposed = true
     try { localServer.close() } catch (e) { /* best-effort */ }
     try { publicServer.close() } catch (e) { /* best-effort */ }
+    try { publicRelayGateway?.stop() } catch (e) { /* best-effort */ }
+    publicRelayGateway = null
   })
 }

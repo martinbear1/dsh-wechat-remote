@@ -25,6 +25,7 @@ import { WebSocket } from 'ws'
 const CONFIG_PATH = path.join(homedir(), '.dsh', 'harness-remote-public.json')
 const IDENTITY_PATH = path.join(homedir(), '.dsh', 'harness-remote-public-identity.json')
 const ROUTING_HEADER_BYTES = 18
+const MAX_AGENT_BUFFERED_BYTES = 2 * 1024 * 1024
 
 export interface PublicRelayConfig {
   readonly enabled: boolean
@@ -59,7 +60,11 @@ export interface PublicRelayAgentOptions {
   readonly displayName?: string
   readonly onFrame: (frame: RelayClientFrame) => void | Promise<void>
   readonly onStatus?: (status: AgentStatus) => void
+  readonly onClientDisconnect?: (clientId: string) => void
+  readonly onClientError?: (clientId: string, error: unknown) => void
   readonly fetchImpl?: typeof fetch
+  /** Test/portable profile override; production defaults to ~/.dsh. */
+  readonly identityPath?: string
 }
 
 function tighten(file: string): void {
@@ -84,11 +89,12 @@ export function loadPublicRelayConfig(configPath = CONFIG_PATH): PublicRelayConf
   if (!existsSync(configPath)) return null
   const value = JSON.parse(readFileSync(configPath, 'utf8')) as Partial<PublicRelayConfig>
   if (value.enabled !== true) return null
-  if (typeof value.relayOrigin !== 'string' || !value.relayOrigin.startsWith('https://')) {
+  if (typeof value.relayOrigin !== 'string') {
     throw new Error('Public relay origin must use https://')
   }
   const url = new URL(value.relayOrigin)
-  if (url.username || url.password || url.search || url.hash || url.pathname !== '/') {
+  if (url.protocol !== 'https:' || (url.port && url.port !== '443') ||
+      url.username || url.password || url.search || url.hash || url.pathname !== '/') {
     throw new Error('Public relay origin must be a bare HTTPS origin')
   }
   return { enabled: true, relayOrigin: url.origin }
@@ -121,13 +127,14 @@ export class PublicRelayAgent {
   private stopped = true
   private reconnectAttempt = 0
   private reconnectTimer: NodeJS.Timeout | null = null
+  private enrollment: Promise<{ ticket?: string; expiresAt?: number }> | null = null
   private status: AgentStatus
 
   constructor(config: PublicRelayConfig, options: PublicRelayAgentOptions) {
     this.config = config
     this.options = options
     this.fetchImpl = options.fetchImpl || fetch
-    this.identity = loadOrCreateAgentIdentity()
+    this.identity = loadOrCreateAgentIdentity(options.identityPath)
     this.status = {
       enabled: true,
       state: 'offline',
@@ -147,6 +154,16 @@ export class PublicRelayAgent {
     await this.enrollAndConnect()
   }
 
+  /** Ensure a desktop pairing surface never serves an expired cloud ticket. */
+  async ensurePairingTicket(minValidityMs = 60_000): Promise<AgentStatus> {
+    if (this.status.pairingTicket && (this.status.pairingExpiresAt || 0) > Date.now() + minValidityMs) {
+      return this.snapshot()
+    }
+    const body = await this.enroll()
+    this.update({ pairingTicket: body.ticket, pairingExpiresAt: body.expiresAt })
+    return this.snapshot()
+  }
+
   stop(): void {
     this.stopped = true
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
@@ -159,6 +176,18 @@ export class PublicRelayAgent {
   private async enrollAndConnect(): Promise<void> {
     try {
       this.update({ state: 'enrolling', lastError: undefined })
+      const body = await this.enroll()
+      this.update({ pairingTicket: body.ticket, pairingExpiresAt: body.expiresAt, state: 'connecting' })
+      this.connect()
+    } catch (error) {
+      this.update({ state: 'offline', lastError: error instanceof Error ? error.message : String(error) })
+      this.scheduleReconnect()
+    }
+  }
+
+  private enroll(): Promise<{ ticket?: string; expiresAt?: number }> {
+    if (this.enrollment) return this.enrollment
+    this.enrollment = (async () => {
       const timestamp = Date.now()
       const nonce = randomBytes(18).toString('base64url')
       const signature = sign(
@@ -182,13 +211,9 @@ export class PublicRelayAgent {
         signal: AbortSignal.timeout(10_000),
       })
       if (!response.ok) throw new Error(`Relay enrollment failed with HTTP ${response.status}`)
-      const body = await response.json() as { ticket?: string; expiresAt?: number }
-      this.update({ pairingTicket: body.ticket, pairingExpiresAt: body.expiresAt, state: 'connecting' })
-      this.connect()
-    } catch (error) {
-      this.update({ state: 'offline', lastError: error instanceof Error ? error.message : String(error) })
-      this.scheduleReconnect()
-    }
+      return await response.json() as { ticket?: string; expiresAt?: number }
+    })()
+    return this.enrollment.finally(() => { this.enrollment = null })
   }
 
   private connect(): void {
@@ -200,7 +225,9 @@ export class PublicRelayAgent {
       this.identity.privateKeyPem,
     ).toString('base64url')
     const socketUrl = new URL(this.config.relayOrigin)
-    socketUrl.protocol = 'wss:'
+    // loadPublicRelayConfig only permits HTTPS in production. HTTP support is
+    // retained solely for loopback integration tests without TLS termination.
+    socketUrl.protocol = socketUrl.protocol === 'https:' ? 'wss:' : 'ws:'
     socketUrl.pathname = '/v1/ws/agent'
     socketUrl.searchParams.set('nodeId', this.identity.nodeId)
     const socket = new WebSocket(socketUrl, {
@@ -219,7 +246,15 @@ export class PublicRelayAgent {
       this.update({ state: 'online', lastError: undefined })
     })
     socket.on('message', (data, isBinary) => {
-      if (!isBinary) return
+      if (!isBinary) {
+        try {
+          const event = JSON.parse(data.toString()) as { readonly type?: unknown; readonly clientId?: unknown }
+          if (event.type === 'client.disconnected' && typeof event.clientId === 'string') {
+            this.options.onClientDisconnect?.(event.clientId)
+          }
+        } catch { /* ignore unknown relay control frames */ }
+        return
+      }
       const frame = Buffer.isBuffer(data)
         ? data
         : Array.isArray(data)
@@ -233,10 +268,14 @@ export class PublicRelayAgent {
       const clientId = header.subarray(2).toString('base64url')
       const reply = (payload: Uint8Array) => {
         if (socket.readyState !== WebSocket.OPEN) return
+        if (socket.bufferedAmount > MAX_AGENT_BUFFERED_BYTES) {
+          socket.close(1013, 'Agent relay backpressure limit reached')
+          return
+        }
         socket.send(Buffer.concat([header, Buffer.from(payload)]), { binary: true })
       }
       Promise.resolve(this.options.onFrame({ clientId, payload: frame.subarray(ROUTING_HEADER_BYTES), reply }))
-        .catch(() => socket.close(1011, 'Agent transport failed'))
+        .catch(error => this.options.onClientError?.(clientId, error))
     })
     socket.on('close', (_code, reason) => {
       if (this.socket !== socket) return

@@ -20,7 +20,7 @@ export interface AgentStatus {
 export interface RelayClientFrame {
     readonly clientId: string;
     readonly payload: Buffer;
-    reply(payload: Uint8Array): void;
+    reply(payload: Uint8Array): Promise<void>;
 }
 export interface PublicRelayAgentOptions {
     readonly agentVersion: string;
@@ -60,6 +60,7 @@ export declare class PublicRelayAgent {
     private connect;
     private scheduleReconnect;
     private dispatchFrame;
+    private sendRouted;
     private update;
 }
 export declare function publicPairingPayload(status: AgentStatus): string | null;

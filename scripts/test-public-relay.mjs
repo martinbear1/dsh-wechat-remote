@@ -61,6 +61,22 @@ try {
   assert.equal(isolatedError.clientId, 'client-sync')
   assert.match(isolatedError.error.message, /synthetic synchronous gateway failure/)
 
+  // Large history responses wait for the network buffer to drain instead of
+  // closing the shared desktop Agent connection at the 2 MiB watermark.
+  let routed = false
+  let closedByBackpressure = false
+  const bufferedSocket = {
+    readyState: 1,
+    bufferedAmount: 3 * 1024 * 1024,
+    send(_data, _options, callback) { routed = true; callback() },
+    close() { closedByBackpressure = true },
+  }
+  const draining = isolatedAgent.sendRouted(bufferedSocket, Buffer.alloc(18), Buffer.from('history'))
+  setTimeout(() => { bufferedSocket.bufferedAmount = 0 }, 20)
+  await draining
+  assert.equal(routed, true)
+  assert.equal(closedByBackpressure, false)
+
   // Regression: when the physical Agent socket drops, every cloud client id
   // from that socket is stale and must be removed before reconnecting.
   let staleTunnelClosed = false

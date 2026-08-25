@@ -26,6 +26,11 @@ const CONFIG_PATH = path.join(homedir(), '.dsh', 'harness-remote-public.json')
 const IDENTITY_PATH = path.join(homedir(), '.dsh', 'harness-remote-public-identity.json')
 const ROUTING_HEADER_BYTES = 18
 const MAX_AGENT_BUFFERED_BYTES = 2 * 1024 * 1024
+const AGENT_BUFFER_DRAIN_TIMEOUT_MS = 15_000
+
+function wait(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
 
 export interface PublicRelayConfig {
   readonly enabled: boolean
@@ -52,7 +57,7 @@ export interface AgentStatus {
 export interface RelayClientFrame {
   readonly clientId: string
   readonly payload: Buffer
-  reply(payload: Uint8Array): void
+  reply(payload: Uint8Array): Promise<void>
 }
 
 export interface PublicRelayAgentOptions {
@@ -268,14 +273,7 @@ export class PublicRelayAgent {
       }
       const header = frame.subarray(0, ROUTING_HEADER_BYTES)
       const clientId = header.subarray(2).toString('base64url')
-      const reply = (payload: Uint8Array) => {
-        if (socket.readyState !== WebSocket.OPEN) return
-        if (socket.bufferedAmount > MAX_AGENT_BUFFERED_BYTES) {
-          socket.close(1013, 'Agent relay backpressure limit reached')
-          return
-        }
-        socket.send(Buffer.concat([header, Buffer.from(payload)]), { binary: true })
-      }
+      const reply = (payload: Uint8Array): Promise<void> => this.sendRouted(socket, header, payload)
       // Start from an already-resolved promise so a synchronous callback throw
       // is converted into a rejection. Promise.resolve(callback()) evaluates
       // callback first and would otherwise let the exception terminate DSH.
@@ -308,6 +306,19 @@ export class PublicRelayAgent {
     } catch (error) {
       try { this.options.onClientError?.(frame.clientId, error) } catch { /* isolation boundary */ }
     }
+  }
+
+  private async sendRouted(socket: WebSocket, header: Buffer, payload: Uint8Array): Promise<void> {
+    const deadline = Date.now() + AGENT_BUFFER_DRAIN_TIMEOUT_MS
+    while (socket.readyState === WebSocket.OPEN && socket.bufferedAmount > MAX_AGENT_BUFFERED_BYTES) {
+      if (Date.now() >= deadline) throw new Error('Agent relay backpressure drain timed out')
+      await wait(10)
+    }
+    if (socket.readyState !== WebSocket.OPEN) throw new Error('Agent relay connection is closed')
+    const frame = Buffer.concat([header, Buffer.from(payload)])
+    await new Promise<void>((resolve, reject) => {
+      socket.send(frame, { binary: true }, error => error ? reject(error) : resolve())
+    })
   }
 
   private update(patch: Partial<AgentStatus>): void {

@@ -71,7 +71,7 @@ export class PublicRelayGateway {
     return this.agent.ensurePairingTicket()
   }
 
-  private receive(frame: RelayClientFrame): void {
+  private async receive(frame: RelayClientFrame): Promise<void> {
     let client = this.clients.get(frame.clientId)
     if (!client) {
       if (this.clients.size >= this.maxClients) throw new Error('Public Agent client limit reached')
@@ -90,7 +90,7 @@ export class PublicRelayGateway {
 
     try {
       const result = client.e2ee.receive(frame.payload)
-      for (const outbound of result.outbound || []) client.reply(outbound)
+      for (const outbound of result.outbound || []) await client.reply(outbound)
       if (result.ready && !client.tunnel) {
         client.tunnel = new DshTunnelAgent({
           dshPort: this.dshPort,

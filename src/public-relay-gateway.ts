@@ -49,6 +49,7 @@ export class PublicRelayGateway {
       onFrame: frame => this.receive(frame),
       onClientDisconnect: clientId => this.disconnect(clientId),
       onClientError: clientId => this.disconnect(clientId),
+      onTransportDisconnect: () => this.disconnectAll(),
     }
     this.agent = new PublicRelayAgent(config, agentOptions)
   }
@@ -112,6 +113,10 @@ export class PublicRelayGateway {
     if (!client) return
     this.clients.delete(clientId)
     client.tunnel?.close()
+  }
+
+  private disconnectAll(): void {
+    for (const clientId of [...this.clients.keys()]) this.disconnect(clientId)
   }
 }
 

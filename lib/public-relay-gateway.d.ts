@@ -22,5 +22,6 @@ export declare class PublicRelayGateway {
     ensurePairingStatus(): Promise<AgentStatus>;
     private receive;
     private disconnect;
+    private disconnectAll;
 }
 export default PublicRelayGateway;

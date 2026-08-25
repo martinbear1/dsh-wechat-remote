@@ -29,6 +29,8 @@ export interface PublicRelayAgentOptions {
     readonly onStatus?: (status: AgentStatus) => void;
     readonly onClientDisconnect?: (clientId: string) => void;
     readonly onClientError?: (clientId: string, error: unknown) => void;
+    /** The physical Agent socket was lost; all relay client ids are now stale. */
+    readonly onTransportDisconnect?: () => void;
     readonly fetchImpl?: typeof fetch;
     /** Test/portable profile override; production defaults to ~/.dsh. */
     readonly identityPath?: string;
@@ -57,6 +59,7 @@ export declare class PublicRelayAgent {
     private enroll;
     private connect;
     private scheduleReconnect;
+    private dispatchFrame;
     private update;
 }
 export declare function publicPairingPayload(status: AgentStatus): string | null;

@@ -62,6 +62,8 @@ export interface PublicRelayAgentOptions {
   readonly onStatus?: (status: AgentStatus) => void
   readonly onClientDisconnect?: (clientId: string) => void
   readonly onClientError?: (clientId: string, error: unknown) => void
+  /** The physical Agent socket was lost; all relay client ids are now stale. */
+  readonly onTransportDisconnect?: () => void
   readonly fetchImpl?: typeof fetch
   /** Test/portable profile override; production defaults to ~/.dsh. */
   readonly identityPath?: string
@@ -274,13 +276,16 @@ export class PublicRelayAgent {
         }
         socket.send(Buffer.concat([header, Buffer.from(payload)]), { binary: true })
       }
-      Promise.resolve(this.options.onFrame({ clientId, payload: frame.subarray(ROUTING_HEADER_BYTES), reply }))
-        .catch(error => this.options.onClientError?.(clientId, error))
+      // Start from an already-resolved promise so a synchronous callback throw
+      // is converted into a rejection. Promise.resolve(callback()) evaluates
+      // callback first and would otherwise let the exception terminate DSH.
+      void this.dispatchFrame({ clientId, payload: frame.subarray(ROUTING_HEADER_BYTES), reply })
     })
     socket.on('close', (_code, reason) => {
       if (this.socket !== socket) return
       this.socket = null
       this.update({ state: 'offline', lastError: reason.toString() || 'Relay connection closed' })
+      try { this.options.onTransportDisconnect?.() } catch { /* isolation boundary */ }
       this.scheduleReconnect()
     })
     socket.on('error', () => { /* close drives the retry state */ })
@@ -295,6 +300,14 @@ export class PublicRelayAgent {
       if (!this.stopped) void this.enrollAndConnect()
     }, delay)
     this.reconnectTimer.unref?.()
+  }
+
+  private async dispatchFrame(frame: RelayClientFrame): Promise<void> {
+    try {
+      await this.options.onFrame(frame)
+    } catch (error) {
+      try { this.options.onClientError?.(frame.clientId, error) } catch { /* isolation boundary */ }
+    }
   }
 
   private update(patch: Partial<AgentStatus>): void {

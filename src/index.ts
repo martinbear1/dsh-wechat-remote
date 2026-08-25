@@ -40,6 +40,7 @@ import httpProxy from 'http-proxy'
 import QRCode from 'qrcode'
 import WechatDirectoryService from './directory-service.js'
 import WechatHostInfoService from './host-info-service.js'
+import WechatHistoryService from './history-service.js'
 import PublicRelayGateway from './public-relay-gateway.js'
 import { loadPublicRelayConfig, publicPairingPayload } from './public-relay-agent.js'
 
@@ -621,6 +622,9 @@ export function apply(ctx) {
   // 电脑名不在 DSH 原生 host.describe 契约里；以微信端隔离的只读 Remote
   // 提供，避免为了一个客户端字段污染 DSH/WebUI 的 Host API。
   ctx.plugin(WechatHostInfoService)
+  // 公网历史性能适配：只读 DSH 原生 session.history，在电脑端补齐轮次
+  // 并删除已完成轮次的冗余流式增量。独立 Remote 不修改 WebUI/DSH。
+  ctx.plugin(WechatHistoryService, { dshPort: UPSTREAM_PORT })
   // Public mode is strictly opt-in. With no enabled config file this branch
   // does not generate an identity, open an outbound socket, or alter LAN/WebUI.
   try {

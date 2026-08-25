@@ -61,6 +61,7 @@ check(!patch.includes('dsh-host-directory-picker-browse'), 'cordis.patch.yml 不
 check(pkg.exports?.['./client']?.default === './lib/client.js', 'package.json exports["./client"] 未指向 lib/client.js')
 check(pkg.exports?.['./directory']?.default === './lib/directory-service.js', 'package.json exports["./directory"] 未指向目录服务')
 check(pkg.exports?.['./host-info']?.default === './lib/host-info-service.js', 'package.json exports["./host-info"] 未指向微信 Host 信息服务')
+check(pkg.exports?.['./history']?.default === './lib/history-service.js', 'package.json exports["./history"] 未指向微信历史服务')
 check(pkg.exports?.['./public-relay']?.default === './lib/public-relay-agent.js', 'package.json exports["./public-relay"] 未指向公网出站 Agent')
 check(pkg.exports?.['./e2ee']?.default === './lib/e2ee-session.js', 'package.json exports["./e2ee"] 未指向 E2EE 会话')
 check(pkg.exports?.['./dsh-tunnel']?.default === './lib/dsh-tunnel-agent.js', 'package.json exports["./dsh-tunnel"] 未指向 DSH 隧道')
@@ -93,7 +94,18 @@ check(hostInfo.includes('super(ctx, "wechatHost")') || hostInfo.includes("super(
 check(hostInfo.includes('computerName: hostname()'), 'Host 信息服务未从操作系统读取真实电脑名')
 check(typert.includes('wechatHost/describe'), '严格 Typert 契约缺少 wechatHost/describe')
 
-// 4d. 公网模块必须是显式启用、出站连接、独立身份和端到端加密；
+// 4d. 公网长会话历史只在微信端独立 Remote 内做无损语义压缩；数据源仍是
+// DSH 原生 session.history，不能改写 WebUI 或另开网络入口。
+check(host.includes("from './history-service.js'"), 'lib/index.js 未挂载微信历史 Remote')
+check(host.includes('ctx.plugin(WechatHistoryService'), 'lib/index.js 未在 gate fiber 下挂载历史服务')
+const history = readFileSync(path.join(root, 'lib/history-service.js'), 'utf8')
+check(history.includes('super(ctx, "wechatHistory")') || history.includes("super(ctx, 'wechatHistory')"), '历史服务的 Typert key 不是 wechatHistory')
+check(history.includes("method: 'session.history'") || history.includes('method: "session.history"'), '历史服务没有读取 DSH 原生 session.history')
+check(history.includes("event?.type !== 'assistant/chunk'") || history.includes('event?.type !== "assistant/chunk"'), '历史服务没有压缩已完成轮次的流式增量')
+check(history.includes("host: '127.0.0.1'") || history.includes('host: "127.0.0.1"'), '历史服务数据源不是 loopback DSH')
+check(typert.includes('wechatHistory/window'), '严格 Typert 契约缺少 wechatHistory/window')
+
+// 4e. 公网模块必须是显式启用、出站连接、独立身份和端到端加密；
 // 不得向 DSH/WebUI 写配置或新增公网监听端口。
 const publicRelay = readFileSync(path.join(root, 'lib/public-relay-agent.js'), 'utf8')
 for (const required of ['harness-remote-public.json', 'harness-remote-public-identity.json', "enabled !== true", "protocol === 'https:' ? 'wss:'", "generateKeyPairSync('ed25519')"]) {

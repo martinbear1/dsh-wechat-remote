@@ -1,6 +1,6 @@
 {
   "name": "@harness-remote/dsh-wechat-remote",
-  "version": "1.1.0-public-research.4",
+  "version": "1.1.0-public-research.5",
   "description": "Harness Remote 微信版：微信小程序扫码配对（openid 一对一身份绑定 + 每次启动复核 + 凭证滚动），局域网直连本机 DeepSeek Harness（认证网关宿主插件 + 侧边栏配对按钮客户端插件 + bundle 聚合，单包安装）",
   "private": true,
   "license": "MIT",
@@ -22,6 +22,10 @@
     "./host-info": {
       "types": "./lib/host-info-service.d.ts",
       "default": "./lib/host-info-service.js"
+    },
+    "./history": {
+      "types": "./lib/history-service.d.ts",
+      "default": "./lib/history-service.js"
     },
     "./public-relay": {
       "types": "./lib/public-relay-agent.d.ts",
@@ -65,6 +69,7 @@
     "bundle": "tsc -p tsconfig.json && node scripts/generate-typert.mjs",
     "verify": "node scripts/verify.mjs",
     "test:directory": "node scripts/test-directory.mjs",
+    "test:history": "node scripts/test-history.mjs",
     "test:public-relay": "node scripts/test-public-relay.mjs"
   },
   "dependencies": {
@@ -103,6 +108,8 @@
     "lib/directory-service.d.ts",
     "lib/host-info-service.js",
     "lib/host-info-service.d.ts",
+    "lib/history-service.js",
+    "lib/history-service.d.ts",
     "lib/public-relay-agent.js",
     "lib/public-relay-agent.d.ts",
     "lib/e2ee-session.js",

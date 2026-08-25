@@ -10,5 +10,5 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["src/index.ts", "src/directory-service.ts", "src/host-info-service.ts", "src/public-relay-agent.ts", "src/public-relay-gateway.ts", "src/e2ee-session.ts", "src/dsh-tunnel-agent.ts"]
+  "include": ["src/index.ts", "src/directory-service.ts", "src/host-info-service.ts", "src/history-service.ts", "src/public-relay-agent.ts", "src/public-relay-gateway.ts", "src/e2ee-session.ts", "src/dsh-tunnel-agent.ts"]
 }

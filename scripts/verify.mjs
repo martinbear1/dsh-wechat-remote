@@ -54,10 +54,31 @@ check(client.includes('微信身份'), 'lib/client.js 弹窗缺少「微信身�
 // 3. bundle 补丁行必须引用本包名（否则插不进 cordis 图）。
 const patch = readFileSync(path.join(root, 'cordis.patch.yml'), 'utf8')
 check(patch.includes(name), `cordis.patch.yml 未引用包名 "${name}"`)
+check(!patch.includes('dsh-host-directory-picker-auto'), 'cordis.patch.yml 不应覆盖 WebUI 官方 auto 目录选择器')
+check(!patch.includes('dsh-host-directory-picker-browse'), 'cordis.patch.yml 不应替换 WebUI 官方目录后端')
 
 // 4. 客户端入口必须在 exports 里可被官方扫描器发现。
 check(pkg.exports?.['./client']?.default === './lib/client.js', 'package.json exports["./client"] 未指向 lib/client.js')
+check(pkg.exports?.['./directory']?.default === './lib/directory-service.js', 'package.json exports["./directory"] 未指向目录服务')
+check(pkg.exports?.['./typert']?.default === './lib/typert.host.js', 'package.json exports["./typert"] 未指向严格 Host 契约')
 check(pkg.dsh?.bundle?.patch === './cordis.patch.yml', 'package.json dsh.bundle.patch 未指向 cordis.patch.yml')
+
+// 4b. 小程序目录能力必须是本包自己的惰性 Remote 服务，不能重新占用
+// DSH 的全局 directoryPicker seam。
+check(host.includes("from './directory-service.js'"), 'lib/index.js 未挂载微信目录 Remote 服务')
+check(host.includes('ctx.plugin(WechatDirectoryService'), 'lib/index.js 未在 gate fiber 下挂载目录服务')
+const directory = readFileSync(path.join(root, 'lib/directory-service.js'), 'utf8')
+check(directory.includes('super(ctx, "wechatDirectory")') || directory.includes("super(ctx, 'wechatDirectory')"), '目录服务的 Cordis/Typert key 不是 wechatDirectory')
+check(directory.includes('Get-PSDrive'), 'Windows 盘符必须来自真实文件系统盘枚举，不能再猜 C-Z')
+check(directory.includes('DEFAULT_OPERATION_TIMEOUT_MS = 6500'), '网络盘目录服务缺少 6.5 秒硬超时')
+check(directory.includes('DSH_WECHAT_DIRECTORY_PATH_B64'), '网络盘路径没有通过非脚本数据通道传给隔离进程')
+check(directory.includes('timeout: this.operationTimeoutMs'), '网络盘子进程没有配置可终止超时')
+check(directory.includes('directory-timeout'), '目录服务缺少网络盘超时业务错误')
+check(directory.includes('network-unavailable'), '目录服务缺少网络盘离线业务错误')
+const typert = readFileSync(path.join(root, 'lib/typert.host.js'), 'utf8')
+for (const method of ['roots', 'list', 'create']) {
+  check(typert.includes(`wechatDirectory/${method}`), `严格 Typert 契约缺少 wechatDirectory/${method}`)
+}
 
 // 5. 随包附带的重启脚本必须列入 files（用户装完即可双击重启）。
 for (const s of ['scripts/restart-dsh.cmd', 'scripts/restart-dsh.ps1']) {

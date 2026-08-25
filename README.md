@@ -23,6 +23,10 @@
     CORS 仅放行官方 UI
 - **透明反向代理**：验过 token 即转发到官方 `127.0.0.1:3080`（Host 重写走官方
   栅栏合法通道），自动 gzip
+- **小程序专用电脑目录服务**：通过 DSH 标准 Typert Remote 契约提供
+  `wechatDirectory/roots|list|create`；真实枚举本地盘与映射网络盘，不替换 WebUI
+  的官方 `directory-picker-auto`，选定路径后仍由小程序调用官方 `workspace.create`。
+  映射网络盘的枚举/新建运行于可终止子进程并设 6.5 秒硬超时，离线盘不会拖住 DSH
 - **随 DSH 生死**：无独立进程、无自启动项；访问日志 `~/.dsh/wechat-gate-access.log`
 
 ## 系统要求
@@ -43,10 +47,10 @@
 dsh plugin --profile web add github:martinbear1/dsh-wechat-remote
 ```
 
-**或指定版本**（稳定复现，如 `#v1.0.2`）：
+**或指定版本**（稳定复现，如 `#v1.0.6`）：
 
 ```bash
-dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.0.2
+dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.0.6
 ```
 
 然后**重启 DSH**，打开 `http://127.0.0.1:3080`，侧边栏底部出现

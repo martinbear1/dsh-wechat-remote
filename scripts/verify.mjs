@@ -61,6 +61,7 @@ check(!patch.includes('dsh-host-directory-picker-browse'), 'cordis.patch.yml 不
 check(pkg.exports?.['./client']?.default === './lib/client.js', 'package.json exports["./client"] 未指向 lib/client.js')
 check(pkg.exports?.['./directory']?.default === './lib/directory-service.js', 'package.json exports["./directory"] 未指向目录服务')
 check(pkg.exports?.['./host-info']?.default === './lib/host-info-service.js', 'package.json exports["./host-info"] 未指向微信 Host 信息服务')
+check(pkg.exports?.['./public-relay']?.default === './lib/public-relay-agent.js', 'package.json exports["./public-relay"] 未指向公网出站 Agent')
 check(pkg.exports?.['./typert']?.default === './lib/typert.host.js', 'package.json exports["./typert"] 未指向严格 Host 契约')
 check(pkg.dsh?.bundle?.patch === './cordis.patch.yml', 'package.json dsh.bundle.patch 未指向 cordis.patch.yml')
 
@@ -88,6 +89,15 @@ const hostInfo = readFileSync(path.join(root, 'lib/host-info-service.js'), 'utf8
 check(hostInfo.includes('super(ctx, "wechatHost")') || hostInfo.includes("super(ctx, 'wechatHost')"), 'Host 信息服务的 Typert key 不是 wechatHost')
 check(hostInfo.includes('computerName: hostname()'), 'Host 信息服务未从操作系统读取真实电脑名')
 check(typert.includes('wechatHost/describe'), '严格 Typert 契约缺少 wechatHost/describe')
+
+// 4d. 公网研究模块必须是显式启用、出站连接和独立身份；不得向 DSH/WebUI
+// 写配置或新增公网监听端口。真正接管流量前仍由发布门禁要求 E2EE 完成。
+const publicRelay = readFileSync(path.join(root, 'lib/public-relay-agent.js'), 'utf8')
+for (const required of ['harness-remote-public.json', 'harness-remote-public-identity.json', "enabled !== true", "protocol = 'wss:'", "generateKeyPairSync('ed25519')"]) {
+  check(publicRelay.includes(required), `公网 Agent 缺少安全约束：${required}`)
+}
+check(!publicRelay.includes('createServer('), '公网 Agent 不得创建入站 HTTP 监听器')
+check(!host.includes("from './public-relay-agent.js'"), 'E2EE 完成前不得把公网研究模块自动挂进稳定插件 apply')
 
 // 5. 随包附带的重启脚本必须列入 files（用户装完即可双击重启）。
 for (const s of ['scripts/restart-dsh.cmd', 'scripts/restart-dsh.ps1']) {

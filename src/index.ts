@@ -632,10 +632,13 @@ export function apply(ctx) {
         // This credential is released only inside an authenticated, identity-
         // pinned E2EE relay tunnel. It is not a DSH Remote and cannot be called
         // by WebUI or unauthenticated LAN clients.
-        issueLanCredential: () => ({
-          baseUrl: `http://${lanIPv4()}:${PUBLIC_PORT}`,
-          token: state.token,
-        }),
+        issueLanCredential: () => {
+          console.log('[wechat-gate] authenticated E2EE client requested LAN route bootstrap')
+          return {
+            baseUrl: `http://${lanIPv4()}:${PUBLIC_PORT}`,
+            token: state.token,
+          }
+        },
         onStatus: (status) => { publicRelayStatus = status },
       })
       void publicRelayGateway.start()

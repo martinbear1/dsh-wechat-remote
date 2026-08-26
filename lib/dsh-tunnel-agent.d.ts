@@ -11,12 +11,20 @@ export interface DshTunnelAgentOptions {
         readonly baseUrl: string;
         readonly token: string;
     };
+    readonly materializeAttachment?: (descriptor: unknown) => Promise<{
+        readonly descriptor: {
+            readonly mediaType: string;
+            readonly name?: string;
+        };
+        readonly data: ByteArray;
+    }>;
 }
 export declare class DshTunnelAgent {
     private readonly sendCallback;
     private readonly dshPort;
     private readonly maxStreams;
     private readonly issueLanCredential?;
+    private readonly materializeAttachment?;
     private readonly streams;
     private sendChain;
     private pendingSendBytes;
@@ -32,6 +40,7 @@ export declare class DshTunnelAgent {
     private flushEventBatch;
     private data;
     private end;
+    private forwardRemotePrompt;
     private cancel;
     private fail;
     private sendError;

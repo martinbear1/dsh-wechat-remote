@@ -1,4 +1,5 @@
 /** Product boundary that joins relay routing, E2EE sessions, and local DSH virtual streams. */
+import { createHash } from 'node:crypto'
 import { DshTunnelAgent } from './dsh-tunnel-agent.js'
 import { AgentE2EESession } from './e2ee-session.js'
 import {
@@ -10,6 +11,8 @@ import {
 } from './public-relay-agent.js'
 import type { AgentCapability } from './agent-metadata.js'
 import type { HostPlatformDescriptor } from './host-platform.js'
+import { decryptRemoteAttachment, encryptCloudObject, type RemoteAttachmentDescriptor } from './object-crypto.js'
+import { PublicObjectClient } from './public-object-client.js'
 
 interface ClientContext {
   readonly e2ee: AgentE2EESession
@@ -44,6 +47,12 @@ export class PublicRelayGateway {
   private readonly maxClients: number
   private readonly maxStreamsPerClient: number
   private readonly issueLanCredential?: PublicRelayGatewayOptions['issueLanCredential']
+  private readonly objectClient: PublicObjectClient
+  private readonly historySnapshots = new Map<string, {
+    readonly descriptor: Record<string, unknown>
+    readonly expiresAt: number
+  }>()
+  private readonly pendingHistorySnapshots = new Map<string, Promise<Record<string, unknown>>>()
 
   constructor(config: PublicRelayConfig, options: PublicRelayGatewayOptions) {
     this.dshPort = options.dshPort || 3080
@@ -73,6 +82,7 @@ export class PublicRelayGateway {
       onTransportDisconnect: () => this.disconnectAll(),
     }
     this.agent = new PublicRelayAgent(config, agentOptions)
+    this.objectClient = new PublicObjectClient(config.relayOrigin, this.agent.identity, this.agent.fetchImpl)
   }
 
   start(): Promise<void> {
@@ -86,6 +96,32 @@ export class PublicRelayGateway {
 
   snapshot(): AgentStatus {
     return this.agent.snapshot()
+  }
+
+  async uploadHistorySnapshot(payloadJson: string): Promise<Record<string, unknown>> {
+    const digest = createHash('sha256').update(payloadJson).digest('base64url')
+    const cached = this.historySnapshots.get(digest)
+    if (cached && cached.expiresAt > Date.now() + 60_000) return cached.descriptor
+    const pending = this.pendingHistorySnapshots.get(digest)
+    if (pending) return pending
+    const upload = (async (): Promise<Record<string, unknown>> => {
+      const encrypted = encryptCloudObject(new TextEncoder().encode(payloadJson), 'history-json')
+      const ticket = await this.objectClient.upload('history', encrypted.ciphertext)
+      const descriptor = { ...encrypted.descriptor, objectId: ticket.objectId, expiresAt: ticket.expiresAt }
+      this.historySnapshots.set(digest, { descriptor, expiresAt: ticket.expiresAt })
+      while (this.historySnapshots.size > 32) {
+        const oldest = this.historySnapshots.keys().next().value as string | undefined
+        if (!oldest) break
+        this.historySnapshots.delete(oldest)
+      }
+      return descriptor
+    })()
+    this.pendingHistorySnapshots.set(digest, upload)
+    try {
+      return await upload
+    } finally {
+      this.pendingHistorySnapshots.delete(digest)
+    }
   }
 
   async ensurePairingStatus(): Promise<AgentStatus> {
@@ -117,6 +153,11 @@ export class PublicRelayGateway {
           dshPort: this.dshPort,
           maxStreams: this.maxStreamsPerClient,
           issueLanCredential: this.issueLanCredential,
+          materializeAttachment: async raw => {
+            const descriptor = raw as RemoteAttachmentDescriptor
+            const ciphertext = await this.objectClient.download(descriptor.objectId)
+            return decryptRemoteAttachment(ciphertext, descriptor)
+          },
           send: clearFrame => client!.reply(client!.e2ee.seal(clearFrame)),
         })
       }

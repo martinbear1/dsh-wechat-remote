@@ -23,6 +23,7 @@ const MAX_PAGE_MESSAGES = 30
 const MAX_PAGES = 64
 const MAX_RESPONSE_BYTES = 32 * 1024 * 1024
 const DEFAULT_TIMEOUT_MS = 60_000
+const DEFAULT_SNAPSHOT_THRESHOLD_BYTES = 256 * 1024
 
 interface HistoryEntry {
   readonly event?: {
@@ -62,7 +63,9 @@ export interface WechatHistoryWindowValue extends NativeHistoryValue {
 
 export interface WechatHistoryRemoteValue {
   /** JSON keeps the Typert boundary constrained while preserving native views. */
-  readonly payloadJson: string
+  readonly payloadJson?: string
+  /** Large windows may use an encrypted, expiring OSS transport descriptor. */
+  readonly snapshotJson?: string
 }
 
 export interface WechatHistoryWindowError {
@@ -81,6 +84,8 @@ export type BuildHistoryWindowResult =
 export interface WechatHistoryConfig {
   readonly dshPort?: number
   readonly timeoutMs?: number
+  readonly snapshotThresholdBytes?: number
+  readonly storeSnapshot?: (payloadJson: string) => Promise<Readonly<Record<string, unknown>>>
 }
 
 type FetchPage = (
@@ -97,6 +102,8 @@ declare module '@deepseek-ai/cordis' {
 export class WechatHistoryService extends TypertRemoteService {
   private readonly dshPort: number
   private readonly timeoutMs: number
+  private readonly snapshotThresholdBytes: number
+  private readonly storeSnapshot?: WechatHistoryConfig['storeSnapshot']
 
   constructor(ctx: Context, config: WechatHistoryConfig = {}) {
     super(ctx, 'wechatHistory')
@@ -106,6 +113,11 @@ export class WechatHistoryService extends TypertRemoteService {
     this.timeoutMs = Number.isSafeInteger(config.timeoutMs) && Number(config.timeoutMs) > 0
       ? Number(config.timeoutMs)
       : DEFAULT_TIMEOUT_MS
+    this.snapshotThresholdBytes = Number.isSafeInteger(config.snapshotThresholdBytes)
+      && Number(config.snapshotThresholdBytes) >= 64 * 1024
+      ? Number(config.snapshotThresholdBytes)
+      : DEFAULT_SNAPSHOT_THRESHOLD_BYTES
+    this.storeSnapshot = config.storeSnapshot
   }
 
   @Remote('window')
@@ -120,7 +132,17 @@ export class WechatHistoryService extends TypertRemoteService {
         this.fetchNativePage(payload, pageSignal)
       ), signal)
       if (!built.ok) return built
-      return { ok: true, value: { payloadJson: JSON.stringify(built.value) } }
+      const payloadJson = JSON.stringify(built.value)
+      if (this.storeSnapshot && Buffer.byteLength(payloadJson) >= this.snapshotThresholdBytes) {
+        try {
+          return { ok: true, value: { snapshotJson: JSON.stringify(await this.storeSnapshot(payloadJson)) } }
+        } catch {
+          // OSS is an acceleration layer, never the history source of truth.
+          // A role, Bucket, or network outage falls back to the existing E2EE
+          // tunnel response without changing DSH/WebUI behavior.
+        }
+      }
+      return { ok: true, value: { payloadJson } }
     } catch (error) {
       signal.throwIfAborted()
       return {

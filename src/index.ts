@@ -722,7 +722,13 @@ export function apply(ctx) {
   ctx.plugin(WechatHostInfoService, { gateRuntime: gateRuntimeSnapshot })
   // 公网历史性能适配：只读 DSH 原生 session.history，在电脑端补齐轮次
   // 并删除已完成轮次的冗余流式增量。独立 Remote 不修改 WebUI/DSH。
-  ctx.plugin(WechatHistoryService, { dshPort: UPSTREAM_PORT })
+  ctx.plugin(WechatHistoryService, {
+    dshPort: UPSTREAM_PORT,
+    storeSnapshot: async payloadJson => {
+      if (!publicRelayGateway) throw new Error('Public object transport is unavailable')
+      return publicRelayGateway.uploadHistorySnapshot(payloadJson)
+    },
+  })
   // Product mode uses the official outbound-only relay by default so one QR
   // provisions public + LAN routes. A local config may explicitly disable or
   // override it; failures stay isolated and never alter LAN/WebUI behavior.

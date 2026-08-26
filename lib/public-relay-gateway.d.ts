@@ -30,10 +30,14 @@ export declare class PublicRelayGateway {
     private readonly maxClients;
     private readonly maxStreamsPerClient;
     private readonly issueLanCredential?;
+    private readonly objectClient;
+    private readonly historySnapshots;
+    private readonly pendingHistorySnapshots;
     constructor(config: PublicRelayConfig, options: PublicRelayGatewayOptions);
     start(): Promise<void>;
     stop(): void;
     snapshot(): AgentStatus;
+    uploadHistorySnapshot(payloadJson: string): Promise<Record<string, unknown>>;
     ensurePairingStatus(): Promise<AgentStatus>;
     private receive;
     private disconnect;

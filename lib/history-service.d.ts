@@ -36,7 +36,9 @@ export interface WechatHistoryWindowValue extends NativeHistoryValue {
 }
 export interface WechatHistoryRemoteValue {
     /** JSON keeps the Typert boundary constrained while preserving native views. */
-    readonly payloadJson: string;
+    readonly payloadJson?: string;
+    /** Large windows may use an encrypted, expiring OSS transport descriptor. */
+    readonly snapshotJson?: string;
 }
 export interface WechatHistoryWindowError {
     readonly code: 'invalid-history-request' | 'history-unavailable' | 'history-pagination-invalid';
@@ -59,6 +61,8 @@ export type BuildHistoryWindowResult = {
 export interface WechatHistoryConfig {
     readonly dshPort?: number;
     readonly timeoutMs?: number;
+    readonly snapshotThresholdBytes?: number;
+    readonly storeSnapshot?: (payloadJson: string) => Promise<Readonly<Record<string, unknown>>>;
 }
 type FetchPage = (payload: {
     readonly sessionId: string;
@@ -73,6 +77,8 @@ declare module '@deepseek-ai/cordis' {
 export declare class WechatHistoryService extends TypertRemoteService {
     private readonly dshPort;
     private readonly timeoutMs;
+    private readonly snapshotThresholdBytes;
+    private readonly storeSnapshot?;
     constructor(ctx: Context, config?: WechatHistoryConfig);
     window(request: WechatHistoryWindowRequest, signal: AbortSignal): Promise<WechatHistoryWindowResult>;
     private fetchNativePage;

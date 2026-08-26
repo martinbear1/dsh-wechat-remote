@@ -27,6 +27,8 @@ const EVENT_BATCH_HEADER_BYTES = 5
 const EVENT_BATCH_CAPABILITY_HEADER = 'x-harness-transport-batch'
 const LAN_CREDENTIAL_PATH = '/api/wechat-remote/lan-credential'
 const LAN_CREDENTIAL_ROTATE_PATH = '/api/wechat-remote/lan-credential/rotate'
+const REMOTE_PROMPT_PATH = '/api/wechat-remote/session.prompt'
+const MAX_REMOTE_PROMPT_BYTES = 256 * 1024
 type ByteArray = Uint8Array<ArrayBufferLike>
 
 function concat(...parts: readonly ByteArray[]): Uint8Array {
@@ -178,7 +180,13 @@ interface WebSocketStream {
   deltaBurstStarted: boolean
 }
 
-type Stream = HttpStream | WebSocketStream
+interface RemotePromptStream {
+  readonly kind: 'remote-prompt'
+  chunks: ByteArray[]
+  bytes: number
+}
+
+type Stream = HttpStream | WebSocketStream | RemotePromptStream
 
 export interface DshTunnelAgentOptions {
   readonly send: (frame: ByteArray) => void | Promise<void>
@@ -189,6 +197,10 @@ export interface DshTunnelAgentOptions {
    * and is never forwarded to DSH/WebUI or exposed on the LAN HTTP door.
    */
   readonly issueLanCredential?: (rotate?: boolean) => { readonly baseUrl: string; readonly token: string }
+  readonly materializeAttachment?: (descriptor: unknown) => Promise<{
+    readonly descriptor: { readonly mediaType: string; readonly name?: string }
+    readonly data: ByteArray
+  }>
 }
 
 export class DshTunnelAgent {
@@ -196,6 +208,7 @@ export class DshTunnelAgent {
   private readonly dshPort: number
   private readonly maxStreams: number
   private readonly issueLanCredential?: DshTunnelAgentOptions['issueLanCredential']
+  private readonly materializeAttachment?: DshTunnelAgentOptions['materializeAttachment']
   private readonly streams = new Map<number, Stream>()
   private sendChain: Promise<void> = Promise.resolve()
   private pendingSendBytes = 0
@@ -206,6 +219,7 @@ export class DshTunnelAgent {
     this.dshPort = options.dshPort || 3080
     this.maxStreams = options.maxStreams || 128
     this.issueLanCredential = options.issueLanCredential
+    this.materializeAttachment = options.materializeAttachment
   }
 
   receive(rawFrame: ByteArray): void {
@@ -239,6 +253,13 @@ export class DshTunnelAgent {
     if (path === LAN_CREDENTIAL_PATH || path === LAN_CREDENTIAL_ROTATE_PATH) {
       if (kind !== KIND_HTTP || safeMethod(value.method) !== 'POST') throw new Error('LAN credential route requires POST')
       return this.openLanCredential(streamId, path === LAN_CREDENTIAL_ROTATE_PATH)
+    }
+    if (path === REMOTE_PROMPT_PATH) {
+      if (kind !== KIND_HTTP || safeMethod(value.method) !== 'POST' || !this.materializeAttachment) {
+        throw new Error('Encrypted prompt adapter is unavailable')
+      }
+      this.streams.set(streamId, { kind: 'remote-prompt', chunks: [], bytes: 0 })
+      return
     }
     if (kind === KIND_HTTP) this.openHttp(streamId, path, value)
     else if (kind === KIND_WEBSOCKET) this.openWebSocket(streamId, path, value)
@@ -377,6 +398,12 @@ export class DshTunnelAgent {
   }
 
   private data(stream: Stream, streamId: number, flags: number, payload: ByteArray): void {
+    if (stream.kind === 'remote-prompt') {
+      stream.bytes += payload.length
+      if (stream.bytes > MAX_REMOTE_PROMPT_BYTES) throw new Error('Encrypted prompt descriptor exceeds 256 KiB')
+      stream.chunks.push(new Uint8Array(payload))
+      return
+    }
     if (stream.kind === KIND_HTTP) {
       stream.bytes += payload.length
       if (stream.bytes > MAX_REQUEST_BYTES) throw new Error('DSH request exceeds 16 MiB')
@@ -394,6 +421,10 @@ export class DshTunnelAgent {
   }
 
   private end(stream: Stream, streamId: number, payload: ByteArray): void {
+    if (stream.kind === 'remote-prompt') {
+      void this.forwardRemotePrompt(streamId, stream)
+      return
+    }
     if (stream.kind === KIND_HTTP) stream.request.end()
     else {
       const value = payload.length ? parseJson(payload) : {}
@@ -404,9 +435,58 @@ export class DshTunnelAgent {
     }
   }
 
+  private async forwardRemotePrompt(streamId: number, stream: RemotePromptStream): Promise<void> {
+    try {
+      const envelope = JSON.parse(new TextDecoder().decode(concat(...stream.chunks))) as Record<string, any>
+      const content = envelope?.payload?.content
+      if (envelope?.type !== 'client-request' || envelope?.method !== 'session.prompt' || !Array.isArray(content)) {
+        throw new Error('Encrypted prompt envelope is invalid')
+      }
+      let attachments = 0
+      const materialized = []
+      for (const part of content) {
+        if (!part?.remoteAttachment) {
+          materialized.push(part)
+          continue
+        }
+        attachments += 1
+        if (attachments > 9 || part.type !== 'image') throw new Error('Encrypted prompt attachment list is invalid')
+        const resolved = await this.materializeAttachment!(part.remoteAttachment)
+        materialized.push({
+          type: 'image',
+          mediaType: resolved.descriptor.mediaType,
+          data: Buffer.from(resolved.data).toString('base64'),
+          ...(resolved.descriptor.name ? { name: resolved.descriptor.name } : {}),
+        })
+      }
+      if (!attachments) throw new Error('Encrypted prompt contains no remote attachment')
+      envelope.payload.content = materialized
+      if (this.streams.get(streamId) !== stream || this.closed) return
+      this.streams.delete(streamId)
+      this.openHttp(streamId, '/api/session.prompt', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+      })
+      const active = this.streams.get(streamId)
+      if (!active || active.kind !== KIND_HTTP) throw new Error('Local DSH prompt stream did not open')
+      const body = json(envelope)
+      this.data(active, streamId, 0, body)
+      this.end(active, streamId, new Uint8Array(0))
+    } catch (error) {
+      if (this.streams.get(streamId) === stream) this.streams.delete(streamId)
+      this.sendError(streamId, error)
+    } finally {
+      stream.chunks = []
+      stream.bytes = 0
+    }
+  }
+
   private cancel(stream: Stream, streamId: number): void {
     this.streams.delete(streamId)
-    if (stream.kind === KIND_HTTP) stream.request.destroy()
+    if (stream.kind === 'remote-prompt') {
+      stream.chunks = []
+      stream.bytes = 0
+    } else if (stream.kind === KIND_HTTP) stream.request.destroy()
     else {
       if (stream.batchTimer) clearTimeout(stream.batchTimer)
       stream.batchTimer = null
@@ -451,7 +531,7 @@ export class DshTunnelAgent {
 
   private resumeSources(): void {
     for (const stream of this.streams.values()) {
-      if (!stream.paused) continue
+      if (stream.kind === 'remote-prompt' || !stream.paused) continue
       stream.paused = false
       if (stream.kind === KIND_HTTP) stream.response?.resume()
       else stream.socket.resume()

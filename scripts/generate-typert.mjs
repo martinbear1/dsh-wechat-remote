@@ -66,6 +66,14 @@ try {
     path.join(packageRoot, 'src', 'public-relay-gateway.ts'),
   )
   copyFileSync(
+    path.join(root, 'src', 'public-object-client.ts'),
+    path.join(packageRoot, 'src', 'public-object-client.ts'),
+  )
+  copyFileSync(
+    path.join(root, 'src', 'object-crypto.ts'),
+    path.join(packageRoot, 'src', 'object-crypto.ts'),
+  )
+  copyFileSync(
     path.join(root, 'src', 'agent-metadata.ts'),
     path.join(packageRoot, 'src', 'agent-metadata.ts'),
   )
@@ -134,7 +142,7 @@ try {
         '@deepseek-ai/dsh-typert-protocol/types': ['../dsh-typert-protocol/src/types.ts'],
       },
     },
-    include: ['src/index.ts', 'src/directory-service.ts', 'src/directory-worker.ts', 'src/host-platform.ts', 'src/host-info-service.ts', 'src/history-service.ts', 'src/public-relay-agent.ts', 'src/public-relay-gateway.ts', 'src/e2ee-session.ts', 'src/dsh-tunnel-agent.ts', 'src/agent-metadata.ts', 'src/gate-ports.ts', 'src/secure-file.ts'],
+    include: ['src/index.ts', 'src/directory-service.ts', 'src/directory-worker.ts', 'src/host-platform.ts', 'src/host-info-service.ts', 'src/history-service.ts', 'src/public-relay-agent.ts', 'src/public-relay-gateway.ts', 'src/public-object-client.ts', 'src/object-crypto.ts', 'src/e2ee-session.ts', 'src/dsh-tunnel-agent.ts', 'src/agent-metadata.ts', 'src/gate-ports.ts', 'src/secure-file.ts'],
   }, null, 2))
   writeFileSync(path.join(temp, 'tsconfig.host.json'), JSON.stringify({
     compilerOptions: {

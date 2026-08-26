@@ -6,7 +6,7 @@
 
 > 纯插件实现：不改动 DeepSeek Harness 的任何官方代码，卸载即还原。
 
-当前正式版本：`v1.4.1`。
+当前正式版本：`v1.4.2`。
 
 ## 特性
 
@@ -22,7 +22,9 @@
   对象层异常只回退一份紧凑历史，不影响 WebUI。任务完成后，插件只观察 DSH 原生
   `host/session-status` 完成边沿并以单并发有限队列预热大历史对象，用户首次打开时不再
   承担冷上传；已加密对象的短期描述符以当前用户专属权限、按 Agent 隔离地保存，插件
-  重启后仍可复用，文件不含会话明文。它不轮询会话、不修改 DSH 数据，也不新增端口
+  重启后仍可复用，文件不含会话明文。同一 DSH 进程内再次打开最新历史窗口时还会命中
+  有界内存缓存；任一原生 Host 事件按会话失效，事件流中断则全部清空，旧分页从不缓存。
+  它不轮询会话、不修改 DSH 数据，也不新增端口
 - **一次扫码双路线**：默认连接产品官方中继，同时携带局域网路线；手机无论在 Wi-Fi
   还是移动网络扫码，之后都可在局域网直连与公网中继之间自动切换
 - **只出不进**：电脑仅主动连接官方中继的 443，不开放公网端口，也不改变 DSH/WebUI；
@@ -59,10 +61,10 @@
 npm exec --yes --package=pnpm@11 -- dsh plugin --profile web add github:martinbear1/dsh-wechat-remote
 ```
 
-**或指定版本**（稳定复现，如 `#v1.4.1`）：
+**或指定版本**（稳定复现，如 `#v1.4.2`）：
 
 ```bash
-npm exec --yes --package=pnpm@11 -- dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.4.1
+npm exec --yes --package=pnpm@11 -- dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.4.2
 ```
 
 然后**重启 DSH**，打开 `http://127.0.0.1:3080`，侧边栏底部出现

@@ -718,6 +718,12 @@ export function apply(ctx) {
           if (level === 'warn') console.warn(`[wechat-gate] ${message}`)
           else console.log(`[wechat-gate] ${message}`)
         },
+        onTrackingState: ready => {
+          ctx.wechatHistory?.setCacheTracking(ready)
+        },
+        onSessionChanged: sessionId => {
+          ctx.wechatHistory?.invalidateSession(sessionId)
+        },
       })
       historySnapshotPrewarmer.start()
     }

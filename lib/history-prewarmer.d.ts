@@ -11,6 +11,8 @@ export interface HistorySnapshotPrewarmerOptions {
     readonly retryDelayMs?: number;
     readonly maxQueue?: number;
     readonly onDiagnostic?: (level: 'info' | 'warn', message: string) => void;
+    readonly onTrackingState?: (ready: boolean) => void;
+    readonly onSessionChanged?: (sessionId: string) => void;
 }
 export declare class HistorySnapshotPrewarmer {
     private readonly dshPort;
@@ -20,6 +22,8 @@ export declare class HistorySnapshotPrewarmer {
     private readonly retryDelayMs;
     private readonly maxQueue;
     private readonly onDiagnostic?;
+    private readonly onTrackingState?;
+    private readonly onSessionChanged?;
     private readonly running;
     private readonly settleTimers;
     private readonly queued;
@@ -30,6 +34,7 @@ export declare class HistorySnapshotPrewarmer {
     private reconnectDelayMs;
     private active;
     private stopped;
+    private tracking;
     constructor(options: HistorySnapshotPrewarmerOptions);
     start(): void;
     stop(): void;
@@ -40,5 +45,6 @@ export declare class HistorySnapshotPrewarmer {
     private enqueue;
     private pump;
     private forget;
+    private setTracking;
 }
 export default HistorySnapshotPrewarmer;

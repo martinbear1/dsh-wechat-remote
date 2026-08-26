@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { inflateRawSync } from 'node:zlib'
 
-import { buildHistoryWindow } from '../lib/history-service.js'
+import { buildHistoryWindow, LatestHistoryWindowCache } from '../lib/history-service.js'
 import { archiveHistoryJson } from '../lib/history-archive.js'
 import { HistorySnapshotPrewarmer } from '../lib/history-prewarmer.js'
 
@@ -115,6 +115,36 @@ const invalid = await buildHistoryWindow({ sessionId: '', maxMessages: 1000 }, a
 assert.equal(invalid.ok, false)
 assert.equal(invalid.error.code, 'invalid-history-request')
 
+const latestCache = new LatestHistoryWindowCache({ maxEntries: 2, maxBytes: 128, maxEntryBytes: 96 })
+const latestA = { sessionId: 'session-cache-a', maxMessages: 30 }
+assert.equal(latestCache.capture(latestA), null, 'cache must fail closed before Host tracking opens')
+latestCache.setTracking(true)
+const stableA = latestCache.capture(latestA)
+assert.ok(stableA)
+assert.equal(latestCache.write(latestA, '{"events":[]}', stableA), true)
+assert.equal(latestCache.read(latestA), '{"events":[]}')
+latestCache.invalidateSession(latestA.sessionId)
+assert.equal(latestCache.read(latestA), null, 'any native Session event must invalidate its latest window')
+assert.equal(latestCache.write(latestA, '{"stale":true}', stableA), false,
+  'a window built across a native event must never enter the cache')
+const olderRequest = { sessionId: latestA.sessionId, maxMessages: 30, beforeSeq: 10 }
+assert.equal(latestCache.capture(olderRequest), null, 'cursor history must remain uncached')
+const stableAfterEvent = latestCache.capture(latestA)
+assert.ok(stableAfterEvent)
+latestCache.setTracking(false)
+assert.equal(latestCache.write(latestA, '{"stale":true}', stableAfterEvent), false)
+assert.equal(latestCache.read(latestA), null, 'a Host monitor gap must clear all clear-text history')
+latestCache.setTracking(true)
+for (const id of ['session-cache-a', 'session-cache-b', 'session-cache-c']) {
+  const request = { sessionId: id, maxMessages: 30 }
+  latestCache.write(request, JSON.stringify({ id }), latestCache.capture(request))
+}
+assert.equal(latestCache.read({ sessionId: 'session-cache-a', maxMessages: 30 }), null,
+  'bounded LRU must evict its oldest latest window')
+const oversized = { sessionId: 'session-cache-large', maxMessages: 30 }
+assert.equal(latestCache.write(oversized, 'x'.repeat(97), latestCache.capture(oversized)), false,
+  'one large transcript must not consume the process cache')
+
 class FakeSocket extends EventEmitter {
   close() { this.emit('close') }
   terminate() { this.emit('close') }
@@ -136,6 +166,8 @@ async function waitFor(predicate, timeoutMs = 500) {
 
 const fakeSocket = new FakeSocket()
 const warmed = []
+const trackingStates = []
+const changedSessions = []
 const prewarmer = new HistorySnapshotPrewarmer({
   dshPort: 3080,
   socketFactory: url => {
@@ -148,8 +180,11 @@ const prewarmer = new HistorySnapshotPrewarmer({
     warmed.push(sessionId)
     return 'object'
   },
+  onTrackingState: ready => trackingStates.push(ready),
+  onSessionChanged: sessionId => changedSessions.push(sessionId),
 })
 prewarmer.start()
+fakeSocket.emit('open')
 fakeSocket.emit('message', hostStatus('session-prewarm1234', true), false)
 fakeSocket.emit('message', hostStatus('session-prewarm1234', false), false)
 await waitFor(() => warmed.length === 1)
@@ -160,6 +195,8 @@ fakeSocket.emit('message', hostStatus('session-prewarm1234', true), false)
 fakeSocket.emit('message', hostStatus('session-prewarm1234', false), false)
 await waitFor(() => warmed.length === 2)
 prewarmer.stop()
+assert.deepEqual(trackingStates, [true, false], 'Host monitor continuity must gate cache reads')
+assert.ok(changedSessions.length >= 4 && changedSessions.every(id => id === 'session-prewarm1234'))
 
 const retrySocket = new FakeSocket()
 let retryCalls = 0

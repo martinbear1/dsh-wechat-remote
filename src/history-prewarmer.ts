@@ -6,6 +6,8 @@
  * projection.
  */
 import { WebSocket } from 'ws'
+import type { Context } from '@deepseek-ai/cordis'
+import type { WechatHistoryService } from './history-service.js'
 
 interface SocketLike {
   on(event: string, listener: (...args: any[]) => void): this
@@ -28,6 +30,45 @@ export interface HistorySnapshotPrewarmerOptions {
   readonly onDiagnostic?: (level: 'info' | 'warn', message: string) => void
   readonly onTrackingState?: (ready: boolean) => void
   readonly onSessionChanged?: (sessionId: string) => void
+}
+
+export interface HistorySnapshotPrewarmerBindingOptions
+  extends Omit<HistorySnapshotPrewarmerOptions, 'warm' | 'onTrackingState' | 'onSessionChanged'> {
+  readonly warm: (
+    service: WechatHistoryService,
+    sessionId: string,
+    signal: AbortSignal,
+  ) => Promise<'inline' | 'object'>
+}
+
+/**
+ * Own the prewarmer under Cordis' native service-injection lifecycle.
+ *
+ * A plugin child context must not read `ctx.wechatHistory` later from a socket
+ * callback: Cordis deliberately rejects service properties outside an inject
+ * scope. Capture the concrete service once inside `ctx.inject()` and let that
+ * child fiber stop the observer whenever the service or parent plugin unloads.
+ */
+export function bindHistorySnapshotPrewarmer(
+  ctx: Context,
+  options: HistorySnapshotPrewarmerBindingOptions,
+) {
+  return ctx.inject(['wechatHistory'], injectedCtx => {
+    const service = injectedCtx.wechatHistory
+    const prewarmer = new HistorySnapshotPrewarmer({
+      dshPort: options.dshPort,
+      socketFactory: options.socketFactory,
+      settleDelayMs: options.settleDelayMs,
+      retryDelayMs: options.retryDelayMs,
+      maxQueue: options.maxQueue,
+      onDiagnostic: options.onDiagnostic,
+      warm: (sessionId, signal) => options.warm(service, sessionId, signal),
+      onTrackingState: ready => service.setCacheTracking(ready),
+      onSessionChanged: sessionId => service.invalidateSession(sessionId),
+    })
+    prewarmer.start()
+    return () => prewarmer.stop()
+  })
 }
 
 export class HistorySnapshotPrewarmer {
@@ -145,7 +186,7 @@ export class HistorySnapshotPrewarmer {
     // Invalidate before any event-specific work. This makes a concurrently
     // building latest window fail its revision check instead of entering the
     // cache after newer native data has already arrived.
-    this.onSessionChanged?.(sessionId)
+    this.notifySessionChanged(sessionId)
     if (frame.type === 'host/session-removed') {
       this.forget(sessionId)
       return
@@ -192,11 +233,11 @@ export class HistorySnapshotPrewarmer {
     const started = Date.now()
     void this.warmCallback(entry.sessionId, controller.signal)
       .then(transport => {
-        this.onDiagnostic?.('info', `history prewarm ${transport} ${entry.sessionId.slice(-8)} in ${Date.now() - started}ms`)
+        this.diagnostic('info', `history prewarm ${transport} ${entry.sessionId.slice(-8)} in ${Date.now() - started}ms`)
       })
       .catch(error => {
         if (controller.signal.aborted || this.stopped) return
-        this.onDiagnostic?.('warn', `history prewarm failed ${entry.sessionId.slice(-8)}: ${messageOf(error)}`)
+        this.diagnostic('warn', `history prewarm failed ${entry.sessionId.slice(-8)}: ${messageOf(error)}`)
         if (entry.attempt === 0) {
           const timer = setTimeout(() => {
             this.settleTimers.delete(entry.sessionId)
@@ -231,7 +272,29 @@ export class HistorySnapshotPrewarmer {
   private setTracking(ready: boolean): void {
     if (this.tracking === ready) return
     this.tracking = ready
-    this.onTrackingState?.(ready)
+    try {
+      this.onTrackingState?.(ready)
+    } catch (error) {
+      // A diagnostics/cache observer is optional acceleration. It must never
+      // escape a WebSocket event callback and terminate the DSH host process.
+      this.diagnostic('warn', `history tracking observer failed: ${messageOf(error)}`)
+    }
+  }
+
+  private notifySessionChanged(sessionId: string): void {
+    try {
+      this.onSessionChanged?.(sessionId)
+    } catch (error) {
+      this.diagnostic('warn', `history invalidation observer failed: ${messageOf(error)}`)
+    }
+  }
+
+  private diagnostic(level: 'info' | 'warn', message: string): void {
+    try {
+      this.onDiagnostic?.(level, message)
+    } catch {
+      // Diagnostics are deliberately non-authoritative and fail closed.
+    }
   }
 }
 

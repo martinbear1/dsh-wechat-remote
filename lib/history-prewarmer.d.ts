@@ -1,3 +1,5 @@
+import type { Context } from '@deepseek-ai/cordis';
+import type { WechatHistoryService } from './history-service.js';
 interface SocketLike {
     on(event: string, listener: (...args: any[]) => void): this;
     close(): void;
@@ -14,6 +16,18 @@ export interface HistorySnapshotPrewarmerOptions {
     readonly onTrackingState?: (ready: boolean) => void;
     readonly onSessionChanged?: (sessionId: string) => void;
 }
+export interface HistorySnapshotPrewarmerBindingOptions extends Omit<HistorySnapshotPrewarmerOptions, 'warm' | 'onTrackingState' | 'onSessionChanged'> {
+    readonly warm: (service: WechatHistoryService, sessionId: string, signal: AbortSignal) => Promise<'inline' | 'object'>;
+}
+/**
+ * Own the prewarmer under Cordis' native service-injection lifecycle.
+ *
+ * A plugin child context must not read `ctx.wechatHistory` later from a socket
+ * callback: Cordis deliberately rejects service properties outside an inject
+ * scope. Capture the concrete service once inside `ctx.inject()` and let that
+ * child fiber stop the observer whenever the service or parent plugin unloads.
+ */
+export declare function bindHistorySnapshotPrewarmer(ctx: Context, options: HistorySnapshotPrewarmerBindingOptions): import("@deepseek-ai/cordis").Fiber & PromiseLike<import("@deepseek-ai/cordis").Fiber>;
 export declare class HistorySnapshotPrewarmer {
     private readonly dshPort;
     private readonly warmCallback;
@@ -46,5 +60,7 @@ export declare class HistorySnapshotPrewarmer {
     private pump;
     private forget;
     private setTracking;
+    private notifySessionChanged;
+    private diagnostic;
 }
 export default HistorySnapshotPrewarmer;

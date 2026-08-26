@@ -1,6 +1,6 @@
 {
   "name": "@harness-remote/dsh-wechat-remote",
-  "version": "1.4.2",
+  "version": "1.4.3",
   "description": "Harness Remote 微信版：同一插件自动适配 Windows、macOS 与 Linux 上的 DeepSeek Harness，提供微信身份绑定、局域网直连及端到端加密公网连接",
   "private": true,
   "license": "MIT",
@@ -8,7 +8,7 @@
   "main": "lib/index.js",
   "exports": {
     ".": {
-      "types": "./lib/types/index.d.ts",
+      "types": "./lib/index.d.ts",
       "default": "./lib/index.js"
     },
     "./client": {
@@ -69,15 +69,18 @@
       "platform": "web",
       "inject": [
         "@deepseek-ai/dsh-client-runtime",
-        "@deepseek-ai/dsh-client-ui-sidebar"
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-ui-slots"
       ]
     }
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "bundle": "tsc -p tsconfig.json && node scripts/generate-typert.mjs",
+    "bundle": "tsc -p tsconfig.json && tsc -p tsconfig.client.json && node scripts/build-client.mjs && node scripts/generate-typert.mjs",
     "verify": "node scripts/verify.mjs",
-    "test": "npm run test:attachment && npm run test:directory && npm run test:host-platform && npm run test:history && npm run test:gate-ports && npm run test:public-relay",
+    "test": "npm run test:lifecycle && npm run test:client && npm run test:attachment && npm run test:directory && npm run test:host-platform && npm run test:history && npm run test:gate-ports && npm run test:public-relay",
+    "test:lifecycle": "node scripts/test-lifecycle.mjs",
+    "test:client": "node scripts/test-client-bundle.mjs",
     "test:directory": "node scripts/test-directory.mjs",
     "test:host-platform": "node scripts/test-host-platform.mjs",
     "test:history": "node scripts/test-history.mjs",
@@ -89,17 +92,39 @@
     "http-proxy": "^1.18.1",
     "qrcode": "^1.5.4",
     "tweetnacl": "^1.0.3",
-    "ws": "^8.18.3",
-    "zod": "^4.4.3"
+    "ws": "^8.18.3"
   },
   "peerDependencies": {
+    "@deepseek-ai/cordis": ">=4.0.1",
     "@deepseek-ai/dsh-client-runtime": ">=0.1.0-rc.5",
     "@deepseek-ai/dsh-client-ui-sidebar": ">=0.1.0-rc.5",
     "@deepseek-ai/dsh-client-ui-slots": ">=0.1.0-rc.5",
     "@deepseek-ai/dsh-host-directory-picker-browse": ">=0.1.1-rc.1",
     "@deepseek-ai/dsh-typert-protocol": ">=0.1.1-rc.1",
-    "@deepseek-ai/cordis": ">=4.0.1",
     "react": "^18.2.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-runtime": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-sidebar": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-slots": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-host-directory-picker-browse": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-typert-protocol": {
+      "optional": true
+    },
+    "react": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
@@ -107,18 +132,22 @@
     "@deepseek-ai/dsh-client-ui-sidebar": "0.1.1-rc.2",
     "@deepseek-ai/dsh-client-ui-slots": "0.1.1-rc.2",
     "@deepseek-ai/dsh-host-directory-picker-browse": "0.1.1-rc.2",
-    "@deepseek-ai/dsh-invariants": "0.1.1-rc.2",
     "@deepseek-ai/dsh-typert-generator": "0.1.1-rc.2",
     "@deepseek-ai/dsh-typert-protocol": "0.1.1-rc.2",
+    "@types/http-proxy": "^1.17.17",
+    "@types/node": "^22.15.3",
+    "@types/qrcode": "^1.5.6",
     "@types/react": "~18.3.1",
     "@types/ws": "^8.18.1",
-    "@types/node": "^22.15.3",
+    "esbuild": "^0.25.9",
     "react": "^18.2.0",
-    "react-dom": "^18.2.0",
     "typescript": "^5.8.3"
   },
   "files": [
     "lib/index.js",
+    "lib/index.d.ts",
+    "lib/gate-runtime.js",
+    "lib/gate-runtime.d.ts",
     "lib/client.js",
     "lib/directory-service.js",
     "lib/directory-service.d.ts",

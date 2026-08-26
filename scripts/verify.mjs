@@ -20,15 +20,20 @@ const check = (ok, msg) => { if (!ok) fails.push(msg) }
 // 1. 客户端 bundle：注册 id 必须等于包名，且不含任何遗留/异包 id。
 const client = readFileSync(path.join(root, 'lib/client.js'), 'utf8')
 check(client.includes('window.__ModuleLoader__.load'), 'lib/client.js 不是 __ModuleLoader__ bundle')
-check(client.includes(`id: "${name}"`), `lib/client.js 注册 id 不是 "${name}"`)
+check(new RegExp(`id\\s*:\\s*["']${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}["']`).test(client), `lib/client.js 注册 id 不是 "${name}"`)
 for (const legacy of ['@deepseek-ai/dsh-client-ui-pairing', '@harness-remote/dsh-harness-remote']) {
   check(!client.includes(legacy), `lib/client.js 残留异包注册 id（${legacy}）`)
 }
 // 1b. 按钮从本 profile 的 Host Remote 发现实际本地门；3093 只作旧版回退。
-check(client.includes('微信连接'), 'lib/client.js 按钮文案不是「微信连接」')
+check(client.includes('连接微信'), 'lib/client.js 按钮文案不是「连接微信」')
 check(client.includes('/api/wechatHost.describe'), 'lib/client.js 没有动态发现当前 profile 的本地门')
 check(client.includes('http://127.0.0.1:3093'), 'lib/client.js 缺少旧 web/default 3093 回退')
-check(client.includes('本机配对门'), 'lib/client.js 未展示实际本地门端口')
+for (const required of ['添加到 Harness Remote', '局域网直连', '远程访问', '微信账号保护']) {
+  check(client.includes(required), `lib/client.js 用户配对界面缺少「${required}」`)
+}
+for (const privateDetail of ['relayOrigin', 'lastError', '本机配对门', 'xyxfood.xyz']) {
+  check(!client.includes(privateDetail), `lib/client.js 用户配对界面泄露内部诊断信息：${privateDetail}`)
+}
 check(!client.includes('127.0.0.1:3091'), 'lib/client.js 残留 iOS 本地门端口 3091')
 // 插件样式必须局限于自身组件，不能按官方 WebUI 哈希类名修改全局布局。
 for (const sel of ['[class*=_footArea]', '[class*=_settingsArea]', '[class*=_footerActions]']) {
@@ -36,10 +41,16 @@ for (const sel of ['[class*=_footArea]', '[class*=_settingsArea]', '[class*=_foo
 }
 
 // 2. 宿主网关：微信专用表面与加固基线。
-const host = readFileSync(path.join(root, 'lib/index.js'), 'utf8')
-check(host.includes('export function apply'), 'lib/index.js 缺少 apply 导出（宿主插件不会加载）')
-check(host.includes("export const name = 'gate'"), 'lib/index.js 缺少 gate name 导出')
-check(host.includes("from './gate-ports.js'"), 'lib/index.js 未使用多 profile 端口推导')
+const entry = readFileSync(path.join(root, 'lib/index.js'), 'utf8')
+const host = readFileSync(path.join(root, 'lib/gate-runtime.js'), 'utf8')
+check(entry.includes('export const apply ='), 'lib/index.js 缺少函数式 apply 导出（宿主插件不会加载）')
+check(!entry.includes('export function apply'), 'lib/index.js 不应使用会被 Cordis 识别为构造器的普通 function apply')
+check(entry.includes("export const name = 'gate'"), 'lib/index.js 缺少 gate name 导出')
+check(entry.includes("from './gate-runtime.js'"), 'lib/index.js 不是无副作用的薄入口')
+for (const forbidden of ['createServer(', 'loadAgentDescriptor()', 'loadState()', 'new PublicRelayGateway']) {
+  check(!entry.includes(forbidden), `lib/index.js 导入阶段残留运行时副作用：${forbidden}`)
+}
+check(host.includes("from './gate-ports.js'"), 'lib/gate-runtime.js 未使用多 profile 端口推导')
 check(host.includes('selectedGatePorts.publicPort'), 'lib/index.js 未使用推导出的局域网门')
 check(host.includes('selectedGatePorts.localPort'), 'lib/index.js 未使用推导出的本地门')
 check(host.includes('gate-wechat-state.json'), 'lib/index.js 状态文件不是独立的 gate-wechat-state.json')
@@ -53,7 +64,7 @@ check(host.includes('icacls'), 'lib/index.js 缺少 Windows ACL 收紧')
 check(host.includes('DSH 本体继续运行'), 'lib/index.js 缺少端口占用的崩溃隔离（server error 处理器）')
 check(host.includes("runtime.state = disposed ? 'stopped' : 'unavailable'"), '端口错误没有降级成可诊断状态')
 check(host.includes('wechat: {'), 'lib/index.js 缺少 /gate/status 的微信身份字段')
-check(client.includes('微信身份'), 'lib/client.js 弹窗缺少「微信身份」状态行')
+check(client.includes('微信账号保护'), 'lib/client.js 弹窗缺少「微信账号保护」状态行')
 
 // 3. bundle 补丁行必须引用本包名（否则插不进 cordis 图）。
 const patch = readFileSync(path.join(root, 'cordis.patch.yml'), 'utf8')
@@ -63,6 +74,8 @@ check(!patch.includes('dsh-host-directory-picker-browse'), 'cordis.patch.yml 不
 
 // 4. 客户端入口必须在 exports 里可被官方扫描器发现。
 check(pkg.exports?.['./client']?.default === './lib/client.js', 'package.json exports["./client"] 未指向 lib/client.js')
+check(pkg.exports?.['.']?.types === './lib/index.d.ts', 'package.json 根类型入口未指向真实 Host 入口声明')
+check(Array.isArray(pkg.files) && pkg.files.includes('lib/index.d.ts'), 'package.json files 缺少真实 Host 入口声明')
 check(pkg.exports?.['./directory']?.default === './lib/directory-service.js', 'package.json exports["./directory"] 未指向目录服务')
 check(pkg.exports?.['./host-info']?.default === './lib/host-info-service.js', 'package.json exports["./host-info"] 未指向微信 Host 信息服务')
 check(pkg.exports?.['./history']?.default === './lib/history-service.js', 'package.json exports["./history"] 未指向微信历史服务')
@@ -77,7 +90,7 @@ check(pkg.dsh?.bundle?.patch === './cordis.patch.yml', 'package.json dsh.bundle.
 // 4b. 小程序目录能力必须是本包自己的惰性 Remote 服务，不能重新占用
 // DSH 的全局 directoryPicker seam。
 check(host.includes("from './directory-service.js'"), 'lib/index.js 未挂载微信目录 Remote 服务')
-check(host.includes('ctx.plugin(WechatDirectoryService'), 'lib/index.js 未在 gate fiber 下挂载目录服务')
+check(host.includes("mountChild('directory', WechatDirectoryService"), 'gate runtime 未在当前 fiber 下挂载目录服务')
 const directory = readFileSync(path.join(root, 'lib/directory-service.js'), 'utf8')
 check(directory.includes('super(ctx, "wechatDirectory")') || directory.includes("super(ctx, 'wechatDirectory')"), '目录服务的 Cordis/Typert key 不是 wechatDirectory')
 check(directory.includes('DEFAULT_OPERATION_TIMEOUT_MS = 6500'), '网络盘目录服务缺少 6.5 秒硬超时')
@@ -98,7 +111,7 @@ for (const method of ['roots', 'list', 'create']) {
 
 // 4c. 电脑名通过微信端隔离的只读 Remote 提供，不能伪造进 DSH host.describe。
 check(host.includes("from './host-info-service.js'"), 'lib/index.js 未挂载微信 Host 信息 Remote')
-check(host.includes('ctx.plugin(WechatHostInfoService'), 'lib/index.js 未在 gate fiber 下挂载 Host 信息服务')
+check(host.includes("mountChild('host-info', WechatHostInfoService"), 'gate runtime 未在当前 fiber 下挂载 Host 信息服务')
 const hostInfo = readFileSync(path.join(root, 'lib/host-info-service.js'), 'utf8')
 check(hostInfo.includes('super(ctx, "wechatHost")') || hostInfo.includes("super(ctx, 'wechatHost')"), 'Host 信息服务的 Typert key 不是 wechatHost')
 check(hostInfo.includes('computerName: hostname()'), 'Host 信息服务未从操作系统读取真实电脑名')
@@ -110,13 +123,16 @@ check(typert.includes('wechatHost/describe'), '严格 Typert 契约缺少 wechat
 // 4d. 公网长会话历史只在微信端独立 Remote 内做无损语义压缩；数据源仍是
 // DSH 原生 session.history，不能改写 WebUI 或另开网络入口。
 check(host.includes("from './history-service.js'"), 'lib/index.js 未挂载微信历史 Remote')
-check(host.includes('ctx.plugin(WechatHistoryService'), 'lib/index.js 未在 gate fiber 下挂载历史服务')
+check(host.includes("mountChild('history', WechatHistoryService"), 'gate runtime 未在当前 fiber 下挂载历史服务')
 const history = readFileSync(path.join(root, 'lib/history-service.js'), 'utf8')
+const historyPrewarmer = readFileSync(path.join(root, 'lib/history-prewarmer.js'), 'utf8')
 check(history.includes('super(ctx, "wechatHistory")') || history.includes("super(ctx, 'wechatHistory')"), '历史服务的 Typert key 不是 wechatHistory')
 check(history.includes("method: 'session.history'") || history.includes('method: "session.history"'), '历史服务没有读取 DSH 原生 session.history')
 check(history.includes("event?.type !== 'assistant/chunk'") || history.includes('event?.type !== "assistant/chunk"'), '历史服务没有压缩已完成轮次的流式增量')
 check(history.includes("host: '127.0.0.1'") || history.includes('host: "127.0.0.1"'), '历史服务数据源不是 loopback DSH')
 check(typert.includes('wechatHistory/window'), '严格 Typert 契约缺少 wechatHistory/window')
+check(/ctx\.inject\(\[['"]wechatHistory['"]\]/.test(historyPrewarmer), '历史预热器没有使用 Cordis 原生服务注入生命周期')
+check(!host.includes('ctx.wechatHistory'), 'Host 异步回调仍在注入作用域外读取 wechatHistory')
 const historySnapshotCache = readFileSync(path.join(root, 'lib/history-snapshot-cache.js'), 'utf8')
 check(host.includes('wechat-history-snapshots-'), '宿主没有按 Agent 隔离历史快照索引')
 check(historySnapshotCache.includes('writePrivateJsonAtomic'), '历史快照索引没有使用私密原子写入')
@@ -126,7 +142,7 @@ check(!historySnapshotCache.includes('payloadJson'), '历史快照索引不应�
 // 4e. 历史图片对象加速必须先读取原生 session.attachment；OSS 只是端侧
 // 加密传输层，失败可回退，且不能绕过 DSH 的会话引用授权。
 check(host.includes("from './attachment-service.js'"), 'lib/index.js 未挂载微信附件对象 Remote')
-check(host.includes('ctx.plugin(WechatAttachmentService'), 'lib/index.js 未在 gate fiber 下挂载附件对象服务')
+check(host.includes("mountChild('attachment', WechatAttachmentService"), 'gate runtime 未在当前 fiber 下挂载附件对象服务')
 const attachment = readFileSync(path.join(root, 'lib/attachment-service.js'), 'utf8')
 check(attachment.includes('super(ctx, "wechatAttachment")') || attachment.includes("super(ctx, 'wechatAttachment')"), '附件对象服务的 Typert key 不是 wechatAttachment')
 check(attachment.includes("method: 'session.attachment'") || attachment.includes('method: "session.attachment"'), '附件对象服务没有读取 DSH 原生 session.attachment')
@@ -176,7 +192,7 @@ check(gatePorts.includes('EADDRINUSE'), '端口推导模块缺少占用错误的
 for (const s of ['scripts/restart-dsh.cmd', 'scripts/restart-dsh.ps1']) {
   check(!Array.isArray(pkg.files) || !pkg.files.includes(s), `package.json files 不应包含危险重启脚本 ${s}`)
 }
-for (const artifact of ['lib/agent-metadata.js', 'lib/gate-ports.js', 'lib/secure-file.js', 'lib/host-platform.js', 'lib/directory-worker.js']) {
+for (const artifact of ['lib/gate-runtime.js', 'lib/agent-metadata.js', 'lib/gate-ports.js', 'lib/secure-file.js', 'lib/host-platform.js', 'lib/directory-worker.js']) {
   check(Array.isArray(pkg.files) && pkg.files.includes(artifact), `package.json files 缺少 ${artifact}`)
 }
 

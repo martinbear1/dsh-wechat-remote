@@ -4,7 +4,12 @@ import { inflateRawSync } from 'node:zlib'
 
 import { buildHistoryWindow, LatestHistoryWindowCache } from '../lib/history-service.js'
 import { archiveHistoryJson } from '../lib/history-archive.js'
-import { HistorySnapshotPrewarmer } from '../lib/history-prewarmer.js'
+import { Context } from '@deepseek-ai/cordis'
+import WechatHistoryService from '../lib/history-service.js'
+import {
+  bindHistorySnapshotPrewarmer,
+  HistorySnapshotPrewarmer,
+} from '../lib/history-prewarmer.js'
 
 function unzipSingleEntry(archive) {
   const value = Buffer.from(archive)
@@ -156,10 +161,10 @@ function hostStatus(sessionId, running) {
   }))
 }
 
-async function waitFor(predicate, timeoutMs = 500) {
+async function waitFor(predicate, timeoutMs = 500, label = 'history prewarmer') {
   const deadline = Date.now() + timeoutMs
   while (!predicate()) {
-    if (Date.now() >= deadline) throw new Error('timed out waiting for history prewarmer')
+    if (Date.now() >= deadline) throw new Error(`timed out waiting for ${label}`)
     await new Promise(resolve => setTimeout(resolve, 2))
   }
 }
@@ -197,6 +202,57 @@ await waitFor(() => warmed.length === 2)
 prewarmer.stop()
 assert.deepEqual(trackingStates, [true, false], 'Host monitor continuity must gate cache reads')
 assert.ok(changedSessions.length >= 4 && changedSessions.every(id => id === 'session-prewarm1234'))
+
+// Production wiring must capture the Cordis service inside an inject fiber.
+// Reading a sibling service later from the parent plugin context is rejected by
+// Cordis and used to terminate DSH when the Host socket opened.
+const lifecycleCtx = new Context()
+const historyFiber = await lifecycleCtx.plugin(WechatHistoryService, {})
+const lifecycleSocket = new FakeSocket()
+let lifecycleWarmCalls = 0
+const bindingFiber = await bindHistorySnapshotPrewarmer(lifecycleCtx, {
+  socketFactory: () => lifecycleSocket,
+  settleDelayMs: 0,
+  warm: async (service, sessionId) => {
+    assert.equal(typeof service.setCacheTracking, 'function')
+    assert.equal(typeof service.invalidateSession, 'function')
+    assert.equal(sessionId, 'session-lifecycle1234')
+    lifecycleWarmCalls += 1
+    return 'inline'
+  },
+})
+assert.equal(lifecycleSocket.listenerCount('open'), 1,
+  'Cordis inject fiber must start exactly one Host observer')
+lifecycleSocket.emit('open')
+lifecycleSocket.emit('message', hostStatus('session-lifecycle1234', true), false)
+lifecycleSocket.emit('message', hostStatus('session-lifecycle1234', false), false)
+await waitFor(() => lifecycleWarmCalls === 1, 500, 'Cordis-injected history prewarmer')
+await historyFiber.dispose()
+lifecycleSocket.emit('message', hostStatus('session-lifecycle1234', true), false)
+lifecycleSocket.emit('message', hostStatus('session-lifecycle1234', false), false)
+await new Promise(resolve => setTimeout(resolve, 10))
+assert.equal(lifecycleWarmCalls, 1, 'service disposal must stop its injected Host observer')
+await bindingFiber.dispose()
+
+const hostileSocket = new FakeSocket()
+const hostileDiagnostics = []
+const hostilePrewarmer = new HistorySnapshotPrewarmer({
+  socketFactory: () => hostileSocket,
+  settleDelayMs: 0,
+  warm: async () => 'inline',
+  onTrackingState: () => { throw new Error('optional tracking observer') },
+  onSessionChanged: () => { throw new Error('optional invalidation observer') },
+  onDiagnostic: (level, message) => {
+    hostileDiagnostics.push({ level, message })
+    if (hostileDiagnostics.length === 1) throw new Error('optional logger')
+  },
+})
+hostilePrewarmer.start()
+assert.doesNotThrow(() => hostileSocket.emit('open'),
+  'an optional tracking observer must not escape the Host socket callback')
+assert.doesNotThrow(() => hostileSocket.emit('message', hostStatus('session-hostile1234', true), false),
+  'an optional invalidation observer must not escape the Host socket callback')
+hostilePrewarmer.stop()
 
 const retrySocket = new FakeSocket()
 let retryCalls = 0

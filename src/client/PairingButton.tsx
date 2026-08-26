@@ -39,8 +39,10 @@ interface GateStatusResp {
   publicRelay: {
     enabled: boolean
     state: 'disabled' | 'enrolling' | 'connecting' | 'online' | 'offline'
-    relayOrigin?: string
-    lastError?: string
+  }
+  agent?: {
+    agentName?: string
+    hostName?: string
   }
 }
 
@@ -57,7 +59,13 @@ export interface PairingButtonProps {
 }
 
 const QR_ICON = (
-  <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+  <svg
+    width="18"
+    height="18"
+    viewBox="0 0 24 24"
+    fill="currentColor"
+    aria-hidden
+  >
     <rect x="3" y="3" width="7" height="7" rx="1" />
     <rect x="14" y="3" width="7" height="7" rx="1" />
     <rect x="3" y="14" width="7" height="7" rx="1" />
@@ -66,7 +74,15 @@ const QR_ICON = (
   </svg>
 )
 
-function ChannelRow({ label, detail, ok }: { label: string; detail: string; ok: boolean }): JSX.Element {
+function ChannelRow({
+  label,
+  detail,
+  ok,
+}: {
+  label: string
+  detail: string
+  ok: boolean
+}): JSX.Element {
   return (
     <div className={styles.channel}>
       <span className={ok ? styles.dotOk : styles.dotOff} aria-hidden />
@@ -103,8 +119,9 @@ export function PairingButton({ wide }: PairingButtonProps): JSX.Element {
         }),
       })
       if (describeRes.ok) {
-        const envelope = await describeRes.json() as HostDescribeEnvelope
-        const gate = envelope.result?.ok === true ? envelope.result.value?.gate : undefined
+        const envelope = (await describeRes.json()) as HostDescribeEnvelope
+        const gate =
+          envelope.result?.ok === true ? envelope.result.value?.gate : undefined
         if (gate && Number.isSafeInteger(gate.localDoor.port)) {
           discovered = true
           setRuntime(gate)
@@ -112,7 +129,7 @@ export function PairingButton({ wide }: PairingButtonProps): JSX.Element {
           if (gate.localDoor.state !== 'listening') {
             setQr(null)
             setStatus(null)
-            setError(gate.localDoor.message || `本机配对门 ${gate.localDoor.port} 尚未就绪`)
+            setError('连接服务暂未就绪，请稍后重试')
             return
           }
         }
@@ -126,25 +143,40 @@ export function PairingButton({ wide }: PairingButtonProps): JSX.Element {
       // must never be fetched from the LAN/public door.
       const codeRes = await fetch(`${localOrigin}/pair/code`)
       if (!codeRes.ok) throw new Error(`pair/code ${codeRes.status}`)
-      const code = await codeRes.json() as PairCodeResp
+      const code = (await codeRes.json()) as PairCodeResp
       setQr(code)
       if (!discovered && code.profileScope) {
-        setRuntime(previous => previous || {
-          profileScope: code.profileScope || 'web',
-          source: 'legacy-default',
-          publicDoor: { bind: '0.0.0.0', port: code.port, state: 'listening', errorCode: null, message: null },
-          localDoor: { bind: '127.0.0.1', port: code.localPort || 3093, state: 'listening', errorCode: null, message: null },
-        })
+        setRuntime(
+          (previous) =>
+            previous || {
+              profileScope: code.profileScope || 'web',
+              source: 'legacy-default',
+              publicDoor: {
+                bind: '0.0.0.0',
+                port: code.port,
+                state: 'listening',
+                errorCode: null,
+                message: null,
+              },
+              localDoor: {
+                bind: '127.0.0.1',
+                port: code.localPort || 3093,
+                state: 'listening',
+                errorCode: null,
+                message: null,
+              },
+            },
+        )
       }
       setError(null)
     } catch (err) {
       setQr(null)
-      setError(`获取配对码失败：本机配对门 ${localOrigin.replace('http://127.0.0.1:', '')} 不可用`)
+      setError('暂时无法生成配对码，请确认 DSH 正在运行后重试')
     }
     try {
       const statusRes = await fetch(`${localOrigin}/gate/status`)
       if (statusRes.ok) {
-        const nextStatus = await statusRes.json() as GateStatusResp
+        const nextStatus = (await statusRes.json()) as GateStatusResp
         setStatus(nextStatus)
         if (nextStatus.gate) setRuntime(nextStatus.gate)
       }
@@ -164,83 +196,110 @@ export function PairingButton({ wide }: PairingButtonProps): JSX.Element {
   }, [open])
 
   const publicDoor = runtime?.publicDoor || status?.gate?.publicDoor
-  const lanDetail = publicDoor?.state === 'unavailable'
-    ? publicDoor.message || `局域网门 ${publicDoor.port} 不可用`
-    : status === null ? '检测中…' : `http://${status.lan.ip}:${status.lan.port}`
-
-  const localDetail = runtime === null
-    ? '检测中…'
-    : `http://127.0.0.1:${runtime.localDoor.port} · ${runtime.profileScope}`
+  const lanReady =
+    status !== null &&
+    status.lan.ip.length > 0 &&
+    publicDoor?.state !== 'unavailable'
+  const lanDetail =
+    status === null ? '检测中…' : lanReady ? '已就绪' : '暂不可用'
 
   const publicDetail = ((): string => {
     if (status === null) return '检测中…'
     const relay = status.publicRelay || { enabled: false, state: 'disabled' }
-    if (!relay.enabled) return '未启用（当前二维码仅供局域网）'
-    if (relay.state === 'online') return relay.relayOrigin || '端到端加密中继已在线'
-    if (relay.state === 'enrolling') return '正在注册电脑 Agent 身份…'
-    if (relay.state === 'connecting') return '正在连接加密中继…'
-    return relay.lastError ? `离线：${relay.lastError}` : '公网 Agent 离线'
+    if (!relay.enabled) return '未启用'
+    if (relay.state === 'online') return '已就绪'
+    if (relay.state === 'enrolling') return '正在准备…'
+    if (relay.state === 'connecting') return '正在连接…'
+    return '暂不可用'
   })()
 
   const wechatDetail = ((): string => {
     if (status === null) return '检测中…'
-    if (status.publicRelay?.enabled) return '扫码时由云端 wx.login 真实校验；电脑不保存 AppSecret'
+    if (status.publicRelay?.state === 'online') return '已启用'
+    if (status.publicRelay?.enabled) return '等待远程连接'
     const w = status.wechat || { configured: false, bindings: 0 }
-    if (!w.configured) return '局域网旧模式尚未配置微信身份校验'
-    return `局域网已绑定 ${w.bindings} 个微信账号`
+    if (!w.configured) return '配对凭证保护'
+    return '已启用'
   })()
+
+  const agentName = status?.agent?.agentName || 'DeepSeek Harness'
+  const hostName = status?.agent?.hostName || '当前电脑'
 
   return (
     <>
       <button
         type="button"
         className={styles.button}
-        title="扫码连接微信（Harness Remote）"
+        title="连接 Harness Remote"
         onClick={() => setOpen(true)}
       >
         {QR_ICON}
-        {wide ? <span className={styles.buttonLabel}>微信连接</span> : null}
+        {wide ? <span className={styles.buttonLabel}>连接微信</span> : null}
       </button>
 
       {open ? (
-        <div className={styles.mask} onClick={(event) => { if (event.target === event.currentTarget) setOpen(false) }}>
+        <div
+          className={styles.mask}
+          onClick={(event) => {
+            if (event.target === event.currentTarget) setOpen(false)
+          }}
+        >
           <div className={styles.modal} role="dialog" aria-modal>
             <div className={styles.head}>
-              <h3>扫码连接微信</h3>
-              <button type="button" className={styles.close} onClick={() => setOpen(false)} aria-label="关闭">✕</button>
+              <h3>添加到 Harness Remote</h3>
+              <button
+                type="button"
+                className={styles.close}
+                onClick={() => setOpen(false)}
+                aria-label="关闭"
+              >
+                ✕
+              </button>
             </div>
-            <p className={styles.hint}>打开微信小程序「Harness Remote」→ 点「扫码配对」扫此二维码</p>
-            {qr !== null && error === null
-              ? (
-                <>
-                  <img className={styles.qr} src={qr.qrDataUrl} alt="配对二维码" />
-                  <p className={styles.code}>配对码：<code>{qr.code}</code></p>
-                </>
-              )
-              : <p className={styles.err}>{error ?? '加载中…'}</p>}
+            <p className={styles.hint}>
+              打开微信小程序，进入「添加节点」扫描二维码
+            </p>
+            <div className={styles.agent}>
+              <span className={styles.agentName}>{agentName}</span>
+              <span className={styles.agentHost}>{hostName}</span>
+            </div>
+            {qr !== null && error === null ? (
+              <>
+                <img
+                  className={styles.qr}
+                  src={qr.qrDataUrl}
+                  alt="配对二维码"
+                />
+                <p className={styles.code}>
+                  配对码 <code>{qr.code}</code>
+                  <span>15 分钟内有效</span>
+                </p>
+              </>
+            ) : (
+              <p className={styles.err}>{error ?? '加载中…'}</p>
+            )}
             <div className={styles.channels}>
+              <ChannelRow label="局域网直连" detail={lanDetail} ok={lanReady} />
               <ChannelRow
-                label="局域网"
-                detail={lanDetail}
-                ok={status !== null && status.lan.ip.length > 0 && publicDoor?.state !== 'unavailable'}
-              />
-              <ChannelRow
-                label="本机配对门"
-                detail={localDetail}
-                ok={runtime?.localDoor.state === 'listening'}
-              />
-              <ChannelRow
-                label="公网"
+                label="远程访问"
                 detail={publicDetail}
                 ok={status !== null && status.publicRelay?.state === 'online'}
               />
               <ChannelRow
-                label="微信身份"
+                label="微信账号保护"
                 detail={wechatDetail}
-                ok={status !== null && status.wechat && status.wechat.bindings > 0}
+                ok={
+                  status !== null &&
+                  (status.publicRelay?.state === 'online' ||
+                    status.wechat?.configured === true)
+                }
               />
             </div>
-            <p className={styles.footnote}>{qr?.mode === 'public-relay' ? '公网流量端到端加密；中继无法读取 DSH 内容' : '二维码 15 分钟内有效，扫码成功后自动刷新'}</p>
+            <p className={styles.footnote}>
+              {qr?.mode === 'public-relay'
+                ? '自动选择更快连接；远程内容端到端加密'
+                : '当前仅支持同一网络连接'}
+            </p>
           </div>
         </div>
       ) : null}

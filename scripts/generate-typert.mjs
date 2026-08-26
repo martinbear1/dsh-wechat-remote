@@ -29,91 +29,39 @@ try {
   mkdirSync(path.join(packageRoot, 'lib'), { recursive: true })
   mkdirSync(path.join(protocolRoot, 'src'), { recursive: true })
   copyFileSync(path.join(root, 'package.json'), path.join(packageRoot, 'package.json'))
-  copyFileSync(
-    path.join(root, 'src', 'directory-service.ts'),
-    path.join(packageRoot, 'src', 'directory-service.ts'),
-  )
-  copyFileSync(
-    path.join(root, 'src', 'directory-worker.ts'),
-    path.join(packageRoot, 'src', 'directory-worker.ts'),
-  )
-  copyFileSync(
-    path.join(root, 'src', 'host-platform.ts'),
-    path.join(packageRoot, 'src', 'host-platform.ts'),
-  )
-  copyFileSync(
-    path.join(root, 'src', 'host-info-service.ts'),
-    path.join(packageRoot, 'src', 'host-info-service.ts'),
-  )
-  copyFileSync(
-    path.join(root, 'src', 'history-service.ts'),
-    path.join(packageRoot, 'src', 'history-service.ts'),
-  )
-  copyFileSync(
-    path.join(root, 'src', 'history-archive.ts'),
-    path.join(packageRoot, 'src', 'history-archive.ts'),
-  )
-  copyFileSync(
-    path.join(root, 'src', 'history-snapshot-cache.ts'),
-    path.join(packageRoot, 'src', 'history-snapshot-cache.ts'),
-  )
-  copyFileSync(
-    path.join(root, 'src', 'attachment-service.ts'),
-    path.join(packageRoot, 'src', 'attachment-service.ts'),
-  )
-  copyFileSync(
-    path.join(root, 'src', 'public-relay-agent.ts'),
-    path.join(packageRoot, 'src', 'public-relay-agent.ts'),
-  )
-  copyFileSync(
-    path.join(root, 'src', 'e2ee-session.ts'),
-    path.join(packageRoot, 'src', 'e2ee-session.ts'),
-  )
-  copyFileSync(
-    path.join(root, 'src', 'dsh-tunnel-agent.ts'),
-    path.join(packageRoot, 'src', 'dsh-tunnel-agent.ts'),
-  )
-  copyFileSync(
-    path.join(root, 'src', 'public-relay-gateway.ts'),
-    path.join(packageRoot, 'src', 'public-relay-gateway.ts'),
-  )
-  copyFileSync(
-    path.join(root, 'src', 'public-object-client.ts'),
-    path.join(packageRoot, 'src', 'public-object-client.ts'),
-  )
-  copyFileSync(
-    path.join(root, 'src', 'object-crypto.ts'),
-    path.join(packageRoot, 'src', 'object-crypto.ts'),
-  )
-  copyFileSync(
-    path.join(root, 'src', 'agent-metadata.ts'),
-    path.join(packageRoot, 'src', 'agent-metadata.ts'),
-  )
-  copyFileSync(
-    path.join(root, 'src', 'gate-ports.ts'),
-    path.join(packageRoot, 'src', 'gate-ports.ts'),
-  )
-  copyFileSync(
-    path.join(root, 'src', 'secure-file.ts'),
-    path.join(packageRoot, 'src', 'secure-file.ts'),
-  )
-  copyFileSync(path.join(root, 'src', 'index.ts'), path.join(packageRoot, 'src', 'index.ts'))
-  copyFileSync(
-    path.join(root, 'lib', 'directory-service.d.ts'),
-    path.join(packageRoot, 'lib', 'directory-service.d.ts'),
-  )
-  copyFileSync(
-    path.join(root, 'lib', 'host-info-service.d.ts'),
-    path.join(packageRoot, 'lib', 'host-info-service.d.ts'),
-  )
-  copyFileSync(
-    path.join(root, 'lib', 'history-service.d.ts'),
-    path.join(packageRoot, 'lib', 'history-service.d.ts'),
-  )
-  copyFileSync(
-    path.join(root, 'lib', 'attachment-service.d.ts'),
-    path.join(packageRoot, 'lib', 'attachment-service.d.ts'),
-  )
+  const hostSources = [
+    'index.ts',
+    'gate-runtime.ts',
+    'directory-service.ts',
+    'directory-worker.ts',
+    'host-platform.ts',
+    'host-info-service.ts',
+    'history-service.ts',
+    'history-archive.ts',
+    'history-snapshot-cache.ts',
+    'attachment-service.ts',
+    'public-relay-agent.ts',
+    'public-relay-gateway.ts',
+    'public-object-client.ts',
+    'object-crypto.ts',
+    'e2ee-session.ts',
+    'dsh-tunnel-agent.ts',
+    'agent-metadata.ts',
+    'gate-ports.ts',
+    'secure-file.ts',
+    'history-prewarmer.ts',
+  ]
+  for (const file of hostSources) {
+    copyFileSync(path.join(root, 'src', file), path.join(packageRoot, 'src', file))
+  }
+  for (const file of [
+    'directory-service.d.ts',
+    'host-info-service.d.ts',
+    'history-service.d.ts',
+    'attachment-service.d.ts',
+  ]) {
+    copyFileSync(path.join(root, 'lib', file), path.join(packageRoot, 'lib', file))
+  }
   const protocolPackage = path.join(root, 'node_modules', '@deepseek-ai', 'dsh-typert-protocol')
   copyFileSync(
     path.join(protocolPackage, 'lib', 'types', 'index.d.ts'),
@@ -128,7 +76,7 @@ try {
     version: '0.1.1-rc.1',
     type: 'module',
     exports: {
-      '.': { types: './lib/types/index.d.ts', default: './lib/index.js' },
+      '.': { types: './lib/index.d.ts', default: './lib/index.js' },
       './types': { types: './lib/types/types.d.ts', default: './lib/types/types.js' },
     },
   }, null, 2))
@@ -158,7 +106,7 @@ try {
         '@deepseek-ai/dsh-typert-protocol/types': ['../dsh-typert-protocol/src/types.ts'],
       },
     },
-    include: ['src/index.ts', 'src/directory-service.ts', 'src/directory-worker.ts', 'src/host-platform.ts', 'src/host-info-service.ts', 'src/history-service.ts', 'src/history-archive.ts', 'src/history-snapshot-cache.ts', 'src/attachment-service.ts', 'src/public-relay-agent.ts', 'src/public-relay-gateway.ts', 'src/public-object-client.ts', 'src/object-crypto.ts', 'src/e2ee-session.ts', 'src/dsh-tunnel-agent.ts', 'src/agent-metadata.ts', 'src/gate-ports.ts', 'src/secure-file.ts'],
+    include: hostSources.map(file => `src/${file}`),
   }, null, 2))
   writeFileSync(path.join(temp, 'tsconfig.host.json'), JSON.stringify({
     compilerOptions: {

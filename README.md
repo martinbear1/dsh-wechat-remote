@@ -6,7 +6,7 @@
 
 > 纯插件实现：不改动 DeepSeek Harness 的任何官方代码，卸载即还原。
 
-当前正式版本：`v1.4.2`。
+当前正式版本：`v1.4.3`。
 
 ## 特性
 
@@ -61,14 +61,14 @@
 npm exec --yes --package=pnpm@11 -- dsh plugin --profile web add github:martinbear1/dsh-wechat-remote
 ```
 
-**或指定版本**（稳定复现，如 `#v1.4.2`）：
+**或指定版本**（稳定复现，如 `#v1.4.3`）：
 
 ```bash
-npm exec --yes --package=pnpm@11 -- dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.4.2
+npm exec --yes --package=pnpm@11 -- dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.4.3
 ```
 
 然后**重启 DSH**，打开 `http://127.0.0.1:3080`，侧边栏底部出现
-**「微信连接」** 按钮即安装成功。
+**「连接微信」** 按钮即安装成功。
 
 > 其他 profile 同样适用：把 `--profile web` 换成你的 profile 名。
 
@@ -112,14 +112,14 @@ dsh web
 
 **插件坏了会影响 DSH 吗？** 不会。本插件所有运行时错误都在进程内消化：端口被占、
 网络异常、WeChat API 失败等任何故障都只让对应功能降级并记日志，**原生 DSH
-照常运行**。端口占用会在 `wechatHost/describe` 与配对按钮中明确显示占用端口、
-错误码和可用的环境变量，不会以未处理 `EADDRINUSE` 拖垮 DSH。
+照常运行**。端口占用会通过 `wechatHost/describe` 保留诊断状态并写入本机日志；
+面向普通用户的配对界面只显示能力是否就绪，不暴露端口、域名或底层错误原文。
 
 ## 使用
 
-1. 电脑上打开 `http://127.0.0.1:3080` → 点侧边栏底部「微信连接」→ 弹出配对弹窗：
-   标题「扫码连接微信」、二维码 + 8 位配对码、三行状态（局域网 / 公网 /
-   **微信身份**：公网模式由云端真实校验，电脑不保存 AppSecret）
+1. 电脑上打开 `http://127.0.0.1:3080` → 点侧边栏底部「连接微信」→ 弹出配对弹窗：
+   显示当前电脑与 Agent、二维码 + 8 位配对码，以及“局域网直连 / 远程访问 /
+   微信账号保护”三项用户能力；内部端口、服务器域名和故障原文不在界面展示
 2. 微信小程序「Harness Remote」→ 首次进入按初始化页引导 →「扫码配对」扫二维码
    （开发者工具模拟器无摄像头，可手动输入配对码）→ 自动完成 openid 绑定与登录
 3. 之后每次打开小程序即自动复核身份并连接
@@ -127,7 +127,7 @@ dsh web
 ### 公网连接配置
 
 正常用户**不需要创建配置文件**。安装并重启 DSH 后，插件会生成本机独立 Ed25519
-身份，只向产品官方中继 `https://relay.xyxfood.xyz` 主动发起 443/WSS 出站连接；同一个
+身份，只向产品官方中继主动发起 443/WSS 出站连接；同一个
 二维码会同时包含公网配对票据和局域网路线。中继只能路由端到端密文，不能读取 DSH
 内容，也不能直接访问用户电脑的局域网门或 DSH 3080。
 
@@ -178,8 +178,8 @@ DSH/WebUI 配置，也不会影响局域网门和原生 DSH。
 
 ## 常见问题
 
-**Q：公网配对失败？** 二维码 15 分钟有效且一次性；确认电脑和手机都能访问
-`relay.xyxfood.xyz`（自托管时则检查自定义中继域名）。微信 `code2session` 只由云端
+**Q：公网配对失败？** 二维码 15 分钟有效且一次性；确认电脑和手机可以正常访问互联网
+（自托管时检查自己的中继域名）。微信 `code2session` 只由云端
 调用，用户电脑无需保存 AppSecret。
 
 **Q：想换微信账号 / 解绑？** 停 DSH → 删除 `~/.dsh/gate-wechat-state.json` →
@@ -210,19 +210,22 @@ dsh-plugin-wechat/
 │   ├── index.js         #   微信认证网关宿主插件（随 DSH 进程加载）
 │   ├── client.js        #   微信连接按钮客户端插件（浏览器加载）
 │   └── types/           #   类型声明
-├── src/                 # 参考源码（配对按钮 UI）
-├── scripts/verify.mjs   # 制品一致性守卫（发布前必跑）
+├── src/                 # Host 与浏览器客户端的唯一源码
+├── scripts/             # 可重复构建、生命周期/平台/协议测试与制品守卫
 ├── cordis.patch.yml     # bundle 补丁：向插件图插入本包
 └── package.json         # 单包三角色：bundle + 宿主插件 + 客户端插件
 ```
 
 ## 从源码重建（维护者）
 
-客户端产物（`lib/client.js`）使用 DeepSeek Harness 官方客户端工具链构建，
-**预设 id 参数必须等于包名**：
+官方的 `clientBundle` 预设尚未发布给仓库外插件，因此本仓库通过
+`scripts/build-client.mjs` 复刻相同的 lazy-CJS factory 输出；注册 id 始终从
+`package.json` 读取，不允许手工维护第二份。Host、Client、Typert 产物统一执行：
 
 ```bash
-clientBundle('@harness-remote/dsh-wechat-remote', ['lib/types/index.js'])
+npm run bundle
+npm test
+npm run verify
 ```
 
 ⚠️ 注册 id 与包名不一致会直接导致 Web UI 报 "Failed to load plugins"

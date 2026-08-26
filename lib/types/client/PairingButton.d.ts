@@ -3,4 +3,3 @@ export interface PairingButtonProps {
     wide: boolean;
 }
 export declare function PairingButton({ wide }: PairingButtonProps): JSX.Element;
-//# sourceMappingURL=PairingButton.d.ts.map

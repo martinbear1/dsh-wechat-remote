@@ -11,8 +11,6 @@ import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import { PairingButton } from './PairingButton.tsx'
 
-export { PairingButton } from './PairingButton.tsx'
-
 /** Required services for the slot registration. */
 export const inject = ['slots']
 

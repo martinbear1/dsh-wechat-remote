@@ -28,6 +28,8 @@ export declare class DshTunnelAgent {
     private openLanCredential;
     private openHttp;
     private openWebSocket;
+    private sendWebSocketMessage;
+    private flushEventBatch;
     private data;
     private end;
     private cancel;

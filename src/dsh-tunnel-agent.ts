@@ -9,6 +9,7 @@ const DATA = 3
 const END = 4
 const ERROR = 5
 const CANCEL = 6
+const BATCH = 7
 const KIND_HTTP = 'http'
 const KIND_WEBSOCKET = 'websocket'
 const FLAG_BINARY = 1
@@ -20,6 +21,10 @@ const MAX_REQUEST_BYTES = 16 * 1024 * 1024
 const SEND_QUEUE_PAUSE_BYTES = 2 * 1024 * 1024
 const SEND_QUEUE_RESUME_BYTES = 512 * 1024
 const MAX_SEND_QUEUE_BYTES = 4 * 1024 * 1024
+const EVENT_BATCH_DELAY_MS = 32
+const EVENT_BATCH_MAX_BYTES = 4 * 1024
+const EVENT_BATCH_HEADER_BYTES = 5
+const EVENT_BATCH_CAPABILITY_HEADER = 'x-harness-transport-batch'
 const LAN_CREDENTIAL_PATH = '/api/wechat-remote/lan-credential'
 const LAN_CREDENTIAL_ROTATE_PATH = '/api/wechat-remote/lan-credential/rotate'
 type ByteArray = Uint8Array<ArrayBufferLike>
@@ -119,6 +124,39 @@ function pieces(data: ByteArray): readonly ByteArray[] {
   return out
 }
 
+function batchPayload(messages: readonly { readonly flags: number; readonly payload: ByteArray }[]): Uint8Array {
+  const out = new Uint8Array(messages.reduce((sum, message) => sum + EVENT_BATCH_HEADER_BYTES + message.payload.length, 0))
+  let offset = 0
+  for (const message of messages) {
+    out[offset] = message.flags
+    uint32(message.payload.length, out, offset + 1)
+    offset += EVENT_BATCH_HEADER_BYTES
+    out.set(message.payload, offset)
+    offset += message.payload.length
+  }
+  return out
+}
+
+function supportsEventBatch(value: Record<string, unknown>): boolean {
+  const headers = value.headers && typeof value.headers === 'object'
+    ? value.headers as Record<string, unknown>
+    : {}
+  return headers[EVENT_BATCH_CAPABILITY_HEADER] === '1'
+}
+
+function isStreamDelta(message: ByteArray, isBinary: boolean): boolean {
+  if (isBinary || message.length === 0 || message.length > EVENT_BATCH_MAX_BYTES) return false
+  try {
+    const root = JSON.parse(new TextDecoder().decode(message)) as Record<string, any>
+    const event = root?.event || root?.payload?.event || root?.payload?.payload?.event
+    const chunk = event?.data?.chunk
+    return event?.type === 'assistant/chunk' &&
+      (chunk?.type === 'text-delta' || chunk?.type === 'reasoning-delta')
+  } catch {
+    return false
+  }
+}
+
 interface HttpStream {
   readonly kind: 'http'
   readonly request: ClientRequest
@@ -133,6 +171,11 @@ interface WebSocketStream {
   fragments: ByteArray[]
   fragmentBytes: number
   paused: boolean
+  readonly batchEnabled: boolean
+  batchMessages: { flags: number; payload: ByteArray }[]
+  batchBytes: number
+  batchTimer: NodeJS.Timeout | null
+  deltaBurstStarted: boolean
 }
 
 type Stream = HttpStream | WebSocketStream
@@ -252,14 +295,25 @@ export class DshTunnelAgent {
     request.on('error', error => this.fail(streamId, error))
   }
 
-  private openWebSocket(streamId: number, path: string, _value: Record<string, unknown>): void {
+  private openWebSocket(streamId: number, path: string, value: Record<string, unknown>): void {
     const socket = new WebSocket(`ws://127.0.0.1:${this.dshPort}${path}`, {
       headers: { 'user-agent': 'HarnessRemote-PublicAgent/1' },
       maxPayload: 1024 * 1024,
       perMessageDeflate: false,
       handshakeTimeout: 10_000,
     })
-    const stream: WebSocketStream = { kind: KIND_WEBSOCKET, socket, fragments: [], fragmentBytes: 0, paused: false }
+    const stream: WebSocketStream = {
+      kind: KIND_WEBSOCKET,
+      socket,
+      fragments: [],
+      fragmentBytes: 0,
+      paused: false,
+      batchEnabled: supportsEventBatch(value),
+      batchMessages: [],
+      batchBytes: 0,
+      batchTimer: null,
+      deltaBurstStarted: false,
+    }
     this.streams.set(streamId, stream)
     socket.on('open', () => this.queue(encode(ACCEPT, streamId, 0, json({ opened: true }))))
     socket.on('message', (data, isBinary) => {
@@ -268,11 +322,7 @@ export class DshTunnelAgent {
         : Array.isArray(data)
           ? Buffer.concat(data)
           : Buffer.from(new Uint8Array(data))
-      const messagePieces = pieces(message)
-      messagePieces.forEach((part, index) => {
-        const flags = (isBinary ? FLAG_BINARY : 0) | (index === messagePieces.length - 1 ? FLAG_FINAL : 0)
-        this.queue(encode(DATA, streamId, flags, part))
-      })
+      this.sendWebSocketMessage(streamId, stream, message, isBinary)
       const current = this.streams.get(streamId)
       if (this.pendingSendBytes >= SEND_QUEUE_PAUSE_BYTES && current?.kind === KIND_WEBSOCKET && !current.paused) {
         current.paused = true
@@ -280,10 +330,50 @@ export class DshTunnelAgent {
       }
     })
     socket.on('close', (code, reason) => {
+      this.flushEventBatch(streamId, stream)
       this.streams.delete(streamId)
       this.queue(encode(END, streamId, 0, json({ code, reason: reason.toString().slice(0, 256) })))
     })
     socket.on('error', error => this.fail(streamId, error))
+  }
+
+  private sendWebSocketMessage(streamId: number, stream: WebSocketStream, message: ByteArray, isBinary: boolean): void {
+    const flags = (isBinary ? FLAG_BINARY : 0) | FLAG_FINAL
+    if (stream.batchEnabled && isStreamDelta(message, isBinary)) {
+      if (!stream.deltaBurstStarted) {
+        stream.deltaBurstStarted = true
+        this.flushEventBatch(streamId, stream)
+        this.queue(encode(DATA, streamId, flags, message))
+        return
+      }
+      const encodedBytes = EVENT_BATCH_HEADER_BYTES + message.length
+      if (stream.batchBytes + encodedBytes > EVENT_BATCH_MAX_BYTES) this.flushEventBatch(streamId, stream)
+      stream.batchMessages.push({ flags, payload: new Uint8Array(message) })
+      stream.batchBytes += encodedBytes
+      if (!stream.batchTimer) {
+        stream.batchTimer = setTimeout(() => this.flushEventBatch(streamId, stream), EVENT_BATCH_DELAY_MS)
+        stream.batchTimer.unref?.()
+      }
+      return
+    }
+
+    this.flushEventBatch(streamId, stream)
+    stream.deltaBurstStarted = false
+    const messagePieces = pieces(message)
+    messagePieces.forEach((part, index) => {
+      const partFlags = (isBinary ? FLAG_BINARY : 0) | (index === messagePieces.length - 1 ? FLAG_FINAL : 0)
+      this.queue(encode(DATA, streamId, partFlags, part))
+    })
+  }
+
+  private flushEventBatch(streamId: number, stream: WebSocketStream): void {
+    if (stream.batchTimer) clearTimeout(stream.batchTimer)
+    stream.batchTimer = null
+    if (!stream.batchMessages.length) return
+    const messages = stream.batchMessages
+    stream.batchMessages = []
+    stream.batchBytes = 0
+    this.queue(encode(BATCH, streamId, 0, batchPayload(messages)))
   }
 
   private data(stream: Stream, streamId: number, flags: number, payload: ByteArray): void {
@@ -317,7 +407,13 @@ export class DshTunnelAgent {
   private cancel(stream: Stream, streamId: number): void {
     this.streams.delete(streamId)
     if (stream.kind === KIND_HTTP) stream.request.destroy()
-    else stream.socket.terminate()
+    else {
+      if (stream.batchTimer) clearTimeout(stream.batchTimer)
+      stream.batchTimer = null
+      stream.batchMessages = []
+      stream.batchBytes = 0
+      stream.socket.terminate()
+    }
   }
 
   private fail(streamId: number, error: Error): void {

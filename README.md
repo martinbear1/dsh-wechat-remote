@@ -223,6 +223,20 @@ Windows 与 macOS 不需要不同仓库、不同安装包或平台专用启动�
 确认安装命令成功，并真正停止后重新启动了对应 profile 的 DSH。浏览器刷新 WebUI；如果终端
 显示插件加载错误，请保留完整 DSH 启动日志用于排查。
 
+### 出现 `ERR_PNPM_UNEXPECTED_STORE`
+
+这表示当前 DSH profile 的 `node_modules` 是由另一个 pnpm 大版本创建的，不是插件包错误。
+可以继续使用原来的 pnpm 大版本；如果要把该 profile 统一迁移到 pnpm 11，请先停止 DSH，
+然后在 Windows PowerShell 或 macOS Terminal 执行：
+
+```bash
+cd ~/.dsh/profiles/web
+npm exec --yes --package=pnpm@11 -- pnpm install --force
+```
+
+这只重建 `web` profile 的依赖链接，不删除工作区、会话或 DSH 凭证。完成后回到任意目录，
+重新执行安装命令即可。其他 profile 请把路径中的 `web` 换成对应名称。
+
 ### 远程访问显示暂不可用
 
 先确认电脑能正常访问互联网并保持 DSH 运行。网络恢复后插件会自动重连，通常不需要重新

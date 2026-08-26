@@ -15,8 +15,9 @@
   session_key 或 AppSecret，云端只保存 OpenID 的不可逆 HMAC 标识
 - **公网端到端加密**：二维码钉扎 Ed25519 Agent 身份，每次连接使用临时 X25519 与
   XSalsa20-Poly1305；中继服务器只能路由密文
-- **低延迟历史对象**：电脑先按 DSH 原生历史语义补齐轮次并压缩，再端到端加密到私有
-  OSS；微信使用原生文件下载与解压。对象层异常只回退一份紧凑历史，不影响 WebUI
+- **低延迟历史传输**：电脑先按 DSH 原生历史语义补齐轮次并压缩；小型压缩窗口直接
+  复用端到端加密实时通道，大型窗口才端侧加密到私有 OSS。微信使用原生文件解压，
+  对象层异常只回退一份紧凑历史，不影响 WebUI
 - **一次扫码双路线**：默认连接产品官方中继，同时携带局域网路线；手机无论在 Wi-Fi
   还是移动网络扫码，之后都可在局域网直连与公网中继之间自动切换
 - **只出不进**：电脑仅主动连接官方中继的 443，不开放公网端口，也不改变 DSH/WebUI；
@@ -53,10 +54,10 @@
 npm exec --yes --package=pnpm@11 -- dsh plugin --profile web add github:martinbear1/dsh-wechat-remote
 ```
 
-**或指定版本**（稳定复现，如 `#v1.3.0`）：
+**或指定版本**（稳定复现，如 `#v1.3.1`）：
 
 ```bash
-npm exec --yes --package=pnpm@11 -- dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.3.0
+npm exec --yes --package=pnpm@11 -- dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.3.1
 ```
 
 然后**重启 DSH**，打开 `http://127.0.0.1:3080`，侧边栏底部出现

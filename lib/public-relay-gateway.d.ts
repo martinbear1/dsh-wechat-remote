@@ -40,7 +40,7 @@ export declare class PublicRelayGateway {
     start(): Promise<void>;
     stop(): void;
     snapshot(): AgentStatus;
-    uploadHistorySnapshot(payloadJson: string): Promise<Record<string, unknown>>;
+    prepareHistorySnapshot(payloadJson: string): Promise<Record<string, unknown>>;
     uploadAttachmentObject(data: Uint8Array, metadata: {
         readonly attachmentId: string;
         readonly mediaType: string;

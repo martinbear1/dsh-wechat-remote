@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { inflateRawSync } from 'node:zlib'
 import {
   agentNodeIdForPublicKey,
   DEFAULT_PUBLIC_RELAY_ORIGIN,
@@ -13,6 +14,16 @@ import {
 import PublicRelayGateway from '../lib/public-relay-gateway.js'
 import { DshTunnelAgent } from '../lib/dsh-tunnel-agent.js'
 import { writePrivateJsonAtomic } from '../lib/secure-file.js'
+
+function unzipSingleEntry(archive) {
+  const value = Buffer.from(archive)
+  assert.equal(value.readUInt32LE(0), 0x04034b50)
+  const nameBytes = value.readUInt16LE(26)
+  const extraBytes = value.readUInt16LE(28)
+  const compressedBytes = value.readUInt32LE(18)
+  const offset = 30 + nameBytes + extraBytes
+  return inflateRawSync(value.subarray(offset, offset + compressedBytes)).toString('utf8')
+}
 
 const root = mkdtempSync(path.join(tmpdir(), 'harness-public-relay-test-'))
 try {
@@ -167,6 +178,17 @@ try {
     { enabled: true, relayOrigin: 'https://relay.example.test' },
     { agentVersion: 'test', identityPath: path.join(root, 'gateway-identity.json') },
   )
+  const compactPayload = JSON.stringify({
+    events: Array.from({ length: 1200 }, (_, seq) => ({
+      event: { seq, type: 'assistant/message', data: { text: 'repeatable compact history '.repeat(8) } },
+    })),
+  })
+  const compactDescriptor = await gateway.prepareHistorySnapshot(compactPayload)
+  assert.equal(compactDescriptor.contentKind, 'history-json')
+  assert.equal(compactDescriptor.contentEncoding, 'zip')
+  assert.equal(typeof compactDescriptor.archiveBase64, 'string')
+  assert.equal(compactDescriptor.objectId, undefined, 'small ZIP must not pay an OSS cold-upload handshake')
+  assert.equal(unzipSingleEntry(Buffer.from(compactDescriptor.archiveBase64, 'base64')), compactPayload)
   gateway.clients.set('stale-client', {
     e2ee: null,
     tunnel: { close() { staleTunnelClosed = true } },

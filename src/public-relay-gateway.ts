@@ -16,6 +16,12 @@ import { decryptRemoteAttachment, encryptCloudObject, type RemoteAttachmentDescr
 import { archiveHistoryJson, HISTORY_ARCHIVE_ENTRY } from './history-archive.js'
 import { PublicObjectClient } from './public-object-client.js'
 
+// Compact history is already protected by the node/client E2EE session.  A
+// small ZIP is faster and cheaper to carry in that existing response than to
+// perform the three-step OSS cold-upload handshake.  Large archives still use
+// OSS so they do not occupy the realtime relay or the mini-program JS thread.
+const INLINE_HISTORY_ARCHIVE_MAX_BYTES = 96 * 1024
+
 interface ClientContext {
   readonly e2ee: AgentE2EESession
   tunnel: DshTunnelAgent | null
@@ -105,14 +111,23 @@ export class PublicRelayGateway {
     return this.agent.snapshot()
   }
 
-  async uploadHistorySnapshot(payloadJson: string): Promise<Record<string, unknown>> {
+  async prepareHistorySnapshot(payloadJson: string): Promise<Record<string, unknown>> {
+    const archive = archiveHistoryJson(payloadJson)
+    if (archive.byteLength <= INLINE_HISTORY_ARCHIVE_MAX_BYTES) {
+      return {
+        contentKind: 'history-json',
+        contentEncoding: 'zip',
+        archiveEntry: HISTORY_ARCHIVE_ENTRY,
+        originalBytes: Buffer.byteLength(payloadJson),
+        archiveBase64: Buffer.from(archive).toString('base64'),
+      }
+    }
     const digest = createHash('sha256').update(payloadJson).digest('base64url')
     const cached = this.historySnapshots.get(digest)
     if (cached && cached.expiresAt > Date.now() + 60_000) return cached.descriptor
     const pending = this.pendingHistorySnapshots.get(digest)
     if (pending) return pending
     const upload = (async (): Promise<Record<string, unknown>> => {
-      const archive = archiveHistoryJson(payloadJson)
       const encrypted = encryptCloudObject(archive, 'history-json')
       const ticket = await this.objectClient.upload('history', encrypted.ciphertext)
       const descriptor = {

@@ -64,7 +64,7 @@ export interface WechatHistoryConfig {
     readonly dshPort?: number;
     readonly timeoutMs?: number;
     readonly snapshotThresholdBytes?: number;
-    readonly storeSnapshot?: (payloadJson: string) => Promise<Readonly<Record<string, unknown>>>;
+    readonly prepareSnapshot?: (payloadJson: string) => Promise<Readonly<Record<string, unknown>>>;
 }
 type FetchPage = (payload: {
     readonly sessionId: string;
@@ -80,7 +80,7 @@ export declare class WechatHistoryService extends TypertRemoteService {
     private readonly dshPort;
     private readonly timeoutMs;
     private readonly snapshotThresholdBytes;
-    private readonly storeSnapshot?;
+    private readonly prepareSnapshot?;
     constructor(ctx: Context, config?: WechatHistoryConfig);
     window(request: WechatHistoryWindowRequest, signal: AbortSignal): Promise<WechatHistoryWindowResult>;
     private fetchNativePage;

@@ -23,9 +23,9 @@ const MAX_PAGE_MESSAGES = 30
 const MAX_PAGES = 64
 const MAX_RESPONSE_BYTES = 32 * 1024 * 1024
 const DEFAULT_TIMEOUT_MS = 60_000
-// Pure-JS E2EE of a ~150 KiB inline response already costs several seconds on
-// iOS WeChat. Above 32 KiB the encrypted object path wins even on a cold read,
-// especially after ZIP compression; smaller windows avoid object-ticket RTT.
+// Above this clear-text size we prepare a compressed transport.  The gateway
+// keeps small ZIPs inside the existing E2EE response and sends only genuinely
+// large archives through OSS, so transport selection is based on wire size.
 const DEFAULT_SNAPSHOT_THRESHOLD_BYTES = 32 * 1024
 
 interface HistoryEntry {
@@ -90,7 +90,7 @@ export interface WechatHistoryConfig {
   readonly dshPort?: number
   readonly timeoutMs?: number
   readonly snapshotThresholdBytes?: number
-  readonly storeSnapshot?: (payloadJson: string) => Promise<Readonly<Record<string, unknown>>>
+  readonly prepareSnapshot?: (payloadJson: string) => Promise<Readonly<Record<string, unknown>>>
 }
 
 type FetchPage = (
@@ -108,7 +108,7 @@ export class WechatHistoryService extends TypertRemoteService {
   private readonly dshPort: number
   private readonly timeoutMs: number
   private readonly snapshotThresholdBytes: number
-  private readonly storeSnapshot?: WechatHistoryConfig['storeSnapshot']
+  private readonly prepareSnapshot?: WechatHistoryConfig['prepareSnapshot']
 
   constructor(ctx: Context, config: WechatHistoryConfig = {}) {
     super(ctx, 'wechatHistory')
@@ -122,7 +122,7 @@ export class WechatHistoryService extends TypertRemoteService {
       && Number(config.snapshotThresholdBytes) >= 16 * 1024
       ? Number(config.snapshotThresholdBytes)
       : DEFAULT_SNAPSHOT_THRESHOLD_BYTES
-    this.storeSnapshot = config.storeSnapshot
+    this.prepareSnapshot = config.prepareSnapshot
   }
 
   @Remote('window')
@@ -138,10 +138,10 @@ export class WechatHistoryService extends TypertRemoteService {
       ), signal)
       if (!built.ok) return built
       const payloadJson = JSON.stringify(built.value)
-      if (request.delivery !== 'inline' && this.storeSnapshot
+      if (request.delivery !== 'inline' && this.prepareSnapshot
         && Buffer.byteLength(payloadJson) >= this.snapshotThresholdBytes) {
         try {
-          return { ok: true, value: { snapshotJson: JSON.stringify(await this.storeSnapshot(payloadJson)) } }
+          return { ok: true, value: { snapshotJson: JSON.stringify(await this.prepareSnapshot(payloadJson)) } }
         } catch {
           // OSS is an acceleration layer, never the history source of truth.
           // A role, Bucket, or network outage falls back to the existing E2EE

@@ -36,10 +36,32 @@ Harness Remote 是与 WebUI 平级的独立 DSH 客户端。它直接使用 DSH 
 
 ## 安装
 
-以下命令在 Windows PowerShell 和 macOS Terminal 中完全相同：
+### DSH 原生命令
+
+已经可以在终端运行 `pnpm` 时，Windows PowerShell 和 macOS Terminal 使用完全相同的
+DSH 原生命令：
 
 ```bash
-npm exec --yes --package=pnpm@11 -- dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.4.3
+dsh plugin --profile web add github:martinbear1/dsh-wechat-remote
+```
+
+不写 `#版本号` 会安装 GitHub `main` 当前的最新正式版。本仓库只在完整测试通过后更新
+`main`；需要固定复现或回退时再追加版本标签，例如：
+
+```bash
+dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.4.3
+```
+
+`dsh plugin` 是 DeepSeek Harness 官方插件管理入口。DSH 会把 `add/remove/why` 等参数原样
+交给 pnpm；这也是为什么电脑需要能找到 `pnpm`，并不是本插件使用了额外安装器。
+
+### 未安装 pnpm：通用一键命令
+
+如果终端提示找不到 pnpm，使用下面这条命令。它只在本次执行中临时提供 pnpm，不做全局安装，
+最终执行的仍然是上面的 DSH 原生命令：
+
+```bash
+npm exec --yes --package=pnpm@11 -- dsh plugin --profile web add github:martinbear1/dsh-wechat-remote
 ```
 
 安装完成后，在没有重要任务运行时重启 DSH：
@@ -58,7 +80,7 @@ DSH 的启动加载机制，不会自行重启 DSH，因为强制重启可能中
 将命令里的 `web` 替换为实际 profile 名即可：
 
 ```bash
-npm exec --yes --package=pnpm@11 -- dsh plugin --profile <profile> add github:martinbear1/dsh-wechat-remote#v1.4.3
+dsh plugin --profile <profile> add github:martinbear1/dsh-wechat-remote
 ```
 
 不同 profile 会获得彼此独立的 Agent 身份、连接状态和端口，不会争用默认实例。
@@ -97,20 +119,26 @@ npm exec --yes --package=pnpm@11 -- dsh plugin --profile <profile> add github:ma
 ### 更新到当前正式版
 
 ```bash
-npm exec --yes --package=pnpm@11 -- dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.4.3
+dsh plugin --profile web add github:martinbear1/dsh-wechat-remote
 ```
 
-更新完成后由用户选择安全时间重启 DSH。
+没有全局 pnpm 时，继续使用安装章节的通用一键命令。更新完成后由用户选择安全时间重启 DSH。
 
 ### 安装指定旧版本
 
 将标签替换为需要的版本，例如：
 
 ```bash
-npm exec --yes --package=pnpm@11 -- dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.4.2
+dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.4.2
 ```
 
 ### 卸载
+
+```bash
+dsh plugin --profile web remove @harness-remote/dsh-wechat-remote
+```
+
+没有全局 pnpm 时，同样可在命令前使用临时运行环境：
 
 ```bash
 npm exec --yes --package=pnpm@11 -- dsh plugin --profile web remove @harness-remote/dsh-wechat-remote

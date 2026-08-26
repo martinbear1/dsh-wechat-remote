@@ -129,8 +129,6 @@ check(host.includes('if (relayConfig)'), '缺少公网 Agent 显式关闭分支'
 check(host.includes('new PublicRelayGateway'), '宿主未挂载加密公网网关')
 check(host.includes('issueLanCredential:'), '宿主入口未把 E2EE 局域网凭证能力挂载到公网网关')
 check(host.includes('authenticated E2EE client requested LAN route bootstrap'), '宿主制品缺少局域网凭证安全诊断点')
-check(!host.includes("execFileSync('tailscale'"), '配对主路径不得同步阻塞探测 Tailscale')
-check(host.includes('scheduleNetworkDiagnosticsRefresh'), '可选网络诊断缺少异步缓存')
 const e2ee = readFileSync(path.join(root, 'lib/e2ee-session.js'), 'utf8')
 for (const required of ['AgentE2EESession', 'sign(null', 'nacl.box.before', 'nacl.secretbox']) {
   check(e2ee.includes(required), `E2EE 实现缺少安全原语：${required}`)

@@ -1,7 +1,7 @@
 /**
  * Pairing action UI: the sidebar foot button (icon in the rail, full row
  * when wide) and its modal. The modal shows the one-time QR code plus the
- * two-channel connectivity status (LAN / Tailscale Funnel), fetched from the
+ * LAN and identity-pinned public-relay status, fetched from the
  * gate's same-origin endpoints (/pair/code, /gate/status).
  */
 import { useEffect, useRef, useState } from 'react'
@@ -35,8 +35,6 @@ interface GateRuntimeInfo {
 interface GateStatusResp {
   gate?: GateRuntimeInfo
   lan: { ip: string; port: number }
-  tailscale: { installed: boolean; loggedIn: boolean; ip: string | null }
-  funnel: { enabled: boolean; url: string | null }
   wechat: { configured: boolean; bindings: number }
   publicRelay: {
     enabled: boolean

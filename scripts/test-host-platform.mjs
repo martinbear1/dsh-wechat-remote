@@ -17,7 +17,7 @@ assert.equal(selectLanIPv4({
   en0: [info('192.168.3.243')],
 }), '192.168.3.243')
 assert.equal(selectLanIPv4({
-  tailscale0: [info('10.7.0.1')],
+  overlay0: [info('100.64.0.1')],
   en0: [info('172.20.10.2')],
 }), '172.20.10.2')
 assert.equal(selectLanIPv4({ lo0: [info('127.0.0.1', true)] }), '127.0.0.1')

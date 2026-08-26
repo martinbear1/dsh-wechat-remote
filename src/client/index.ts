@@ -1,6 +1,6 @@
 /**
  * Harness Remote（微信版）pairing surface, browser half: a QR pairing button
- * with LAN/Tailscale connectivity status, rendered beside Settings at the
+ * with LAN/public-relay connectivity status, rendered beside Settings at the
  * sidebar foot through the `sidebar.footer.action` slot. The pairing endpoints
  * live on the WeChat gate in front of this host (local door 127.0.0.1:3093):
  * the button simply fetches /pair/code and /gate/status and shows a modal —

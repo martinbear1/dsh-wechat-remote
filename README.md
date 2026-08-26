@@ -175,12 +175,6 @@ DSH/WebUI 配置，也不会影响局域网门和原生 DSH。
 - 公网：电脑主动出站，云端短期用户凭证 + Agent 签名证明 + 端到端密文；单 Agent 默认
   最多 8 个手机会话，Agent 解密后只允许访问 loopback DSH 的 `/api/*`
 
-## 小程序端适配
-
-本插件协议与旧网关高度兼容，但端口和 verify 响应有变化 —— 见
-[docs/MINIPROGRAM-ADAPTATION.md](docs/MINIPROGRAM-ADAPTATION.md)
-（**由小程序侧开发者按其修改，插件侧不动小程序代码**）。
-
 ## 常见问题
 
 **Q：公网配对失败？** 二维码 15 分钟有效且一次性；确认电脑和手机都能访问
@@ -201,8 +195,8 @@ Agent 私钥（自动收紧为当前用户专属 ACL）和配对的屏幕秘密�
 
 **Q：需要手动开防火墙吗？** 一般不用：Node.js 自带程序级放行规则（按 node.exe
 放行、覆盖所有端口），DSH 跑在 node.exe 上，实际局域网门通常自动可用。只有在你机器上存在
-「仅 3090」的端口级规则等特殊情况下才需手动加（命令见
-docs/MINIPROGRAM-ADAPTATION.md）。
+「仅 3090」的端口级规则等特殊情况下，才需要在系统防火墙中放行本节点实际显示的
+局域网端口。
 
 **Q：如何卸载？**
 ```bash
@@ -220,7 +214,6 @@ dsh-plugin-wechat/
 │   └── types/           #   类型声明
 ├── src/                 # 参考源码（配对按钮 UI）
 ├── scripts/verify.mjs   # 制品一致性守卫（发布前必跑）
-├── docs/                # 设计讨论 + 小程序端适配清单
 ├── cordis.patch.yml     # bundle 补丁：向插件图插入本包
 └── package.json         # 单包三角色：bundle + 宿主插件 + 客户端插件
 ```

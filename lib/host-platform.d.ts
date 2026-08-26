@@ -24,7 +24,7 @@ export interface HostPlatformAdapter {
 export declare const hostPlatform: HostPlatformAdapter;
 export declare function hostPlatformDescriptor(): HostPlatformDescriptor;
 /**
- * Choose a real private LAN address, not a VPN/VM/benchmark adapter. Interface
- * names are only ranking hints; no chosen address is persisted by this layer.
+ * Choose a real private LAN address, not an overlay/VM/benchmark adapter.
+ * Interface names are only ranking hints; no chosen address is persisted.
  */
 export declare function selectLanIPv4(source?: Readonly<Record<string, readonly NetworkInterfaceInfo[] | undefined>>): string;

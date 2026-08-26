@@ -8,9 +8,9 @@
  *
  * 进程内两个监听器：
  *
- *   1. PUBLIC door（0.0.0.0:3092 — 局域网 + 未来 Tailscale Funnel 目标）：
+ *   1. PUBLIC door（0.0.0.0:3092 — 仅局域网直连）：
  *        - 所有请求都要求 "Authorization: Bearer <token>"（无任何 loopback
- *          豁免：Funnel 转发流量来自 127.0.0.1，必须视同外部），唯一例外是
+ *          豁免），唯一例外是
  *          POST /pair/claim-wechat —— 用一次性配对码 + wx.login jsCode 换取
  *          长期 token，并把 token 与解析出的微信 openid 一对一绑定。
  *        - POST /pair/verify-wechat（需 Bearer）：每次启动用新 jsCode 复核
@@ -22,7 +22,7 @@
  *   2. LOCAL door（127.0.0.1:3093 — 仅本机可访问）：
  *        - GET /pair       电脑端配对页（二维码 + 配对码）
  *        - GET /pair/code  官方 Web UI 侧边栏按钮数据（CORS for :3080）
- *        - GET /gate/status 局域网 / Tailscale / Funnel 连通性
+ *        - GET /gate/status 局域网门与端到端加密公网 Agent 状态
  *
  * 状态（token + 待配对码 + openid↔token 绑定）存于
  * ~/.dsh/gate-wechat-state.json；微信 appid/secret 配置存于
@@ -36,8 +36,6 @@ import path from 'node:path'
 import os from 'node:os'
 import crypto from 'node:crypto'
 import zlib from 'node:zlib'
-import { execFile } from 'node:child_process'
-import { promisify } from 'node:util'
 import httpProxy from 'http-proxy'
 import QRCode from 'qrcode'
 import WechatDirectoryService from './directory-service.js'
@@ -60,7 +58,6 @@ const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
 const RATE_WINDOW_MS = 60 * 1000
 const RATE_MAX_PER_IP = 120 // general requests per IP per minute on the public door
 const CLAIM_MAX_PER_IP = 10 // claim attempts per IP per minute (brute-force brake)
-const execFileAsync = promisify(execFile)
 let publicRelayGateway = null
 let publicRelayStatus = { enabled: false, state: 'disabled' }
 let agentDescriptor
@@ -194,10 +191,7 @@ function setCors(req, res) {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
 }
 
-/**
- * The public door has NO loopback exemption: Funnel-forwarded traffic arrives
- * from 127.0.0.1 (tailscaled) and must not be treated as local.
- */
+/** The public LAN door has no loopback authentication exemption. */
 /**
  * Append one line to the gate access log so connectivity problems can be
  * diagnosed from the PC side (~/.dsh/wechat-gate-access.log).
@@ -214,18 +208,12 @@ function accessLog(req, note) {
  * 敌意局域网邻居 / 互联网扫描器能撞上的第一道闸，也刹住配对码的暴力尝试
  * （单码已有次数上限，这里再兜一层按来源的节奏限制）。
  *
- * Key 规则：socket 对端是 loopback 时（Tailscale Funnel 由 tailscaled 从
- * 127.0.0.1 连进来），采信 Funnel 附带的 X-Forwarded-For；直连的局域网
- * 客户端一律按 socket 地址计数，忽略其自带的 XFF —— 伪造头不能绕过预算。
+ * Key 只取 socket 对端地址。PUBLIC door 不再承载反向代理或 Funnel，因而
+ * 永不采信客户端自带的 X-Forwarded-For，伪造头不能绕过预算。
  */
 const rateBuckets = new Map()
 function rateKey(req) {
   const sock = String(req.socket && req.socket.remoteAddress ? req.socket.remoteAddress : '')
-  const loopback = sock === '127.0.0.1' || sock === '::1' || sock === '::ffff:127.0.0.1'
-  if (loopback) {
-    const xff = req.headers['x-forwarded-for']
-    if (typeof xff === 'string' && xff.trim()) return 'xff:' + xff.split(',')[0].trim()
-  }
   return 'ip:' + (sock.startsWith('::ffff:') ? sock.slice(7) : (sock || 'unknown'))
 }
 function allowRequest(req, isClaim) {
@@ -327,13 +315,9 @@ async function makePairEntry() {
   const code = randomCode()
   state.pending[code] = { expiresAt: now + PAIR_TTL_MS, attempts: 0 }
   saveState(state)
-  // The phone claims over the PUBLIC door (LAN / Funnel), so the payload
-  // carries the public port; the funnel URL (when enabled) rides along so
-  // the app can auto-fallback to the public channel outside the LAN.
-  scheduleNetworkDiagnosticsRefresh()
-  const funnel = networkDiagnostics.funnel
+  // The LAN route is additive metadata on the identity-pinned public QR.
+  // Internet access always uses the dedicated E2EE relay, never this door.
   const payloadObj = { code, host: lanIPv4(), port: PUBLIC_PORT }
-  if (funnel.enabled && funnel.url) payloadObj.funnelUrl = funnel.url
   let payload = JSON.stringify(payloadObj)
   let publicMode = false
   if (publicRelayGateway) {
@@ -387,7 +371,6 @@ code{color:#7aa2ff;font-size:15px;letter-spacing:3px}
 async function servePairCode(req, res) {
   setCors(req, res)
   const entry = await makePairEntry()
-  const funnel = networkDiagnostics.funnel
   res.writeHead(200, { 'Content-Type': 'application/json' })
   res.end(JSON.stringify({
     code: entry.code,
@@ -399,84 +382,15 @@ async function servePairCode(req, res) {
     qrDataUrl: entry.qrDataUrl,
     mode: entry.publicMode ? 'public-relay' : 'lan',
     payload: entry.payload,
-    ...(funnel.enabled && funnel.url ? { funnelUrl: funnel.url } : {}),
   }))
-}
-
-async function probeTailscale() {
-  try {
-    const { stdout } = await execFileAsync('tailscale', ['status', '--json'], {
-      timeout: 4000,
-      windowsHide: true,
-      encoding: 'utf8',
-    })
-    const s = JSON.parse(String(stdout))
-    const self = s && s.Self
-    const ips = self && Array.isArray(self.TailscaleIPs) ? self.TailscaleIPs : []
-    const ip = ips.find((a) => a.startsWith('100.')) || ips[0] || null
-    return { installed: true, loggedIn: Boolean(self && self.UserID), ip }
-  } catch (e) {
-    return { installed: false, loggedIn: false, ip: null }
-  }
-}
-
-async function probeFunnel() {
-  try {
-    const { stdout } = await execFileAsync('tailscale', ['funnel', 'status', '--json'], {
-      timeout: 4000,
-      windowsHide: true,
-      encoding: 'utf8',
-    })
-    const s = JSON.parse(String(stdout))
-    const hosts = Object.keys((s && s.Web) || {})
-    const host = hosts.find((h) => h.endsWith(':443')) || hosts[0] || null
-    if (!host) return { enabled: false, url: null }
-    const allow = Boolean(s.AllowFunnel && s.AllowFunnel[host] === true)
-    return { enabled: allow, url: allow ? `https://${host.split(':')[0]}` : null }
-  } catch (e) {
-    return { enabled: false, url: null }
-  }
-}
-
-const NETWORK_DIAGNOSTIC_TTL_MS = 60_000
-let networkDiagnostics = {
-  expiresAt: 0,
-  refreshing: false,
-  tailscale: { installed: false, loggedIn: false, ip: null },
-  funnel: { enabled: false, url: null },
-}
-
-/** Pairing/status return immediately; optional legacy diagnostics refresh off-path. */
-function scheduleNetworkDiagnosticsRefresh() {
-  if (networkDiagnostics.refreshing || networkDiagnostics.expiresAt > Date.now()) return
-  networkDiagnostics.refreshing = true
-  void Promise.all([probeTailscale(), probeFunnel()])
-    .then(([tailscale, funnel]) => {
-      networkDiagnostics = {
-        expiresAt: Date.now() + NETWORK_DIAGNOSTIC_TTL_MS,
-        refreshing: false,
-        tailscale,
-        funnel,
-      }
-    })
-    .catch(() => {
-      networkDiagnostics = {
-        ...networkDiagnostics,
-        expiresAt: Date.now() + NETWORK_DIAGNOSTIC_TTL_MS,
-        refreshing: false,
-      }
-    })
 }
 
 function serveGateStatus(req, res) {
   setCors(req, res)
-  scheduleNetworkDiagnosticsRefresh()
   res.writeHead(200, { 'Content-Type': 'application/json' })
   res.end(JSON.stringify({
     gate: gateRuntimeSnapshot(),
     lan: { ip: lanIPv4(), port: PUBLIC_PORT },
-    tailscale: networkDiagnostics.tailscale,
-    funnel: networkDiagnostics.funnel,
     wechat: {
       configured: Boolean(loadWechatConfig()),
       bindings: Object.keys(state.wechatBindings).length,
@@ -711,9 +625,6 @@ export const name = 'gate'
  * @param ctx - host context.
  */
 export function apply(ctx) {
-  // Optional Tailscale/Funnel diagnostics are warmed in a child process and
-  // never delay DSH startup, the QR endpoint, or WebUI interaction.
-  scheduleNetworkDiagnosticsRefresh()
   // 独立的 Host-only Typert 服务。它不占用 DSH 的全局 directoryPicker，
   // 因而 WebUI 继续使用官方 auto/native 目录选择器。
   ctx.plugin(WechatDirectoryService, { maxEntries: 1000 })

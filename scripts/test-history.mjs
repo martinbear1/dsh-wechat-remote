@@ -1,6 +1,29 @@
 import assert from 'node:assert/strict'
+import { inflateRawSync } from 'node:zlib'
 
 import { buildHistoryWindow } from '../lib/history-service.js'
+import { archiveHistoryJson } from '../lib/history-archive.js'
+
+function unzipSingleEntry(archive) {
+  const value = Buffer.from(archive)
+  assert.equal(value.readUInt32LE(0), 0x04034b50)
+  assert.equal(value.readUInt16LE(8), 8)
+  const nameBytes = value.readUInt16LE(26)
+  const extraBytes = value.readUInt16LE(28)
+  const compressedBytes = value.readUInt32LE(18)
+  const dataOffset = 30 + nameBytes + extraBytes
+  assert.equal(value.subarray(30, 30 + nameBytes).toString('utf8'), 'history.json')
+  return inflateRawSync(value.subarray(dataOffset, dataOffset + compressedBytes)).toString('utf8')
+}
+
+const archiveSource = JSON.stringify({
+  events: Array.from({ length: 800 }, (_, index) => ({
+    event: { seq: index, type: 'assistant/message', data: { message: '重复的历史内容 '.repeat(8) } },
+  })),
+})
+const archive = archiveHistoryJson(archiveSource)
+assert.equal(unzipSingleEntry(archive), archiveSource)
+assert.ok(archive.length < Buffer.byteLength(archiveSource) / 5, 'history ZIP should materially reduce the encrypted payload')
 
 const signal = new AbortController().signal
 const calls = []

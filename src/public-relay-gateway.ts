@@ -13,6 +13,7 @@ import type { AgentCapability } from './agent-metadata.js'
 import type { WechatAttachmentObjectDescriptor } from './attachment-service.js'
 import type { HostPlatformDescriptor } from './host-platform.js'
 import { decryptRemoteAttachment, encryptCloudObject, type RemoteAttachmentDescriptor } from './object-crypto.js'
+import { archiveHistoryJson, HISTORY_ARCHIVE_ENTRY } from './history-archive.js'
 import { PublicObjectClient } from './public-object-client.js'
 
 interface ClientContext {
@@ -111,9 +112,17 @@ export class PublicRelayGateway {
     const pending = this.pendingHistorySnapshots.get(digest)
     if (pending) return pending
     const upload = (async (): Promise<Record<string, unknown>> => {
-      const encrypted = encryptCloudObject(new TextEncoder().encode(payloadJson), 'history-json')
+      const archive = archiveHistoryJson(payloadJson)
+      const encrypted = encryptCloudObject(archive, 'history-json')
       const ticket = await this.objectClient.upload('history', encrypted.ciphertext)
-      const descriptor = { ...encrypted.descriptor, objectId: ticket.objectId, expiresAt: ticket.expiresAt }
+      const descriptor = {
+        ...encrypted.descriptor,
+        objectId: ticket.objectId,
+        expiresAt: ticket.expiresAt,
+        contentEncoding: 'zip',
+        archiveEntry: HISTORY_ARCHIVE_ENTRY,
+        originalBytes: Buffer.byteLength(payloadJson),
+      }
       this.historySnapshots.set(digest, { descriptor, expiresAt: ticket.expiresAt })
       while (this.historySnapshots.size > 32) {
         const oldest = this.historySnapshots.keys().next().value as string | undefined

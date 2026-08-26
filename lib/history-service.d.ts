@@ -25,6 +25,8 @@ export interface WechatHistoryWindowRequest {
     readonly sessionId: string;
     readonly beforeSeq?: number;
     readonly maxMessages?: number;
+    /** Force compact JSON inline when the client's object data plane is unavailable. */
+    readonly delivery?: 'auto' | 'inline';
 }
 export interface WechatHistoryWindowValue extends NativeHistoryValue {
     readonly events: readonly HistoryEntry[];

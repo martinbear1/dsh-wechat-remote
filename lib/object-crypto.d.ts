@@ -9,6 +9,7 @@ export interface EncryptedCloudObjectDescriptor {
     readonly cipherBytes: number;
     readonly chunkBytes: number;
     readonly contentKind: 'image' | 'history-json' | 'artifact';
+    readonly contentEncoding?: 'zip';
     readonly mediaType?: string;
     readonly name?: string;
 }

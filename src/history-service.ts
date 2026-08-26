@@ -23,7 +23,10 @@ const MAX_PAGE_MESSAGES = 30
 const MAX_PAGES = 64
 const MAX_RESPONSE_BYTES = 32 * 1024 * 1024
 const DEFAULT_TIMEOUT_MS = 60_000
-const DEFAULT_SNAPSHOT_THRESHOLD_BYTES = 256 * 1024
+// Pure-JS E2EE of a ~150 KiB inline response already costs several seconds on
+// iOS WeChat. Above 32 KiB the encrypted object path wins even on a cold read,
+// especially after ZIP compression; smaller windows avoid object-ticket RTT.
+const DEFAULT_SNAPSHOT_THRESHOLD_BYTES = 32 * 1024
 
 interface HistoryEntry {
   readonly event?: {
@@ -50,6 +53,8 @@ export interface WechatHistoryWindowRequest {
   readonly sessionId: string
   readonly beforeSeq?: number
   readonly maxMessages?: number
+  /** Force compact JSON inline when the client's object data plane is unavailable. */
+  readonly delivery?: 'auto' | 'inline'
 }
 
 export interface WechatHistoryWindowValue extends NativeHistoryValue {
@@ -114,7 +119,7 @@ export class WechatHistoryService extends TypertRemoteService {
       ? Number(config.timeoutMs)
       : DEFAULT_TIMEOUT_MS
     this.snapshotThresholdBytes = Number.isSafeInteger(config.snapshotThresholdBytes)
-      && Number(config.snapshotThresholdBytes) >= 64 * 1024
+      && Number(config.snapshotThresholdBytes) >= 16 * 1024
       ? Number(config.snapshotThresholdBytes)
       : DEFAULT_SNAPSHOT_THRESHOLD_BYTES
     this.storeSnapshot = config.storeSnapshot
@@ -133,7 +138,8 @@ export class WechatHistoryService extends TypertRemoteService {
       ), signal)
       if (!built.ok) return built
       const payloadJson = JSON.stringify(built.value)
-      if (this.storeSnapshot && Buffer.byteLength(payloadJson) >= this.snapshotThresholdBytes) {
+      if (request.delivery !== 'inline' && this.storeSnapshot
+        && Buffer.byteLength(payloadJson) >= this.snapshotThresholdBytes) {
         try {
           return { ok: true, value: { snapshotJson: JSON.stringify(await this.storeSnapshot(payloadJson)) } }
         } catch {
@@ -319,6 +325,9 @@ function validateRequest(request: WechatHistoryWindowRequest): WechatHistoryWind
     && (!Number.isSafeInteger(request.maxMessages)
       || request.maxMessages < 1 || request.maxMessages > MAX_PAGE_MESSAGES)) {
     return { code: 'invalid-history-request', message: '历史窗口大小无效' }
+  }
+  if (request.delivery !== undefined && request.delivery !== 'auto' && request.delivery !== 'inline') {
+    return { code: 'invalid-history-request', message: '历史传输方式无效' }
   }
   return null
 }

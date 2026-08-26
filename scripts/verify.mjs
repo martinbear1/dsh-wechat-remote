@@ -24,11 +24,15 @@ check(new RegExp(`id\\s*:\\s*["']${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[
 for (const legacy of ['@deepseek-ai/dsh-client-ui-pairing', '@harness-remote/dsh-harness-remote']) {
   check(!client.includes(legacy), `lib/client.js 残留异包注册 id（${legacy}）`)
 }
-// 1b. 按钮从本 profile 的 Host Remote 发现实际本地门；3093 只作旧版回退。
-check(client.includes('连接微信'), 'lib/client.js 按钮文案不是「连接微信」')
-check(client.includes('/api/wechatHost.describe'), 'lib/client.js 没有动态发现当前 profile 的本地门')
+// 1b. 页面通过官方 Settings section slot 融入 WebUI，并从本 profile 的
+// Host Remote 发现实际本地门；3093 只作旧版回退。
+check(client.includes('settings.section'), 'lib/client.js 未注册官方 settings.section')
+check(client.includes('微信连接'), 'lib/client.js 设置导航文案不是「微信连接」')
+check(!client.includes('sidebar.footer.action'), 'lib/client.js 不应再占用侧边栏 footer')
+check(client.includes('wechatHost/describe'), 'lib/client.js 没有通过 DSH 原生 RPC 发现当前 profile 的本地门')
+check(!client.includes('/api/wechatHost.describe'), 'lib/client.js 残留错误的手写 Web API 地址')
 check(client.includes('http://127.0.0.1:3093'), 'lib/client.js 缺少旧 web/default 3093 回退')
-for (const required of ['添加到 Harness Remote', '局域网直连', '远程访问', '微信账号保护']) {
+for (const required of ['鲸常在', '添加到微信', '生成配对码', '局域网直连', '远程访问', '微信账号保护']) {
   check(client.includes(required), `lib/client.js 用户配对界面缺少「${required}」`)
 }
 for (const privateDetail of ['relayOrigin', 'lastError', '本机配对门', 'xyxfood.xyz']) {
@@ -39,6 +43,8 @@ check(!client.includes('127.0.0.1:3091'), 'lib/client.js 残留 iOS 本地门端
 for (const sel of ['[class*=_footArea]', '[class*=_settingsArea]', '[class*=_footerActions]']) {
   check(!client.includes(sel), `lib/client.js 不应覆盖官方 WebUI 全局布局 ${sel}`)
 }
+check(client.includes('.hr_'), 'lib/client.js 的 CSS 类名缺少合法字母前缀')
+check(!/\.[0-9][0-9a-f]{6}_[A-Za-z]/.test(client), 'lib/client.js 生成了数字开头的无效 CSS 选择器')
 
 // 2. 宿主网关：微信专用表面与加固基线。
 const entry = readFileSync(path.join(root, 'lib/index.js'), 'utf8')
@@ -64,7 +70,7 @@ check(host.includes('icacls'), 'lib/index.js 缺少 Windows ACL 收紧')
 check(host.includes('DSH 本体继续运行'), 'lib/index.js 缺少端口占用的崩溃隔离（server error 处理器）')
 check(host.includes("runtime.state = disposed ? 'stopped' : 'unavailable'"), '端口错误没有降级成可诊断状态')
 check(host.includes('wechat: {'), 'lib/index.js 缺少 /gate/status 的微信身份字段')
-check(client.includes('微信账号保护'), 'lib/client.js 弹窗缺少「微信账号保护」状态行')
+check(client.includes('微信账号保护'), 'lib/client.js 设置页缺少「微信账号保护」状态行')
 
 // 3. bundle 补丁行必须引用本包名（否则插不进 cordis 图）。
 const patch = readFileSync(path.join(root, 'cordis.patch.yml'), 'utf8')
@@ -86,6 +92,9 @@ check(pkg.exports?.['./dsh-tunnel']?.default === './lib/dsh-tunnel-agent.js', 'p
 check(pkg.exports?.['./public-gateway']?.default === './lib/public-relay-gateway.js', 'package.json exports["./public-gateway"] 未指向公网网关')
 check(pkg.exports?.['./typert']?.default === './lib/typert.host.js', 'package.json exports["./typert"] 未指向严格 Host 契约')
 check(pkg.dsh?.bundle?.patch === './cordis.patch.yml', 'package.json dsh.bundle.patch 未指向 cordis.patch.yml')
+check(pkg.dsh?.client?.inject?.includes('@deepseek-ai/dsh-client-ui-settings'), '客户端未注入官方 Settings 契约')
+check(pkg.dsh?.client?.inject?.includes('@deepseek-ai/dsh-client-connection'), '客户端未注入官方 Connection RPC 载体')
+check(!pkg.dsh?.client?.inject?.includes('@deepseek-ai/dsh-client-ui-sidebar'), '客户端不应再注入 Sidebar UI')
 
 // 4b. 小程序目录能力必须是本包自己的惰性 Remote 服务，不能重新占用
 // DSH 的全局 directoryPicker seam。

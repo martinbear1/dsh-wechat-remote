@@ -21,10 +21,12 @@ const cssModules = {
   setup(buildApi) {
     buildApi.onLoad({ filter: /\.module\.css$/ }, async ({ path: file }) => {
       const source = await readFile(file, 'utf8')
-      const prefix = createHash('sha256')
+      // CSS identifiers cannot begin with a digit. Prefixing the digest keeps
+      // every generated selector valid regardless of the hash's first nibble.
+      const prefix = `hr_${createHash('sha256')
         .update(`${file}\0${source}`)
         .digest('hex')
-        .slice(0, 7)
+        .slice(0, 7)}`
       const names = [...source.matchAll(/\.([A-Za-z_][A-Za-z0-9_-]*)/g)].map(
         (match) => match[1],
       )
@@ -74,8 +76,9 @@ const result = await build({
     'react-dom',
     'react-dom/client',
     '@deepseek-ai/cordis',
+    '@deepseek-ai/dsh-client-connection/client',
     '@deepseek-ai/dsh-client-runtime/client',
-    '@deepseek-ai/dsh-client-ui-sidebar/client',
+    '@deepseek-ai/dsh-client-ui-settings/client',
     '@deepseek-ai/dsh-client-ui-slots',
   ],
   plugins: [cssModules],

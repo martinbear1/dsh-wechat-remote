@@ -1,12 +1,12 @@
 # Harness Remote for DeepSeek Harness
 
 在电脑上的 DeepSeek Harness 安装一个插件，用微信扫码添加这台电脑，随后即可在
-Harness Remote 小程序中查看工作区和会话、发送任务，并在局域网与移动网络之间继续工作。
+「鲸常在」小程序中查看工作区和会话、发送任务，并在局域网与移动网络之间继续工作。
 
-Harness Remote 是与 WebUI 平级的独立 DSH 客户端。它直接使用 DSH 的原生 RPC、事件和
+「鲸常在」是与 WebUI 平级的独立 DSH 客户端。它直接使用 DSH 的原生 RPC、事件和
 会话数据，不抓取网页、不修改 WebUI，也不替换 DeepSeek Harness 本体。
 
-当前插件版本：`v1.4.3`
+当前插件版本：`v1.4.4`
 
 ## 用户能获得什么
 
@@ -26,7 +26,7 @@ Harness Remote 是与 WebUI 平级的独立 DSH 客户端。它直接使用 DSH 
 | macOS | 正式支持并完成真机验证 |
 | Linux | 具备平台适配，尚未列入本版本真机验收基线 |
 | DeepSeek Harness | 当前验收基线为 `0.1.1-rc.2` |
-| 微信客户端 | Harness Remote 小程序 |
+| 微信客户端 | 「鲸常在」小程序 |
 
 电脑需要能够运行 `dsh`、`node`、`npm` 和 `git`。安装命令会临时提供 DSH 插件管理所需的
 `pnpm`，不要求用户提前全局安装。
@@ -49,7 +49,7 @@ dsh plugin --profile web add github:martinbear1/dsh-wechat-remote
 `main`；需要固定复现或回退时再追加版本标签，例如：
 
 ```bash
-dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.4.3
+dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.4.4
 ```
 
 `dsh plugin` 是 DeepSeek Harness 官方插件管理入口。DSH 会把 `add/remove/why` 等参数原样
@@ -73,7 +73,7 @@ dsh web
 如果 `dsh web` 已在终端中运行，先在原终端按 `Ctrl + C` 正常停止，再重新执行。插件遵守
 DSH 的启动加载机制，不会自行重启 DSH，因为强制重启可能中断正在执行的任务。
 
-打开 DSH WebUI 后，侧边栏底部出现 **连接微信**，即表示插件已经加载。
+打开 DSH WebUI 后，进入 **设置 → 微信连接**；能看到「鲸常在」状态页即表示插件已经加载。
 
 ### 安装其他 profile
 
@@ -87,9 +87,9 @@ dsh plugin --profile <profile> add github:martinbear1/dsh-wechat-remote
 
 ## 添加到微信
 
-1. 在电脑 DSH WebUI 侧边栏点击 **连接微信**。
-2. 弹窗会显示 `DeepSeek Harness · 电脑名称`、二维码和有效期。
-3. 打开 Harness Remote 小程序，进入 **添加节点**。
+1. 在电脑 DSH WebUI 进入 **设置 → 微信连接**。
+2. 确认连接状态正常，然后点击 **生成配对码**。
+3. 打开「鲸常在」小程序，进入 **添加节点**。
 4. 扫描二维码并确认添加。
 5. 小程序自动完成微信身份验证，并显示这台电脑上的工作区和会话。
 
@@ -192,7 +192,7 @@ Harness Remote 遵守以下约束：
 数据路径如下：
 
 ```text
-Harness Remote 小程序
+「鲸常在」小程序
     ├─ 同网：加密凭据保护的局域网直连 ───────────────┐
     └─ 异网：端到端加密实时中继 ────────────────────┤
                                                      ▼
@@ -218,10 +218,11 @@ Windows 与 macOS 不需要不同仓库、不同安装包或平台专用启动�
 
 ## 常见问题
 
-### 安装后没有“连接微信”
+### 安装后没有“微信连接”
 
 确认安装命令成功，并真正停止后重新启动了对应 profile 的 DSH。浏览器刷新 WebUI；如果终端
-显示插件加载错误，请保留完整 DSH 启动日志用于排查。
+显示插件加载错误，请保留完整 DSH 启动日志用于排查。Harness Remote 使用 DSH 官方
+`settings.section` 扩展槽，只会在设置导航中出现，不会在会话侧边栏增加入口。
 
 ### 出现 `ERR_PNPM_UNEXPECTED_STORE`
 
@@ -261,7 +262,7 @@ npm exec --yes --package=pnpm@11 -- pnpm install --force
 
 - 启动 DSH 的终端输出；
 - 当前用户目录下 `.dsh/wechat-gate-access.log`；
-- Harness Remote 小程序的“小程序日志”。
+- 「鲸常在」小程序的“小程序日志”。
 
 向维护者反馈时请隐藏配对码、二维码、令牌和个人路径。
 

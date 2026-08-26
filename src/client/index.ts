@@ -1,27 +1,63 @@
 /**
- * Harness Remote（微信版）pairing surface, browser half: a QR pairing button
- * with LAN/public-relay connectivity status, rendered beside Settings at the
- * sidebar foot through the `sidebar.footer.action` slot. The pairing endpoints
- * live on the WeChat gate in front of this host (local door 127.0.0.1:3093):
- * the button simply fetches /pair/code and /gate/status and shows a modal —
- * no DSH transport involvement.
+ * Harness Remote browser surface. The plugin contributes one lazy page to the
+ * official Web Settings section ledger. Pairing remains owned by the
+ * WeChat gate's loopback-only door; this client page only presents status and
+ * requests a short-lived QR code when the user explicitly asks for one.
  */
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
-// Type-only: pulls the ui-sidebar SlotMap merge (the footer action entry).
-import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
-import { PairingButton } from './PairingButton.tsx'
+import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
+// Type-only: pulls the canonical Settings slot contract.
+import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
+import {
+  HarnessRemoteSettings,
+  type HarnessRemoteHostDescription,
+} from './HarnessRemoteSettings.tsx'
 
 /** Required services for the slot registration. */
-export const inject = ['slots']
+export const inject = ['slots', 'connection']
+
+type HarnessRemoteClientContext = ClientContext & {
+  connection: ConnectionHandle
+}
+
+interface WechatHostDescribeResult {
+  ok: true
+  value: HarnessRemoteHostDescription
+}
 
 /**
- * Client plugin body: registers the pairing action into the footer slot.
+ * Register a feature-owned page inside the official Settings shell.
+ * `slots.inject` follows late declaration/redeclaration of the section and
+ * ensures the registration is disposed with this Cordis fiber.
  * @param ctx - client root context.
  */
-export function apply(ctx: ClientContext): void {
-  ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
-    name: 'sidebar.footer.action',
-    id: 'wechat-pairing',
-    order: 30,
-  }, PairingButton))
+export function apply(ctx: HarnessRemoteClientContext): void {
+  const describeHost = async (): Promise<HarnessRemoteHostDescription> => {
+    const response = await ctx.connection.rpc.call(
+      '/api',
+      'wechatHost/describe',
+      { args: { request: {} } },
+    )
+    if (!response.ok) {
+      throw new Error(`wechatHost/describe: ${response.error.code}`)
+    }
+    const result = response.value as WechatHostDescribeResult
+    if (result?.ok !== true || result.value === undefined) {
+      throw new Error('wechatHost/describe returned an invalid result')
+    }
+    return result.value
+  }
+
+  ctx.slots.inject('settings.section', () =>
+    ctx.slots.register(
+      {
+        name: 'settings.section',
+        id: 'harness-remote',
+        order: 30,
+        label: '微信连接',
+        inject: () => ({ describeHost }),
+      },
+      HarnessRemoteSettings,
+    ),
+  )
 }

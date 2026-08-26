@@ -48,13 +48,13 @@
 **默认装最新正式版**（推荐）：
 
 ```bash
-npm exec --yes --package=pnpm@10 -- dsh plugin --profile web add github:martinbear1/dsh-wechat-remote
+npm exec --yes --package=pnpm@11 -- dsh plugin --profile web add github:martinbear1/dsh-wechat-remote
 ```
 
-**或指定版本**（稳定复现，如 `#v1.2.0`）：
+**或指定版本**（稳定复现，如 `#v1.2.1`）：
 
 ```bash
-npm exec --yes --package=pnpm@10 -- dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.2.0
+npm exec --yes --package=pnpm@11 -- dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.2.1
 ```
 
 然后**重启 DSH**，打开 `http://127.0.0.1:3080`，侧边栏底部出现

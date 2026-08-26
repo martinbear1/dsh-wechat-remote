@@ -105,19 +105,25 @@ try {
       onFrame() {},
       async fetchImpl(_url, options) {
         enrollmentBody = JSON.parse(options.body)
-        return new Response(JSON.stringify({ ticket: 'ticket', expiresAt: Date.now() + 60000 }), {
+        return new Response(JSON.stringify({
+          ticket: 'ticket',
+          expiresAt: Date.now() + 60000,
+          remoteAccess: { status: 'active', validUntil: Date.now() + 30 * 86400000 },
+        }), {
           status: 200,
           headers: { 'content-type': 'application/json' },
         })
       },
     },
   )
-  await metadataAgent.enroll()
+  const enrollmentStatus = await metadataAgent.ensurePairingTicket()
   assert.equal(enrollmentBody.agentVersion, '0.1.1-rc.2')
   assert.equal(enrollmentBody.adapterVersion, '1.1.0')
   assert.equal(enrollmentBody.hostId, 'host-id-1234567890123456')
   assert.equal(enrollmentBody.agentInstanceId, 'agent-id-123456789012345')
   assert.deepEqual(enrollmentBody.capabilities, [{ id: 'dsh.rpc', version: 1 }])
+  assert.equal(enrollmentStatus.remoteAccess.status, 'active')
+  assert.equal(typeof enrollmentStatus.remoteAccess.validUntil, 'number')
 
   const atomicPath = path.join(root, 'atomic-state.json')
   writePrivateJsonAtomic(atomicPath, { generation: 1 })

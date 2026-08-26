@@ -45,6 +45,18 @@ export interface AgentIdentity {
   readonly privateKeyPem: string
 }
 
+export type RemoteAccessState =
+  | 'active'
+  | 'pending'
+  | 'expired'
+  | 'suspended'
+  | 'not_entitled'
+
+export interface RemoteAccessStatus {
+  readonly status: RemoteAccessState
+  readonly validUntil?: number | null
+}
+
 export interface AgentStatus {
   readonly enabled: boolean
   readonly state: 'disabled' | 'enrolling' | 'connecting' | 'online' | 'offline'
@@ -63,6 +75,7 @@ export interface AgentStatus {
   readonly adapterVersion?: string
   readonly hostPlatform?: HostPlatformDescriptor
   readonly capabilities?: readonly AgentCapability[]
+  readonly remoteAccess?: RemoteAccessStatus
 }
 
 export interface RelayClientFrame {
@@ -137,7 +150,11 @@ export class PublicRelayAgent {
   private stopped = true
   private reconnectAttempt = 0
   private reconnectTimer: NodeJS.Timeout | null = null
-  private enrollment: Promise<{ ticket?: string; expiresAt?: number }> | null = null
+  private enrollment: Promise<{
+    ticket?: string
+    expiresAt?: number
+    remoteAccess?: RemoteAccessStatus
+  }> | null = null
   private status: AgentStatus
 
   constructor(config: PublicRelayConfig, options: PublicRelayAgentOptions) {
@@ -179,7 +196,11 @@ export class PublicRelayAgent {
       return this.snapshot()
     }
     const body = await this.enroll()
-    this.update({ pairingTicket: body.ticket, pairingExpiresAt: body.expiresAt })
+    this.update({
+      pairingTicket: body.ticket,
+      pairingExpiresAt: body.expiresAt,
+      ...(body.remoteAccess ? { remoteAccess: body.remoteAccess } : {}),
+    })
     return this.snapshot()
   }
 
@@ -196,7 +217,12 @@ export class PublicRelayAgent {
     try {
       this.update({ state: 'enrolling', lastError: undefined })
       const body = await this.enroll()
-      this.update({ pairingTicket: body.ticket, pairingExpiresAt: body.expiresAt, state: 'connecting' })
+      this.update({
+        pairingTicket: body.ticket,
+        pairingExpiresAt: body.expiresAt,
+        state: 'connecting',
+        ...(body.remoteAccess ? { remoteAccess: body.remoteAccess } : {}),
+      })
       this.connect()
     } catch (error) {
       this.update({ state: 'offline', lastError: error instanceof Error ? error.message : String(error) })
@@ -204,7 +230,11 @@ export class PublicRelayAgent {
     }
   }
 
-  private enroll(): Promise<{ ticket?: string; expiresAt?: number }> {
+  private enroll(): Promise<{
+    ticket?: string
+    expiresAt?: number
+    remoteAccess?: RemoteAccessStatus
+  }> {
     if (this.enrollment) return this.enrollment
     this.enrollment = (async () => {
       const timestamp = Date.now()
@@ -236,7 +266,16 @@ export class PublicRelayAgent {
         signal: AbortSignal.timeout(10_000),
       })
       if (!response.ok) throw new Error(`Relay enrollment failed with HTTP ${response.status}`)
-      return await response.json() as { ticket?: string; expiresAt?: number }
+      const body = await response.json() as {
+        ticket?: string
+        expiresAt?: number
+        remoteAccess?: unknown
+      }
+      return {
+        ticket: body.ticket,
+        expiresAt: body.expiresAt,
+        remoteAccess: normalizeRemoteAccess(body.remoteAccess),
+      }
     })()
     return this.enrollment.finally(() => { this.enrollment = null })
   }
@@ -273,9 +312,15 @@ export class PublicRelayAgent {
     socket.on('message', (data, isBinary) => {
       if (!isBinary) {
         try {
-          const event = JSON.parse(data.toString()) as { readonly type?: unknown; readonly clientId?: unknown }
+          const event = JSON.parse(data.toString()) as {
+            readonly type?: unknown
+            readonly clientId?: unknown
+            readonly remoteAccess?: unknown
+          }
           if (event.type === 'client.disconnected' && typeof event.clientId === 'string') {
             this.options.onClientDisconnect?.(event.clientId)
+          } else if (event.type === 'relay.ready' || event.type === 'relay.access') {
+            this.update({ remoteAccess: normalizeRemoteAccess(event.remoteAccess) })
           }
         } catch { /* ignore unknown relay control frames */ }
         return
@@ -342,6 +387,24 @@ export class PublicRelayAgent {
   private update(patch: Partial<AgentStatus>): void {
     this.status = { ...this.status, ...patch }
     this.options.onStatus?.(this.snapshot())
+  }
+}
+
+function normalizeRemoteAccess(value: unknown): RemoteAccessStatus | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const raw = value as { readonly status?: unknown; readonly validUntil?: unknown }
+  if (
+    raw.status !== 'active' &&
+    raw.status !== 'pending' &&
+    raw.status !== 'expired' &&
+    raw.status !== 'suspended' &&
+    raw.status !== 'not_entitled'
+  ) return undefined
+  return {
+    status: raw.status,
+    validUntil: typeof raw.validUntil === 'number' && Number.isFinite(raw.validUntil)
+      ? raw.validUntil
+      : null,
   }
 }
 

@@ -586,6 +586,7 @@ code{color:#7aa2ff;font-size:15px;letter-spacing:3px}
         publicRelay: {
           enabled: publicRelayStatus.enabled === true,
           state: publicRelayStatus.state || 'disabled',
+          remoteAccess: publicRelayStatus.remoteAccess || null,
         },
         agent: {
           agentName: agentDescriptor.agentName,

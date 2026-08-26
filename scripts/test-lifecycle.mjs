@@ -62,9 +62,10 @@ const childSource = `
   const status = await response.json()
   assert.deepEqual(
     Object.keys(status.publicRelay).sort(),
-    ['enabled', 'state'],
+    ['enabled', 'remoteAccess', 'state'],
     'user-facing status must not expose relay origin or raw errors',
   )
+  assert.equal(status.publicRelay.remoteAccess, null)
   assert.deepEqual(
     Object.keys(status.agent).sort(),
     ['agentName', 'hostName'],

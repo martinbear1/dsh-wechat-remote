@@ -6,13 +6,15 @@
 「鲸常在」是与 WebUI 平级的独立 DSH 客户端。它直接使用 DSH 的原生 RPC、事件和
 会话数据，不抓取网页、不修改 WebUI，也不替换 DeepSeek Harness 本体。
 
-当前插件版本：`v1.4.4`
+当前插件版本：`v1.5.0`
 
 ## 用户能获得什么
 
 - **扫码添加节点**：不填写 IP、端口或密码；一个二维码同时配置本地和远程连接。
 - **自动选择路线**：同一网络优先局域网直连，离开 Wi-Fi 后自动使用远程连接。
 - **微信账号绑定**：远程节点与完成配对的微信用户绑定，不能只凭节点地址访问。
+- **账户权益同步**：远程访问由小程序中的微信账户统一开通；局域网始终免费，插件只展示
+  当前状态，不保存微信资料、不负责收费，也不改变 DSH 配置。
 - **端到端加密**：远程会话内容在手机与电脑之间加密，中继服务只转发密文。
 - **原生 DSH 能力**：工作区、会话、实时事件、历史、附件和目录操作均来自 DSH 规范接口。
 - **Windows 与 macOS 通用**：同一个仓库、同一个版本、同一条安装命令。
@@ -49,7 +51,7 @@ dsh plugin --profile web add github:martinbear1/dsh-wechat-remote
 `main`；需要固定复现或回退时再追加版本标签，例如：
 
 ```bash
-dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.4.4
+dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.5.0
 ```
 
 `dsh plugin` 是 DeepSeek Harness 官方插件管理入口。DSH 会把 `add/remove/why` 等参数原样
@@ -101,6 +103,10 @@ dsh plugin --profile <profile> add github:martinbear1/dsh-wechat-remote
 
 服务器域名、端口、令牌、内部节点 ID 和底层异常不会展示给普通用户。需要排查故障时，
 诊断信息只保留在电脑本机日志中。
+
+「远程访问」显示的是当前节点所属微信账户的公网权益与 Agent 在线状态。申请体验、兑换码、
+有效期和用量统一在小程序设置页顶部的「公网访问」卡片管理；这些信息不重复放进 DSH 设置，
+也不会影响同网 Wi-Fi 的局域网直连。
 
 ## 日常使用
 

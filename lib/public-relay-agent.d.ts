@@ -10,6 +10,11 @@ export interface AgentIdentity {
     readonly publicKeyPem: string;
     readonly privateKeyPem: string;
 }
+export type RemoteAccessState = 'active' | 'pending' | 'expired' | 'suspended' | 'not_entitled';
+export interface RemoteAccessStatus {
+    readonly status: RemoteAccessState;
+    readonly validUntil?: number | null;
+}
 export interface AgentStatus {
     readonly enabled: boolean;
     readonly state: 'disabled' | 'enrolling' | 'connecting' | 'online' | 'offline';
@@ -28,6 +33,7 @@ export interface AgentStatus {
     readonly adapterVersion?: string;
     readonly hostPlatform?: HostPlatformDescriptor;
     readonly capabilities?: readonly AgentCapability[];
+    readonly remoteAccess?: RemoteAccessStatus;
 }
 export interface RelayClientFrame {
     readonly clientId: string;

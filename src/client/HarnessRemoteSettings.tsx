@@ -35,6 +35,10 @@ interface GateStatusResp {
   publicRelay: {
     enabled: boolean
     state: 'disabled' | 'enrolling' | 'connecting' | 'online' | 'offline'
+    remoteAccess?: {
+      status: 'active' | 'pending' | 'expired' | 'suspended' | 'not_entitled'
+      validUntil?: number | null
+    } | null
   }
   agent?: {
     agentName?: string
@@ -191,14 +195,23 @@ export function HarnessRemoteSettings({
 
   const relay = status?.publicRelay
   const publicBusy = relay?.state === 'enrolling' || relay?.state === 'connecting'
-  const publicReady = relay?.state === 'online'
-  const publicDetail = publicReady
-    ? '可在外网安全连接'
-    : publicBusy
-      ? '正在准备远程连接'
-      : relay?.enabled
-        ? '暂时离线'
-        : '未启用'
+  const remoteAccessState = relay?.remoteAccess?.status
+  const publicReady = relay?.state === 'online' && remoteAccessState === 'active'
+  const publicDetail = remoteAccessState === 'suspended'
+    ? '账户公网访问已暂停'
+    : remoteAccessState === 'pending'
+      ? '体验申请审核中'
+      : remoteAccessState === 'expired'
+        ? '公网访问已到期'
+        : remoteAccessState === 'not_entitled'
+          ? '请在小程序中申请体验'
+          : remoteAccessState !== 'active'
+            ? '配对后由小程序账户决定'
+            : publicReady
+              ? '可在外网安全连接'
+              : publicBusy
+                ? '正在准备远程连接'
+                : '暂时离线'
 
   const localDoor = runtime?.localDoor ?? status?.gate?.localDoor
   const lanReady =

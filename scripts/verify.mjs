@@ -117,6 +117,11 @@ check(history.includes("method: 'session.history'") || history.includes('method:
 check(history.includes("event?.type !== 'assistant/chunk'") || history.includes('event?.type !== "assistant/chunk"'), '历史服务没有压缩已完成轮次的流式增量')
 check(history.includes("host: '127.0.0.1'") || history.includes('host: "127.0.0.1"'), '历史服务数据源不是 loopback DSH')
 check(typert.includes('wechatHistory/window'), '严格 Typert 契约缺少 wechatHistory/window')
+const historySnapshotCache = readFileSync(path.join(root, 'lib/history-snapshot-cache.js'), 'utf8')
+check(host.includes('wechat-history-snapshots-'), '宿主没有按 Agent 隔离历史快照索引')
+check(historySnapshotCache.includes('writePrivateJsonAtomic'), '历史快照索引没有使用私密原子写入')
+check(historySnapshotCache.includes('MAX_CACHE_ENTRIES = 32'), '历史快照索引缺少有界容量')
+check(!historySnapshotCache.includes('payloadJson'), '历史快照索引不应接收或保存会话 JSON 明文')
 
 // 4e. 历史图片对象加速必须先读取原生 session.attachment；OSS 只是端侧
 // 加密传输层，失败可回退，且不能绕过 DSH 的会话引用授权。

@@ -10,5 +10,5 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["src/index.ts", "src/directory-service.ts", "src/directory-worker.ts", "src/host-platform.ts", "src/host-info-service.ts", "src/history-service.ts", "src/history-archive.ts", "src/attachment-service.ts", "src/public-relay-agent.ts", "src/public-relay-gateway.ts", "src/public-object-client.ts", "src/object-crypto.ts", "src/e2ee-session.ts", "src/dsh-tunnel-agent.ts", "src/agent-metadata.ts", "src/gate-ports.ts", "src/secure-file.ts"]
+  "include": ["src/index.ts", "src/directory-service.ts", "src/directory-worker.ts", "src/host-platform.ts", "src/host-info-service.ts", "src/history-service.ts", "src/history-archive.ts", "src/history-snapshot-cache.ts", "src/attachment-service.ts", "src/public-relay-agent.ts", "src/public-relay-gateway.ts", "src/public-object-client.ts", "src/object-crypto.ts", "src/e2ee-session.ts", "src/dsh-tunnel-agent.ts", "src/agent-metadata.ts", "src/gate-ports.ts", "src/secure-file.ts"]
 }

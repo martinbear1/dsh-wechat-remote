@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { createHash, randomBytes } from 'node:crypto'
 import { inflateRawSync } from 'node:zlib'
 import {
   agentNodeIdForPublicKey,
@@ -14,6 +15,7 @@ import {
 import PublicRelayGateway from '../lib/public-relay-gateway.js'
 import { DshTunnelAgent } from '../lib/dsh-tunnel-agent.js'
 import { writePrivateJsonAtomic } from '../lib/secure-file.js'
+import HistorySnapshotCache from '../lib/history-snapshot-cache.js'
 
 function unzipSingleEntry(archive) {
   const value = Buffer.from(archive)
@@ -121,6 +123,105 @@ try {
   writePrivateJsonAtomic(atomicPath, { generation: 1 })
   writePrivateJsonAtomic(atomicPath, { generation: 2 })
   assert.deepEqual(JSON.parse(readFileSync(atomicPath, 'utf8')), { generation: 2 })
+
+  // The restart cache stores only a bounded encrypted object descriptor. It
+  // must survive a new gateway process without persisting any clear history.
+  const cachePath = path.join(root, 'history-snapshot-cache.json')
+  const cacheNow = Date.now()
+  const clearMarker = 'PRIVATE CONVERSATION CONTENT MUST NEVER BE STORED HERE'
+  const cachedPayload = JSON.stringify({ events: [{ text: clearMarker }, {
+    text: randomBytes(180 * 1024).toString('base64'),
+  }] })
+  const cachedDigest = createHash('sha256').update(cachedPayload).digest('base64url')
+  const encryptedDescriptor = {
+    v: 1,
+    scheme: 'xsalsa20-poly1305-chunks-v1',
+    objectId: randomBytes(18).toString('base64url'),
+    key: randomBytes(32).toString('base64url'),
+    noncePrefix: randomBytes(16).toString('base64url'),
+    plainBytes: 180_000,
+    cipherBytes: 180_020,
+    chunkBytes: 256 * 1024,
+    contentKind: 'history-json',
+    contentEncoding: 'zip',
+    archiveEntry: 'history.json',
+    originalBytes: Buffer.byteLength(cachedPayload),
+    expiresAt: cacheNow + 60 * 60_000,
+  }
+  const firstCache = new HistorySnapshotCache({ file: cachePath, now: () => cacheNow })
+  firstCache.set(cachedDigest, encryptedDescriptor)
+  const serializedCache = readFileSync(cachePath, 'utf8')
+  assert.equal(serializedCache.includes(clearMarker), false, 'restart cache must never persist clear history')
+  if (process.platform !== 'win32') assert.equal(statSync(cachePath).mode & 0o077, 0, 'restart cache must be owner-only')
+
+  const cacheDiagnostics = []
+  const restoredCache = new HistorySnapshotCache({
+    file: cachePath,
+    now: () => cacheNow,
+    onDiagnostic(level, message) { cacheDiagnostics.push({ level, message }) },
+  })
+  assert.deepEqual(restoredCache.get(cachedDigest), encryptedDescriptor)
+  assert.match(cacheDiagnostics[0].message, /restored 1 encrypted history snapshot/)
+
+  // Invalid and expired entries are ignored independently; one damaged entry
+  // cannot poison other valid restart cache records.
+  const storedCache = JSON.parse(serializedCache)
+  storedCache.entries.push({
+    digest: randomBytes(32).toString('base64url'),
+    descriptor: { ...encryptedDescriptor, expiresAt: cacheNow - 1 },
+    expiresAt: cacheNow - 1,
+  })
+  storedCache.entries.push({
+    digest: randomBytes(32).toString('base64url'),
+    descriptor: { ...encryptedDescriptor, key: 'tampered' },
+    expiresAt: encryptedDescriptor.expiresAt,
+  })
+  writePrivateJsonAtomic(cachePath, storedCache)
+  const filteredDiagnostics = []
+  const filteredCache = new HistorySnapshotCache({
+    file: cachePath,
+    now: () => cacheNow,
+    onDiagnostic(level, message) { filteredDiagnostics.push({ level, message }) },
+  })
+  assert.equal(filteredCache.size, 1)
+  assert.match(filteredDiagnostics[0].message, /ignored 2 invalid/)
+
+  const boundedCache = new HistorySnapshotCache({ now: () => cacheNow })
+  for (let index = 0; index < 40; index += 1) {
+    boundedCache.set(randomBytes(32).toString('base64url'), {
+      ...encryptedDescriptor,
+      objectId: randomBytes(18).toString('base64url'),
+    })
+  }
+  assert.equal(boundedCache.size, 32, 'restart cache must remain bounded')
+
+  const corruptCachePath = path.join(root, 'corrupt-history-cache.json')
+  writeFileSync(corruptCachePath, '{not-json')
+  const corruptDiagnostics = []
+  const corruptCache = new HistorySnapshotCache({
+    file: corruptCachePath,
+    now: () => cacheNow,
+    onDiagnostic(level, message) { corruptDiagnostics.push({ level, message }) },
+  })
+  assert.equal(corruptCache.size, 0)
+  assert.equal(corruptDiagnostics[0].level, 'warn')
+  assert.doesNotThrow(() => corruptCache.set(cachedDigest, encryptedDescriptor), 'cache corruption must not affect DSH')
+  assert.equal(readFileSync(corruptCachePath, 'utf8'), '{not-json', 'malformed cache evidence must not be overwritten')
+
+  // A new gateway instance must return the persisted descriptor before any
+  // upload-ticket request. This proves restart reuse rather than only testing
+  // the cache class in isolation.
+  const cachedGateway = new PublicRelayGateway(
+    { enabled: true, relayOrigin: 'https://relay.example.test' },
+    {
+      agentVersion: 'test',
+      identityPath: path.join(root, 'cached-gateway-identity.json'),
+      historyCachePath: cachePath,
+      fetchImpl() { throw new Error('cache hit unexpectedly contacted object service') },
+    },
+  )
+  assert.deepEqual(await cachedGateway.prepareHistorySnapshot(cachedPayload), encryptedDescriptor)
+  cachedGateway.stop()
 
   // Regression: a synchronous gateway error must be isolated to that client.
   // Promise.resolve(callback()) does not catch a synchronous callback throw

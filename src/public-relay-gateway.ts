@@ -15,6 +15,7 @@ import type { HostPlatformDescriptor } from './host-platform.js'
 import { decryptRemoteAttachment, encryptCloudObject, type RemoteAttachmentDescriptor } from './object-crypto.js'
 import { archiveHistoryJson, HISTORY_ARCHIVE_ENTRY } from './history-archive.js'
 import { PublicObjectClient } from './public-object-client.js'
+import HistorySnapshotCache from './history-snapshot-cache.js'
 
 // Compact history is already protected by the node/client E2EE session.  A
 // small ZIP is faster and cheaper to carry in that existing response than to
@@ -46,6 +47,8 @@ export interface PublicRelayGatewayOptions {
   readonly onStatus?: (status: AgentStatus) => void
   readonly fetchImpl?: typeof fetch
   readonly identityPath?: string
+  readonly historyCachePath?: string
+  readonly onDiagnostic?: (level: 'info' | 'warn', message: string) => void
 }
 
 export class PublicRelayGateway {
@@ -56,10 +59,7 @@ export class PublicRelayGateway {
   private readonly maxStreamsPerClient: number
   private readonly issueLanCredential?: PublicRelayGatewayOptions['issueLanCredential']
   private readonly objectClient: PublicObjectClient
-  private readonly historySnapshots = new Map<string, {
-    readonly descriptor: Record<string, unknown>
-    readonly expiresAt: number
-  }>()
+  private readonly historySnapshots: HistorySnapshotCache
   private readonly pendingHistorySnapshots = new Map<string, Promise<Record<string, unknown>>>()
   private readonly attachmentObjects = new Map<string, {
     readonly descriptor: WechatAttachmentObjectDescriptor
@@ -96,6 +96,10 @@ export class PublicRelayGateway {
     }
     this.agent = new PublicRelayAgent(config, agentOptions)
     this.objectClient = new PublicObjectClient(config.relayOrigin, this.agent.identity, this.agent.fetchImpl)
+    this.historySnapshots = new HistorySnapshotCache({
+      file: options.historyCachePath,
+      onDiagnostic: options.onDiagnostic,
+    })
   }
 
   start(): Promise<void> {
@@ -124,7 +128,7 @@ export class PublicRelayGateway {
     }
     const digest = createHash('sha256').update(payloadJson).digest('base64url')
     const cached = this.historySnapshots.get(digest)
-    if (cached && cached.expiresAt > Date.now() + 60_000) return cached.descriptor
+    if (cached) return cached
     const pending = this.pendingHistorySnapshots.get(digest)
     if (pending) return pending
     const upload = (async (): Promise<Record<string, unknown>> => {
@@ -138,13 +142,7 @@ export class PublicRelayGateway {
         archiveEntry: HISTORY_ARCHIVE_ENTRY,
         originalBytes: Buffer.byteLength(payloadJson),
       }
-      this.historySnapshots.set(digest, { descriptor, expiresAt: ticket.expiresAt })
-      while (this.historySnapshots.size > 32) {
-        const oldest = this.historySnapshots.keys().next().value as string | undefined
-        if (!oldest) break
-        this.historySnapshots.delete(oldest)
-      }
-      return descriptor
+      return this.historySnapshots.set(digest, descriptor)
     })()
     this.pendingHistorySnapshots.set(digest, upload)
     try {

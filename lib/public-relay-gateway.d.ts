@@ -23,6 +23,8 @@ export interface PublicRelayGatewayOptions {
     readonly onStatus?: (status: AgentStatus) => void;
     readonly fetchImpl?: typeof fetch;
     readonly identityPath?: string;
+    readonly historyCachePath?: string;
+    readonly onDiagnostic?: (level: 'info' | 'warn', message: string) => void;
 }
 export declare class PublicRelayGateway {
     readonly agent: PublicRelayAgent;

@@ -53,10 +53,10 @@
 npm exec --yes --package=pnpm@10 -- dsh plugin --profile web add github:martinbear1/dsh-wechat-remote
 ```
 
-**或指定版本**（稳定复现，如 `#v1.0.7`）：
+**或指定版本**（稳定复现，如 `#v1.1.0`）：
 
 ```bash
-npm exec --yes --package=pnpm@10 -- dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.0.7
+npm exec --yes --package=pnpm@10 -- dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.1.0
 ```
 
 然后**重启 DSH**，打开 `http://127.0.0.1:3080`，侧边栏底部出现
@@ -122,7 +122,7 @@ dsh web
    （开发者工具模拟器无摄像头，可手动输入配对码）→ 自动完成 openid 绑定与登录
 3. 之后每次打开小程序即自动复核身份并连接
 
-### 公网连接配置（研究分支）
+### 公网连接配置
 
 正常用户**不需要创建配置文件**。安装并重启 DSH 后，插件会生成本机独立 Ed25519
 身份，只向产品官方中继 `https://relay.xyxfood.xyz` 主动发起 443/WSS 出站连接；同一个

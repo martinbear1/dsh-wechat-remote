@@ -67,7 +67,7 @@ try {
     agentKind: 'deepseek-harness',
     agentName: 'DeepSeek Harness',
     agentVersion: '0.1.1-rc.2',
-    adapterVersion: '1.1.0-public-research.8',
+    adapterVersion: '1.1.0',
     capabilities: [{ id: 'dsh.rpc', version: 1 }],
   }))
   assert.equal(metadataPayload.v, 1, 'metadata extensions must preserve QR protocol v1')
@@ -81,7 +81,7 @@ try {
     { enabled: true, relayOrigin: 'https://relay.example.test' },
     {
       agentVersion: '0.1.1-rc.2',
-      adapterVersion: '1.1.0-public-research.8',
+      adapterVersion: '1.1.0',
       hostId: 'host-id-1234567890123456',
       agentInstanceId: 'agent-id-123456789012345',
       agentKind: 'deepseek-harness',
@@ -101,7 +101,7 @@ try {
   )
   await metadataAgent.enroll()
   assert.equal(enrollmentBody.agentVersion, '0.1.1-rc.2')
-  assert.equal(enrollmentBody.adapterVersion, '1.1.0-public-research.8')
+  assert.equal(enrollmentBody.adapterVersion, '1.1.0')
   assert.equal(enrollmentBody.hostId, 'host-id-1234567890123456')
   assert.equal(enrollmentBody.agentInstanceId, 'agent-id-123456789012345')
   assert.deepEqual(enrollmentBody.capabilities, [{ id: 'dsh.rpc', version: 1 }])

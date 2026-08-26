@@ -26,17 +26,21 @@ export class PublicObjectClient {
     private readonly fetchImpl: typeof fetch = fetch,
   ) {}
 
-  async download(objectId: string, expectedMaximum = 20 * 1024 * 1024 + 4096): Promise<Uint8Array> {
+  async download(
+    objectId: string,
+    expectedMaximum = 20 * 1024 * 1024 + 4096,
+    signal?: AbortSignal,
+  ): Promise<Uint8Array> {
     if (!/^[A-Za-z0-9_-]{20,64}$/.test(objectId)) throw new Error('Invalid encrypted object ID')
     const pathname = `/v1/agents/${this.identity.nodeId}/objects/${objectId}/download`
-    const ticket = await this.requestJson<ObjectTicket>('GET', pathname)
+    const ticket = await this.requestJson<ObjectTicket>('GET', pathname, undefined, signal)
     if (!ticket.download || ticket.expectedBytes < 17 || ticket.expectedBytes > expectedMaximum) {
       throw new Error('Encrypted attachment ticket is invalid')
     }
     const response = await this.fetchImpl(ticket.download.url, {
       method: 'GET',
       headers: ticket.download.headers || {},
-      signal: AbortSignal.timeout(30_000),
+      signal: deadlineSignal(signal, 30_000),
     })
     if (!response.ok) throw new Error(`Encrypted attachment download failed with HTTP ${response.status}`)
     const body = new Uint8Array(await response.arrayBuffer())
@@ -44,25 +48,34 @@ export class PublicObjectClient {
     return body
   }
 
-  async upload(purpose: 'artifact' | 'history', body: Uint8Array): Promise<ObjectTicket> {
+  async upload(
+    purpose: 'attachment' | 'artifact' | 'history',
+    body: Uint8Array,
+    signal?: AbortSignal,
+  ): Promise<ObjectTicket> {
     const pathname = `/v1/agents/${this.identity.nodeId}/objects`
     const ticket = await this.requestJson<ObjectTicket>('POST', pathname, {
       purpose,
       expectedBytes: body.length,
-    })
+    }, signal)
     if (!ticket.upload || ticket.expectedBytes !== body.length) throw new Error('Encrypted object upload ticket is invalid')
     const uploaded = await this.fetchImpl(ticket.upload.url, {
       method: 'PUT',
       headers: ticket.upload.headers || {},
       body: Buffer.from(body),
-      signal: AbortSignal.timeout(60_000),
+      signal: deadlineSignal(signal, 60_000),
     })
     if (!uploaded.ok) throw new Error(`Encrypted object upload failed with HTTP ${uploaded.status}`)
     const completePath = `${pathname}/${ticket.objectId}/complete`
-    return this.requestJson<ObjectTicket>('POST', completePath, {})
+    return this.requestJson<ObjectTicket>('POST', completePath, {}, signal)
   }
 
-  private async requestJson<T>(method: 'GET' | 'POST', pathname: string, body?: unknown): Promise<T> {
+  private async requestJson<T>(
+    method: 'GET' | 'POST',
+    pathname: string,
+    body?: unknown,
+    signal?: AbortSignal,
+  ): Promise<T> {
     const timestamp = Date.now()
     const nonce = randomBytes(18).toString('base64url')
     const signature = sign(
@@ -80,9 +93,14 @@ export class PublicObjectClient {
         'x-hr-signature': signature,
       },
       body: body === undefined ? undefined : JSON.stringify(body),
-      signal: AbortSignal.timeout(15_000),
+      signal: deadlineSignal(signal, 15_000),
     })
     if (!response.ok) throw new Error(`Encrypted object service failed with HTTP ${response.status}`)
     return await response.json() as T
   }
+}
+
+function deadlineSignal(parent: AbortSignal | undefined, timeoutMs: number): AbortSignal {
+  const timeout = AbortSignal.timeout(timeoutMs)
+  return parent ? AbortSignal.any([parent, timeout]) : timeout
 }

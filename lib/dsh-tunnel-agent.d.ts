@@ -11,7 +11,7 @@ export interface DshTunnelAgentOptions {
         readonly baseUrl: string;
         readonly token: string;
     };
-    readonly materializeAttachment?: (descriptor: unknown) => Promise<{
+    readonly materializeAttachment?: (descriptor: unknown, signal: AbortSignal) => Promise<{
         readonly descriptor: {
             readonly mediaType: string;
             readonly name?: string;

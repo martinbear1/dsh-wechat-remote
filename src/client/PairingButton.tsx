@@ -89,8 +89,8 @@ export function PairingButton({ wide }: PairingButtonProps): JSX.Element {
     let discovered = false
     try {
       // Ask this WebUI profile's authenticated Host Remote for the selected
-      // LOCAL door. New non-default profiles must never accidentally display
-      // the web/default profile's QR from legacy port 3093.
+      // LOCAL door. Non-default profiles must never accidentally display the
+      // web/default profile's QR from its compatibility port 3093.
       const rpcId = `wechat-pairing-${Date.now().toString(36)}`
       const describeRes = await fetch('/api/wechatHost.describe', {
         method: 'POST',
@@ -118,7 +118,7 @@ export function PairingButton({ wide }: PairingButtonProps): JSX.Element {
         }
       }
     } catch {
-      // Older .5 hosts do not expose gate runtime metadata; their documented
+      // Older installed hosts do not expose gate runtime metadata; their documented
       // web/default endpoint remains 127.0.0.1:3093.
     }
     try {

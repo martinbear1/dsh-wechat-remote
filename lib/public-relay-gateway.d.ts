@@ -1,5 +1,6 @@
 import { PublicRelayAgent, type AgentStatus, type PublicRelayConfig } from './public-relay-agent.js';
 import type { AgentCapability } from './agent-metadata.js';
+import type { WechatAttachmentObjectDescriptor } from './attachment-service.js';
 import type { HostPlatformDescriptor } from './host-platform.js';
 export interface PublicRelayGatewayOptions {
     readonly agentVersion: string;
@@ -33,11 +34,18 @@ export declare class PublicRelayGateway {
     private readonly objectClient;
     private readonly historySnapshots;
     private readonly pendingHistorySnapshots;
+    private readonly attachmentObjects;
+    private readonly pendingAttachmentObjects;
     constructor(config: PublicRelayConfig, options: PublicRelayGatewayOptions);
     start(): Promise<void>;
     stop(): void;
     snapshot(): AgentStatus;
     uploadHistorySnapshot(payloadJson: string): Promise<Record<string, unknown>>;
+    uploadAttachmentObject(data: Uint8Array, metadata: {
+        readonly attachmentId: string;
+        readonly mediaType: string;
+        readonly name?: string;
+    }, signal?: AbortSignal): Promise<WechatAttachmentObjectDescriptor>;
     ensurePairingStatus(): Promise<AgentStatus>;
     private receive;
     private disconnect;

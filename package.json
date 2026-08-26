@@ -1,6 +1,6 @@
 {
   "name": "@harness-remote/dsh-wechat-remote",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Harness Remote 微信版：同一插件自动适配 Windows、macOS 与 Linux 上的 DeepSeek Harness，提供微信身份绑定、局域网直连及端到端加密公网连接",
   "private": true,
   "license": "MIT",
@@ -30,6 +30,10 @@
     "./history": {
       "types": "./lib/history-service.d.ts",
       "default": "./lib/history-service.js"
+    },
+    "./attachment": {
+      "types": "./lib/attachment-service.d.ts",
+      "default": "./lib/attachment-service.js"
     },
     "./public-relay": {
       "types": "./lib/public-relay-agent.d.ts",
@@ -70,11 +74,14 @@
     }
   },
   "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
     "bundle": "tsc -p tsconfig.json && node scripts/generate-typert.mjs",
     "verify": "node scripts/verify.mjs",
+    "test": "npm run test:attachment && npm run test:directory && npm run test:host-platform && npm run test:history && npm run test:gate-ports && npm run test:public-relay",
     "test:directory": "node scripts/test-directory.mjs",
     "test:host-platform": "node scripts/test-host-platform.mjs",
     "test:history": "node scripts/test-history.mjs",
+    "test:attachment": "node scripts/test-attachment.mjs",
     "test:gate-ports": "node scripts/test-gate-ports.mjs",
     "test:public-relay": "node scripts/test-public-relay.mjs"
   },
@@ -122,6 +129,8 @@
     "lib/host-info-service.d.ts",
     "lib/history-service.js",
     "lib/history-service.d.ts",
+    "lib/attachment-service.js",
+    "lib/attachment-service.d.ts",
     "lib/public-relay-agent.js",
     "lib/public-relay-agent.d.ts",
     "lib/e2ee-session.js",
@@ -145,8 +154,6 @@
     "lib/typert.remote-client.js",
     "lib/typert.remote-client.d.ts",
     "lib/types",
-    "cordis.patch.yml",
-    "scripts/restart-dsh.cmd",
-    "scripts/restart-dsh.ps1"
+    "cordis.patch.yml"
   ]
 }

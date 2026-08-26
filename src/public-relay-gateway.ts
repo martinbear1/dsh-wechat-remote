@@ -10,6 +10,7 @@ import {
   type RelayClientFrame,
 } from './public-relay-agent.js'
 import type { AgentCapability } from './agent-metadata.js'
+import type { WechatAttachmentObjectDescriptor } from './attachment-service.js'
 import type { HostPlatformDescriptor } from './host-platform.js'
 import { decryptRemoteAttachment, encryptCloudObject, type RemoteAttachmentDescriptor } from './object-crypto.js'
 import { PublicObjectClient } from './public-object-client.js'
@@ -53,6 +54,11 @@ export class PublicRelayGateway {
     readonly expiresAt: number
   }>()
   private readonly pendingHistorySnapshots = new Map<string, Promise<Record<string, unknown>>>()
+  private readonly attachmentObjects = new Map<string, {
+    readonly descriptor: WechatAttachmentObjectDescriptor
+    readonly expiresAt: number
+  }>()
+  private readonly pendingAttachmentObjects = new Map<string, Promise<WechatAttachmentObjectDescriptor>>()
 
   constructor(config: PublicRelayConfig, options: PublicRelayGatewayOptions) {
     this.dshPort = options.dshPort || 3080
@@ -124,6 +130,49 @@ export class PublicRelayGateway {
     }
   }
 
+  async uploadAttachmentObject(
+    data: Uint8Array,
+    metadata: { readonly attachmentId: string; readonly mediaType: string; readonly name?: string },
+    signal?: AbortSignal,
+  ): Promise<WechatAttachmentObjectDescriptor> {
+    const digest = createHash('sha256')
+      .update(data)
+      .update('\0')
+      .update(metadata.mediaType)
+      .digest('base64url')
+    const cached = this.attachmentObjects.get(digest)
+    if (cached && cached.expiresAt > Date.now() + 60_000) return cached.descriptor
+    const pending = this.pendingAttachmentObjects.get(digest)
+    if (pending) return await waitFor(pending, signal)
+    const transferSignal = AbortSignal.timeout(60_000)
+    const upload = (async (): Promise<WechatAttachmentObjectDescriptor> => {
+      const encrypted = encryptCloudObject(data, 'image')
+      const ticket = await this.objectClient.upload('attachment', encrypted.ciphertext, transferSignal)
+      const descriptor = {
+        ...encrypted.descriptor,
+        contentKind: 'image' as const,
+        objectId: ticket.objectId,
+        expiresAt: ticket.expiresAt,
+        mediaType: metadata.mediaType,
+        ...(metadata.name ? { name: metadata.name } : {}),
+      }
+      this.attachmentObjects.set(digest, { descriptor, expiresAt: ticket.expiresAt })
+      while (this.attachmentObjects.size > 128) {
+        const oldest = this.attachmentObjects.keys().next().value as string | undefined
+        if (!oldest) break
+        this.attachmentObjects.delete(oldest)
+      }
+      return descriptor
+    })()
+    this.pendingAttachmentObjects.set(digest, upload)
+    void upload.finally(() => {
+      if (this.pendingAttachmentObjects.get(digest) === upload) {
+        this.pendingAttachmentObjects.delete(digest)
+      }
+    }).catch(() => { /* waiting callers observe the original rejection */ })
+    return await waitFor(upload, signal)
+  }
+
   async ensurePairingStatus(): Promise<AgentStatus> {
     return this.agent.ensurePairingTicket()
   }
@@ -153,9 +202,9 @@ export class PublicRelayGateway {
           dshPort: this.dshPort,
           maxStreams: this.maxStreamsPerClient,
           issueLanCredential: this.issueLanCredential,
-          materializeAttachment: async raw => {
+          materializeAttachment: async (raw, signal) => {
             const descriptor = raw as RemoteAttachmentDescriptor
-            const ciphertext = await this.objectClient.download(descriptor.objectId)
+            const ciphertext = await this.objectClient.download(descriptor.objectId, undefined, signal)
             return decryptRemoteAttachment(ciphertext, descriptor)
           },
           send: clearFrame => client!.reply(client!.e2ee.seal(clearFrame)),
@@ -181,6 +230,19 @@ export class PublicRelayGateway {
   private disconnectAll(): void {
     for (const clientId of [...this.clients.keys()]) this.disconnect(clientId)
   }
+}
+
+async function waitFor<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return await promise
+  signal.throwIfAborted()
+  return await new Promise<T>((resolve, reject) => {
+    const abort = (): void => reject(signal.reason || new Error('Object transfer aborted'))
+    signal.addEventListener('abort', abort, { once: true })
+    promise.then(
+      value => { signal.removeEventListener('abort', abort); resolve(value) },
+      error => { signal.removeEventListener('abort', abort); reject(error) },
+    )
+  })
 }
 
 export default PublicRelayGateway

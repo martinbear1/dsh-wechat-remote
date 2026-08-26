@@ -5,8 +5,6 @@
 （同一次扫码同时配置局域网直连和端到端加密公网中继，客户端按网络自动择优）。
 
 > 纯插件实现：不改动 DeepSeek Harness 的任何官方代码，卸载即还原。
-> 与 iOS 版插件（`martinbear1/dsh-harness-remote`，端口 3090/3091）**完全独立、
-> 可同时安装共存**。
 
 ## 特性
 
@@ -21,7 +19,7 @@
   还是移动网络扫码，之后都可在局域网直连与公网中继之间自动切换
 - **只出不进**：电脑仅主动连接官方中继的 443，不开放公网端口，也不改变 DSH/WebUI；
   需要纯局域网时可在本机配置中明确关闭公网
-- **双门安全**（与 iOS 插件同款防线）：
+- **双门安全边界**：
   - `web/default` profile 的局域网门继续使用 `0.0.0.0:3092`，兼容所有旧安装
   - `web/default` profile 的本地门继续使用 `127.0.0.1:3093`，配对二维码仅本机可访问
   - 同机其他 DSH profile 自动使用稳定的高位端口对，避免争抢 3092/3093
@@ -53,10 +51,10 @@
 npm exec --yes --package=pnpm@10 -- dsh plugin --profile web add github:martinbear1/dsh-wechat-remote
 ```
 
-**或指定版本**（稳定复现，如 `#v1.1.0`）：
+**或指定版本**（稳定复现，如 `#v1.2.0`）：
 
 ```bash
-npm exec --yes --package=pnpm@10 -- dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.1.0
+npm exec --yes --package=pnpm@10 -- dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.2.0
 ```
 
 然后**重启 DSH**，打开 `http://127.0.0.1:3080`，侧边栏底部出现
@@ -79,12 +77,6 @@ dsh web
 > ⚠️ 重启会中断正在进行的对话/任务（历史已落盘不丢，刷新页面继续）。
 > 如果你的 DSH 正有重要任务在跑，请改用上面的手动两步，自己挑时间重启。
 
-**随包附带的重启脚本**：插件安装后，本包自带重启脚本（双击即用）——
-
-```
-%USERPROFILE%\.dsh\profiles\web\node_modules\@harness-remote\dsh-wechat-remote\scripts\restart-dsh.cmd
-```
->
 > **版本策略**：本仓库 `main` 分支只合并「已通过完整测试」的代码（开发在特性分支，
 > 测试通过才合并并打版本标签），所以不带 `#版本号` 安装 = 安装那一刻的最新正式版。
 > 无论哪种写法，装完都会锁定具体提交，**不会自动更新**；升级 = 重跑上面的命令 +
@@ -144,12 +136,11 @@ dsh web
 配置文件不存在时使用产品官方中继；配置错误只会让公网功能降级并显示错误，不会修改
 DSH/WebUI 配置，也不会影响局域网门和原生 DSH。
 
-## 端口约定（与 iOS 插件共存）
+## 端口约定
 
 | 端口 | 用途 | 归属 |
 |---|---|---|
 | 3080 | DeepSeek Harness 官方 Web | 官方（不变） |
-| 3090 / 3091 | iOS 版插件（公网门 / 本地门） | iOS 插件（若安装） |
 | **3092** | **微信版 web/default 局域网门**（API + 配对认领） | 本插件，token 必填 |
 | **3093** | **微信版 web/default 配对二维码 + 状态** | 本插件，仅本机 |
 | **32000–39999** | 其他 DSH profile 的稳定偶/奇端口对 | 本插件，按 profile + Agent 实例推导 |
@@ -184,9 +175,6 @@ DSH/WebUI 配置，也不会影响局域网门和原生 DSH。
 **Q：想换微信账号 / 解绑？** 停 DSH → 删除 `~/.dsh/gate-wechat-state.json` →
 重启 DSH → 重新扫码配对。
 
-**Q：和 iOS 插件同时装会冲突吗？** 不会：默认两插件端口（3090/3091 vs 3092/3093）
-与状态文件相互独立；Web UI 侧边栏会同时出现「手机连接」与「微信连接」两个按钮。
-
 **Q：openid 泄露了会被冒名登录吗？** 不会。openid 只是**身份标识**不是**凭证**：
 登录靠的是「微信登录态 → wx.login 换 jsCode → 服务端 code2session 解析」这条链，
 攻击者拿不到被绑定微信账号的登录态就伪造不出有效的 jsCode，知道 openid 字符串
@@ -195,7 +183,7 @@ Agent 私钥（自动收紧为当前用户专属 ACL）和配对的屏幕秘密�
 
 **Q：需要手动开防火墙吗？** 一般不用：Node.js 自带程序级放行规则（按 node.exe
 放行、覆盖所有端口），DSH 跑在 node.exe 上，实际局域网门通常自动可用。只有在你机器上存在
-「仅 3090」的端口级规则等特殊情况下，才需要在系统防火墙中放行本节点实际显示的
+已有端口级防火墙规则等特殊情况下，才需要在系统防火墙中放行本节点实际显示的
 局域网端口。
 
 **Q：如何卸载？**
@@ -228,7 +216,7 @@ clientBundle('@harness-remote/dsh-wechat-remote', ['lib/types/index.js'])
 ```
 
 ⚠️ 注册 id 与包名不一致会直接导致 Web UI 报 "Failed to load plugins"
-（iOS 插件 v1.0.1 的事故即源于此）。改完产物先跑 `node scripts/verify.mjs`。
+这类错误会让 WebUI 无法加载插件。改完产物先跑 `node scripts/verify.mjs`。
 
 ## License
 

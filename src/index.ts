@@ -2,7 +2,6 @@
 /**
  * dsh-wechat-remote gate — WeChat 小程序专用认证网关（原生 DSH 宿主插件）。
  *
- * 与 iOS 插件（dsh-harness-remote，端口 3090/3091）完全独立、可共存：
  * web/default profile 保持占用 3092/3093；其他 profile 使用稳定推导的
  * 高位端口对。全部仍可用环境变量覆盖（见 apply 部分）。
  *
@@ -41,6 +40,7 @@ import QRCode from 'qrcode'
 import WechatDirectoryService from './directory-service.js'
 import WechatHostInfoService from './host-info-service.js'
 import WechatHistoryService from './history-service.js'
+import WechatAttachmentService from './attachment-service.js'
 import PublicRelayGateway from './public-relay-gateway.js'
 import { loadPublicRelayConfig, publicPairingPayload } from './public-relay-agent.js'
 import { agentProfileScope, loadAgentDescriptor } from './agent-metadata.js'
@@ -638,6 +638,16 @@ export function apply(ctx) {
     storeSnapshot: async payloadJson => {
       if (!publicRelayGateway) throw new Error('Public object transport is unavailable')
       return publicRelayGateway.uploadHistorySnapshot(payloadJson)
+    },
+  })
+  // 历史图片仍先通过 DSH 原生 session.attachment 完成会话引用校验；随后
+  // 仅将端侧加密密文放入私有对象存储，让小程序公网直取，避免大体积
+  // base64 占用实时中继。对象层故障返回 unavailable，由客户端原生回退。
+  ctx.plugin(WechatAttachmentService, {
+    dshPort: UPSTREAM_PORT,
+    storeAttachment: async (data, attachment, signal) => {
+      if (!publicRelayGateway) throw new Error('Public object transport is unavailable')
+      return publicRelayGateway.uploadAttachmentObject(data, attachment, signal)
     },
   })
   // Product mode uses the official outbound-only relay by default so one QR

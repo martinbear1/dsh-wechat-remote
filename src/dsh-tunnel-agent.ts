@@ -29,6 +29,7 @@ const LAN_CREDENTIAL_PATH = '/api/wechat-remote/lan-credential'
 const LAN_CREDENTIAL_ROTATE_PATH = '/api/wechat-remote/lan-credential/rotate'
 const REMOTE_PROMPT_PATH = '/api/wechat-remote/session.prompt'
 const MAX_REMOTE_PROMPT_BYTES = 256 * 1024
+const REMOTE_ATTACHMENT_CONCURRENCY = 3
 type ByteArray = Uint8Array<ArrayBufferLike>
 
 function concat(...parts: readonly ByteArray[]): Uint8Array {
@@ -182,6 +183,7 @@ interface WebSocketStream {
 
 interface RemotePromptStream {
   readonly kind: 'remote-prompt'
+  readonly controller: AbortController
   chunks: ByteArray[]
   bytes: number
 }
@@ -197,7 +199,7 @@ export interface DshTunnelAgentOptions {
    * and is never forwarded to DSH/WebUI or exposed on the LAN HTTP door.
    */
   readonly issueLanCredential?: (rotate?: boolean) => { readonly baseUrl: string; readonly token: string }
-  readonly materializeAttachment?: (descriptor: unknown) => Promise<{
+  readonly materializeAttachment?: (descriptor: unknown, signal: AbortSignal) => Promise<{
     readonly descriptor: { readonly mediaType: string; readonly name?: string }
     readonly data: ByteArray
   }>
@@ -258,7 +260,12 @@ export class DshTunnelAgent {
       if (kind !== KIND_HTTP || safeMethod(value.method) !== 'POST' || !this.materializeAttachment) {
         throw new Error('Encrypted prompt adapter is unavailable')
       }
-      this.streams.set(streamId, { kind: 'remote-prompt', chunks: [], bytes: 0 })
+      this.streams.set(streamId, {
+        kind: 'remote-prompt',
+        controller: new AbortController(),
+        chunks: [],
+        bytes: 0,
+      })
       return
     }
     if (kind === KIND_HTTP) this.openHttp(streamId, path, value)
@@ -442,23 +449,35 @@ export class DshTunnelAgent {
       if (envelope?.type !== 'client-request' || envelope?.method !== 'session.prompt' || !Array.isArray(content)) {
         throw new Error('Encrypted prompt envelope is invalid')
       }
-      let attachments = 0
-      const materialized = []
-      for (const part of content) {
-        if (!part?.remoteAttachment) {
-          materialized.push(part)
-          continue
+      const remoteIndexes: number[] = []
+      const materialized = Array.from(content)
+      for (let index = 0; index < content.length; index += 1) {
+        const part = content[index]
+        if (!part?.remoteAttachment) continue
+        if (remoteIndexes.length >= 9 || part.type !== 'image') {
+          throw new Error('Encrypted prompt attachment list is invalid')
         }
-        attachments += 1
-        if (attachments > 9 || part.type !== 'image') throw new Error('Encrypted prompt attachment list is invalid')
-        const resolved = await this.materializeAttachment!(part.remoteAttachment)
-        materialized.push({
-          type: 'image',
-          mediaType: resolved.descriptor.mediaType,
-          data: Buffer.from(resolved.data).toString('base64'),
-          ...(resolved.descriptor.name ? { name: resolved.descriptor.name } : {}),
-        })
+        remoteIndexes.push(index)
       }
+      const workers = Array.from(
+        { length: Math.min(REMOTE_ATTACHMENT_CONCURRENCY, remoteIndexes.length) },
+        async (_unused, workerIndex) => {
+          for (let cursor = workerIndex; cursor < remoteIndexes.length; cursor += REMOTE_ATTACHMENT_CONCURRENCY) {
+            stream.controller.signal.throwIfAborted()
+            const index = remoteIndexes[cursor]
+            const part = content[index]
+            const resolved = await this.materializeAttachment!(part.remoteAttachment, stream.controller.signal)
+            materialized[index] = {
+              type: 'image',
+              mediaType: resolved.descriptor.mediaType,
+              data: Buffer.from(resolved.data).toString('base64'),
+              ...(resolved.descriptor.name ? { name: resolved.descriptor.name } : {}),
+            }
+          }
+        },
+      )
+      await Promise.all(workers)
+      const attachments = remoteIndexes.length
       if (!attachments) throw new Error('Encrypted prompt contains no remote attachment')
       envelope.payload.content = materialized
       if (this.streams.get(streamId) !== stream || this.closed) return
@@ -473,6 +492,7 @@ export class DshTunnelAgent {
       this.data(active, streamId, 0, body)
       this.end(active, streamId, new Uint8Array(0))
     } catch (error) {
+      stream.controller.abort(error)
       if (this.streams.get(streamId) === stream) this.streams.delete(streamId)
       this.sendError(streamId, error)
     } finally {
@@ -484,6 +504,7 @@ export class DshTunnelAgent {
   private cancel(stream: Stream, streamId: number): void {
     this.streams.delete(streamId)
     if (stream.kind === 'remote-prompt') {
+      stream.controller.abort(new Error('Encrypted prompt cancelled'))
       stream.chunks = []
       stream.bytes = 0
     } else if (stream.kind === KIND_HTTP) stream.request.destroy()

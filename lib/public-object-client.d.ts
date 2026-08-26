@@ -17,8 +17,8 @@ export declare class PublicObjectClient {
     private readonly identity;
     private readonly fetchImpl;
     constructor(relayOrigin: string, identity: AgentIdentity, fetchImpl?: typeof fetch);
-    download(objectId: string, expectedMaximum?: number): Promise<Uint8Array>;
-    upload(purpose: 'artifact' | 'history', body: Uint8Array): Promise<ObjectTicket>;
+    download(objectId: string, expectedMaximum?: number, signal?: AbortSignal): Promise<Uint8Array>;
+    upload(purpose: 'attachment' | 'artifact' | 'history', body: Uint8Array, signal?: AbortSignal): Promise<ObjectTicket>;
     private requestJson;
 }
 export {};

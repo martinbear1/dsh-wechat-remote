@@ -38,6 +38,7 @@ export const AGENT_CAPABILITIES: readonly AgentCapability[] = Object.freeze([
   Object.freeze({ id: 'dsh.realtime', version: 1 }),
   Object.freeze({ id: 'wechat.directory', version: 1 }),
   Object.freeze({ id: 'wechat.history-window', version: 1 }),
+  Object.freeze({ id: 'wechat.attachment-object', version: 1 }),
   Object.freeze({ id: 'harness.public-relay-e2ee', version: 1 }),
   Object.freeze({ id: 'harness.lan-bootstrap', version: 1 }),
   Object.freeze({ id: 'harness.host-platform', version: 1 }),
@@ -74,7 +75,7 @@ function instanceStorageKey(): string {
 
 export function defaultAgentIdentityPath(): string {
   const scope = agentProfileScope()
-  // Preserve the public-research.5/default web nodeId and cloud ownership.
+  // Preserve an existing default web nodeId and its cloud ownership.
   if (scope === 'web' || scope === 'default') {
     return path.join(homedir(), '.dsh', 'harness-remote-public-identity.json')
   }

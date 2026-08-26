@@ -146,26 +146,3 @@
   font-size: 11px;
   color: #6b7385;
 }
-
-/* ── 官方侧边栏脚部布局（仅宽屏）：设置区在左、本插件在右 ──
-   官方 SidebarRoot 把 sidebar.footer.action 与 sidebar.settings 上下堆叠；
-   这里复刻我们早期 fork 版 ui-sidebar 的 footRow 设计，用全局选择器把
-   宽屏下的脚部排成一行（设置左、动作右）。
-   选择器只匹配官方类名的局部名（class*=），不依赖官方构建的哈希前缀，
-   rc 升级后仍生效；万一官方改名，失效也只是退回官方堆叠布局，不会报错。 */
-:global([class*=_root]:not([class*=_collapsed]) [class*=_footArea]) {
-  flex-direction: row;
-  align-items: center;
-  gap: 6px;
-}
-
-:global([class*=_root]:not([class*=_collapsed]) [class*=_settingsArea]) {
-  order: 1;
-  flex: 1;
-  width: auto;
-}
-
-:global([class*=_root]:not([class*=_collapsed]) [class*=_footerActions]) {
-  order: 2;
-  width: auto;
-}

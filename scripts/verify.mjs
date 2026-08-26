@@ -30,9 +30,9 @@ check(client.includes('/api/wechatHost.describe'), 'lib/client.js 没有动态�
 check(client.includes('http://127.0.0.1:3093'), 'lib/client.js 缺少旧 web/default 3093 回退')
 check(client.includes('本机配对门'), 'lib/client.js 未展示实际本地门端口')
 check(!client.includes('127.0.0.1:3091'), 'lib/client.js 残留 iOS 本地门端口 3091')
-// 1c. 侧边栏脚部布局选择器（宽屏：设置左、配对按钮右）必须在注入的 CSS 里。
+// 插件样式必须局限于自身组件，不能按官方 WebUI 哈希类名修改全局布局。
 for (const sel of ['[class*=_footArea]', '[class*=_settingsArea]', '[class*=_footerActions]']) {
-  check(client.includes(sel), `lib/client.js 注入 CSS 缺少布局选择器 ${sel}`)
+  check(!client.includes(sel), `lib/client.js 不应覆盖官方 WebUI 全局布局 ${sel}`)
 }
 
 // 2. 宿主网关：微信专用表面与加固基线。
@@ -66,6 +66,7 @@ check(pkg.exports?.['./client']?.default === './lib/client.js', 'package.json ex
 check(pkg.exports?.['./directory']?.default === './lib/directory-service.js', 'package.json exports["./directory"] 未指向目录服务')
 check(pkg.exports?.['./host-info']?.default === './lib/host-info-service.js', 'package.json exports["./host-info"] 未指向微信 Host 信息服务')
 check(pkg.exports?.['./history']?.default === './lib/history-service.js', 'package.json exports["./history"] 未指向微信历史服务')
+check(pkg.exports?.['./attachment']?.default === './lib/attachment-service.js', 'package.json exports["./attachment"] 未指向微信附件对象服务')
 check(pkg.exports?.['./public-relay']?.default === './lib/public-relay-agent.js', 'package.json exports["./public-relay"] 未指向公网出站 Agent')
 check(pkg.exports?.['./e2ee']?.default === './lib/e2ee-session.js', 'package.json exports["./e2ee"] 未指向 E2EE 会话')
 check(pkg.exports?.['./dsh-tunnel']?.default === './lib/dsh-tunnel-agent.js', 'package.json exports["./dsh-tunnel"] 未指向 DSH 隧道')
@@ -117,7 +118,21 @@ check(history.includes("event?.type !== 'assistant/chunk'") || history.includes(
 check(history.includes("host: '127.0.0.1'") || history.includes('host: "127.0.0.1"'), '历史服务数据源不是 loopback DSH')
 check(typert.includes('wechatHistory/window'), '严格 Typert 契约缺少 wechatHistory/window')
 
-// 4e. 产品默认使用官方中继；本机可显式关闭或覆盖。公网模块必须只出站、
+// 4e. 历史图片对象加速必须先读取原生 session.attachment；OSS 只是端侧
+// 加密传输层，失败可回退，且不能绕过 DSH 的会话引用授权。
+check(host.includes("from './attachment-service.js'"), 'lib/index.js 未挂载微信附件对象 Remote')
+check(host.includes('ctx.plugin(WechatAttachmentService'), 'lib/index.js 未在 gate fiber 下挂载附件对象服务')
+const attachment = readFileSync(path.join(root, 'lib/attachment-service.js'), 'utf8')
+check(attachment.includes('super(ctx, "wechatAttachment")') || attachment.includes("super(ctx, 'wechatAttachment')"), '附件对象服务的 Typert key 不是 wechatAttachment')
+check(attachment.includes("method: 'session.attachment'") || attachment.includes('method: "session.attachment"'), '附件对象服务没有读取 DSH 原生 session.attachment')
+check(attachment.includes("host: '127.0.0.1'") || attachment.includes('host: "127.0.0.1"'), '附件对象服务数据源不是 loopback DSH')
+check(attachment.includes('MAX_BATCH_ATTACHMENTS = 6'), '附件对象服务缺少批量上限')
+check(attachment.includes('BATCH_CONCURRENCY = 2'), '附件对象服务缺少有界并发')
+check(typert.includes('wechatAttachment/prepareBatch'), '严格 Typert 契约缺少 wechatAttachment/prepareBatch')
+const metadata = readFileSync(path.join(root, 'lib/agent-metadata.js'), 'utf8')
+check(metadata.includes('wechat.attachment-object'), 'Agent 能力未声明 wechat.attachment-object')
+
+// 4f. 产品默认使用官方中继；本机可显式关闭或覆盖。公网模块必须只出站、
 // 使用独立身份和端到端加密，不得向 DSH/WebUI 写配置或新增公网监听端口。
 const publicRelay = readFileSync(path.join(root, 'lib/public-relay-agent.js'), 'utf8')
 for (const required of ['harness-remote-public.json', 'DEFAULT_PUBLIC_RELAY_ORIGIN', 'value.enabled === false', "protocol === 'https:' ? 'wss:'", "generateKeyPairSync('ed25519')"]) {
@@ -142,7 +157,6 @@ check(tunnel.includes('response.pause()'), '公网 HTTP 隧道缺少上游背压
 
 const secureFile = readFileSync(path.join(root, 'lib/secure-file.js'), 'utf8')
 check(secureFile.includes('renameSync(temporary, file)'), '私密状态文件没有同卷原子替换')
-const metadata = readFileSync(path.join(root, 'lib/agent-metadata.js'), 'utf8')
 check(metadata.includes('harness-remote-public-identity.json'), '默认实例没有兼容 public-research.5 的 Agent 身份')
 check(metadata.includes('agentInstanceId'), 'Agent 元数据缺少实例标识')
 const gatePorts = readFileSync(path.join(root, 'lib/gate-ports.js'), 'utf8')
@@ -152,9 +166,10 @@ check(/DYNAMIC_PORT_BASE = (?:32_000|32000|32e3)/.test(gatePorts), '其他 profi
 check(/DYNAMIC_PORT_PAIRS = (?:4_000|4000|4e3)/.test(gatePorts), 'profile 端口区间可能越入 Windows ephemeral range')
 check(gatePorts.includes('EADDRINUSE'), '端口推导模块缺少占用错误的可读诊断')
 
-// 5. 随包附带的重启脚本必须列入 files（用户装完即可双击重启）。
+// 5. 插件不得随包附带会结束 DSH 进程的自动重启脚本；用户从原启动入口
+// 明确重启，避免安装动作中断正在执行的任务。
 for (const s of ['scripts/restart-dsh.cmd', 'scripts/restart-dsh.ps1']) {
-  check(Array.isArray(pkg.files) && pkg.files.includes(s), `package.json files 缺少 ${s}`)
+  check(!Array.isArray(pkg.files) || !pkg.files.includes(s), `package.json files 不应包含危险重启脚本 ${s}`)
 }
 for (const artifact of ['lib/agent-metadata.js', 'lib/gate-ports.js', 'lib/secure-file.js', 'lib/host-platform.js', 'lib/directory-worker.js']) {
   check(Array.isArray(pkg.files) && pkg.files.includes(artifact), `package.json files 缺少 ${artifact}`)

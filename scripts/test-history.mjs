@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict'
+import { EventEmitter } from 'node:events'
 import { inflateRawSync } from 'node:zlib'
 
 import { buildHistoryWindow } from '../lib/history-service.js'
 import { archiveHistoryJson } from '../lib/history-archive.js'
+import { HistorySnapshotPrewarmer } from '../lib/history-prewarmer.js'
 
 function unzipSingleEntry(archive) {
   const value = Buffer.from(archive)
@@ -112,5 +114,131 @@ const invalid = await buildHistoryWindow({ sessionId: '', maxMessages: 1000 }, a
 }, signal)
 assert.equal(invalid.ok, false)
 assert.equal(invalid.error.code, 'invalid-history-request')
+
+class FakeSocket extends EventEmitter {
+  close() { this.emit('close') }
+  terminate() { this.emit('close') }
+}
+
+function hostStatus(sessionId, running) {
+  return Buffer.from(JSON.stringify({
+    payload: { type: 'host/session-status', sessionId, running },
+  }))
+}
+
+async function waitFor(predicate, timeoutMs = 500) {
+  const deadline = Date.now() + timeoutMs
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error('timed out waiting for history prewarmer')
+    await new Promise(resolve => setTimeout(resolve, 2))
+  }
+}
+
+const fakeSocket = new FakeSocket()
+const warmed = []
+const prewarmer = new HistorySnapshotPrewarmer({
+  dshPort: 3080,
+  socketFactory: url => {
+    assert.equal(url, 'ws://127.0.0.1:3080/api/events.host')
+    return fakeSocket
+  },
+  settleDelayMs: 0,
+  retryDelayMs: 5,
+  warm: async (sessionId) => {
+    warmed.push(sessionId)
+    return 'object'
+  },
+})
+prewarmer.start()
+fakeSocket.emit('message', hostStatus('session-prewarm1234', true), false)
+fakeSocket.emit('message', hostStatus('session-prewarm1234', false), false)
+await waitFor(() => warmed.length === 1)
+fakeSocket.emit('message', hostStatus('session-prewarm1234', false), false)
+await new Promise(resolve => setTimeout(resolve, 10))
+assert.equal(warmed.length, 1, 'only a true-to-false native edge should prewarm')
+fakeSocket.emit('message', hostStatus('session-prewarm1234', true), false)
+fakeSocket.emit('message', hostStatus('session-prewarm1234', false), false)
+await waitFor(() => warmed.length === 2)
+prewarmer.stop()
+
+const retrySocket = new FakeSocket()
+let retryCalls = 0
+const retryPrewarmer = new HistorySnapshotPrewarmer({
+  socketFactory: () => retrySocket,
+  settleDelayMs: 0,
+  retryDelayMs: 5,
+  warm: async () => {
+    retryCalls += 1
+    if (retryCalls === 1) throw new Error('temporary object transport failure')
+    return 'object'
+  },
+})
+retryPrewarmer.start()
+retrySocket.emit('message', hostStatus('session-retry123456', true), false)
+retrySocket.emit('message', hostStatus('session-retry123456', false), false)
+await waitFor(() => retryCalls === 2)
+retryPrewarmer.stop()
+
+const overlapSocket = new FakeSocket()
+let overlapCalls = 0
+let releaseFirstWarm
+const firstWarmGate = new Promise(resolve => { releaseFirstWarm = resolve })
+const overlapPrewarmer = new HistorySnapshotPrewarmer({
+  socketFactory: () => overlapSocket,
+  settleDelayMs: 0,
+  warm: async () => {
+    overlapCalls += 1
+    if (overlapCalls === 1) await firstWarmGate
+    return 'object'
+  },
+})
+overlapPrewarmer.start()
+overlapSocket.emit('message', hostStatus('session-overlap1234', true), false)
+overlapSocket.emit('message', hostStatus('session-overlap1234', false), false)
+await waitFor(() => overlapCalls === 1)
+overlapSocket.emit('message', hostStatus('session-overlap1234', true), false)
+overlapSocket.emit('message', hostStatus('session-overlap1234', false), false)
+await new Promise(resolve => setTimeout(resolve, 5))
+releaseFirstWarm()
+await waitFor(() => overlapCalls === 2)
+overlapPrewarmer.stop()
+
+const removedSocket = new FakeSocket()
+let removedWarmCalls = 0
+const removedPrewarmer = new HistorySnapshotPrewarmer({
+  socketFactory: () => removedSocket,
+  settleDelayMs: 15,
+  warm: async () => { removedWarmCalls += 1; return 'object' },
+})
+removedPrewarmer.start()
+removedSocket.emit('message', hostStatus('session-removed1234', true), false)
+removedSocket.emit('message', hostStatus('session-removed1234', false), false)
+removedSocket.emit('message', Buffer.from(JSON.stringify({
+  payload: { type: 'host/session-removed', sessionId: 'session-removed1234' },
+})), false)
+await new Promise(resolve => setTimeout(resolve, 25))
+assert.equal(removedWarmCalls, 0, 'removed sessions must leave no queued prewarm work')
+removedPrewarmer.stop()
+
+const abortSocket = new FakeSocket()
+let activeStarted = false
+let activeAborted = false
+const abortPrewarmer = new HistorySnapshotPrewarmer({
+  socketFactory: () => abortSocket,
+  settleDelayMs: 0,
+  warm: async (_sessionId, activeSignal) => await new Promise((resolve, reject) => {
+    activeStarted = true
+    activeSignal.addEventListener('abort', () => {
+      activeAborted = true
+      reject(activeSignal.reason)
+    }, { once: true })
+  }),
+})
+abortPrewarmer.start()
+abortSocket.emit('message', hostStatus('session-abort123456', true), false)
+abortSocket.emit('message', hostStatus('session-abort123456', false), false)
+await waitFor(() => activeStarted)
+abortPrewarmer.stop()
+await waitFor(() => activeAborted)
 
 console.log('history service tests passed')

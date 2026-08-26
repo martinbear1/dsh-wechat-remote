@@ -85,6 +85,12 @@ export declare class WechatHistoryService extends TypertRemoteService {
     window(request: WechatHistoryWindowRequest, signal: AbortSignal): Promise<WechatHistoryWindowResult>;
     private fetchNativePage;
 }
+/**
+ * Populate the gateway's content-addressed history cache after a native DSH
+ * turn finishes. This is deliberately a host helper rather than a Typert
+ * Remote, so clients cannot invoke background work or discover a second API.
+ */
+export declare function prewarmLatestHistory(service: WechatHistoryService, sessionId: string, signal: AbortSignal): Promise<'inline' | 'object'>;
 /** Exported pure coordinator for deterministic plugin regression tests. */
 export declare function buildHistoryWindow(request: WechatHistoryWindowRequest, fetchPage: FetchPage, signal: AbortSignal): Promise<BuildHistoryWindowResult>;
 export default WechatHistoryService;

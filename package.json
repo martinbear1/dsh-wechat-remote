@@ -1,6 +1,6 @@
 {
   "name": "@harness-remote/dsh-wechat-remote",
-  "version": "1.1.0-public-research.7",
+  "version": "1.1.0-public-research.8",
   "description": "Harness Remote 微信版：同一插件自动适配 Windows、macOS 与 Linux 上的 DeepSeek Harness，提供微信身份绑定、局域网直连及端到端加密公网连接",
   "private": true,
   "license": "MIT",

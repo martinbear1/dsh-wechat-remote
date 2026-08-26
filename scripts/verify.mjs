@@ -117,15 +117,15 @@ check(history.includes("event?.type !== 'assistant/chunk'") || history.includes(
 check(history.includes("host: '127.0.0.1'") || history.includes('host: "127.0.0.1"'), '历史服务数据源不是 loopback DSH')
 check(typert.includes('wechatHistory/window'), '严格 Typert 契约缺少 wechatHistory/window')
 
-// 4e. 公网模块必须是显式启用、出站连接、独立身份和端到端加密；
-// 不得向 DSH/WebUI 写配置或新增公网监听端口。
+// 4e. 产品默认使用官方中继；本机可显式关闭或覆盖。公网模块必须只出站、
+// 使用独立身份和端到端加密，不得向 DSH/WebUI 写配置或新增公网监听端口。
 const publicRelay = readFileSync(path.join(root, 'lib/public-relay-agent.js'), 'utf8')
-for (const required of ['harness-remote-public.json', "enabled !== true", "protocol === 'https:' ? 'wss:'", "generateKeyPairSync('ed25519')"]) {
+for (const required of ['harness-remote-public.json', 'DEFAULT_PUBLIC_RELAY_ORIGIN', 'value.enabled === false', "protocol === 'https:' ? 'wss:'", "generateKeyPairSync('ed25519')"]) {
   check(publicRelay.includes(required), `公网 Agent 缺少安全约束：${required}`)
 }
 check(!publicRelay.includes('createServer('), '公网 Agent 不得创建入站 HTTP 监听器')
-check(host.includes('loadPublicRelayConfig()'), '宿主没有通过显式配置门禁启用公网 Agent')
-check(host.includes('if (relayConfig)'), '缺少公网 Agent 默认关闭分支')
+check(host.includes('loadPublicRelayConfig()'), '宿主没有加载公网 Agent 产品配置')
+check(host.includes('if (relayConfig)'), '缺少公网 Agent 显式关闭分支')
 check(host.includes('new PublicRelayGateway'), '宿主未挂载加密公网网关')
 check(host.includes('issueLanCredential:'), '宿主入口未把 E2EE 局域网凭证能力挂载到公网网关')
 check(host.includes('authenticated E2EE client requested LAN route bootstrap'), '宿主制品缺少局域网凭证安全诊断点')

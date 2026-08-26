@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import {
   agentNodeIdForPublicKey,
+  DEFAULT_PUBLIC_RELAY_ORIGIN,
   loadOrCreateAgentIdentity,
   loadPublicRelayConfig,
   PublicRelayAgent,
@@ -23,6 +24,12 @@ try {
   assert.equal(readFileSync(identityPath, 'utf8').includes('PRIVATE KEY'), true)
 
   const configPath = path.join(root, 'config.json')
+  assert.deepEqual(loadPublicRelayConfig(path.join(root, 'missing.json')), {
+    enabled: true,
+    relayOrigin: DEFAULT_PUBLIC_RELAY_ORIGIN,
+  })
+  writeFileSync(configPath, JSON.stringify({ enabled: false }))
+  assert.equal(loadPublicRelayConfig(configPath), null)
   writeFileSync(configPath, JSON.stringify({ enabled: true, relayOrigin: 'https://relay.example.test/' }))
   assert.deepEqual(loadPublicRelayConfig(configPath), {
     enabled: true,
@@ -60,7 +67,7 @@ try {
     agentKind: 'deepseek-harness',
     agentName: 'DeepSeek Harness',
     agentVersion: '0.1.1-rc.2',
-    adapterVersion: '1.1.0-public-research.7',
+    adapterVersion: '1.1.0-public-research.8',
     capabilities: [{ id: 'dsh.rpc', version: 1 }],
   }))
   assert.equal(metadataPayload.v, 1, 'metadata extensions must preserve QR protocol v1')
@@ -74,7 +81,7 @@ try {
     { enabled: true, relayOrigin: 'https://relay.example.test' },
     {
       agentVersion: '0.1.1-rc.2',
-      adapterVersion: '1.1.0-public-research.7',
+      adapterVersion: '1.1.0-public-research.8',
       hostId: 'host-id-1234567890123456',
       agentInstanceId: 'agent-id-123456789012345',
       agentKind: 'deepseek-harness',
@@ -94,7 +101,7 @@ try {
   )
   await metadataAgent.enroll()
   assert.equal(enrollmentBody.agentVersion, '0.1.1-rc.2')
-  assert.equal(enrollmentBody.adapterVersion, '1.1.0-public-research.7')
+  assert.equal(enrollmentBody.adapterVersion, '1.1.0-public-research.8')
   assert.equal(enrollmentBody.hostId, 'host-id-1234567890123456')
   assert.equal(enrollmentBody.agentInstanceId, 'agent-id-123456789012345')
   assert.deepEqual(enrollmentBody.capabilities, [{ id: 'dsh.rpc', version: 1 }])

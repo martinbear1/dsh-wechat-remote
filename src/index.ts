@@ -723,8 +723,9 @@ export function apply(ctx) {
   // 公网历史性能适配：只读 DSH 原生 session.history，在电脑端补齐轮次
   // 并删除已完成轮次的冗余流式增量。独立 Remote 不修改 WebUI/DSH。
   ctx.plugin(WechatHistoryService, { dshPort: UPSTREAM_PORT })
-  // Public mode is strictly opt-in. With no enabled config file this branch
-  // does not generate an identity, open an outbound socket, or alter LAN/WebUI.
+  // Product mode uses the official outbound-only relay by default so one QR
+  // provisions public + LAN routes. A local config may explicitly disable or
+  // override it; failures stay isolated and never alter LAN/WebUI behavior.
   try {
     const relayConfig = loadPublicRelayConfig()
     if (relayConfig) {

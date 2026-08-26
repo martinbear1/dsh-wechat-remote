@@ -1,9 +1,10 @@
 /**
- * Optional outbound-only public relay transport for Harness Remote.
+ * Outbound-only public relay transport for Harness Remote.
  *
  * This module is deliberately isolated from the existing LAN gate. It opens no
- * public port, does not change DSH/WebUI configuration, and is disabled unless
- * ~/.dsh/harness-remote-public.json explicitly contains { "enabled": true }.
+ * public port and does not change DSH/WebUI configuration. Product builds use
+ * the official relay by default so one QR always carries public + LAN routes;
+ * ~/.dsh/harness-remote-public.json may explicitly disable or override it.
  */
 import {
   createHash,
@@ -24,6 +25,7 @@ import type { HostPlatformDescriptor } from './host-platform.js'
 import { readPrivateJson, writePrivateJsonAtomic } from './secure-file.js'
 
 const CONFIG_PATH = path.join(homedir(), '.dsh', 'harness-remote-public.json')
+export const DEFAULT_PUBLIC_RELAY_ORIGIN = 'https://relay.xyxfood.xyz'
 const ROUTING_HEADER_BYTES = 18
 const MAX_AGENT_BUFFERED_BYTES = 2 * 1024 * 1024
 const AGENT_BUFFER_DRAIN_TIMEOUT_MS = 15_000
@@ -98,13 +100,12 @@ export function agentNodeIdForPublicKey(publicKeyPem: string): string {
 }
 
 export function loadPublicRelayConfig(configPath = CONFIG_PATH): PublicRelayConfig | null {
-  if (!existsSync(configPath)) return null
-  const value = JSON.parse(readFileSync(configPath, 'utf8')) as Partial<PublicRelayConfig>
-  if (value.enabled !== true) return null
-  if (typeof value.relayOrigin !== 'string') {
-    throw new Error('Public relay origin must use https://')
-  }
-  const url = new URL(value.relayOrigin)
+  const value = existsSync(configPath)
+    ? JSON.parse(readFileSync(configPath, 'utf8')) as Partial<PublicRelayConfig>
+    : {}
+  if (value.enabled === false) return null
+  const relayOrigin = value.relayOrigin || DEFAULT_PUBLIC_RELAY_ORIGIN
+  const url = new URL(relayOrigin)
   if (url.protocol !== 'https:' || (url.port && url.port !== '443') ||
       url.username || url.password || url.search || url.hash || url.pathname !== '/') {
     throw new Error('Public relay origin must be a bare HTTPS origin')

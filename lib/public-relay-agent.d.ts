@@ -1,5 +1,6 @@
 import { type AgentCapability } from './agent-metadata.js';
 import type { HostPlatformDescriptor } from './host-platform.js';
+export declare const DEFAULT_PUBLIC_RELAY_ORIGIN = "https://relay.xyxfood.xyz";
 export interface PublicRelayConfig {
     readonly enabled: boolean;
     readonly relayOrigin: string;

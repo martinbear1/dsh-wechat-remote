@@ -9,6 +9,7 @@ import {
   type RelayClientFrame,
 } from './public-relay-agent.js'
 import type { AgentCapability } from './agent-metadata.js'
+import type { HostPlatformDescriptor } from './host-platform.js'
 
 interface ClientContext {
   readonly e2ee: AgentE2EESession
@@ -24,6 +25,7 @@ export interface PublicRelayGatewayOptions {
   readonly agentKind?: string
   readonly agentName?: string
   readonly hostName?: string
+  readonly hostPlatform?: HostPlatformDescriptor
   readonly capabilities?: readonly AgentCapability[]
   readonly displayName?: string
   readonly dshPort?: number
@@ -59,6 +61,7 @@ export class PublicRelayGateway {
       agentKind: options.agentKind,
       agentName: options.agentName,
       hostName: options.hostName,
+      hostPlatform: options.hostPlatform,
       capabilities: options.capabilities,
       displayName: options.displayName,
       fetchImpl: options.fetchImpl,

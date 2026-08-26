@@ -1,6 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis';
 import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol';
 import { type AgentCapability } from './agent-metadata.js';
+import type { HostPlatformDescriptor } from './host-platform.js';
 export interface WechatHostDescribeRequest {
 }
 export interface WechatGateDoorInfo {
@@ -29,6 +30,7 @@ export interface WechatHostDescribeValue {
     readonly agentKind: 'deepseek-harness';
     readonly agentName: 'DeepSeek Harness';
     readonly agentVersion: string;
+    readonly hostPlatform: HostPlatformDescriptor;
     readonly capabilities: readonly AgentCapability[];
     /** Actual ports selected for this DSH profile; never assume 3092/3093. */
     readonly gate?: WechatGateRuntimeInfo;

@@ -1,3 +1,4 @@
+import { type HostPlatformDescriptor } from './host-platform.js';
 export interface AgentCapability {
     readonly id: string;
     readonly version: number;
@@ -10,6 +11,7 @@ export interface AgentDescriptor {
     readonly agentKind: 'deepseek-harness';
     readonly agentName: 'DeepSeek Harness';
     readonly agentVersion: string;
+    readonly hostPlatform: HostPlatformDescriptor;
     readonly capabilities: readonly AgentCapability[];
 }
 export declare const AGENT_CAPABILITIES: readonly AgentCapability[];

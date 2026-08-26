@@ -46,6 +46,7 @@ import WechatHistoryService from './history-service.js'
 import PublicRelayGateway from './public-relay-gateway.js'
 import { loadPublicRelayConfig, publicPairingPayload } from './public-relay-agent.js'
 import { agentProfileScope, loadAgentDescriptor } from './agent-metadata.js'
+import { selectLanIPv4 } from './host-platform.js'
 import { deriveGatePorts, describeGateListenFailure } from './gate-ports.js'
 import { tightenPrivateFile, writePrivateJsonAtomic } from './secure-file.js'
 
@@ -170,18 +171,7 @@ function randomCode(len = 8) {
 }
 
 function lanIPv4() {
-  const list = []
-  for (const ifaces of Object.values(os.networkInterfaces())) {
-    for (const iface of ifaces || []) {
-      if (iface.family === 'IPv4' && !iface.internal) list.push(iface.address)
-    }
-  }
-  return (
-    list.find((a) => a.startsWith('192.168.')) ||
-    list.find((a) => a.startsWith('10.')) ||
-    list[0] ||
-    '127.0.0.1'
-  )
+  return selectLanIPv4()
 }
 
 /**
@@ -746,6 +736,7 @@ export function apply(ctx) {
         agentKind: agentDescriptor.agentKind,
         agentName: agentDescriptor.agentName,
         hostName: agentDescriptor.hostName,
+        hostPlatform: agentDescriptor.hostPlatform,
         capabilities: agentDescriptor.capabilities,
         dshPort: UPSTREAM_PORT,
         // This credential is released only inside an authenticated, identity-

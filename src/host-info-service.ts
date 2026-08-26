@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { loadAgentDescriptor, type AgentCapability } from './agent-metadata.js'
+import type { HostPlatformDescriptor } from './host-platform.js'
 
 export interface WechatHostDescribeRequest {}
 
@@ -45,6 +46,7 @@ export interface WechatHostDescribeValue {
   readonly agentKind: 'deepseek-harness'
   readonly agentName: 'DeepSeek Harness'
   readonly agentVersion: string
+  readonly hostPlatform: HostPlatformDescriptor
   readonly capabilities: readonly AgentCapability[]
   /** Actual ports selected for this DSH profile; never assume 3092/3093. */
   readonly gate?: WechatGateRuntimeInfo
@@ -99,6 +101,7 @@ export class WechatHostInfoService extends TypertRemoteService {
         agentKind: descriptor.agentKind,
         agentName: descriptor.agentName,
         agentVersion: descriptor.agentVersion,
+        hostPlatform: descriptor.hostPlatform,
         capabilities: descriptor.capabilities,
         ...(this.gateRuntime ? { gate: this.gateRuntime() } : {}),
       },

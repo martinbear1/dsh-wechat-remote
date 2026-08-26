@@ -20,6 +20,7 @@ import path from 'node:path'
 import { WebSocket } from 'ws'
 
 import { defaultAgentIdentityPath, type AgentCapability } from './agent-metadata.js'
+import type { HostPlatformDescriptor } from './host-platform.js'
 import { readPrivateJson, writePrivateJsonAtomic } from './secure-file.js'
 
 const CONFIG_PATH = path.join(homedir(), '.dsh', 'harness-remote-public.json')
@@ -58,6 +59,7 @@ export interface AgentStatus {
   readonly agentName?: string
   readonly agentVersion?: string
   readonly adapterVersion?: string
+  readonly hostPlatform?: HostPlatformDescriptor
   readonly capabilities?: readonly AgentCapability[]
 }
 
@@ -75,6 +77,7 @@ export interface PublicRelayAgentOptions {
   readonly agentKind?: string
   readonly agentName?: string
   readonly hostName?: string
+  readonly hostPlatform?: HostPlatformDescriptor
   readonly capabilities?: readonly AgentCapability[]
   readonly displayName?: string
   readonly onFrame: (frame: RelayClientFrame) => void | Promise<void>
@@ -154,6 +157,7 @@ export class PublicRelayAgent {
       agentName: options.agentName || 'DeepSeek Harness',
       agentVersion: options.agentVersion,
       adapterVersion: options.adapterVersion,
+      hostPlatform: options.hostPlatform,
       capabilities: options.capabilities,
     }
   }
@@ -224,6 +228,7 @@ export class PublicRelayAgent {
           adapterVersion: this.options.adapterVersion,
           hostId: this.options.hostId,
           agentInstanceId: this.options.agentInstanceId,
+          hostPlatform: this.options.hostPlatform,
           capabilities: this.options.capabilities,
           hostName: this.options.hostName || hostname(),
         }),
@@ -356,6 +361,7 @@ export function publicPairingPayload(status: AgentStatus): string | null {
     ...(status.agentName ? { agentName: status.agentName } : {}),
     ...(status.agentVersion ? { agentVersion: status.agentVersion } : {}),
     ...(status.adapterVersion ? { adapterVersion: status.adapterVersion } : {}),
+    ...(status.hostPlatform ? { hostPlatform: status.hostPlatform } : {}),
     ...(status.capabilities ? { capabilities: status.capabilities } : {}),
   })
 }

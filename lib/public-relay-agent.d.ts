@@ -1,4 +1,5 @@
 import { type AgentCapability } from './agent-metadata.js';
+import type { HostPlatformDescriptor } from './host-platform.js';
 export interface PublicRelayConfig {
     readonly enabled: boolean;
     readonly relayOrigin: string;
@@ -24,6 +25,7 @@ export interface AgentStatus {
     readonly agentName?: string;
     readonly agentVersion?: string;
     readonly adapterVersion?: string;
+    readonly hostPlatform?: HostPlatformDescriptor;
     readonly capabilities?: readonly AgentCapability[];
 }
 export interface RelayClientFrame {
@@ -39,6 +41,7 @@ export interface PublicRelayAgentOptions {
     readonly agentKind?: string;
     readonly agentName?: string;
     readonly hostName?: string;
+    readonly hostPlatform?: HostPlatformDescriptor;
     readonly capabilities?: readonly AgentCapability[];
     readonly displayName?: string;
     readonly onFrame: (frame: RelayClientFrame) => void | Promise<void>;

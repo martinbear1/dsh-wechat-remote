@@ -37,8 +37,8 @@
 | 依赖 | 说明 |
 |---|---|
 | DeepSeek Harness | ≥ 0.1.0-rc.7（`dsh` 命令可用） |
-| git | 安装插件时用到（Windows 需装 Git for Windows） |
-| pnpm | `dsh plugin` 内部调用；报 "pnpm is not recognized" 时执行 `npm install -g pnpm` |
+| git | 安装插件时用到（Windows 需装 Git for Windows；macOS 使用系统 Git） |
+| Node/npm | DSH 已依赖 Node；统一安装命令会临时提供官方 CLI 所需的 pnpm，不要求全局安装 |
 | 微信小程序 | 你已注册的小程序（个人主体即可；`wx.login` 可用） |
 | 公网服务（可选） | 需要开发者提供已备案 HTTPS/WSS 域名；用户电脑不开放公网端口 |
 
@@ -47,13 +47,13 @@
 **默认装最新正式版**（推荐）：
 
 ```bash
-dsh plugin --profile web add github:martinbear1/dsh-wechat-remote
+npm exec --yes --package=pnpm@10 -- dsh plugin --profile web add github:martinbear1/dsh-wechat-remote
 ```
 
 **或指定版本**（稳定复现，如 `#v1.0.7`）：
 
 ```bash
-dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.0.7
+npm exec --yes --package=pnpm@10 -- dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.0.7
 ```
 
 然后**重启 DSH**，打开 `http://127.0.0.1:3080`，侧边栏底部出现
@@ -61,23 +61,16 @@ dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.0.7
 
 > 其他 profile 同样适用：把 `--profile web` 换成你的 profile 名。
 
-**怎么重启 DSH（通用）**：
+这条命令在 Windows PowerShell、macOS Terminal 和 Linux shell 中完全相同；
+`pnpm` 只在本次 npm 执行环境中提供，不修改用户的全局包配置。
+
+**怎么重启 DSH（Windows / macOS 通用）**：
 
 - 若 `dsh web` 正开在一个终端窗口里：那个窗口按 **Ctrl + C**，再重新运行 `dsh web`；
-- 若窗口已关/后台运行：PowerShell 两步 ——
+- 若由服务管理器或其他工具托管：先从原来的管理入口正常停止 DSH，再运行：
 
-```powershell
-Get-NetTCPConnection -LocalPort 3080 -State Listen | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }
-Start-Process -WindowStyle Hidden cmd -ArgumentList '/c dsh web'
-```
-
-> 按 3080 端口精确停进程，不会误伤其他 Node 程序；**不要**用
-> `Stop-Process -Name node`。
-
-**一条龙（新用户首选）**：安装 + 重启合成一条命令，粘贴进 PowerShell 回车即可 ——
-
-```powershell
-dsh plugin --profile web add github:martinbear1/dsh-wechat-remote; Get-NetTCPConnection -LocalPort 3080 -State Listen | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }; Start-Process -WindowStyle Hidden cmd -ArgumentList '/c dsh web'
+```bash
+dsh web
 ```
 
 > ⚠️ 重启会中断正在进行的对话/任务（历史已落盘不丢，刷新页面继续）。
@@ -99,6 +92,18 @@ dsh plugin --profile web add github:martinbear1/dsh-wechat-remote; Get-NetTCPCon
 进程操作。自动重启也被有意排除：重启会中断正在进行的 agent 会话（可能丢掉正在
 执行的任务），这个时机应当由用户自己掌握。重启只影响进程，**会话记录都在磁盘上，
 不会丢**。
+
+## 主机平台架构
+
+同一个插件包在启动时选择 HostPlatform 适配器，DSH、微信和云端协议本身不分叉：
+
+- Windows：真实枚举本地盘符和映射网络盘；
+- macOS：提供主目录、POSIX 根目录与 `/Volumes` 卷入口；
+- Linux：提供主目录、根目录及常见挂载入口；
+- Windows 网络盘、macOS 外部卷和 Linux 挂载目录统一在可超时终止的隔离 worker 中访问，
+  失联存储不会阻塞 DSH 主事件循环；
+- Agent 只发布最小平台能力（平台类型、路径风格、根目录风格），不上传系统版本等额外
+  设备指纹；云端只校验并透传，小程序按能力呈现。
 
 **插件坏了会影响 DSH 吗？** 不会。本插件所有运行时错误都在进程内消化：端口被占、
 网络异常、WeChat API 失败等任何故障都只让对应功能降级并记日志，**原生 DSH

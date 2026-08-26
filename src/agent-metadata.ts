@@ -5,6 +5,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { readPrivateJson, writePrivateJsonAtomic } from './secure-file.js'
+import { hostPlatformDescriptor, type HostPlatformDescriptor } from './host-platform.js'
 
 export interface AgentCapability {
   readonly id: string
@@ -19,6 +20,7 @@ export interface AgentDescriptor {
   readonly agentKind: 'deepseek-harness'
   readonly agentName: 'DeepSeek Harness'
   readonly agentVersion: string
+  readonly hostPlatform: HostPlatformDescriptor
   readonly capabilities: readonly AgentCapability[]
 }
 
@@ -38,6 +40,7 @@ export const AGENT_CAPABILITIES: readonly AgentCapability[] = Object.freeze([
   Object.freeze({ id: 'wechat.history-window', version: 1 }),
   Object.freeze({ id: 'harness.public-relay-e2ee', version: 1 }),
   Object.freeze({ id: 'harness.lan-bootstrap', version: 1 }),
+  Object.freeze({ id: 'harness.host-platform', version: 1 }),
 ])
 
 function stableId(file: string): string {
@@ -132,6 +135,7 @@ export function loadAgentDescriptor(): AgentDescriptor {
     agentKind: 'deepseek-harness',
     agentName: 'DeepSeek Harness',
     agentVersion: installedDshVersion(),
+    hostPlatform: hostPlatformDescriptor(),
     capabilities: AGENT_CAPABILITIES,
   }
   return cachedDescriptor

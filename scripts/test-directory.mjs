@@ -20,6 +20,8 @@ try {
 
   const roots = await service.roots({}, signal)
   if (!roots.ok || roots.value.roots.length === 0) fail('filesystem roots were not enumerated')
+  if (!['windows', 'macos', 'linux', 'unknown'].includes(roots.value.platform)) fail('host platform was not returned')
+  if (!['drives', 'filesystem'].includes(roots.value.rootStyle)) fail('directory root style was not returned')
   if (process.platform === 'win32') {
     const paths = roots.value.roots.map((item) => item.path.toUpperCase())
     if (!paths.includes(`${process.env.SystemDrive || 'C:'}\\`.toUpperCase())) fail('system drive is missing')

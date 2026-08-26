@@ -79,12 +79,17 @@ check(host.includes("from './directory-service.js'"), 'lib/index.js 未挂载微
 check(host.includes('ctx.plugin(WechatDirectoryService'), 'lib/index.js 未在 gate fiber 下挂载目录服务')
 const directory = readFileSync(path.join(root, 'lib/directory-service.js'), 'utf8')
 check(directory.includes('super(ctx, "wechatDirectory")') || directory.includes("super(ctx, 'wechatDirectory')"), '目录服务的 Cordis/Typert key 不是 wechatDirectory')
-check(directory.includes('Get-PSDrive'), 'Windows 盘符必须来自真实文件系统盘枚举，不能再猜 C-Z')
 check(directory.includes('DEFAULT_OPERATION_TIMEOUT_MS = 6500'), '网络盘目录服务缺少 6.5 秒硬超时')
 check(directory.includes('DSH_WECHAT_DIRECTORY_PATH_B64'), '网络盘路径没有通过非脚本数据通道传给隔离进程')
 check(directory.includes('timeout: this.operationTimeoutMs'), '网络盘子进程没有配置可终止超时')
 check(directory.includes('directory-timeout'), '目录服务缺少网络盘超时业务错误')
 check(directory.includes('network-unavailable'), '目录服务缺少网络盘离线业务错误')
+check(directory.includes('directory-worker.js'), '挂载目录没有通过跨平台可终止 worker 隔离')
+const hostPlatform = readFileSync(path.join(root, 'lib/host-platform.js'), 'utf8')
+check(hostPlatform.includes('Get-PSDrive'), 'Windows 适配器必须枚举真实文件系统盘，不能猜 C-Z')
+check(hostPlatform.includes("kind: 'macos'") || hostPlatform.includes('kind: "macos"'), '缺少 macOS HostPlatform 适配器')
+check(hostPlatform.includes("'/Volumes'") || hostPlatform.includes('"/Volumes"'), 'macOS 适配器没有建模挂载卷')
+check(hostPlatform.includes('isBenchmarkAddress'), 'LAN 地址选择没有排除 macOS/VPN 基准网段')
 const typert = readFileSync(path.join(root, 'lib/typert.host.js'), 'utf8')
 for (const method of ['roots', 'list', 'create']) {
   check(typert.includes(`wechatDirectory/${method}`), `严格 Typert 契约缺少 wechatDirectory/${method}`)
@@ -96,7 +101,7 @@ check(host.includes('ctx.plugin(WechatHostInfoService'), 'lib/index.js 未在 ga
 const hostInfo = readFileSync(path.join(root, 'lib/host-info-service.js'), 'utf8')
 check(hostInfo.includes('super(ctx, "wechatHost")') || hostInfo.includes("super(ctx, 'wechatHost')"), 'Host 信息服务的 Typert key 不是 wechatHost')
 check(hostInfo.includes('computerName: hostname()'), 'Host 信息服务未从操作系统读取真实电脑名')
-for (const field of ['hostId', 'agentInstanceId', 'agentKind', 'agentName', 'agentVersion', 'capabilities']) {
+for (const field of ['hostId', 'agentInstanceId', 'agentKind', 'agentName', 'agentVersion', 'hostPlatform', 'capabilities']) {
   check(hostInfo.includes(field), `Host 信息服务缺少 Agent 元数据字段 ${field}`)
 }
 check(typert.includes('wechatHost/describe'), '严格 Typert 契约缺少 wechatHost/describe')
@@ -153,7 +158,7 @@ check(gatePorts.includes('EADDRINUSE'), '端口推导模块缺少占用错误的
 for (const s of ['scripts/restart-dsh.cmd', 'scripts/restart-dsh.ps1']) {
   check(Array.isArray(pkg.files) && pkg.files.includes(s), `package.json files 缺少 ${s}`)
 }
-for (const artifact of ['lib/agent-metadata.js', 'lib/gate-ports.js', 'lib/secure-file.js']) {
+for (const artifact of ['lib/agent-metadata.js', 'lib/gate-ports.js', 'lib/secure-file.js', 'lib/host-platform.js', 'lib/directory-worker.js']) {
   check(Array.isArray(pkg.files) && pkg.files.includes(artifact), `package.json files 缺少 ${artifact}`)
 }
 

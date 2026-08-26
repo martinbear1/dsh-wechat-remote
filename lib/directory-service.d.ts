@@ -1,16 +1,19 @@
 import type { Context } from '@deepseek-ai/cordis';
 import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol';
+import { type DirectoryRootStyle, type HostPlatformKind, type PlatformRootKind } from './host-platform.js';
 export interface WechatDirectoryRootsRequest {
 }
 export interface WechatDirectoryRoot {
     readonly name: string;
     readonly path: string;
-    readonly kind: 'local' | 'network' | 'filesystem';
+    readonly kind: PlatformRootKind;
     readonly displayRoot?: string;
 }
 export interface WechatDirectoryRootsValue {
     readonly home: string;
     readonly roots: readonly WechatDirectoryRoot[];
+    readonly platform: HostPlatformKind;
+    readonly rootStyle: DirectoryRootStyle;
 }
 export interface WechatDirectoryRootsError {
     readonly code: 'drive-enumeration-failed';
@@ -89,31 +92,21 @@ declare module '@deepseek-ai/cordis' {
 export declare class WechatDirectoryService extends TypertRemoteService {
     private readonly maxEntries;
     private readonly operationTimeoutMs;
-    private readonly windowsRoots;
-    private windowsRootsPromise?;
     constructor(ctx: Context, config?: WechatDirectoryConfig);
-    /** Enumerate real filesystem roots once; never guess C: through Z:. */
+    /** Enumerate roots through the selected host adapter; never guess C: through Z:. */
     roots(request: WechatDirectoryRootsRequest, signal: AbortSignal): Promise<WechatDirectoryRootsResult>;
     /** List one directory level with the same bounds and path fence as DSH browse. */
     list(request: WechatDirectoryListRequest, signal: AbortSignal): Promise<WechatDirectoryListResult>;
     /** Create exactly one child directory; never recurse or accept a path segment. */
     create(request: WechatDirectoryCreateRequest, signal: AbortSignal): Promise<WechatDirectoryCreateResult>;
     /**
-     * Share one non-blocking drive snapshot between roots() and the initial home
-     * listing. The child process still has its own 8 s kill deadline, while each
-     * caller may stop waiting through the Typert request signal.
+     * Potentially blocking Windows network drives and macOS/Linux mounts are
+     * enumerated in the same disposable Node worker. A dead mount can therefore
+     * be killed without pinning DSH's event loop. The path travels only through
+     * base64 environment data and is never interpolated into executable code.
      */
-    private readWindowsRoots;
-    /** Treat UNC paths and mapped drives reported with DisplayRoot as network I/O. */
-    private isNetworkTarget;
-    /**
-     * Network shares are enumerated in a disposable PowerShell child. A dead
-     * mapped drive can therefore be killed without pinning DSH's event loop.
-     * The path travels only through base64 environment data; no client text is
-     * interpolated into the fixed script.
-     */
-    private listNetworkDirectory;
-    /** Create one network-share child in a killable process with the same deadline. */
-    private createNetworkDirectory;
+    private listMountedDirectory;
+    /** Create one child on mounted storage in a killable process with the same deadline. */
+    private createMountedDirectory;
 }
 export default WechatDirectoryService;

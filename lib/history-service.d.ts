@@ -41,8 +41,6 @@ export interface WechatHistoryRemoteValue {
     readonly payloadJson?: string;
     /** Large windows may use an encrypted, expiring OSS transport descriptor. */
     readonly snapshotJson?: string;
-    /** Observable acceleration only; DSH remains the source of truth. */
-    readonly cache?: 'memory';
 }
 export interface WechatHistoryWindowError {
     readonly code: 'invalid-history-request' | 'history-unavailable' | 'history-pagination-invalid';
@@ -68,40 +66,6 @@ export interface WechatHistoryConfig {
     readonly snapshotThresholdBytes?: number;
     readonly prepareSnapshot?: (payloadJson: string) => Promise<Readonly<Record<string, unknown>>>;
 }
-export interface LatestHistoryWindowCacheToken {
-    readonly epoch: number;
-    readonly revision: number;
-}
-/**
- * Process-local, event-coherent cache for the latest semantic window.
- *
- * It is deliberately disabled until the native Host event stream is live.
- * Any event for a Session invalidates that Session; any monitor gap clears the
- * whole cache. Clear history never leaves memory and older cursor pages are
- * never cached.
- */
-export declare class LatestHistoryWindowCache {
-    private readonly maxEntries;
-    private readonly maxBytes;
-    private readonly maxEntryBytes;
-    private readonly entries;
-    private readonly revisions;
-    private tracking;
-    private epoch;
-    private totalBytes;
-    constructor(options?: {
-        readonly maxEntries?: number;
-        readonly maxBytes?: number;
-        readonly maxEntryBytes?: number;
-    });
-    setTracking(ready: boolean): void;
-    invalidateSession(sessionId: string): void;
-    capture(request: WechatHistoryWindowRequest): LatestHistoryWindowCacheToken | null;
-    read(request: WechatHistoryWindowRequest): string | null;
-    write(request: WechatHistoryWindowRequest, payloadJson: string, token: LatestHistoryWindowCacheToken | null): boolean;
-    private clear;
-    private remove;
-}
 type FetchPage = (payload: {
     readonly sessionId: string;
     readonly maxMessages: number;
@@ -117,13 +81,8 @@ export declare class WechatHistoryService extends TypertRemoteService {
     private readonly timeoutMs;
     private readonly snapshotThresholdBytes;
     private readonly prepareSnapshot?;
-    private readonly latestCache;
     constructor(ctx: Context, config?: WechatHistoryConfig);
     window(request: WechatHistoryWindowRequest, signal: AbortSignal): Promise<WechatHistoryWindowResult>;
-    /** Enable cache reads only while the native Host monitor is continuous. */
-    setCacheTracking(ready: boolean): void;
-    /** Invalidate before processing every native event for this Session. */
-    invalidateSession(sessionId: string): void;
     private deliver;
     private fetchNativePage;
 }

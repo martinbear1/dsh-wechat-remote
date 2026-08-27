@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { inflateRawSync } from 'node:zlib'
 
-import { buildHistoryWindow, LatestHistoryWindowCache } from '../lib/history-service.js'
+import { buildHistoryWindow } from '../lib/history-service.js'
 import { archiveHistoryJson } from '../lib/history-archive.js'
 import { Context } from '@deepseek-ai/cordis'
 import WechatHistoryService from '../lib/history-service.js'
@@ -120,35 +120,37 @@ const invalid = await buildHistoryWindow({ sessionId: '', maxMessages: 1000 }, a
 assert.equal(invalid.ok, false)
 assert.equal(invalid.error.code, 'invalid-history-request')
 
-const latestCache = new LatestHistoryWindowCache({ maxEntries: 2, maxBytes: 128, maxEntryBytes: 96 })
-const latestA = { sessionId: 'session-cache-a', maxMessages: 30 }
-assert.equal(latestCache.capture(latestA), null, 'cache must fail closed before Host tracking opens')
-latestCache.setTracking(true)
-const stableA = latestCache.capture(latestA)
-assert.ok(stableA)
-assert.equal(latestCache.write(latestA, '{"events":[]}', stableA), true)
-assert.equal(latestCache.read(latestA), '{"events":[]}')
-latestCache.invalidateSession(latestA.sessionId)
-assert.equal(latestCache.read(latestA), null, 'any native Session event must invalidate its latest window')
-assert.equal(latestCache.write(latestA, '{"stale":true}', stableA), false,
-  'a window built across a native event must never enter the cache')
-const olderRequest = { sessionId: latestA.sessionId, maxMessages: 30, beforeSeq: 10 }
-assert.equal(latestCache.capture(olderRequest), null, 'cursor history must remain uncached')
-const stableAfterEvent = latestCache.capture(latestA)
-assert.ok(stableAfterEvent)
-latestCache.setTracking(false)
-assert.equal(latestCache.write(latestA, '{"stale":true}', stableAfterEvent), false)
-assert.equal(latestCache.read(latestA), null, 'a Host monitor gap must clear all clear-text history')
-latestCache.setTracking(true)
-for (const id of ['session-cache-a', 'session-cache-b', 'session-cache-c']) {
-  const request = { sessionId: id, maxMessages: 30 }
-  latestCache.write(request, JSON.stringify({ id }), latestCache.capture(request))
+// The latest Session window is a mutable pointer, not cacheable content. Every
+// read must consult native DSH history; only the immutable payload digest may
+// be reused later by the encrypted object layer.
+let latestRevision = 0
+let latestFetches = 0
+const alwaysFreshService = {
+  fetchNativePage: async () => {
+    latestFetches += 1
+    return {
+      ok: true,
+      value: {
+        hasMore: false,
+        events: [{
+          event: {
+            type: 'assistant/message',
+            seq: latestRevision,
+            data: { message: { id: `message-${latestRevision}` } },
+          },
+        }],
+      },
+    }
+  },
+  deliver: async payloadJson => ({ ok: true, value: { payloadJson } }),
 }
-assert.equal(latestCache.read({ sessionId: 'session-cache-a', maxMessages: 30 }), null,
-  'bounded LRU must evict its oldest latest window')
-const oversized = { sessionId: 'session-cache-large', maxMessages: 30 }
-assert.equal(latestCache.write(oversized, 'x'.repeat(97), latestCache.capture(oversized)), false,
-  'one large transcript must not consume the process cache')
+const latestRequest = { sessionId: 'session-always-fresh', maxMessages: 30 }
+const firstLatest = await WechatHistoryService.prototype.window.call(alwaysFreshService, latestRequest, signal)
+latestRevision = 1
+const secondLatest = await WechatHistoryService.prototype.window.call(alwaysFreshService, latestRequest, signal)
+assert.equal(latestFetches, 2, 'latest history must never be served from a mutable process cache')
+assert.notEqual(firstLatest.value.payloadJson, secondLatest.value.payloadJson,
+  'a completed native turn must be observable on the next history read')
 
 class FakeSocket extends EventEmitter {
   close() { this.emit('close') }
@@ -171,8 +173,6 @@ async function waitFor(predicate, timeoutMs = 500, label = 'history prewarmer') 
 
 const fakeSocket = new FakeSocket()
 const warmed = []
-const trackingStates = []
-const changedSessions = []
 const prewarmer = new HistorySnapshotPrewarmer({
   dshPort: 3080,
   socketFactory: url => {
@@ -185,8 +185,6 @@ const prewarmer = new HistorySnapshotPrewarmer({
     warmed.push(sessionId)
     return 'object'
   },
-  onTrackingState: ready => trackingStates.push(ready),
-  onSessionChanged: sessionId => changedSessions.push(sessionId),
 })
 prewarmer.start()
 fakeSocket.emit('open')
@@ -200,8 +198,6 @@ fakeSocket.emit('message', hostStatus('session-prewarm1234', true), false)
 fakeSocket.emit('message', hostStatus('session-prewarm1234', false), false)
 await waitFor(() => warmed.length === 2)
 prewarmer.stop()
-assert.deepEqual(trackingStates, [true, false], 'Host monitor continuity must gate cache reads')
-assert.ok(changedSessions.length >= 4 && changedSessions.every(id => id === 'session-prewarm1234'))
 
 // Production wiring must capture the Cordis service inside an inject fiber.
 // Reading a sibling service later from the parent plugin context is rejected by
@@ -214,8 +210,7 @@ const bindingFiber = await bindHistorySnapshotPrewarmer(lifecycleCtx, {
   socketFactory: () => lifecycleSocket,
   settleDelayMs: 0,
   warm: async (service, sessionId) => {
-    assert.equal(typeof service.setCacheTracking, 'function')
-    assert.equal(typeof service.invalidateSession, 'function')
+    assert.equal(typeof service.window, 'function')
     assert.equal(sessionId, 'session-lifecycle1234')
     lifecycleWarmCalls += 1
     return 'inline'
@@ -233,26 +228,6 @@ lifecycleSocket.emit('message', hostStatus('session-lifecycle1234', false), fals
 await new Promise(resolve => setTimeout(resolve, 10))
 assert.equal(lifecycleWarmCalls, 1, 'service disposal must stop its injected Host observer')
 await bindingFiber.dispose()
-
-const hostileSocket = new FakeSocket()
-const hostileDiagnostics = []
-const hostilePrewarmer = new HistorySnapshotPrewarmer({
-  socketFactory: () => hostileSocket,
-  settleDelayMs: 0,
-  warm: async () => 'inline',
-  onTrackingState: () => { throw new Error('optional tracking observer') },
-  onSessionChanged: () => { throw new Error('optional invalidation observer') },
-  onDiagnostic: (level, message) => {
-    hostileDiagnostics.push({ level, message })
-    if (hostileDiagnostics.length === 1) throw new Error('optional logger')
-  },
-})
-hostilePrewarmer.start()
-assert.doesNotThrow(() => hostileSocket.emit('open'),
-  'an optional tracking observer must not escape the Host socket callback')
-assert.doesNotThrow(() => hostileSocket.emit('message', hostStatus('session-hostile1234', true), false),
-  'an optional invalidation observer must not escape the Host socket callback')
-hostilePrewarmer.stop()
 
 const retrySocket = new FakeSocket()
 let retryCalls = 0

@@ -28,12 +28,10 @@ export interface HistorySnapshotPrewarmerOptions {
   readonly retryDelayMs?: number
   readonly maxQueue?: number
   readonly onDiagnostic?: (level: 'info' | 'warn', message: string) => void
-  readonly onTrackingState?: (ready: boolean) => void
-  readonly onSessionChanged?: (sessionId: string) => void
 }
 
 export interface HistorySnapshotPrewarmerBindingOptions
-  extends Omit<HistorySnapshotPrewarmerOptions, 'warm' | 'onTrackingState' | 'onSessionChanged'> {
+  extends Omit<HistorySnapshotPrewarmerOptions, 'warm'> {
   readonly warm: (
     service: WechatHistoryService,
     sessionId: string,
@@ -63,8 +61,6 @@ export function bindHistorySnapshotPrewarmer(
       maxQueue: options.maxQueue,
       onDiagnostic: options.onDiagnostic,
       warm: (sessionId, signal) => options.warm(service, sessionId, signal),
-      onTrackingState: ready => service.setCacheTracking(ready),
-      onSessionChanged: sessionId => service.invalidateSession(sessionId),
     })
     prewarmer.start()
     return () => prewarmer.stop()
@@ -79,8 +75,6 @@ export class HistorySnapshotPrewarmer {
   private readonly retryDelayMs: number
   private readonly maxQueue: number
   private readonly onDiagnostic?: HistorySnapshotPrewarmerOptions['onDiagnostic']
-  private readonly onTrackingState?: HistorySnapshotPrewarmerOptions['onTrackingState']
-  private readonly onSessionChanged?: HistorySnapshotPrewarmerOptions['onSessionChanged']
   private readonly running = new Map<string, boolean>()
   private readonly settleTimers = new Map<string, NodeJS.Timeout>()
   private readonly queued = new Set<string>()
@@ -91,7 +85,6 @@ export class HistorySnapshotPrewarmer {
   private reconnectDelayMs = 1_000
   private active: { readonly sessionId: string; readonly controller: AbortController } | null = null
   private stopped = true
-  private tracking = false
 
   constructor(options: HistorySnapshotPrewarmerOptions) {
     this.dshPort = Number.isSafeInteger(options.dshPort) && Number(options.dshPort) > 0
@@ -108,8 +101,6 @@ export class HistorySnapshotPrewarmer {
     this.retryDelayMs = nonNegative(options.retryDelayMs, 15_000)
     this.maxQueue = positive(options.maxQueue, 8)
     this.onDiagnostic = options.onDiagnostic
-    this.onTrackingState = options.onTrackingState
-    this.onSessionChanged = options.onSessionChanged
   }
 
   start(): void {
@@ -129,7 +120,6 @@ export class HistorySnapshotPrewarmer {
     this.queued.clear()
     this.rerun.clear()
     this.running.clear()
-    this.setTracking(false)
     this.active?.controller.abort(new Error('History prewarmer stopped'))
     this.active = null
     const socket = this.socket
@@ -149,19 +139,16 @@ export class HistorySnapshotPrewarmer {
     this.socket = socket
     socket.on('open', () => {
       this.reconnectDelayMs = 1_000
-      this.setTracking(true)
     })
     socket.on('message', (data: unknown, isBinary?: boolean) => {
       if (!isBinary) this.observe(data)
     })
     socket.on('close', () => {
       if (this.socket === socket) this.socket = null
-      this.setTracking(false)
       this.scheduleReconnect()
     })
     socket.on('error', () => {
       if (this.socket === socket) this.socket = null
-      this.setTracking(false)
       try { socket.terminate?.() } catch { /* reconnect below */ }
       this.scheduleReconnect()
     })
@@ -183,10 +170,6 @@ export class HistorySnapshotPrewarmer {
     if (!frame) return
     const sessionId = validSessionId(frame.sessionId)
     if (!sessionId) return
-    // Invalidate before any event-specific work. This makes a concurrently
-    // building latest window fail its revision check instead of entering the
-    // cache after newer native data has already arrived.
-    this.notifySessionChanged(sessionId)
     if (frame.type === 'host/session-removed') {
       this.forget(sessionId)
       return
@@ -267,26 +250,6 @@ export class HistorySnapshotPrewarmer {
       if (index >= 0) this.queue.splice(index, 1)
     }
     if (this.active?.sessionId === sessionId) this.active.controller.abort(new Error('Session removed'))
-  }
-
-  private setTracking(ready: boolean): void {
-    if (this.tracking === ready) return
-    this.tracking = ready
-    try {
-      this.onTrackingState?.(ready)
-    } catch (error) {
-      // A diagnostics/cache observer is optional acceleration. It must never
-      // escape a WebSocket event callback and terminate the DSH host process.
-      this.diagnostic('warn', `history tracking observer failed: ${messageOf(error)}`)
-    }
-  }
-
-  private notifySessionChanged(sessionId: string): void {
-    try {
-      this.onSessionChanged?.(sessionId)
-    } catch (error) {
-      this.diagnostic('warn', `history invalidation observer failed: ${messageOf(error)}`)
-    }
   }
 
   private diagnostic(level: 'info' | 'warn', message: string): void {

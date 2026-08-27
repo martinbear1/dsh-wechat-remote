@@ -27,9 +27,6 @@ const DEFAULT_TIMEOUT_MS = 60_000
 // keeps small ZIPs inside the existing E2EE response and sends only genuinely
 // large archives through OSS, so transport selection is based on wire size.
 const DEFAULT_SNAPSHOT_THRESHOLD_BYTES = 32 * 1024
-const DEFAULT_MEMORY_CACHE_ENTRIES = 8
-const DEFAULT_MEMORY_CACHE_BYTES = 16 * 1024 * 1024
-const DEFAULT_MEMORY_CACHE_ENTRY_BYTES = 4 * 1024 * 1024
 
 interface HistoryEntry {
   readonly event?: {
@@ -74,8 +71,6 @@ export interface WechatHistoryRemoteValue {
   readonly payloadJson?: string
   /** Large windows may use an encrypted, expiring OSS transport descriptor. */
   readonly snapshotJson?: string
-  /** Observable acceleration only; DSH remains the source of truth. */
-  readonly cache?: 'memory'
 }
 
 export interface WechatHistoryWindowError {
@@ -98,114 +93,6 @@ export interface WechatHistoryConfig {
   readonly prepareSnapshot?: (payloadJson: string) => Promise<Readonly<Record<string, unknown>>>
 }
 
-export interface LatestHistoryWindowCacheToken {
-  readonly epoch: number
-  readonly revision: number
-}
-
-interface LatestHistoryWindowCacheEntry {
-  readonly sessionId: string
-  readonly payloadJson: string
-  readonly bytes: number
-}
-
-/**
- * Process-local, event-coherent cache for the latest semantic window.
- *
- * It is deliberately disabled until the native Host event stream is live.
- * Any event for a Session invalidates that Session; any monitor gap clears the
- * whole cache. Clear history never leaves memory and older cursor pages are
- * never cached.
- */
-export class LatestHistoryWindowCache {
-  private readonly maxEntries: number
-  private readonly maxBytes: number
-  private readonly maxEntryBytes: number
-  private readonly entries = new Map<string, LatestHistoryWindowCacheEntry>()
-  private readonly revisions = new Map<string, number>()
-  private tracking = false
-  private epoch = 0
-  private totalBytes = 0
-
-  constructor(options: {
-    readonly maxEntries?: number
-    readonly maxBytes?: number
-    readonly maxEntryBytes?: number
-  } = {}) {
-    this.maxEntries = positiveInteger(options.maxEntries, DEFAULT_MEMORY_CACHE_ENTRIES)
-    this.maxBytes = positiveInteger(options.maxBytes, DEFAULT_MEMORY_CACHE_BYTES)
-    this.maxEntryBytes = positiveInteger(options.maxEntryBytes, DEFAULT_MEMORY_CACHE_ENTRY_BYTES)
-  }
-
-  setTracking(ready: boolean): void {
-    if (this.tracking === ready) return
-    this.tracking = ready
-    this.epoch += 1
-    this.clear()
-  }
-
-  invalidateSession(sessionId: string): void {
-    this.revisions.set(sessionId, (this.revisions.get(sessionId) || 0) + 1)
-    for (const [key, entry] of this.entries) {
-      if (entry.sessionId === sessionId) this.remove(key, entry)
-    }
-  }
-
-  capture(request: WechatHistoryWindowRequest): LatestHistoryWindowCacheToken | null {
-    if (!this.tracking || request.beforeSeq !== undefined) return null
-    return {
-      epoch: this.epoch,
-      revision: this.revisions.get(request.sessionId) || 0,
-    }
-  }
-
-  read(request: WechatHistoryWindowRequest): string | null {
-    if (!this.tracking || request.beforeSeq !== undefined) return null
-    const key = latestCacheKey(request)
-    const entry = this.entries.get(key)
-    if (!entry) return null
-    // Refresh insertion order to make Map a bounded LRU.
-    this.entries.delete(key)
-    this.entries.set(key, entry)
-    return entry.payloadJson
-  }
-
-  write(
-    request: WechatHistoryWindowRequest,
-    payloadJson: string,
-    token: LatestHistoryWindowCacheToken | null,
-  ): boolean {
-    if (!token || !this.tracking || request.beforeSeq !== undefined
-      || token.epoch !== this.epoch
-      || token.revision !== (this.revisions.get(request.sessionId) || 0)) return false
-    const bytes = Buffer.byteLength(payloadJson)
-    if (bytes > this.maxEntryBytes || bytes > this.maxBytes) return false
-    const key = latestCacheKey(request)
-    const previous = this.entries.get(key)
-    if (previous) this.remove(key, previous)
-    this.entries.set(key, { sessionId: request.sessionId, payloadJson, bytes })
-    this.totalBytes += bytes
-    while (this.entries.size > this.maxEntries || this.totalBytes > this.maxBytes) {
-      const oldest = this.entries.entries().next().value as
-        | [string, LatestHistoryWindowCacheEntry]
-        | undefined
-      if (!oldest) break
-      this.remove(oldest[0], oldest[1])
-    }
-    return this.entries.has(key)
-  }
-
-  private clear(): void {
-    this.entries.clear()
-    this.totalBytes = 0
-  }
-
-  private remove(key: string, entry: LatestHistoryWindowCacheEntry): void {
-    if (!this.entries.delete(key)) return
-    this.totalBytes = Math.max(0, this.totalBytes - entry.bytes)
-  }
-}
-
 type FetchPage = (
   payload: { readonly sessionId: string; readonly maxMessages: number; readonly beforeSeq?: number },
   signal: AbortSignal,
@@ -222,7 +109,6 @@ export class WechatHistoryService extends TypertRemoteService {
   private readonly timeoutMs: number
   private readonly snapshotThresholdBytes: number
   private readonly prepareSnapshot?: WechatHistoryConfig['prepareSnapshot']
-  private readonly latestCache = new LatestHistoryWindowCache()
 
   constructor(ctx: Context, config: WechatHistoryConfig = {}) {
     super(ctx, 'wechatHistory')
@@ -247,16 +133,12 @@ export class WechatHistoryService extends TypertRemoteService {
     const validation = validateRequest(request)
     if (validation) return { ok: false, error: validation }
     try {
-      const cached = this.latestCache.read(request)
-      if (cached !== null) return this.deliver(cached, request, true)
-      const cacheToken = this.latestCache.capture(request)
       const built = await buildHistoryWindow(request, (payload, pageSignal) => (
         this.fetchNativePage(payload, pageSignal)
       ), signal)
       if (!built.ok) return built
       const payloadJson = JSON.stringify(built.value)
-      this.latestCache.write(request, payloadJson, cacheToken)
-      return this.deliver(payloadJson, request, false)
+      return this.deliver(payloadJson, request)
     } catch (error) {
       signal.throwIfAborted()
       return {
@@ -266,27 +148,15 @@ export class WechatHistoryService extends TypertRemoteService {
     }
   }
 
-  /** Enable cache reads only while the native Host monitor is continuous. */
-  setCacheTracking(ready: boolean): void {
-    this.latestCache.setTracking(ready)
-  }
-
-  /** Invalidate before processing every native event for this Session. */
-  invalidateSession(sessionId: string): void {
-    this.latestCache.invalidateSession(sessionId)
-  }
-
   private async deliver(
     payloadJson: string,
     request: WechatHistoryWindowRequest,
-    cacheHit: boolean,
   ): Promise<WechatHistoryWindowResult> {
     if (request.delivery !== 'inline' && this.prepareSnapshot
         && Buffer.byteLength(payloadJson) >= this.snapshotThresholdBytes) {
       try {
         return { ok: true, value: {
           snapshotJson: JSON.stringify(await this.prepareSnapshot(payloadJson)),
-          ...(cacheHit ? { cache: 'memory' as const } : {}),
         } }
       } catch {
         // OSS is an acceleration layer, never the history source of truth.
@@ -294,10 +164,7 @@ export class WechatHistoryService extends TypertRemoteService {
         // tunnel response without changing DSH/WebUI behavior.
       }
     }
-    return { ok: true, value: {
-      payloadJson,
-      ...(cacheHit ? { cache: 'memory' as const } : {}),
-    } }
+    return { ok: true, value: { payloadJson } }
   }
 
   private fetchNativePage(
@@ -493,14 +360,6 @@ function validateRequest(request: WechatHistoryWindowRequest): WechatHistoryWind
     return { code: 'invalid-history-request', message: '历史传输方式无效' }
   }
   return null
-}
-
-function latestCacheKey(request: WechatHistoryWindowRequest): string {
-  return `${request.sessionId}\u0000${request.maxMessages ?? DEFAULT_PAGE_MESSAGES}`
-}
-
-function positiveInteger(value: unknown, fallback: number): number {
-  return Number.isSafeInteger(value) && Number(value) > 0 ? Number(value) : fallback
 }
 
 function eventSeqOf(entry: HistoryEntry | undefined): number | undefined {

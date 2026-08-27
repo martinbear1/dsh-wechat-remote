@@ -6,7 +6,7 @@
 「鲸常在」是与 WebUI 平级的独立 DSH 客户端。它直接使用 DSH 的原生 RPC、事件和
 会话数据，不抓取网页、不修改 WebUI，也不替换 DeepSeek Harness 本体。
 
-当前插件版本：`v1.5.2`
+当前插件版本：`v1.5.3`
 
 ## 用户能获得什么
 
@@ -33,8 +33,7 @@
 电脑需要能够运行 `dsh`、`node`、`npm` 和 `git`。安装命令会临时提供 DSH 插件管理所需的
 `pnpm`，不要求用户提前全局安装。
 
-> 当前 GitHub 仓库是受控测试分发渠道，安装账号需要拥有仓库访问权限。正式公开分发前，
-> 会切换为不依赖私有源码权限的稳定安装渠道。
+GitHub 仓库已公开，用户无需登录 GitHub 或申请源码访问权限即可安装。
 
 ## 安装
 
@@ -51,7 +50,7 @@ dsh plugin --profile web add github:martinbear1/dsh-wechat-remote
 `main`；需要固定复现或回退时再追加版本标签，例如：
 
 ```bash
-dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.5.2
+dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.5.3
 ```
 
 `dsh plugin` 是 DeepSeek Harness 官方插件管理入口。DSH 会把 `add/remove/why` 等参数原样

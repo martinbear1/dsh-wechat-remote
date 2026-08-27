@@ -1,7 +1,7 @@
 {
   "name": "@harness-remote/dsh-wechat-remote",
-  "version": "1.5.0",
-  "description": "Harness Remote 微信版：同一插件自动适配 Windows、macOS 与 Linux 上的 DeepSeek Harness，提供微信身份绑定、局域网直连及端到端加密公网连接",
+  "version": "1.5.1",
+  "description": "鲸常在：同一插件自动适配 Windows、macOS 与 Linux 上的 DeepSeek Harness，提供微信身份绑定、局域网直连及端到端加密公网连接",
   "private": true,
   "license": "MIT",
   "type": "module",
@@ -71,6 +71,7 @@
         "@deepseek-ai/dsh-client-connection",
         "@deepseek-ai/dsh-client-runtime",
         "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-primitives",
         "@deepseek-ai/dsh-client-ui-slots"
       ]
     }
@@ -99,6 +100,7 @@
     "@deepseek-ai/cordis": ">=4.0.1",
     "@deepseek-ai/dsh-client-connection": ">=0.1.0-rc.5",
     "@deepseek-ai/dsh-client-runtime": ">=0.1.0-rc.5",
+    "@deepseek-ai/dsh-client-ui-primitives": ">=0.1.0-rc.5",
     "@deepseek-ai/dsh-client-ui-settings": ">=0.1.0-rc.5",
     "@deepseek-ai/dsh-client-ui-slots": ">=0.1.0-rc.5",
     "@deepseek-ai/dsh-host-directory-picker-browse": ">=0.1.1-rc.1",
@@ -113,6 +115,9 @@
       "optional": true
     },
     "@deepseek-ai/dsh-client-runtime": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-primitives": {
       "optional": true
     },
     "@deepseek-ai/dsh-client-ui-settings": {
@@ -135,6 +140,7 @@
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-client-connection": "0.1.1-rc.2",
     "@deepseek-ai/dsh-client-runtime": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-primitives": "0.1.1-rc.2",
     "@deepseek-ai/dsh-client-ui-settings": "0.1.1-rc.2",
     "@deepseek-ai/dsh-client-ui-slots": "0.1.1-rc.2",
     "@deepseek-ai/dsh-host-directory-picker-browse": "0.1.1-rc.2",

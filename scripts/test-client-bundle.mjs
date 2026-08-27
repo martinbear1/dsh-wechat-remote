@@ -52,6 +52,9 @@ const exports = registration.factory((id) => {
       useState: (value) => [value, () => {}],
     }
   if (id === 'react/jsx-runtime') return jsxRuntime
+  if (id === '@deepseek-ai/dsh-client-ui-primitives') {
+    return { FishLogo: (props) => ({ type: 'FishLogo', props }) }
+  }
   throw new Error(`Unexpected external client module: ${id}`)
 })
 assert.ok(styleTag, 'client factory must install its component stylesheet')

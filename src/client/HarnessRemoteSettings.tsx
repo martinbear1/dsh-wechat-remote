@@ -1,5 +1,6 @@
 /** Harness Remote's lazy page inside the native Web Settings navigation. */
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { FishLogo } from '@deepseek-ai/dsh-client-ui-primitives'
 import styles from './HarnessRemoteSettings.module.css'
 
 interface PairCodeResp {
@@ -227,12 +228,7 @@ export function HarnessRemoteSettings({
       <div className={styles.hero}>
         <div className={styles.identity}>
           <span className={styles.mark} aria-hidden>
-            <svg viewBox="0 0 24 24" width="22" height="22">
-              <path
-                fill="currentColor"
-                d="M4 4h6v6H4V4Zm10 0h6v6h-6V4ZM4 14h6v6H4v-6Zm10 0h3v3h-3v-3Zm3 3h3v3h-3v-3Zm-3 3h3v-3h-3v3Zm6-6v3h-3v-3h3Z"
-              />
-            </svg>
+            <FishLogo size={28} />
           </span>
           <div className={styles.identityCopy}>
             <h3 id="harness-remote-title">鲸常在</h3>

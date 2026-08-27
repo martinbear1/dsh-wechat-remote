@@ -55,7 +55,7 @@ npm install -g pnpm@11
 普通用户不需要填写版本号；默认安装 `main` 上的最新正式版。只有复现或回退时才需要指定标签，例如：
 
 ```bash
-dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.5.4
+dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.5.5
 ```
 
 ## 添加电脑
@@ -129,7 +129,7 @@ dsh plugin --profile web remove @harness-remote/dsh-wechat-remote
 | macOS | 支持 |
 | Linux | 尚未列入正式测试范围 |
 
-当前版本：`v1.5.4`
+当前版本：`v1.5.5`
 
 ## 许可证
 

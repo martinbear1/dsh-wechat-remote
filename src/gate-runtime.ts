@@ -92,6 +92,7 @@ interface PairEntry {
   payload: string
   qrDataUrl: string
   publicMode: boolean
+  expiresAt: number
 }
 
 type MutableDoor = {
@@ -494,6 +495,7 @@ export function mountWechatGate(ctx: Context): () => void {
     const payloadObj = { code, host: lanIPv4(), port: PUBLIC_PORT }
     let payload = JSON.stringify(payloadObj)
     let publicMode = false
+    let expiresAt = state.pending[code].expiresAt
     const gateway = publicRelayGateway
     if (gateway) {
       try {
@@ -506,6 +508,7 @@ export function mountWechatGate(ctx: Context): () => void {
           publicPayload.lan = payloadObj
           payload = JSON.stringify(publicPayload)
           publicMode = true
+          expiresAt = Number(publicPayload.expiresAt) || expiresAt
         }
       } catch (error: unknown) {
         console.warn(
@@ -514,8 +517,8 @@ export function mountWechatGate(ctx: Context): () => void {
         )
       }
     }
-    const qrDataUrl = await QRCode.toDataURL(payload, { width: 320, margin: 1 })
-    return { code, payload, qrDataUrl, publicMode }
+    const qrDataUrl = await QRCode.toDataURL(payload, { width: 420, margin: 2 })
+    return { code, payload, qrDataUrl, publicMode, expiresAt }
   }
 
   // ── LOCAL door (127.0.0.1:3093): pairing surface + status ──
@@ -537,7 +540,7 @@ img{background:#fff;border-radius:14px;padding:12px}
 code{color:#7aa2ff;font-size:15px;letter-spacing:3px}
 </style></head>
 <body>
-<h1>添加到 Harness Remote</h1>
+<h1>添加到鲸常在</h1>
 <p>${agentDescriptor.agentName} · ${agentDescriptor.hostName}</p>
 <p>打开微信小程序，进入「添加节点」扫描二维码</p>
 <img src="${entry.qrDataUrl}" alt="pairing QR">
@@ -566,6 +569,7 @@ code{color:#7aa2ff;font-size:15px;letter-spacing:3px}
         qrDataUrl: entry.qrDataUrl,
         mode: entry.publicMode ? 'public-relay' : 'lan',
         payload: entry.payload,
+        expiresAt: entry.expiresAt,
       }),
     )
   }

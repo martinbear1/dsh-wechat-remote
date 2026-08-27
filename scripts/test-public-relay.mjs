@@ -66,7 +66,7 @@ try {
   assert.match(decoded.identityPublicKey, /BEGIN PUBLIC KEY/)
   assert.equal(decoded.ticket, 'single-use-ticket')
 
-  const metadataPayload = JSON.parse(publicPairingPayload({
+  const compactPairingPayload = JSON.parse(publicPairingPayload({
     enabled: true,
     state: 'online',
     nodeId: first.nodeId,
@@ -83,11 +83,11 @@ try {
     adapterVersion: '1.1.0',
     capabilities: [{ id: 'dsh.rpc', version: 1 }],
   }))
-  assert.equal(metadataPayload.v, 1, 'metadata extensions must preserve QR protocol v1')
-  assert.equal(metadataPayload.hostId, 'host-id-1234567890123456')
-  assert.equal(metadataPayload.agentInstanceId, 'agent-id-123456789012345')
-  assert.equal(metadataPayload.agentVersion, '0.1.1-rc.2')
-  assert.deepEqual(metadataPayload.capabilities, [{ id: 'dsh.rpc', version: 1 }])
+  assert.equal(compactPairingPayload.v, 1, 'compact pairing must preserve QR protocol v1')
+  assert.equal(compactPairingPayload.nodeId, first.nodeId)
+  assert.equal(compactPairingPayload.hostId, undefined, 'claim response, not QR, owns mutable Agent metadata')
+  assert.equal(compactPairingPayload.capabilities, undefined)
+  assert.ok(JSON.stringify(compactPairingPayload).length < 500, 'public pairing payload must remain easy to scan')
 
   let enrollmentBody = null
   const metadataAgent = new PublicRelayAgent(

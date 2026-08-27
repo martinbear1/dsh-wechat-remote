@@ -250,7 +250,7 @@
 }
 
 .qrArea {
-  min-height: 236px;
+  min-height: 292px;
   margin-top: 16px;
   display: flex;
   align-items: center;
@@ -261,14 +261,15 @@
 .qr,
 .qrPlaceholder {
   box-sizing: border-box;
-  width: 224px;
-  height: 224px;
+  width: 280px;
+  height: 280px;
   border-radius: 12px;
 }
 
 .qr {
   background: #fff;
-  padding: 8px;
+  padding: 10px;
+  image-rendering: pixelated;
 }
 
 .qrPlaceholder {

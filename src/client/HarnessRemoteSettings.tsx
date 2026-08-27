@@ -7,6 +7,7 @@ interface PairCodeResp {
   code: string
   qrDataUrl: string
   mode: 'lan' | 'public-relay'
+  expiresAt: number
 }
 
 interface GateDoorInfo {
@@ -193,6 +194,13 @@ export function HarnessRemoteSettings({
       window.clearInterval(timer)
     }
   }, [loadStatus])
+
+  useEffect(() => {
+    if (qrState !== 'ready' || !qr?.expiresAt) return undefined
+    const delay = Math.max(1000, qr.expiresAt - Date.now() - 60_000)
+    const timer = window.setTimeout(() => void generateQr(), delay)
+    return () => window.clearTimeout(timer)
+  }, [generateQr, qr?.expiresAt, qrState])
 
   const relay = status?.publicRelay
   const publicBusy = relay?.state === 'enrolling' || relay?.state === 'connecting'

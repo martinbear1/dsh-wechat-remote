@@ -55,7 +55,7 @@ npm install -g pnpm@11
 普通用户不需要填写版本号；默认安装 `main` 上的最新正式版。只有复现或回退时才需要指定标签，例如：
 
 ```bash
-dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.5.3
+dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.5.4
 ```
 
 ## 添加电脑
@@ -67,6 +67,8 @@ dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.5.3
 5. 添加成功后即可查看这台电脑上的工作区和会话。
 
 配对码一次性使用并会自动过期。请勿把二维码或配对码发送给不受信任的人。
+
+从小程序删除节点后，旧身份和旧二维码会立即失效。电脑插件会自动准备一个全新的配对身份；需要再次使用时，重新生成并扫描新二维码即可。
 
 添加完成后通常不需要再次扫码。小程序会根据当前网络在可用连接之间自动选择；电脑需保持 DSH 运行。
 
@@ -127,7 +129,7 @@ dsh plugin --profile web remove @harness-remote/dsh-wechat-remote
 | macOS | 支持 |
 | Linux | 尚未列入正式测试范围 |
 
-当前版本：`v1.5.3`
+当前版本：`v1.5.4`
 
 ## 许可证
 

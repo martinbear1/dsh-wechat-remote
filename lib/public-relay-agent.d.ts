@@ -66,9 +66,10 @@ export declare function loadPublicRelayConfig(configPath?: string): PublicRelayC
 export declare function loadOrCreateAgentIdentity(identityPath?: string): AgentIdentity;
 export declare class PublicRelayAgent {
     readonly config: PublicRelayConfig;
-    readonly identity: AgentIdentity;
+    identity: AgentIdentity;
     readonly options: PublicRelayAgentOptions;
     readonly fetchImpl: typeof fetch;
+    private readonly identityPath;
     private socket;
     private stopped;
     private reconnectAttempt;
@@ -82,6 +83,8 @@ export declare class PublicRelayAgent {
     ensurePairingTicket(minValidityMs?: number): Promise<AgentStatus>;
     stop(): void;
     private enrollAndConnect;
+    private enrollWithIdentityRecovery;
+    private rotateRevokedIdentity;
     private enroll;
     private connect;
     private scheduleReconnect;

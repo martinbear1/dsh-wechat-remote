@@ -133,6 +133,10 @@ export function loadOrCreateAgentIdentity(identityPath = defaultAgentIdentityPat
     if (stored.nodeId !== expected || !stored.privateKeyPem) throw new Error('Public relay identity file is invalid')
     return stored
   }
+  return replaceAgentIdentity(identityPath)
+}
+
+function replaceAgentIdentity(identityPath: string): AgentIdentity {
   const pair = generateKeyPairSync('ed25519')
   const publicKeyPem = pair.publicKey.export({ type: 'spki', format: 'pem' }).toString()
   const privateKeyPem = pair.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString()
@@ -141,11 +145,24 @@ export function loadOrCreateAgentIdentity(identityPath = defaultAgentIdentityPat
   return identity
 }
 
+class RelayEnrollmentError extends Error {
+  readonly status: number
+  readonly code: string
+
+  constructor(status: number, code: string, message: string) {
+    super(message)
+    this.name = 'RelayEnrollmentError'
+    this.status = status
+    this.code = code
+  }
+}
+
 export class PublicRelayAgent {
   readonly config: PublicRelayConfig
-  readonly identity: AgentIdentity
+  identity: AgentIdentity
   readonly options: PublicRelayAgentOptions
   readonly fetchImpl: typeof fetch
+  private readonly identityPath: string
   private socket: WebSocket | null = null
   private stopped = true
   private reconnectAttempt = 0
@@ -161,7 +178,8 @@ export class PublicRelayAgent {
     this.config = config
     this.options = options
     this.fetchImpl = options.fetchImpl || fetch
-    this.identity = loadOrCreateAgentIdentity(options.identityPath)
+    this.identityPath = options.identityPath || defaultAgentIdentityPath()
+    this.identity = loadOrCreateAgentIdentity(this.identityPath)
     this.status = {
       enabled: true,
       state: 'offline',
@@ -195,7 +213,7 @@ export class PublicRelayAgent {
     if (this.status.pairingTicket && (this.status.pairingExpiresAt || 0) > Date.now() + minValidityMs) {
       return this.snapshot()
     }
-    const body = await this.enroll()
+    const body = await this.enrollWithIdentityRecovery()
     this.update({
       pairingTicket: body.ticket,
       pairingExpiresAt: body.expiresAt,
@@ -216,7 +234,7 @@ export class PublicRelayAgent {
   private async enrollAndConnect(): Promise<void> {
     try {
       this.update({ state: 'enrolling', lastError: undefined })
-      const body = await this.enroll()
+      const body = await this.enrollWithIdentityRecovery()
       this.update({
         pairingTicket: body.ticket,
         pairingExpiresAt: body.expiresAt,
@@ -230,13 +248,43 @@ export class PublicRelayAgent {
     }
   }
 
+  private async enrollWithIdentityRecovery(): Promise<{
+    ticket?: string
+    expiresAt?: number
+    remoteAccess?: RemoteAccessStatus
+  }> {
+    const attemptedNodeId = this.identity.nodeId
+    try {
+      return await this.enroll()
+    } catch (error) {
+      if (!(error instanceof RelayEnrollmentError) || error.code !== 'agent_revoked') throw error
+      // Deleting a node intentionally tombstones its old public key. Generate
+      // a fresh identity rather than resurrecting that revoked credential.
+      // The node remains unowned until a user scans the new pairing ticket.
+      if (this.identity.nodeId === attemptedNodeId) this.rotateRevokedIdentity()
+      return this.enroll()
+    }
+  }
+
+  private rotateRevokedIdentity(): void {
+    this.identity = replaceAgentIdentity(this.identityPath)
+    this.update({
+      nodeId: this.identity.nodeId,
+      identityPublicKey: this.identity.publicKeyPem,
+      pairingTicket: undefined,
+      pairingExpiresAt: undefined,
+      remoteAccess: undefined,
+      lastError: undefined,
+    })
+  }
+
   private enroll(): Promise<{
     ticket?: string
     expiresAt?: number
     remoteAccess?: RemoteAccessStatus
   }> {
     if (this.enrollment) return this.enrollment
-    this.enrollment = (async () => {
+    const pending = (async () => {
       const timestamp = Date.now()
       const nonce = randomBytes(18).toString('base64url')
       const signature = sign(
@@ -265,7 +313,16 @@ export class PublicRelayAgent {
         }),
         signal: AbortSignal.timeout(10_000),
       })
-      if (!response.ok) throw new Error(`Relay enrollment failed with HTTP ${response.status}`)
+      if (!response.ok) {
+        let code = 'agent_identity_unavailable'
+        let message = `Relay enrollment failed with HTTP ${response.status}`
+        try {
+          const body = await response.json() as { error?: { code?: unknown; message?: unknown } }
+          if (typeof body.error?.code === 'string') code = body.error.code
+          if (typeof body.error?.message === 'string') message = body.error.message
+        } catch { /* retain a stable transport error */ }
+        throw new RelayEnrollmentError(response.status, code, message)
+      }
       const body = await response.json() as {
         ticket?: string
         expiresAt?: number
@@ -277,7 +334,10 @@ export class PublicRelayAgent {
         remoteAccess: normalizeRemoteAccess(body.remoteAccess),
       }
     })()
-    return this.enrollment.finally(() => { this.enrollment = null })
+    this.enrollment = pending
+    return pending.finally(() => {
+      if (this.enrollment === pending) this.enrollment = null
+    })
   }
 
   private connect(): void {

@@ -125,6 +125,42 @@ try {
   assert.equal(enrollmentStatus.remoteAccess.status, 'active')
   assert.equal(typeof enrollmentStatus.remoteAccess.validUntil, 'number')
 
+  const rotatedIdentityPath = path.join(root, 'revoked-identity.json')
+  const revokedIdentity = loadOrCreateAgentIdentity(rotatedIdentityPath)
+  const enrollmentNodeIds = []
+  let enrollmentAttempts = 0
+  const recoveringAgent = new PublicRelayAgent(
+    { enabled: true, relayOrigin: 'https://relay.example.test' },
+    {
+      agentVersion: 'test',
+      identityPath: rotatedIdentityPath,
+      onFrame() {},
+      async fetchImpl(_url, options) {
+        enrollmentAttempts += 1
+        enrollmentNodeIds.push(JSON.parse(options.body).publicKey)
+        if (enrollmentAttempts === 1) {
+          return new Response(JSON.stringify({
+            error: { code: 'agent_revoked', message: 'Agent identity has been revoked' },
+          }), {
+            status: 409,
+            headers: { 'content-type': 'application/json' },
+          })
+        }
+        return new Response(JSON.stringify({ ticket: 'fresh-ticket', expiresAt: Date.now() + 60_000 }), {
+          status: 201,
+          headers: { 'content-type': 'application/json' },
+        })
+      },
+    },
+  )
+  const recoveredStatus = await recoveringAgent.ensurePairingTicket()
+  const persistedIdentity = loadOrCreateAgentIdentity(rotatedIdentityPath)
+  assert.equal(enrollmentAttempts, 2, 'revoked identity should be replaced and enrolled once')
+  assert.notEqual(recoveredStatus.nodeId, revokedIdentity.nodeId)
+  assert.notEqual(enrollmentNodeIds[0], enrollmentNodeIds[1])
+  assert.equal(recoveredStatus.nodeId, persistedIdentity.nodeId)
+  assert.equal(recoveredStatus.pairingTicket, 'fresh-ticket')
+
   const atomicPath = path.join(root, 'atomic-state.json')
   writePrivateJsonAtomic(atomicPath, { generation: 1 })
   writePrivateJsonAtomic(atomicPath, { generation: 2 })

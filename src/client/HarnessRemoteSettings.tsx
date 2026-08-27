@@ -283,7 +283,7 @@ export function HarnessRemoteSettings({
         <div className={styles.connectCard}>
           <div>
             <strong>添加到微信</strong>
-            <p>打开「鲸常在」小程序，扫描一次即可绑定这台电脑。</p>
+            <p>打开「鲸常在」→ 添加节点，扫描配对码。</p>
           </div>
           <button
             type="button"

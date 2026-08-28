@@ -14,7 +14,8 @@
  *        - POST /pair/verify-wechat（需 Bearer）：每次启动用新 jsCode 复核
  *          当前微信身份与绑定一致；配置了真实 appid/secret 时，复核成功即
  *          **轮换 token**（旧凭证立即作废，泄露窗口 = 一次会话）。
- *        - 其余请求反代到 DSH 127.0.0.1:3080（Host 重写走官方栅栏合法通道）。
+ *        - 其余请求经版本能力适配器进入 DSH：新版走官方进程内共享 handler，
+ *          旧版仅在明确探测为 legacy 时反代本机 Host API。
  *        - 加固：每 IP 限速（429）、常数时间 token 比较、状态文件 0600。
  *
  *   2. LOCAL door（127.0.0.1:3093 — 仅本机可访问）：
@@ -22,9 +23,9 @@
  *        - GET /pair/code  官方 Web Settings 配对页数据（CORS for :3080）
  *        - GET /gate/status 局域网门与端到端加密公网 Agent 状态
  *
- * 状态（token + 待配对码 + openid↔token 绑定）存于
- * ~/.dsh/gate-wechat-state.json；微信 appid/secret 配置存于
- * ~/.dsh/gate-wechat.json（未配置时降级为开发态身份，功能全通）。
+ * 状态（token + 待配对码 + openid↔token 绑定）存于当前 DSH_HOME 下，
+ * 非默认 profile 的运行态进一步隔离；微信 appid/secret 配置存于同一
+ * DSH_HOME 根并由其 profile 共享（未配置时降级为开发态身份，功能全通）。
  * 随 DSH 同生共死 —— 无独立进程。
  */
 import http, { type IncomingMessage, type ServerResponse } from 'node:http'
@@ -37,6 +38,7 @@ import zlib from 'node:zlib'
 import type { Socket } from 'node:net'
 import httpProxy from 'http-proxy'
 import QRCode from 'qrcode'
+import { WebSocketServer } from 'ws'
 import type { Context, Plugin } from '@deepseek-ai/cordis'
 import WechatDirectoryService from './directory-service.js'
 import WechatHostInfoService, {
@@ -64,6 +66,8 @@ import {
 import { hostPlatformDescriptor, selectLanIPv4 } from './host-platform.js'
 import { deriveGatePorts, describeGateListenFailure } from './gate-ports.js'
 import { tightenPrivateFile, writePrivateJsonAtomic } from './secure-file.js'
+import { DshHostAdapterRuntime } from './dsh-host-adapter.js'
+import { dshDataHome, profileDataRoot } from './storage-paths.js'
 
 interface PendingPair {
   expiresAt: number
@@ -134,7 +138,10 @@ function recordOf(value: unknown): Record<string, unknown> | null {
  */
 export function mountWechatGate(ctx: Context): () => void {
   const UPSTREAM_PORT = Number(process.env.DSH_PORT || 3080)
-  const STATE_FILE = path.join(os.homedir(), '.dsh', 'gate-wechat-state.json')
+  const PROFILE_SCOPE = agentProfileScope()
+  const PROFILE_ROOT = profileDataRoot(PROFILE_SCOPE)
+  const STATE_FILE = path.join(PROFILE_ROOT, 'gate-wechat-state.json')
+  const hostAdapter = new DshHostAdapterRuntime(ctx, UPSTREAM_PORT)
   const TARGET = {
     target: 'http://127.0.0.1:' + UPSTREAM_PORT,
     changeOrigin: true,
@@ -174,7 +181,7 @@ export function mountWechatGate(ctx: Context): () => void {
     }
   }
   const selectedGatePorts = deriveGatePorts(
-    agentProfileScope(),
+    PROFILE_SCOPE,
     agentDescriptor.agentInstanceId,
     process.env,
   )
@@ -267,16 +274,27 @@ export function mountWechatGate(ctx: Context): () => void {
   }
 
   function loadState(): GateState {
+    const legacyStateFile = path.join(dshDataHome(), 'gate-wechat-state.json')
     try {
-      const raw = recordOf(JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')))
+      const source = fs.existsSync(STATE_FILE)
+        ? STATE_FILE
+        : STATE_FILE !== legacyStateFile && fs.existsSync(legacyStateFile)
+          ? legacyStateFile
+          : STATE_FILE
+      const raw = recordOf(JSON.parse(fs.readFileSync(source, 'utf8')))
       // 修复升级前遗留的宽松权限。
-      tightenFilePerms(STATE_FILE)
+      tightenFilePerms(source)
       if (raw && typeof raw.token === 'string' && raw.token.length >= 32) {
-        return {
+        const restored = {
           token: raw.token,
           pending: validPendingPairs(raw.pending),
           wechatBindings: validWechatBindings(raw.wechatBindings),
         }
+        // A non-default profile used to share this global file. Copy its last
+        // valid state into the new profile root, leaving the source untouched
+        // so the default profile and rollback remain lossless.
+        if (source !== STATE_FILE) saveState(restored)
+        return restored
       }
     } catch {
       /* first run */
@@ -346,13 +364,13 @@ export function mountWechatGate(ctx: Context): () => void {
   /** The public LAN door has no loopback authentication exemption. */
   /**
    * Append one line to the gate access log so connectivity problems can be
-   * diagnosed from the PC side (~/.dsh/wechat-gate-access.log).
+   * diagnosed from the PC side (the active DSH_HOME/profile access log).
    */
   function accessLog(req: IncomingMessage, note: string): void {
     try {
       const line = `${new Date().toISOString()} ${req.socket.remoteAddress ?? '?'} ${req.method} ${req.url ?? '?'} ${note}\n`
       fs.appendFileSync(
-        path.join(os.homedir(), '.dsh', 'wechat-gate-access.log'),
+        path.join(PROFILE_ROOT, 'wechat-gate-access.log'),
         line,
       )
     } catch (e) {
@@ -607,7 +625,7 @@ code{color:#7aa2ff;font-size:15px;letter-spacing:3px}
   //    走微信 code2session，否则用确定性开发态哈希），记录 openid↔token 绑定；
   //    每次启动可经 /pair/verify-wechat 复核，成功即轮换 token。
 
-  const WECHAT_CONFIG_FILE = path.join(os.homedir(), '.dsh', 'gate-wechat.json')
+  const WECHAT_CONFIG_FILE = path.join(dshDataHome(), 'gate-wechat.json')
 
   function loadWechatConfig(): WechatConfig | null {
     try {
@@ -787,6 +805,54 @@ code{color:#7aa2ff;font-size:15px;letter-spacing:3px}
     res.end('not found')
   })
 
+  async function serveThroughHostAdapter(
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): Promise<void> {
+    const chunks: Buffer[] = []
+    let bytes = 0
+    for await (const chunk of req) {
+      const part = Buffer.from(chunk)
+      bytes += part.byteLength
+      if (bytes > 64 * 1024 * 1024) throw new Error('DSH request exceeds 64 MiB')
+      chunks.push(part)
+    }
+    const controller = new AbortController()
+    const close = (): void => controller.abort(new Error('LAN client disconnected'))
+    req.once('aborted', close)
+    try {
+      const response = await hostAdapter.fetch({
+        path: req.url || '/',
+        method: req.method || 'GET',
+        headers: Object.fromEntries(Object.entries(req.headers)
+          .filter((entry): entry is [string, string] => typeof entry[1] === 'string')),
+        body: Buffer.concat(chunks),
+        signal: controller.signal,
+      })
+      const headers: Record<string, string> = {}
+      response.headers.forEach((value, key) => {
+        if (!['connection', 'transfer-encoding', 'set-cookie'].includes(key)) headers[key] = value
+      })
+      const body = Buffer.from(await response.arrayBuffer())
+      const accept = String(req.headers['accept-encoding'] || '')
+      if (/\bgzip\b/.test(accept) && body.byteLength > 1024
+          && /json|text|javascript|xml|svg/i.test(headers['content-type'] || 'application/json')) {
+        const compressed = zlib.gzipSync(body, { level: 6 })
+        delete headers['content-length']
+        headers['content-encoding'] = 'gzip'
+        headers.vary = 'Accept-Encoding'
+        res.writeHead(response.status, headers)
+        res.end(compressed)
+      } else {
+        headers['content-length'] = String(body.byteLength)
+        res.writeHead(response.status, headers)
+        res.end(body)
+      }
+    } finally {
+      req.removeListener('aborted', close)
+    }
+  }
+
   const publicServer = http.createServer((req, res) => {
     if (req.method === 'OPTIONS') {
       res.writeHead(204)
@@ -825,9 +891,27 @@ code{color:#7aa2ff;font-size:15px;letter-spacing:3px}
     // （Web UI 直连 3080，不受影响）。
     stripBrowserMarkers(req)
     accessLog(req, 'ok')
-    proxy.web(req, res, { ...TARGET, selfHandleResponse: true })
+    if (hostAdapter.usesModernTransport) {
+      void serveThroughHostAdapter(req, res).catch((error: unknown) => {
+        if (!res.headersSent) res.writeHead(502, { 'Content-Type': 'text/plain' })
+        if (!res.destroyed) res.end(`Bad Gateway: ${messageOf(error)}`)
+      })
+      return
+    }
+    if (hostAdapter.mode === 'legacy') {
+      proxy.web(req, res, { ...TARGET, selfHandleResponse: true })
+      return
+    }
+    res.writeHead(503, { 'Content-Type': 'application/json', 'Retry-After': '1' })
+    res.end(JSON.stringify({
+      result: {
+        ok: false,
+        error: { code: 'service-unavailable', message: 'DSH Host API is starting', details: {} },
+      },
+    }))
   })
 
+  const modernWebSockets = new WebSocketServer({ noServer: true, perMessageDeflate: false })
   publicServer.on('upgrade', (req, socket, head) => {
     // A remote client can reset a WebSocket while the proxy is connecting to
     // DSH. Without this listener, Node treats ECONNRESET as an unhandled Socket
@@ -848,7 +932,35 @@ code{color:#7aa2ff;font-size:15px;letter-spacing:3px}
       return socket.destroy()
     }
     stripBrowserMarkers(req)
-    proxy.ws(req, socket, head, WS_TARGET)
+    if (hostAdapter.usesModernTransport) {
+      const path = req.url || ''
+      if (!['/api/events.host', '/api/events.mux'].includes(path.split('?', 1)[0])) {
+        socket.write('HTTP/1.1 404 Not Found\r\n\r\n')
+        return socket.destroy()
+      }
+      modernWebSockets.handleUpgrade(req, socket, head, client => {
+        const controller = new AbortController()
+        client.once('close', () => controller.abort(new Error('LAN realtime client closed')))
+        client.once('error', () => controller.abort(new Error('LAN realtime client failed')))
+        void (async () => {
+          try {
+            for await (const frame of hostAdapter.events(path, controller.signal)) {
+              if (client.readyState !== client.OPEN) break
+              client.send(frame)
+            }
+          } catch (error) {
+            if (!controller.signal.aborted) client.close(1011, messageOf(error).slice(0, 100))
+          }
+        })()
+      })
+      return
+    }
+    if (hostAdapter.mode === 'legacy') {
+      proxy.ws(req, socket, head, WS_TARGET)
+      return
+    }
+    socket.write('HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\n\r\n')
+    socket.destroy()
   })
 
   /**
@@ -910,6 +1022,8 @@ code{color:#7aa2ff;font-size:15px;letter-spacing:3px}
       /* best-effort */
     }
     publicRelayGateway = null
+    hostAdapter.dispose()
+    modernWebSockets.close()
     console.log('[wechat-gate] runtime disposed')
   }
 
@@ -946,6 +1060,7 @@ code{color:#7aa2ff;font-size:15px;letter-spacing:3px}
   // 并删除已完成轮次的冗余流式增量。独立 Remote 不修改 WebUI/DSH。
   const historyConfig: WechatHistoryConfig = {
     dshPort: UPSTREAM_PORT,
+    callDsh: (method, payload, signal) => hostAdapter.call(method, payload, signal),
     prepareSnapshot: async (payloadJson: string) => {
       const gateway = publicRelayGateway
       if (!gateway) throw new Error('Public object transport is unavailable')
@@ -958,6 +1073,7 @@ code{color:#7aa2ff;font-size:15px;letter-spacing:3px}
   // base64 占用实时中继。对象层故障返回 unavailable，由客户端原生回退。
   const attachmentConfig: WechatAttachmentConfig = {
     dshPort: UPSTREAM_PORT,
+    callDsh: (method, payload, signal) => hostAdapter.call(method, payload, signal),
     storeAttachment: async (data, attachment, signal) => {
       const gateway = publicRelayGateway
       if (!gateway) throw new Error('Public object transport is unavailable')
@@ -986,10 +1102,11 @@ code{color:#7aa2ff;font-size:15px;letter-spacing:3px}
         // private index by stable Agent identity so multiple profiles on one
         // host cannot reuse another public node's object ticket.
         historyCachePath: path.join(
-          os.homedir(),
-          '.dsh',
+          PROFILE_ROOT,
           `wechat-history-snapshots-${agentDescriptor.agentInstanceId}.json`,
         ),
+        fetchDsh: request => hostAdapter.fetch(request),
+        openDshEvents: (eventPath, signal) => hostAdapter.events(eventPath, signal),
         onDiagnostic: (level, message) => {
           if (level === 'warn') console.warn(`[wechat-gate] ${message}`)
           else console.log(`[wechat-gate] ${message}`)
@@ -1034,6 +1151,7 @@ code{color:#7aa2ff;font-size:15px;letter-spacing:3px}
       void Promise.resolve(
         bindHistorySnapshotPrewarmer(ctx, {
           dshPort: UPSTREAM_PORT,
+          eventSource: signal => hostAdapter.events('/api/events.host', signal),
           warm: (service, sessionId, signal) =>
             prewarmLatestHistory(service, sessionId, signal),
           onDiagnostic: (level, message) => {

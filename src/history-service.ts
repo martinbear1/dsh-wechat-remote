@@ -91,6 +91,11 @@ export interface WechatHistoryConfig {
   readonly timeoutMs?: number
   readonly snapshotThresholdBytes?: number
   readonly prepareSnapshot?: (payloadJson: string) => Promise<Readonly<Record<string, unknown>>>
+  readonly callDsh?: (
+    method: string,
+    payload: Record<string, unknown>,
+    signal: AbortSignal,
+  ) => Promise<NativeHistoryResponse>
 }
 
 type FetchPage = (
@@ -109,6 +114,7 @@ export class WechatHistoryService extends TypertRemoteService {
   private readonly timeoutMs: number
   private readonly snapshotThresholdBytes: number
   private readonly prepareSnapshot?: WechatHistoryConfig['prepareSnapshot']
+  private readonly callDsh?: WechatHistoryConfig['callDsh']
 
   constructor(ctx: Context, config: WechatHistoryConfig = {}) {
     super(ctx, 'wechatHistory')
@@ -123,6 +129,7 @@ export class WechatHistoryService extends TypertRemoteService {
       ? Number(config.snapshotThresholdBytes)
       : DEFAULT_SNAPSHOT_THRESHOLD_BYTES
     this.prepareSnapshot = config.prepareSnapshot
+    this.callDsh = config.callDsh
   }
 
   @Remote('window')
@@ -171,6 +178,7 @@ export class WechatHistoryService extends TypertRemoteService {
     payload: { readonly sessionId: string; readonly maxMessages: number; readonly beforeSeq?: number },
     signal: AbortSignal,
   ): Promise<NativeHistoryResponse> {
+    if (this.callDsh) return this.callDsh('session.history', payload, signal)
     const body = Buffer.from(JSON.stringify({
       type: 'client-request',
       rpcId: `wechat-history-${Date.now().toString(36)}`,

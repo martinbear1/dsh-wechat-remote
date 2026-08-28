@@ -4,7 +4,7 @@
  * This module is deliberately isolated from the existing LAN gate. It opens no
  * public port and does not change DSH/WebUI configuration. Product builds use
  * the official relay by default so one QR always carries public + LAN routes;
- * ~/.dsh/harness-remote-public.json may explicitly disable or override it.
+ * DSH_HOME/harness-remote-public.json may explicitly disable or override it.
  */
 import {
   createHash,
@@ -16,15 +16,16 @@ import {
   existsSync,
   readFileSync,
 } from 'node:fs'
-import { homedir, hostname } from 'node:os'
+import { hostname } from 'node:os'
 import path from 'node:path'
 import { WebSocket } from 'ws'
 
 import { defaultAgentIdentityPath, type AgentCapability } from './agent-metadata.js'
 import type { HostPlatformDescriptor } from './host-platform.js'
 import { readPrivateJson, writePrivateJsonAtomic } from './secure-file.js'
+import { dshDataHome } from './storage-paths.js'
 
-const CONFIG_PATH = path.join(homedir(), '.dsh', 'harness-remote-public.json')
+const CONFIG_PATH = path.join(dshDataHome(), 'harness-remote-public.json')
 export const DEFAULT_PUBLIC_RELAY_ORIGIN = 'https://relay.xyxfood.xyz'
 const ROUTING_HEADER_BYTES = 18
 const MAX_AGENT_BUFFERED_BYTES = 2 * 1024 * 1024
@@ -102,7 +103,7 @@ export interface PublicRelayAgentOptions {
   /** The physical Agent socket was lost; all relay client ids are now stale. */
   readonly onTransportDisconnect?: () => void
   readonly fetchImpl?: typeof fetch
-  /** Test/portable profile override; production defaults to ~/.dsh. */
+  /** Test/portable override; production defaults to the active DSH_HOME. */
   readonly identityPath?: string
 }
 

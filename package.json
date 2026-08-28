@@ -69,7 +69,6 @@
       "platform": "web",
       "inject": [
         "@deepseek-ai/dsh-client-connection",
-        "@deepseek-ai/dsh-client-runtime",
         "@deepseek-ai/dsh-client-ui-settings",
         "@deepseek-ai/dsh-client-ui-primitives",
         "@deepseek-ai/dsh-client-ui-slots"
@@ -80,7 +79,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "bundle": "tsc -p tsconfig.json && node scripts/clean-client-types.mjs && tsc -p tsconfig.client.json && node scripts/build-client.mjs && node scripts/generate-typert.mjs",
     "verify": "node scripts/verify.mjs",
-    "test": "npm run test:lifecycle && npm run test:client && npm run test:attachment && npm run test:directory && npm run test:host-platform && npm run test:history && npm run test:gate-ports && npm run test:public-relay",
+    "test": "npm run test:lifecycle && npm run test:client && npm run test:attachment && npm run test:directory && npm run test:host-platform && npm run test:history && npm run test:gate-ports && npm run test:dsh-adapter && npm run test:public-relay",
     "test:lifecycle": "node scripts/test-lifecycle.mjs",
     "test:client": "node scripts/test-client-bundle.mjs",
     "test:directory": "node scripts/test-directory.mjs",
@@ -88,6 +87,9 @@
     "test:history": "node scripts/test-history.mjs",
     "test:attachment": "node scripts/test-attachment.mjs",
     "test:gate-ports": "node scripts/test-gate-ports.mjs",
+    "test:dsh-adapter": "node scripts/test-dsh-host-adapter.mjs",
+    "smoke:installed-gate": "node scripts/smoke-installed-gate.mjs",
+    "smoke:installed-gate:deep": "node scripts/smoke-installed-gate-deep.mjs",
     "test:public-relay": "node scripts/test-public-relay.mjs"
   },
   "dependencies": {
@@ -99,7 +101,6 @@
   "peerDependencies": {
     "@deepseek-ai/cordis": ">=4.0.1",
     "@deepseek-ai/dsh-client-connection": ">=0.1.0-rc.5",
-    "@deepseek-ai/dsh-client-runtime": ">=0.1.0-rc.5",
     "@deepseek-ai/dsh-client-ui-primitives": ">=0.1.0-rc.5",
     "@deepseek-ai/dsh-client-ui-settings": ">=0.1.0-rc.5",
     "@deepseek-ai/dsh-client-ui-slots": ">=0.1.0-rc.5",
@@ -112,9 +113,6 @@
       "optional": true
     },
     "@deepseek-ai/dsh-client-connection": {
-      "optional": true
-    },
-    "@deepseek-ai/dsh-client-runtime": {
       "optional": true
     },
     "@deepseek-ai/dsh-client-ui-primitives": {
@@ -139,7 +137,6 @@
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-client-connection": "0.1.1-rc.2",
-    "@deepseek-ai/dsh-client-runtime": "0.1.1-rc.2",
     "@deepseek-ai/dsh-client-ui-primitives": "0.1.1-rc.2",
     "@deepseek-ai/dsh-client-ui-settings": "0.1.1-rc.2",
     "@deepseek-ai/dsh-client-ui-slots": "0.1.1-rc.2",
@@ -184,6 +181,8 @@
     "lib/e2ee-session.d.ts",
     "lib/dsh-tunnel-agent.js",
     "lib/dsh-tunnel-agent.d.ts",
+    "lib/dsh-host-adapter.js",
+    "lib/dsh-host-adapter.d.ts",
     "lib/public-relay-gateway.js",
     "lib/public-relay-gateway.d.ts",
     "lib/public-object-client.js",
@@ -196,11 +195,14 @@
     "lib/gate-ports.d.ts",
     "lib/secure-file.js",
     "lib/secure-file.d.ts",
+    "lib/storage-paths.js",
+    "lib/storage-paths.d.ts",
     "lib/typert.host.js",
     "lib/typert.host.d.ts",
     "lib/typert.remote-client.js",
     "lib/typert.remote-client.d.ts",
     "lib/types",
-    "cordis.patch.yml"
+    "cordis.patch.yml",
+    "compatibility-manifest.json"
   ]
 }

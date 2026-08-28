@@ -46,6 +46,8 @@ try {
     'object-crypto.ts',
     'e2ee-session.ts',
     'dsh-tunnel-agent.ts',
+    'dsh-host-adapter.ts',
+    'storage-paths.ts',
     'agent-metadata.ts',
     'gate-ports.ts',
     'secure-file.ts',

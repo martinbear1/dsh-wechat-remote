@@ -171,11 +171,13 @@ dsh plugin --profile web remove @harness-remote/dsh-wechat-remote
 
 ## 支持范围
 
-| 平台 | 状态 |
-| --- | --- |
-| Windows | 支持 |
-| macOS | 支持 |
-| Linux | 尚未列入正式测试范围 |
+| 平台 | DSH 0.1.1-rc.2 | DSH 0.1.2-alpha.1 |
+| --- | --- | --- |
+| Windows | 支持 | 支持 |
+| macOS | 支持 | 支持 |
+| Linux | 尚未列入正式测试范围 | 尚未列入正式测试范围 |
+
+插件会按 DSH 实际提供的能力自动选择兼容通道，不要求用户选择版本。维护与验证规则见 [DSH 兼容策略](COMPATIBILITY.md)。
 
 当前版本：`v1.5.5`
 

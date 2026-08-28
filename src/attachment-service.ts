@@ -94,6 +94,11 @@ export interface WechatAttachmentConfig {
     attachmentId: string,
     signal: AbortSignal,
   ) => Promise<NativeAttachmentResponse>
+  readonly callDsh?: (
+    method: string,
+    payload: Record<string, unknown>,
+    signal: AbortSignal,
+  ) => Promise<NativeAttachmentResponse>
 }
 
 declare module '@deepseek-ai/cordis' {
@@ -107,6 +112,7 @@ export class WechatAttachmentService extends TypertRemoteService {
   private readonly timeoutMs: number
   private readonly storeAttachment?: WechatAttachmentConfig['storeAttachment']
   private readonly readAttachmentOverride?: WechatAttachmentConfig['readAttachment']
+  private readonly callDsh?: WechatAttachmentConfig['callDsh']
   private readonly cache = new Map<string, {
     readonly descriptor: WechatAttachmentObjectDescriptor
     readonly expiresAt: number
@@ -123,6 +129,7 @@ export class WechatAttachmentService extends TypertRemoteService {
       : DEFAULT_TIMEOUT_MS
     this.storeAttachment = config.storeAttachment
     this.readAttachmentOverride = config.readAttachment
+    this.callDsh = config.callDsh
   }
 
   @Remote('prepareBatch')
@@ -236,6 +243,9 @@ export class WechatAttachmentService extends TypertRemoteService {
     attachmentId: string,
     signal: AbortSignal,
   ): Promise<NativeAttachmentResponse> {
+    if (this.callDsh) {
+      return this.callDsh('session.attachment', { sessionId, attachmentId }, signal)
+    }
     const body = Buffer.from(JSON.stringify({
       type: 'client-request',
       rpcId: `wechat-attachment-${Date.now().toString(36)}`,

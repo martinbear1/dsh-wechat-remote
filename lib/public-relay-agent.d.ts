@@ -58,7 +58,7 @@ export interface PublicRelayAgentOptions {
     /** The physical Agent socket was lost; all relay client ids are now stale. */
     readonly onTransportDisconnect?: () => void;
     readonly fetchImpl?: typeof fetch;
-    /** Test/portable profile override; production defaults to ~/.dsh. */
+    /** Test/portable override; production defaults to the active DSH_HOME. */
     readonly identityPath?: string;
 }
 export declare function agentNodeIdForPublicKey(publicKeyPem: string): string;

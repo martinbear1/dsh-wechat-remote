@@ -1,3 +1,4 @@
+import { DshTunnelAgent } from './dsh-tunnel-agent.js';
 import { PublicRelayAgent, type AgentStatus, type PublicRelayConfig } from './public-relay-agent.js';
 import type { AgentCapability } from './agent-metadata.js';
 import type { WechatAttachmentObjectDescriptor } from './attachment-service.js';
@@ -25,6 +26,8 @@ export interface PublicRelayGatewayOptions {
     readonly identityPath?: string;
     readonly historyCachePath?: string;
     readonly onDiagnostic?: (level: 'info' | 'warn', message: string) => void;
+    readonly fetchDsh?: NonNullable<ConstructorParameters<typeof DshTunnelAgent>[0]>['fetchDsh'];
+    readonly openDshEvents?: NonNullable<ConstructorParameters<typeof DshTunnelAgent>[0]>['openDshEvents'];
 }
 export declare class PublicRelayGateway {
     readonly agent: PublicRelayAgent;
@@ -33,6 +36,8 @@ export declare class PublicRelayGateway {
     private readonly maxClients;
     private readonly maxStreamsPerClient;
     private readonly issueLanCredential?;
+    private readonly fetchDsh?;
+    private readonly openDshEvents?;
     private readonly objectClient;
     private readonly historySnapshots;
     private readonly pendingHistorySnapshots;

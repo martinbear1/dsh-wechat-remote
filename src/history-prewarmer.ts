@@ -24,6 +24,7 @@ export interface HistorySnapshotPrewarmerOptions {
   readonly dshPort?: number
   readonly warm: (sessionId: string, signal: AbortSignal) => Promise<'inline' | 'object'>
   readonly socketFactory?: (url: string) => SocketLike
+  readonly eventSource?: (signal: AbortSignal) => AsyncIterable<Uint8Array>
   readonly settleDelayMs?: number
   readonly retryDelayMs?: number
   readonly maxQueue?: number
@@ -56,6 +57,7 @@ export function bindHistorySnapshotPrewarmer(
     const prewarmer = new HistorySnapshotPrewarmer({
       dshPort: options.dshPort,
       socketFactory: options.socketFactory,
+      eventSource: options.eventSource,
       settleDelayMs: options.settleDelayMs,
       retryDelayMs: options.retryDelayMs,
       maxQueue: options.maxQueue,
@@ -71,6 +73,7 @@ export class HistorySnapshotPrewarmer {
   private readonly dshPort: number
   private readonly warmCallback: HistorySnapshotPrewarmerOptions['warm']
   private readonly socketFactory: NonNullable<HistorySnapshotPrewarmerOptions['socketFactory']>
+  private readonly eventSource?: HistorySnapshotPrewarmerOptions['eventSource']
   private readonly settleDelayMs: number
   private readonly retryDelayMs: number
   private readonly maxQueue: number
@@ -84,6 +87,7 @@ export class HistorySnapshotPrewarmer {
   private reconnectTimer: NodeJS.Timeout | null = null
   private reconnectDelayMs = 1_000
   private active: { readonly sessionId: string; readonly controller: AbortController } | null = null
+  private eventController: AbortController | null = null
   private stopped = true
 
   constructor(options: HistorySnapshotPrewarmerOptions) {
@@ -97,6 +101,7 @@ export class HistorySnapshotPrewarmer {
       perMessageDeflate: false,
       handshakeTimeout: 10_000,
     }))
+    this.eventSource = options.eventSource
     this.settleDelayMs = nonNegative(options.settleDelayMs, 750)
     this.retryDelayMs = nonNegative(options.retryDelayMs, 15_000)
     this.maxQueue = positive(options.maxQueue, 8)
@@ -106,7 +111,40 @@ export class HistorySnapshotPrewarmer {
   start(): void {
     if (!this.stopped) return
     this.stopped = false
-    this.connect()
+    if (this.eventSource) void this.consumeEvents()
+    else this.connect()
+  }
+
+  private async consumeEvents(): Promise<void> {
+    const controller = new AbortController()
+    this.eventController = controller
+    try {
+      let delayMs = 250
+      while (!this.stopped && !controller.signal.aborted) {
+        try {
+          for await (const frame of this.eventSource!(controller.signal)) {
+            if (this.stopped) break
+            delayMs = 250
+            this.observe(frame)
+          }
+        } catch (error) {
+          if (this.stopped || controller.signal.aborted) break
+          this.onDiagnostic?.('warn', `history event source unavailable; retrying: ${String(error)}`)
+        }
+        if (this.stopped || controller.signal.aborted) break
+        await new Promise<void>(resolve => {
+          const timer = setTimeout(resolve, delayMs)
+          timer.unref?.()
+          controller.signal.addEventListener('abort', () => {
+            clearTimeout(timer)
+            resolve()
+          }, { once: true })
+        })
+        delayMs = Math.min(10_000, delayMs * 2)
+      }
+    } finally {
+      if (this.eventController === controller) this.eventController = null
+    }
   }
 
   stop(): void {
@@ -122,6 +160,8 @@ export class HistorySnapshotPrewarmer {
     this.running.clear()
     this.active?.controller.abort(new Error('History prewarmer stopped'))
     this.active = null
+    this.eventController?.abort(new Error('History prewarmer stopped'))
+    this.eventController = null
     const socket = this.socket
     this.socket = null
     try { socket?.close() } catch { socket?.terminate?.() }

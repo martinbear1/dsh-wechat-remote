@@ -77,7 +77,6 @@ const result = await build({
     'react-dom/client',
     '@deepseek-ai/cordis',
     '@deepseek-ai/dsh-client-connection/client',
-    '@deepseek-ai/dsh-client-runtime/client',
     '@deepseek-ai/dsh-client-ui-primitives',
     '@deepseek-ai/dsh-client-ui-settings/client',
     '@deepseek-ai/dsh-client-ui-slots',

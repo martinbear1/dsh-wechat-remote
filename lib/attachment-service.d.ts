@@ -66,6 +66,7 @@ export interface WechatAttachmentConfig {
     }, signal: AbortSignal) => Promise<WechatAttachmentObjectDescriptor>;
     /** Pure-test seam; production always uses the native loopback API. */
     readonly readAttachment?: (sessionId: string, attachmentId: string, signal: AbortSignal) => Promise<NativeAttachmentResponse>;
+    readonly callDsh?: (method: string, payload: Record<string, unknown>, signal: AbortSignal) => Promise<NativeAttachmentResponse>;
 }
 declare module '@deepseek-ai/cordis' {
     interface Context {
@@ -77,6 +78,7 @@ export declare class WechatAttachmentService extends TypertRemoteService {
     private readonly timeoutMs;
     private readonly storeAttachment?;
     private readonly readAttachmentOverride?;
+    private readonly callDsh?;
     private readonly cache;
     private readonly pending;
     constructor(ctx: Context, config?: WechatAttachmentConfig);

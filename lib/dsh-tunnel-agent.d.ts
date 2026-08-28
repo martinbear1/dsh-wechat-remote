@@ -18,6 +18,14 @@ export interface DshTunnelAgentOptions {
         };
         readonly data: ByteArray;
     }>;
+    readonly fetchDsh?: (request: {
+        readonly path: string;
+        readonly method: string;
+        readonly headers?: Readonly<Record<string, string>>;
+        readonly body?: Uint8Array;
+        readonly signal?: AbortSignal;
+    }) => Promise<Response>;
+    readonly openDshEvents?: (path: string, signal: AbortSignal) => AsyncIterable<Uint8Array>;
 }
 export declare class DshTunnelAgent {
     private readonly sendCallback;
@@ -25,6 +33,8 @@ export declare class DshTunnelAgent {
     private readonly maxStreams;
     private readonly issueLanCredential?;
     private readonly materializeAttachment?;
+    private readonly fetchDsh?;
+    private readonly openDshEvents?;
     private readonly streams;
     private sendChain;
     private pendingSendBytes;
@@ -40,6 +50,7 @@ export declare class DshTunnelAgent {
     private flushEventBatch;
     private data;
     private end;
+    private forwardAdapterHttp;
     private forwardRemotePrompt;
     private cancel;
     private fail;

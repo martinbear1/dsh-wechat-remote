@@ -188,7 +188,22 @@ interface RemotePromptStream {
   bytes: number
 }
 
-type Stream = HttpStream | WebSocketStream | RemotePromptStream
+interface AdapterHttpStream {
+  readonly kind: 'adapter-http'
+  readonly controller: AbortController
+  readonly path: string
+  readonly method: string
+  readonly headers: Record<string, string>
+  chunks: ByteArray[]
+  bytes: number
+}
+
+interface AdapterWebSocketStream {
+  readonly kind: 'adapter-websocket'
+  readonly controller: AbortController
+}
+
+type Stream = HttpStream | WebSocketStream | RemotePromptStream | AdapterHttpStream | AdapterWebSocketStream
 
 export interface DshTunnelAgentOptions {
   readonly send: (frame: ByteArray) => void | Promise<void>
@@ -203,6 +218,14 @@ export interface DshTunnelAgentOptions {
     readonly descriptor: { readonly mediaType: string; readonly name?: string }
     readonly data: ByteArray
   }>
+  readonly fetchDsh?: (request: {
+    readonly path: string
+    readonly method: string
+    readonly headers?: Readonly<Record<string, string>>
+    readonly body?: Uint8Array
+    readonly signal?: AbortSignal
+  }) => Promise<Response>
+  readonly openDshEvents?: (path: string, signal: AbortSignal) => AsyncIterable<Uint8Array>
 }
 
 export class DshTunnelAgent {
@@ -211,6 +234,8 @@ export class DshTunnelAgent {
   private readonly maxStreams: number
   private readonly issueLanCredential?: DshTunnelAgentOptions['issueLanCredential']
   private readonly materializeAttachment?: DshTunnelAgentOptions['materializeAttachment']
+  private readonly fetchDsh?: DshTunnelAgentOptions['fetchDsh']
+  private readonly openDshEvents?: DshTunnelAgentOptions['openDshEvents']
   private readonly streams = new Map<number, Stream>()
   private sendChain: Promise<void> = Promise.resolve()
   private pendingSendBytes = 0
@@ -222,6 +247,8 @@ export class DshTunnelAgent {
     this.maxStreams = options.maxStreams || 128
     this.issueLanCredential = options.issueLanCredential
     this.materializeAttachment = options.materializeAttachment
+    this.fetchDsh = options.fetchDsh
+    this.openDshEvents = options.openDshEvents
   }
 
   receive(rawFrame: ByteArray): void {
@@ -289,6 +316,18 @@ export class DshTunnelAgent {
   }
 
   private openHttp(streamId: number, path: string, value: Record<string, unknown>): void {
+    if (this.fetchDsh) {
+      this.streams.set(streamId, {
+        kind: 'adapter-http',
+        controller: new AbortController(),
+        path,
+        method: safeMethod(value.method),
+        headers: requestHeaders(value.headers),
+        chunks: [],
+        bytes: 0,
+      })
+      return
+    }
     const request = http.request({
       host: '127.0.0.1',
       port: this.dshPort,
@@ -324,6 +363,33 @@ export class DshTunnelAgent {
   }
 
   private openWebSocket(streamId: number, path: string, value: Record<string, unknown>): void {
+    if (this.openDshEvents) {
+      const controller = new AbortController()
+      const stream: AdapterWebSocketStream = { kind: 'adapter-websocket', controller }
+      this.streams.set(streamId, stream)
+      this.queue(encode(ACCEPT, streamId, 0, json({ opened: true })))
+      void (async () => {
+        try {
+          for await (const message of this.openDshEvents!(path, controller.signal)) {
+            if (this.streams.get(streamId) !== stream) return
+            const parts = pieces(message)
+            parts.forEach((part, index) => this.queue(encode(
+              DATA,
+              streamId,
+              index === parts.length - 1 ? FLAG_FINAL : 0,
+              part,
+            )))
+          }
+          if (this.streams.get(streamId) === stream) {
+            this.streams.delete(streamId)
+            this.queue(encode(END, streamId, 0, json({ code: 1000, reason: '' })))
+          }
+        } catch (error) {
+          if (!controller.signal.aborted) this.fail(streamId, error as Error)
+        }
+      })()
+      return
+    }
     const socket = new WebSocket(`ws://127.0.0.1:${this.dshPort}${path}`, {
       headers: { 'user-agent': 'HarnessRemote-PublicAgent/1' },
       maxPayload: 1024 * 1024,
@@ -417,6 +483,15 @@ export class DshTunnelAgent {
       stream.request.write(payload)
       return
     }
+    if (stream.kind === 'adapter-http') {
+      stream.bytes += payload.length
+      if (stream.bytes > MAX_REQUEST_BYTES) throw new Error('DSH request exceeds 16 MiB')
+      stream.chunks.push(new Uint8Array(payload))
+      return
+    }
+    if (stream.kind === 'adapter-websocket') {
+      throw new Error('DSH event streams are server-to-client only')
+    }
     stream.fragmentBytes += payload.length
     if (stream.fragmentBytes > 1024 * 1024) throw new Error('DSH WebSocket message exceeds 1 MiB')
     stream.fragments.push(new Uint8Array(payload))
@@ -432,13 +507,55 @@ export class DshTunnelAgent {
       void this.forwardRemotePrompt(streamId, stream)
       return
     }
-    if (stream.kind === KIND_HTTP) stream.request.end()
+    if (stream.kind === 'adapter-http') {
+      void this.forwardAdapterHttp(streamId, stream)
+    } else if (stream.kind === 'adapter-websocket') {
+      stream.controller.abort(new Error('DSH event client closed'))
+      this.streams.delete(streamId)
+    } else if (stream.kind === KIND_HTTP) stream.request.end()
     else {
       const value = payload.length ? parseJson(payload) : {}
       const code = typeof value.code === 'number' ? value.code : 1000
       const reason = typeof value.reason === 'string' ? value.reason.slice(0, 123) : ''
       stream.socket.close(code, reason)
       this.streams.delete(streamId)
+    }
+  }
+
+  private async forwardAdapterHttp(streamId: number, stream: AdapterHttpStream): Promise<void> {
+    try {
+      const response = await this.fetchDsh!({
+        path: stream.path,
+        method: stream.method,
+        headers: stream.headers,
+        body: concat(...stream.chunks),
+        signal: stream.controller.signal,
+      })
+      if (this.streams.get(streamId) !== stream) return
+      const headers: Record<string, string> = {}
+      response.headers.forEach((value, key) => {
+        if (!['connection', 'transfer-encoding', 'set-cookie', 'content-encoding'].includes(key)) {
+          headers[key] = value
+        }
+      })
+      this.queue(encode(ACCEPT, streamId, 0, json({ statusCode: response.status, headers })))
+      const reader = response.body?.getReader()
+      if (reader) {
+        while (true) {
+          const next = await reader.read()
+          if (next.done) break
+          for (const part of pieces(next.value)) this.queue(encode(DATA, streamId, 0, part))
+        }
+      }
+      if (this.streams.get(streamId) === stream) {
+        this.streams.delete(streamId)
+        this.queue(encode(END, streamId))
+      }
+    } catch (error) {
+      if (!stream.controller.signal.aborted) this.fail(streamId, error as Error)
+    } finally {
+      stream.chunks = []
+      stream.bytes = 0
     }
   }
 
@@ -507,6 +624,12 @@ export class DshTunnelAgent {
       stream.controller.abort(new Error('Encrypted prompt cancelled'))
       stream.chunks = []
       stream.bytes = 0
+    } else if (stream.kind === 'adapter-http' || stream.kind === 'adapter-websocket') {
+      stream.controller.abort(new Error('DSH adapter stream cancelled'))
+      if (stream.kind === 'adapter-http') {
+        stream.chunks = []
+        stream.bytes = 0
+      }
     } else if (stream.kind === KIND_HTTP) stream.request.destroy()
     else {
       if (stream.batchTimer) clearTimeout(stream.batchTimer)
@@ -552,7 +675,8 @@ export class DshTunnelAgent {
 
   private resumeSources(): void {
     for (const stream of this.streams.values()) {
-      if (stream.kind === 'remote-prompt' || !stream.paused) continue
+      if (stream.kind === 'remote-prompt' || stream.kind === 'adapter-http'
+          || stream.kind === 'adapter-websocket' || !stream.paused) continue
       stream.paused = false
       if (stream.kind === KIND_HTTP) stream.response?.resume()
       else stream.socket.resume()

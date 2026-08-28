@@ -49,6 +49,8 @@ export interface PublicRelayGatewayOptions {
   readonly identityPath?: string
   readonly historyCachePath?: string
   readonly onDiagnostic?: (level: 'info' | 'warn', message: string) => void
+  readonly fetchDsh?: NonNullable<ConstructorParameters<typeof DshTunnelAgent>[0]>['fetchDsh']
+  readonly openDshEvents?: NonNullable<ConstructorParameters<typeof DshTunnelAgent>[0]>['openDshEvents']
 }
 
 export class PublicRelayGateway {
@@ -58,6 +60,8 @@ export class PublicRelayGateway {
   private readonly maxClients: number
   private readonly maxStreamsPerClient: number
   private readonly issueLanCredential?: PublicRelayGatewayOptions['issueLanCredential']
+  private readonly fetchDsh?: PublicRelayGatewayOptions['fetchDsh']
+  private readonly openDshEvents?: PublicRelayGatewayOptions['openDshEvents']
   private readonly objectClient: PublicObjectClient
   private readonly historySnapshots: HistorySnapshotCache
   private readonly pendingHistorySnapshots = new Map<string, Promise<Record<string, unknown>>>()
@@ -75,6 +79,8 @@ export class PublicRelayGateway {
     this.maxClients = options.maxClients || 8
     this.maxStreamsPerClient = options.maxStreamsPerClient || 32
     this.issueLanCredential = options.issueLanCredential
+    this.fetchDsh = options.fetchDsh
+    this.openDshEvents = options.openDshEvents
     const agentOptions: PublicRelayAgentOptions = {
       agentVersion: options.agentVersion,
       adapterVersion: options.adapterVersion,
@@ -224,6 +230,8 @@ export class PublicRelayGateway {
           dshPort: this.dshPort,
           maxStreams: this.maxStreamsPerClient,
           issueLanCredential: this.issueLanCredential,
+          fetchDsh: this.fetchDsh,
+          openDshEvents: this.openDshEvents,
           materializeAttachment: async (raw, signal) => {
             const descriptor = raw as RemoteAttachmentDescriptor
             const ciphertext = await this.objectClient.download(descriptor.objectId, undefined, signal)

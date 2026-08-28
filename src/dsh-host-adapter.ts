@@ -628,6 +628,7 @@ class ModernLegacyEventHub {
     if (!sessionId || this.followedSessions.has(sessionId)) return
     this.followedSessions.add(sessionId)
     void (async () => {
+      const legacyViewState = createLegacyViewState()
       try {
         const stream = await openModernStream(this.gateway, 'session/follow', {
           args: { request: { address: { kind: 'session', sessionId } } },
@@ -637,13 +638,19 @@ class ModernLegacyEventHub {
           if (!isRecord(value)) continue
           if (!opened && value.type === 'snapshot') {
             opened = true
+            // Seed pending mutation calls from the opening window. A tool result
+            // may arrive immediately after the snapshot for a call it contains.
+            legacyHistoryEntries(value.records, legacyViewState)
             this.mux({ type: 'session/subscribed', sessionId, lastSeq: value.cursor })
           } else if (value.type === 'event' && isRecord(value.event)) {
+            const synthesizedView = legacyMutationView(value.event, legacyViewState)
             this.mux({
               type: 'session/event',
               sessionId,
               event: value.event,
-              ...(Object.hasOwn(value, 'view') ? { view: value.view } : {}),
+              ...(Object.hasOwn(value, 'view')
+                ? { view: value.view }
+                : synthesizedView === undefined ? {} : { view: synthesizedView }),
             })
           }
         }
@@ -779,21 +786,110 @@ function translateLegacyCall(
   }
 }
 
-function legacyHistoryEntries(records: unknown): Array<{ readonly event: any; readonly view?: any }> {
+interface LegacyViewState {
+  readonly mutationPaths: Map<string, string | null>
+}
+
+function createLegacyViewState(): LegacyViewState {
+  return { mutationPaths: new Map() }
+}
+
+function legacyHistoryEntries(
+  records: unknown,
+  viewState: LegacyViewState = createLegacyViewState(),
+): Array<{ readonly event: any; readonly view?: any }> {
   if (!Array.isArray(records)) return []
   const entries: Array<{ event: any; view?: any }> = []
   for (const record of records) {
     if (!isRecord(record) || !isRecord(record.event)) continue
     if (record.type !== 'chunks') {
+      const synthesizedView = legacyMutationView(record.event, viewState)
       entries.push({
         event: record.event,
-        ...(Object.hasOwn(record, 'view') ? { view: record.view } : {}),
+        ...(Object.hasOwn(record, 'view')
+          ? { view: record.view }
+          : synthesizedView === undefined ? {} : { view: synthesizedView }),
       })
       continue
     }
     for (const event of expandChunkRowEvent(record.event)) entries.push({ event })
   }
   return entries
+}
+
+/**
+ * Recreate the legacy diff view from alpha's durable mutation vocabulary.
+ *
+ * DSH 0.1.2 deliberately removed presentation `view` objects from the Host
+ * journal. Its official deliverables client derives produced files from
+ * successful first-party `write`, `edit`, and mutating `str_replace_editor`
+ * calls. The mini-program contract still consumes the earlier diff view, so
+ * the compatibility boundary performs that same deterministic derivation.
+ */
+function legacyMutationView(
+  event: Record<string, any>,
+  state: LegacyViewState,
+): { readonly view: { readonly card: 'diff'; readonly diffs: readonly { readonly path: string }[] } } | undefined {
+  const data = isRecord(event.data) ? event.data : null
+  if (!data) return undefined
+  if (event.type === 'tool/call') {
+    const callId = typeof data.callId === 'string' ? data.callId : ''
+    if (callId) state.mutationPaths.set(callId, mutationPath(data.name, data.arguments))
+    return undefined
+  }
+  if (event.type !== 'tool/result') return undefined
+  const message = isRecord(data.message) ? data.message : null
+  const source = message && isRecord(message.source) ? message.source : null
+  const firstContent = message && Array.isArray(message.content) && isRecord(message.content[0])
+    ? message.content[0] : null
+  const callId = typeof source?.callId === 'string'
+    ? source.callId
+    : typeof firstContent?.toolCallId === 'string' ? firstContent.toolCallId : ''
+  if (!callId) return undefined
+  const path = state.mutationPaths.get(callId)
+  state.mutationPaths.delete(callId)
+  if (!path || firstContent?.isError === true) return undefined
+  return { view: { card: 'diff', diffs: [{ path }] } }
+}
+
+function mutationPath(name: unknown, argumentsRaw: unknown): string | null {
+  if (typeof name !== 'string' || typeof argumentsRaw !== 'string') return null
+  let args: Record<string, unknown>
+  try {
+    const parsed = JSON.parse(argumentsRaw)
+    if (!isRecord(parsed)) return null
+    args = parsed
+  } catch {
+    return null
+  }
+  if (name === 'write') {
+    return typeof args.content === 'string' ? pathValue(args.file_path) : null
+  }
+  if (name === 'edit') {
+    const valid = typeof args.old_string === 'string'
+      && args.old_string.length > 0
+      && typeof args.new_string === 'string'
+      && args.old_string !== args.new_string
+      && (args.replace_all === undefined || typeof args.replace_all === 'boolean')
+    return valid ? pathValue(args.file_path) : null
+  }
+  if (name !== 'str_replace_editor') return null
+  const path = pathValue(args.path)
+  if (!path) return null
+  if (args.command === 'create') return typeof args.file_text === 'string' ? path : null
+  if (args.command === 'str_replace') {
+    return typeof args.old_str === 'string' && args.old_str.length > 0
+      && (args.new_str === undefined || typeof args.new_str === 'string') ? path : null
+  }
+  if (args.command === 'insert') {
+    return Number.isInteger(args.insert_line) && Number(args.insert_line) >= 0
+      && typeof args.new_str === 'string' ? path : null
+  }
+  return null
+}
+
+function pathValue(value: unknown): string | null {
+  return typeof value === 'string' && value.trim().length > 0 ? value : null
 }
 
 /** Expand alpha's packed delta row back to the legacy raw event contract. */

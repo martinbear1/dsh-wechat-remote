@@ -31,17 +31,57 @@ const connection = {
 const streams = {
   'workspace/follow': [{ type: 'baseline', value: { items: [], archivedSessionIds: [] } }],
   'session/follow': [{
-    type: 'snapshot', cursor: 4, hasMore: false,
-    records: [{
-      type: 'event',
-      event: { type: 'user/message', seq: 4, time: 1, data: {} },
-      view: { view: { card: 'diff', diffs: [{ path: 'generated.txt' }] } },
-    }],
+    type: 'snapshot', cursor: 6, hasMore: false,
+    records: [
+      {
+        type: 'event',
+        event: { type: 'user/message', seq: 4, time: 1, data: {} },
+        view: { view: { card: 'diff', diffs: [{ path: 'generated.txt' }] } },
+      },
+      {
+        type: 'event',
+        event: {
+          type: 'tool/call', seq: 5, time: 2,
+          data: {
+            callId: 'write-history', name: 'write',
+            arguments: JSON.stringify({ file_path: 'history.txt', content: 'done' }),
+          },
+        },
+      },
+      {
+        type: 'event',
+        event: {
+          type: 'tool/result', seq: 6, time: 3,
+          data: {
+            message: {
+              source: { callId: 'write-history' },
+              content: [{ type: 'tool-result', toolCallId: 'write-history', isError: false }],
+            },
+          },
+        },
+      },
+    ],
     projections: { values: {} },
   }, {
     type: 'event',
-    event: { type: 'tool/result', seq: 5, time: 2, data: {} },
-    view: { view: { card: 'diff', diffs: [{ path: 'generated.txt' }] } },
+    event: {
+      type: 'tool/call', seq: 7, time: 4,
+      data: {
+        callId: 'write-live', name: 'write',
+        arguments: JSON.stringify({ file_path: 'live.txt', content: 'done' }),
+      },
+    },
+  }, {
+    type: 'event',
+    event: {
+      type: 'tool/result', seq: 8, time: 5,
+      data: {
+        message: {
+          source: { callId: 'write-live' },
+          content: [{ type: 'tool-result', toolCallId: 'write-live', isError: false }],
+        },
+      },
+    },
   }],
   'session/control': [],
   '$events': [],
@@ -73,17 +113,22 @@ assert.deepEqual((await adapter.call('workspace.list', {}, new AbortController()
 const history = await adapter.call('session.history', {
   sessionId: 's1', maxMessages: 8,
 }, new AbortController().signal)
-assert.equal(history.value.events.length, 1)
+assert.equal(history.value.events.length, 3)
 assert.deepEqual(history.value.events[0].view, {
   view: { card: 'diff', diffs: [{ path: 'generated.txt' }] },
+})
+assert.deepEqual(history.value.events[2].view, {
+  view: { card: 'diff', diffs: [{ path: 'history.txt' }] },
 })
 const realtimeAbort = new AbortController()
 const realtime = adapter.events('/api/events.mux', realtimeAbort.signal)[Symbol.asyncIterator]()
 const subscribed = JSON.parse(new TextDecoder().decode((await realtime.next()).value))
+const realtimeCall = JSON.parse(new TextDecoder().decode((await realtime.next()).value))
 const realtimeEvent = JSON.parse(new TextDecoder().decode((await realtime.next()).value))
 assert.equal(subscribed.payload.type, 'session/subscribed')
+assert.equal(realtimeCall.payload.event.type, 'tool/call')
 assert.deepEqual(realtimeEvent.payload.view, {
-  view: { card: 'diff', diffs: [{ path: 'generated.txt' }] },
+  view: { card: 'diff', diffs: [{ path: 'live.txt' }] },
 })
 realtimeAbort.abort()
 await adapter.call('agentPreset.select', {

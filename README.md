@@ -36,7 +36,55 @@ dsh plugin --profile web add github:martinbear1/dsh-wechat-remote
 dsh web
 ```
 
-如果 DSH 已经在当前终端运行，请先按 `Ctrl + C` 正常停止，再执行 `dsh web`。
+如果 DSH 正在当前终端前台运行，请先按 `Ctrl + C` 正常停止，再执行 `dsh web`。如果 DSH 已在后台运行，请使用下方对应系统的“停止”或“一行重启”命令，不要直接重复启动。
+
+### 启动、停止与后台运行
+
+在可见终端中运行 `dsh web` 最便于查看报错。需要关闭终端后继续运行时，可以使用下面的命令。命令不包含用户名或安装路径，适用于 DSH 的标准全局安装。
+
+#### Windows PowerShell
+
+静默启动：
+
+```powershell
+Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', 'dsh web' -WorkingDirectory $env:USERPROFILE -WindowStyle Hidden
+```
+
+只停止占用 DSH Web 默认端口 `3080` 的进程：
+
+```powershell
+Get-NetTCPConnection -LocalPort 3080 -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object { Stop-Process -Id $_ -Force }
+```
+
+一行重启到后台：
+
+```powershell
+Get-NetTCPConnection -LocalPort 3080 -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object { Stop-Process -Id $_ -Force }; Start-Sleep -Seconds 1; Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', 'dsh web' -WorkingDirectory $env:USERPROFILE -WindowStyle Hidden
+```
+
+这些命令只负责当前登录会话；电脑重启后需要重新启动 DSH。不要使用 `taskkill /IM node.exe`，它会误杀其他 Node.js 程序。如果修改过 DSH Web 端口，请把命令中的 `3080` 换成实际端口。
+
+#### macOS Terminal
+
+后台启动，并把输出保存在 `~/dsh-web.log`：
+
+```bash
+nohup dsh web >"$HOME/dsh-web.log" 2>&1 </dev/null &
+```
+
+只停止占用 DSH Web 默认端口 `3080` 的进程：
+
+```bash
+lsof -tiTCP:3080 -sTCP:LISTEN | xargs kill 2>/dev/null || true
+```
+
+一行重启到后台：
+
+```bash
+lsof -tiTCP:3080 -sTCP:LISTEN | xargs kill 2>/dev/null || true; sleep 1; nohup dsh web >"$HOME/dsh-web.log" 2>&1 </dev/null &
+```
+
+不要使用 `pkill node`，它会误杀其他 Node.js 程序。如果修改过 DSH Web 端口，请把命令中的 `3080` 换成实际端口。若后台启动失败，请先在可见终端运行 `dsh web`，或查看 `~/dsh-web.log`。
 
 打开 DSH WebUI，进入 **设置 → 微信连接**。看到「鲸常在」连接页面即表示插件已加载。
 

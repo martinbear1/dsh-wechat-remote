@@ -639,7 +639,12 @@ class ModernLegacyEventHub {
             opened = true
             this.mux({ type: 'session/subscribed', sessionId, lastSeq: value.cursor })
           } else if (value.type === 'event' && isRecord(value.event)) {
-            this.mux({ type: 'session/event', sessionId, event: value.event })
+            this.mux({
+              type: 'session/event',
+              sessionId,
+              event: value.event,
+              ...(Object.hasOwn(value, 'view') ? { view: value.view } : {}),
+            })
           }
         }
       } catch (error) {
@@ -774,13 +779,16 @@ function translateLegacyCall(
   }
 }
 
-function legacyHistoryEntries(records: unknown): Array<{ readonly event: any }> {
+function legacyHistoryEntries(records: unknown): Array<{ readonly event: any; readonly view?: any }> {
   if (!Array.isArray(records)) return []
-  const entries: Array<{ event: any }> = []
+  const entries: Array<{ event: any; view?: any }> = []
   for (const record of records) {
     if (!isRecord(record) || !isRecord(record.event)) continue
     if (record.type !== 'chunks') {
-      entries.push({ event: record.event })
+      entries.push({
+        event: record.event,
+        ...(Object.hasOwn(record, 'view') ? { view: record.view } : {}),
+      })
       continue
     }
     for (const event of expandChunkRowEvent(record.event)) entries.push({ event })

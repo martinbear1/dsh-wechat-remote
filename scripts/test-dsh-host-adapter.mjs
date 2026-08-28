@@ -32,8 +32,16 @@ const streams = {
   'workspace/follow': [{ type: 'baseline', value: { items: [], archivedSessionIds: [] } }],
   'session/follow': [{
     type: 'snapshot', cursor: 4, hasMore: false,
-    records: [{ type: 'event', event: { type: 'user/message', seq: 4, time: 1, data: {} } }],
+    records: [{
+      type: 'event',
+      event: { type: 'user/message', seq: 4, time: 1, data: {} },
+      view: { view: { card: 'diff', diffs: [{ path: 'generated.txt' }] } },
+    }],
     projections: { values: {} },
+  }, {
+    type: 'event',
+    event: { type: 'tool/result', seq: 5, time: 2, data: {} },
+    view: { view: { card: 'diff', diffs: [{ path: 'generated.txt' }] } },
   }],
   'session/control': [],
   '$events': [],
@@ -62,9 +70,22 @@ assert.deepEqual(calls[0].body.payload, { args: { _request: {} } })
 assert.deepEqual((await adapter.call('workspace.list', {}, new AbortController().signal)).value, {
   items: [], archivedSessionIds: [],
 })
-assert.equal((await adapter.call('session.history', {
+const history = await adapter.call('session.history', {
   sessionId: 's1', maxMessages: 8,
-}, new AbortController().signal)).value.events.length, 1)
+}, new AbortController().signal)
+assert.equal(history.value.events.length, 1)
+assert.deepEqual(history.value.events[0].view, {
+  view: { card: 'diff', diffs: [{ path: 'generated.txt' }] },
+})
+const realtimeAbort = new AbortController()
+const realtime = adapter.events('/api/events.mux', realtimeAbort.signal)[Symbol.asyncIterator]()
+const subscribed = JSON.parse(new TextDecoder().decode((await realtime.next()).value))
+const realtimeEvent = JSON.parse(new TextDecoder().decode((await realtime.next()).value))
+assert.equal(subscribed.payload.type, 'session/subscribed')
+assert.deepEqual(realtimeEvent.payload.view, {
+  view: { card: 'diff', diffs: [{ path: 'generated.txt' }] },
+})
+realtimeAbort.abort()
 await adapter.call('agentPreset.select', {
   sessionId: 's1', agentPreset: 'standard',
 }, new AbortController().signal)
@@ -120,6 +141,44 @@ tunnel.receive(tunnelFrame(1, 3, encoded({ kind: 'websocket', path: '/api/events
 await new Promise(resolve => setTimeout(resolve, 20))
 assert.ok(sent.some(frame => frame[1] === 3), 'adapter realtime must emit data')
 tunnel.close()
+
+const promptFrames = []
+let promptFetches = 0
+const promptTunnel = new DshTunnelAgent({
+  send: frame => { promptFrames.push(new Uint8Array(frame)) },
+  materializeAttachment: async () => ({
+    descriptor: { mediaType: 'image/png', name: 'sample.png' },
+    data: new Uint8Array([1, 2, 3]),
+  }),
+  fetchDsh: async request => {
+    promptFetches += 1
+    assert.equal(request.path, '/api/session.prompt')
+    const envelope = JSON.parse(new TextDecoder().decode(request.body))
+    assert.equal(envelope.payload.content[0].type, 'image')
+    assert.equal(envelope.payload.content[0].data, 'AQID')
+    return Response.json({
+      type: 'server-response', rpcId: envelope.rpcId,
+      result: { ok: true, value: { accepted: true } },
+    })
+  },
+})
+promptTunnel.receive(tunnelFrame(1, 5, encoded({
+  kind: 'http', path: '/api/wechat-remote/session.prompt', method: 'POST',
+})))
+promptTunnel.receive(tunnelFrame(3, 5, encoded({
+  type: 'client-request', rpcId: 'image-prompt', method: 'session.prompt',
+  payload: {
+    sessionId: 's1', mode: 'queue',
+    content: [{ type: 'image', remoteAttachment: { objectId: 'encrypted-object' } }],
+  },
+}), 2))
+promptTunnel.receive(tunnelFrame(4, 5))
+await new Promise(resolve => setTimeout(resolve, 30))
+assert.equal(promptFetches, 1, 'materialized image prompt must reach the selected DSH adapter')
+assert.ok(promptFrames.some(frame => frame[1] === 2), 'image prompt adapter must accept')
+assert.ok(promptFrames.some(frame => frame[1] === 4), 'image prompt adapter must end')
+assert.ok(!promptFrames.some(frame => frame[1] === 5), 'image prompt adapter must not fail')
+promptTunnel.close()
 
 assert.equal(dshDataHome({ DSH_HOME: path.join('tmp', 'isolated') }), path.resolve('tmp', 'isolated'))
 const previous = process.env.DSH_HOME

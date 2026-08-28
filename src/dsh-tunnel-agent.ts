@@ -604,7 +604,9 @@ export class DshTunnelAgent {
         headers: { 'content-type': 'application/json' },
       })
       const active = this.streams.get(streamId)
-      if (!active || active.kind !== KIND_HTTP) throw new Error('Local DSH prompt stream did not open')
+      if (!active || (active.kind !== KIND_HTTP && active.kind !== 'adapter-http')) {
+        throw new Error('Local DSH prompt stream did not open')
+      }
       const body = json(envelope)
       this.data(active, streamId, 0, body)
       this.end(active, streamId, new Uint8Array(0))

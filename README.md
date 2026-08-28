@@ -53,13 +53,13 @@ Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', 'dsh web' -WorkingDirector
 只停止占用 DSH Web 默认端口 `3080` 的进程：
 
 ```powershell
-Get-NetTCPConnection -LocalPort 3080 -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object { Stop-Process -Id $_ -Force }
+Get-NetTCPConnection -LocalPort 3080 -State Listen -EA SilentlyContinue | % { Stop-Process $_.OwningProcess -Force -EA SilentlyContinue }
 ```
 
 一行重启到后台：
 
 ```powershell
-Get-NetTCPConnection -LocalPort 3080 -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object { Stop-Process -Id $_ -Force }; Start-Sleep -Seconds 1; Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', 'dsh web' -WorkingDirectory $env:USERPROFILE -WindowStyle Hidden
+Get-NetTCPConnection -LocalPort 3080 -State Listen -EA SilentlyContinue | % { Stop-Process $_.OwningProcess -Force -EA SilentlyContinue }; Start-Sleep 1; Start-Process cmd.exe -ArgumentList '/c dsh web' -WindowStyle Hidden
 ```
 
 这些命令只负责当前登录会话；电脑重启后需要重新启动 DSH。不要使用 `taskkill /IM node.exe`，它会误杀其他 Node.js 程序。如果修改过 DSH Web 端口，请把命令中的 `3080` 换成实际端口。
@@ -75,13 +75,13 @@ nohup dsh web >"$HOME/dsh-web.log" 2>&1 </dev/null &
 只停止占用 DSH Web 默认端口 `3080` 的进程：
 
 ```bash
-lsof -tiTCP:3080 -sTCP:LISTEN | xargs kill 2>/dev/null || true
+kill $(lsof -tiTCP:3080 -sTCP:LISTEN) 2>/dev/null || true
 ```
 
 一行重启到后台：
 
 ```bash
-lsof -tiTCP:3080 -sTCP:LISTEN | xargs kill 2>/dev/null || true; sleep 1; nohup dsh web >"$HOME/dsh-web.log" 2>&1 </dev/null &
+kill $(lsof -tiTCP:3080 -sTCP:LISTEN) 2>/dev/null || true; sleep 1; nohup dsh web >"$HOME/dsh-web.log" 2>&1 </dev/null &
 ```
 
 不要使用 `pkill node`，它会误杀其他 Node.js 程序。如果修改过 DSH Web 端口，请把命令中的 `3080` 换成实际端口。若后台启动失败，请先在可见终端运行 `dsh web`，或查看 `~/dsh-web.log`。

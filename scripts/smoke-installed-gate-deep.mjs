@@ -38,6 +38,11 @@ try {
   workspaceId = workspace.workspaceId
   passed.push('workspace.list(created)')
 
+  // DSH 0.1.1 attaches a newly registered workspace on its next host tick.
+  // The real UI naturally crosses this boundary; keep the automated gate from
+  // issuing session.create in the same microtask as workspace.create.
+  await new Promise(resolve => setTimeout(resolve, 150))
+
   const createdSession = valueOf('session.create', await rpc('session.create', { workspaceId }))
   const sessionId = createdSession.sessionId || createdSession.session?.sessionId
   assert.equal(typeof sessionId, 'string', 'session.create did not return sessionId')

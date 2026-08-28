@@ -103,7 +103,7 @@ npm install -g pnpm@11
 普通用户不需要填写版本号；默认安装 `main` 上的最新正式版。只有复现或回退时才需要指定标签，例如：
 
 ```bash
-dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.5.5
+dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.6.0-rc.1
 ```
 
 ## 添加电脑
@@ -179,7 +179,7 @@ dsh plugin --profile web remove @harness-remote/dsh-wechat-remote
 
 插件会按 DSH 实际提供的能力自动选择兼容通道，不要求用户选择版本。维护与验证规则见 [DSH 兼容策略](COMPATIBILITY.md)。
 
-当前版本：`v1.5.5`
+候选版本：`v1.6.0-rc.1`
 
 ## 许可证
 

@@ -14,6 +14,9 @@ import type { Context } from '@deepseek-ai/cordis'
 const MAX_HTTP_BODY_BYTES = 64 * 1024 * 1024
 const MAX_EVENT_BYTES = 1024 * 1024
 const LEGACY_TIMEOUT_MS = 60_000
+const STREAM_RESTART_BASE_MS = 250
+const STREAM_RESTART_MAX_MS = 15_000
+const STREAM_STABLE_RESET_MS = 30_000
 
 export type DshAdapterMode = 'probing' | 'legacy' | 'modern' | 'unavailable'
 
@@ -413,10 +416,24 @@ class ModernLegacyEventHub {
     readonly eventId: string
     readonly event: string
     readonly sessionId: string
+    readonly rpcId: string
+    readonly payload: Record<string, unknown>
+    responding: boolean
   }>()
+  private readonly queueBaselines = new Map<string, readonly unknown[]>()
+  private readonly projectionBaselines = new Map<string, Map<string, {
+    readonly value: unknown
+    readonly seq: number
+  }>>()
+  private readonly sessionHeads = new Map<string, number>()
   private clientId = ''
   private started = false
-  private readonly followedSessions = new Set<string>()
+  private generation = 0
+  private generationAbort: AbortController | null = null
+  private restartTimer: NodeJS.Timeout | null = null
+  private stableTimer: NodeJS.Timeout | null = null
+  private restartAttempt = 0
+  private readonly followedSessions = new Map<string, number>()
 
   constructor(
     private readonly gateway: ModernGateway,
@@ -429,11 +446,21 @@ class ModernLegacyEventHub {
 
   dispose(): void {
     this.lifetime.abort(new Error('DSH modern compatibility bridge disposed'))
+    this.generationAbort?.abort(new Error('DSH modern compatibility bridge disposed'))
+    this.generationAbort = null
+    if (this.restartTimer) clearTimeout(this.restartTimer)
+    if (this.stableTimer) clearTimeout(this.stableTimer)
+    this.restartTimer = null
+    this.stableTimer = null
     for (const queue of this.hostSubscribers) queue.end()
     for (const queue of this.muxSubscribers) queue.end()
     this.hostSubscribers.clear()
     this.muxSubscribers.clear()
     this.pending.clear()
+    this.queueBaselines.clear()
+    this.projectionBaselines.clear()
+    this.sessionHeads.clear()
+    this.followedSessions.clear()
   }
 
   subscribe(path: string, signal: AbortSignal): AsyncIterable<Uint8Array> {
@@ -446,6 +473,10 @@ class ModernLegacyEventHub {
     if (!subscribers) throw new Error('Unsupported DSH realtime path')
     const queue = new AsyncFrameQueue()
     subscribers.add(queue)
+    // A downstream WebSocket generation is independent from the long-lived
+    // modern DSH streams. Replaying only into this queue prevents a newly
+    // connected phone from duplicating frames in already healthy clients.
+    if (target === '/api/events.mux') this.replayMux(queue)
     this.start()
     const close = (): void => {
       subscribers.delete(queue)
@@ -460,71 +491,111 @@ class ModernLegacyEventHub {
     if (!pending || !this.clientId || pending.clientId !== this.clientId) {
       return { accepted: false, reason: 'unknown-rpc-id' }
     }
-    const modernOutcome = legacyResponseOutcome(pending.event, result)
-    const response = await this.callEndpoint(
-      '$events/result',
-      {
-        clientId: pending.clientId,
-        eventId: pending.eventId,
-        outcome: modernOutcome,
-      },
-      signal ?? new AbortController().signal,
-    )
-    if (response.ok) {
-      this.pending.delete(rpcId)
-      if (pending.event === 'approval/request') {
-        this.mux({
-          type: 'approval/resolved', sessionId: pending.sessionId,
-          approvalId: pending.eventId,
-          ...(isRecord(result) && isRecord(result.value)
-            ? { outcome: result.value.outcome } : {}),
-        })
-      } else if (pending.event === 'user-questions/request') {
-        this.mux({
-          type: 'question/resolved', sessionId: pending.sessionId,
-          questionRpcId: rpcId,
-          ...(isRecord(result) && isRecord(result.value)
-            ? { outcome: result.value.answer } : {}),
-        })
+    if (pending.responding) return { accepted: false, reason: 'response-in-flight' }
+    pending.responding = true
+    try {
+      const modernOutcome = legacyResponseOutcome(pending.event, result)
+      const response = await this.callEndpoint(
+        '$events/result',
+        {
+          clientId: pending.clientId,
+          eventId: pending.eventId,
+          outcome: modernOutcome,
+        },
+        signal ?? new AbortController().signal,
+      )
+      if (response.ok && this.pending.get(rpcId) === pending) {
+        this.pending.delete(rpcId)
+        this.broadcastResolved(pending, result)
       }
+      return response.ok
+        ? { accepted: true }
+        : { accepted: false, reason: response.error?.code || 'rejected' }
+    } finally {
+      if (this.pending.get(rpcId) === pending) pending.responding = false
     }
-    return response.ok
-      ? { accepted: true }
-      : { accepted: false, reason: response.error?.code || 'rejected' }
   }
 
   private start(): void {
-    if (this.started) return
+    if (this.started || this.restartTimer || this.lifetime.signal.aborted) return
     this.started = true
-    void this.consumeRemoteEvents()
-    void this.consumeWorkspace()
-    void this.consumeControl()
-    void this.consumeSessions()
+    this.generation += 1
+    const generation = this.generation
+    const controller = new AbortController()
+    this.generationAbort = controller
+    const signal = AbortSignal.any([this.lifetime.signal, controller.signal])
+    if (this.stableTimer) clearTimeout(this.stableTimer)
+    this.stableTimer = setTimeout(() => {
+      if (this.generation === generation && !signal.aborted) this.restartAttempt = 0
+    }, STREAM_STABLE_RESET_MS)
+    this.stableTimer.unref?.()
+    void this.runGeneration(generation, signal)
   }
 
-  private async consumeRemoteEvents(): Promise<void> {
+  private async runGeneration(generation: number, signal: AbortSignal): Promise<void> {
     try {
-      const stream = await openModernStream(this.gateway, '$events', { args: {} }, this.lifetime.signal)
-      for await (const value of stream) {
-        if (!isRecord(value)) continue
-        if (value.type === 'ready' && typeof value.clientId === 'string') {
-          this.clientId = value.clientId
-          continue
-        }
-        if (value.type === 'emit') {
-          this.consumeEmit(String(value.event || ''), Array.isArray(value.args) ? value.args : [])
-          continue
-        }
-        if (value.type === 'waterfall') this.consumeWaterfall(value)
-        if (value.type === 'cancel' && typeof value.eventId === 'string') {
-          for (const [rpcId, pending] of this.pending) {
-            if (pending.eventId === value.eventId) this.pending.delete(rpcId)
-          }
+      await this.consumeSessions(generation, signal)
+      await Promise.all([
+        this.consumeRemoteEvents(signal),
+        this.consumeWorkspace(signal),
+        this.consumeControl(signal),
+      ])
+      if (!signal.aborted) throw new Error('DSH modern compatibility streams ended')
+    } catch (error) {
+      this.failGeneration(generation, error)
+    }
+  }
+
+  private failGeneration(generation: number, error: unknown): void {
+    if (generation !== this.generation || !this.started || this.lifetime.signal.aborted) return
+    this.generationAbort?.abort(new Error('DSH modern compatibility generation replaced'))
+    this.generationAbort = null
+    this.started = false
+    this.clientId = ''
+    if (this.stableTimer) clearTimeout(this.stableTimer)
+    this.stableTimer = null
+    for (const [sessionId, owner] of this.followedSessions) {
+      if (owner === generation) this.followedSessions.delete(sessionId)
+    }
+    // A waterfall belongs to one upstream $events clientId. Retire its local
+    // card before reconnecting; the new $events generation will replay any
+    // still-authoritative request with a fresh clientId and the same event id.
+    this.retirePending()
+    this.broadcastError(error)
+    const delay = Math.min(
+      STREAM_RESTART_BASE_MS * (2 ** Math.min(this.restartAttempt, 8)),
+      STREAM_RESTART_MAX_MS,
+    )
+    this.restartAttempt += 1
+    this.restartTimer = setTimeout(() => {
+      this.restartTimer = null
+      this.start()
+    }, delay)
+    this.restartTimer.unref?.()
+  }
+
+  private async consumeRemoteEvents(signal: AbortSignal): Promise<void> {
+    const stream = await openModernStream(this.gateway, '$events', { args: {} }, signal)
+    for await (const value of stream) {
+      if (!isRecord(value)) continue
+      if (value.type === 'ready' && typeof value.clientId === 'string') {
+        this.clientId = value.clientId
+        continue
+      }
+      if (value.type === 'emit') {
+        this.consumeEmit(String(value.event || ''), Array.isArray(value.args) ? value.args : [])
+        continue
+      }
+      if (value.type === 'waterfall') this.consumeWaterfall(value)
+      if (value.type === 'cancel' && typeof value.eventId === 'string') {
+        for (const [rpcId, pending] of this.pending) {
+          if (pending.eventId !== value.eventId) continue
+          this.pending.delete(rpcId)
+          this.broadcastResolved(pending)
         }
       }
-    } catch (error) {
-      if (!this.lifetime.signal.aborted) this.broadcastError(error)
     }
+    if (!signal.aborted) throw new Error('DSH $events stream ended')
   }
 
   private consumeEmit(event: string, args: unknown[]): void {
@@ -533,6 +604,10 @@ class ModernLegacyEventHub {
       this.host({ type: 'host/session-added', ...summary })
       this.followSession(String(summary.sessionId || ''))
     } else if (event === 'api-session/removed') {
+      const sessionId = String(args[0] || '')
+      this.queueBaselines.delete(sessionId)
+      this.projectionBaselines.delete(sessionId)
+      this.sessionHeads.delete(sessionId)
       this.host({ type: 'host/session-removed', sessionId: args[0] })
     } else if (event === 'api-session/status') {
       this.host({ type: 'host/session-status', sessionId: args[0], running: args[1] })
@@ -548,91 +623,96 @@ class ModernLegacyEventHub {
     if (typeof frame.eventId !== 'string' || typeof frame.event !== 'string'
       || typeof frame.agentId !== 'string' || !isRecord(frame.request)) return
     const rpcId = frame.eventId
-    this.pending.set(rpcId, {
-      clientId: this.clientId,
-      eventId: frame.eventId,
-      event: frame.event,
-      sessionId: frame.agentId,
-    })
     if (frame.event === 'approval/request') {
-      this.mux({
+      const payload = {
         type: 'approval/requested',
         sessionId: frame.agentId,
         approvalId: frame.eventId,
         ...frame.request,
-      }, rpcId)
+      }
+      this.pending.set(rpcId, {
+        clientId: this.clientId, eventId: frame.eventId, event: frame.event,
+        sessionId: frame.agentId, rpcId, payload, responding: false,
+      })
+      this.mux(payload, rpcId)
     } else if (frame.event === 'user-questions/request') {
-      this.mux({
+      const payload = {
         type: 'question/requested',
         sessionId: frame.agentId,
         questions: frame.request.questions,
-      }, rpcId)
-    }
-  }
-
-  private async consumeWorkspace(): Promise<void> {
-    try {
-      const stream = await openModernStream(this.gateway, 'workspace/follow', { args: {} }, this.lifetime.signal)
-      for await (const value of stream) {
-        if (!isRecord(value) || value.type === 'baseline') continue
-        if (value.type === 'upsert') this.host({ type: 'host/workspace-changed', workspace: value.workspace })
-        else if (value.type === 'remove') this.host({ type: 'host/workspace-removed', workspaceId: value.workspaceId })
-        else if (value.type === 'order') this.host({ type: 'host/workspace-order-changed', workspaceIds: value.workspaceIds })
-        else if (value.type === 'archived') this.host({ type: 'host/archived-sessions-changed', archivedSessionIds: value.archivedSessionIds })
       }
-    } catch (error) {
-      if (!this.lifetime.signal.aborted) this.broadcastError(error)
+      this.pending.set(rpcId, {
+        clientId: this.clientId, eventId: frame.eventId, event: frame.event,
+        sessionId: frame.agentId, rpcId, payload, responding: false,
+      })
+      this.mux(payload, rpcId)
     }
   }
 
-  private async consumeControl(): Promise<void> {
-    try {
-      const stream = await openModernStream(this.gateway, 'session/control', { args: {} }, this.lifetime.signal)
-      for await (const value of stream) {
-        if (!isRecord(value)) continue
-        if (value.type === 'baseline' && isRecord(value.value)) {
-          for (const [sessionId, items] of Object.entries(value.value.queues || {})) {
-            this.mux({ type: 'session/queue', sessionId, items })
-          }
-          for (const [sessionId, jobs] of Object.entries(value.value.jobs || {})) {
-            this.mux({ type: 'session/jobs', sessionId, jobs })
-          }
-          for (const [sessionId, projection] of Object.entries(value.value.projections || {})) {
-            if (!isRecord(projection) || !isRecord(projection.values)) continue
-            for (const [key, projectionValue] of Object.entries(projection.values)) {
-              this.mux({ type: 'session/projection', sessionId, key, value: projectionValue, seq: projection.asOfSeq })
-            }
-          }
-        } else if (value.type === 'queue') {
-          this.mux({ type: 'session/queue', sessionId: value.sessionId, items: value.items })
-        } else if (value.type === 'jobs') {
-          this.mux({ type: 'session/jobs', sessionId: value.sessionId, jobs: value.jobs })
-        } else if (value.type === 'projection') {
-          this.mux({ type: 'session/projection', sessionId: value.sessionId, key: value.key, value: value.value, seq: value.seq })
+  private async consumeWorkspace(signal: AbortSignal): Promise<void> {
+    const stream = await openModernStream(this.gateway, 'workspace/follow', { args: {} }, signal)
+    for await (const value of stream) {
+      if (!isRecord(value) || value.type === 'baseline') continue
+      if (value.type === 'upsert') this.host({ type: 'host/workspace-changed', workspace: value.workspace })
+      else if (value.type === 'remove') this.host({ type: 'host/workspace-removed', workspaceId: value.workspaceId })
+      else if (value.type === 'order') this.host({ type: 'host/workspace-order-changed', workspaceIds: value.workspaceIds })
+      else if (value.type === 'archived') this.host({ type: 'host/archived-sessions-changed', archivedSessionIds: value.archivedSessionIds })
+    }
+    if (!signal.aborted) throw new Error('DSH workspace stream ended')
+  }
+
+  private async consumeControl(signal: AbortSignal): Promise<void> {
+    const stream = await openModernStream(this.gateway, 'session/control', { args: {} }, signal)
+    for await (const value of stream) {
+      if (!isRecord(value)) continue
+      if (value.type === 'baseline' && isRecord(value.value)) {
+        const queues = isRecord(value.value.queues) ? value.value.queues : {}
+        for (const sessionId of this.queueBaselines.keys()) {
+          if (!Object.hasOwn(queues, sessionId)) this.cacheQueue(sessionId, [])
         }
+        for (const [sessionId, items] of Object.entries(queues)) {
+          this.cacheQueue(sessionId, items)
+        }
+        for (const [sessionId, jobs] of Object.entries(value.value.jobs || {})) {
+          this.mux({ type: 'session/jobs', sessionId, jobs })
+        }
+        for (const [sessionId, projection] of Object.entries(value.value.projections || {})) {
+          if (!isRecord(projection) || !isRecord(projection.values)) continue
+          for (const [key, projectionValue] of Object.entries(projection.values)) {
+            this.cacheProjection(sessionId, key, projectionValue, projection.asOfSeq)
+          }
+        }
+      } else if (value.type === 'queue') {
+        this.cacheQueue(String(value.sessionId || ''), value.items)
+      } else if (value.type === 'jobs') {
+        this.mux({ type: 'session/jobs', sessionId: value.sessionId, jobs: value.jobs })
+      } else if (value.type === 'projection') {
+        this.cacheProjection(String(value.sessionId || ''), String(value.key || ''), value.value, value.seq)
       }
-    } catch (error) {
-      if (!this.lifetime.signal.aborted) this.broadcastError(error)
     }
+    if (!signal.aborted) throw new Error('DSH session control stream ended')
   }
 
-  private async consumeSessions(): Promise<void> {
-    const result = await invokeModernRpc(this.gateway, 'session/list', { args: { _request: {} } }, this.lifetime.signal)
-    if (!result.ok || !Array.isArray(result.value?.items)) return
+  private async consumeSessions(generation: number, signal: AbortSignal): Promise<void> {
+    const result = await invokeModernRpc(this.gateway, 'session/list', { args: { _request: {} } }, signal)
+    if (!result.ok || !Array.isArray(result.value?.items)) {
+      throw new Error(result.error?.message || 'DSH session catalog is unavailable')
+    }
     for (const item of result.value.items) {
-      if (typeof item?.sessionId === 'string') this.followSession(item.sessionId)
+      if (typeof item?.sessionId === 'string') this.followSession(item.sessionId, generation, signal)
     }
   }
 
-  private followSession(sessionId: string): void {
-    if (!sessionId || this.followedSessions.has(sessionId)) return
-    this.followedSessions.add(sessionId)
+  private followSession(sessionId: string, generation = this.generation, signal?: AbortSignal): void {
+    if (!sessionId || this.followedSessions.get(sessionId) === generation) return
+    this.followedSessions.set(sessionId, generation)
+    const generationSignal = signal ?? this.generationAbort?.signal ?? this.lifetime.signal
     void (async () => {
       const legacyViewState = createLegacyViewState()
       try {
         const stream = await openModernStream(this.gateway, 'session/follow', {
           args: { request: { address: { kind: 'session', sessionId } } },
-        }, this.lifetime.signal)
+        }, generationSignal)
         let opened = false
         for await (const value of stream) {
           if (!isRecord(value)) continue
@@ -641,9 +721,14 @@ class ModernLegacyEventHub {
             // Seed pending mutation calls from the opening window. A tool result
             // may arrive immediately after the snapshot for a call it contains.
             legacyHistoryEntries(value.records, legacyViewState)
+            if (Number.isSafeInteger(value.cursor)) this.sessionHeads.set(sessionId, Number(value.cursor))
             this.mux({ type: 'session/subscribed', sessionId, lastSeq: value.cursor })
           } else if (value.type === 'event' && isRecord(value.event)) {
             const synthesizedView = legacyMutationView(value.event, legacyViewState)
+            if (Number.isSafeInteger(value.event.seq)) {
+              const seq = Number(value.event.seq)
+              this.sessionHeads.set(sessionId, Math.max(this.sessionHeads.get(sessionId) ?? -1, seq))
+            }
             this.mux({
               type: 'session/event',
               sessionId,
@@ -654,12 +739,77 @@ class ModernLegacyEventHub {
             })
           }
         }
+        if (!generationSignal.aborted) throw new Error(`DSH Session stream ended for ${sessionId}`)
       } catch (error) {
-        if (!this.lifetime.signal.aborted) this.broadcastError(error)
+        if (!generationSignal.aborted) this.failGeneration(generation, error)
       } finally {
-        this.followedSessions.delete(sessionId)
+        if (this.followedSessions.get(sessionId) === generation) this.followedSessions.delete(sessionId)
       }
     })()
+  }
+
+  private cacheQueue(sessionId: string, items: unknown): void {
+    if (!sessionId) return
+    const normalized = Array.isArray(items) ? items : []
+    this.queueBaselines.set(sessionId, normalized)
+    this.mux({ type: 'session/queue', sessionId, items: normalized })
+  }
+
+  private cacheProjection(sessionId: string, key: string, value: unknown, seq: unknown): void {
+    if (!sessionId || !key || !Number.isSafeInteger(seq)) return
+    let rows = this.projectionBaselines.get(sessionId)
+    if (!rows) {
+      rows = new Map()
+      this.projectionBaselines.set(sessionId, rows)
+    }
+    const previous = rows.get(key)
+    if (previous && Number(seq) < previous.seq) return
+    const cell = { value, seq: Number(seq) }
+    rows.set(key, cell)
+    this.mux({ type: 'session/projection', sessionId, key, value, seq: cell.seq })
+  }
+
+  private replayMux(queue: AsyncFrameQueue): void {
+    for (const [sessionId, lastSeq] of this.sessionHeads) {
+      this.push(queue, { type: 'session/subscribed', sessionId, lastSeq })
+    }
+    for (const [sessionId, items] of this.queueBaselines) {
+      this.push(queue, { type: 'session/queue', sessionId, items })
+    }
+    for (const [sessionId, rows] of this.projectionBaselines) {
+      for (const [key, cell] of rows) {
+        this.push(queue, { type: 'session/projection', sessionId, key, value: cell.value, seq: cell.seq })
+      }
+    }
+    for (const pending of this.pending.values()) {
+      if (!pending.responding) this.push(queue, pending.payload, pending.rpcId)
+    }
+  }
+
+  private broadcastResolved(
+    pending: { readonly event: string; readonly sessionId: string; readonly eventId: string; readonly rpcId: string },
+    result?: unknown,
+  ): void {
+    if (pending.event === 'approval/request') {
+      this.mux({
+        type: 'approval/resolved', sessionId: pending.sessionId,
+        approvalId: pending.eventId,
+        ...(isRecord(result) && isRecord(result.value)
+          ? { outcome: result.value.outcome } : {}),
+      })
+    } else if (pending.event === 'user-questions/request') {
+      this.mux({
+        type: 'question/resolved', sessionId: pending.sessionId,
+        questionRpcId: pending.rpcId,
+        ...(isRecord(result) && isRecord(result.value)
+          ? { outcome: result.value.answer } : {}),
+      })
+    }
+  }
+
+  private retirePending(): void {
+    for (const pending of this.pending.values()) this.broadcastResolved(pending)
+    this.pending.clear()
   }
 
   private host(payload: object, rpcId?: string): void {
@@ -671,12 +821,22 @@ class ModernLegacyEventHub {
   }
 
   private broadcast(subscribers: Set<AsyncFrameQueue>, payload: object, rpcId?: string): void {
+    const bytes = this.encode(payload, rpcId)
+    if (!bytes) return
+    for (const subscriber of subscribers) subscriber.push(bytes)
+  }
+
+  private push(queue: AsyncFrameQueue, payload: object, rpcId?: string): void {
+    const bytes = this.encode(payload, rpcId)
+    if (bytes) queue.push(bytes)
+  }
+
+  private encode(payload: object, rpcId?: string): Uint8Array | null {
     const bytes = Buffer.from(JSON.stringify({
       rpcId: rpcId || `push-${randomUUID()}`,
       payload,
     }))
-    if (bytes.byteLength > MAX_EVENT_BYTES) return
-    for (const subscriber of subscribers) subscriber.push(bytes)
+    return bytes.byteLength <= MAX_EVENT_BYTES ? bytes : null
   }
 
   private broadcastError(error: unknown): void {

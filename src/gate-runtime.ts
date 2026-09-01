@@ -940,8 +940,35 @@ code{color:#7aa2ff;font-size:15px;letter-spacing:3px}
       }
       modernWebSockets.handleUpgrade(req, socket, head, client => {
         const controller = new AbortController()
-        client.once('close', () => controller.abort(new Error('LAN realtime client closed')))
-        client.once('error', () => controller.abort(new Error('LAN realtime client failed')))
+        // WeChat can leave a Wi-Fi socket half-open without promptly emitting
+        // close/error. Protocol ping makes that state observable so the mobile
+        // client can rebuild only its realtime generation and receive replay.
+        let heartbeatAlive = true
+        client.on('pong', () => { heartbeatAlive = true })
+        const heartbeat = setInterval(() => {
+          if (client.readyState !== client.OPEN) return
+          if (!heartbeatAlive) {
+            controller.abort(new Error('LAN realtime heartbeat timeout'))
+            try { client.terminate() } catch { /* best-effort */ }
+            return
+          }
+          heartbeatAlive = false
+          try {
+            client.ping()
+          } catch (error) {
+            controller.abort(error)
+            try { client.terminate() } catch { /* best-effort */ }
+          }
+        }, 15_000)
+        const stopHeartbeat = (): void => clearInterval(heartbeat)
+        client.once('close', () => {
+          stopHeartbeat()
+          controller.abort(new Error('LAN realtime client closed'))
+        })
+        client.once('error', () => {
+          stopHeartbeat()
+          controller.abort(new Error('LAN realtime client failed'))
+        })
         void (async () => {
           try {
             for await (const frame of hostAdapter.events(path, controller.signal)) {
@@ -986,6 +1013,9 @@ code{color:#7aa2ff;font-size:15px;letter-spacing:3px}
   let disposed = false
   const openSockets = new Set<Socket>()
   const trackSocket = (socket: Socket): void => {
+    // Also cover legacy proxied transports and HTTP keep-alive connections.
+    // OS TCP probes complement the WebSocket protocol heartbeat above.
+    try { socket.setKeepAlive(true, 15_000) } catch { /* best-effort */ }
     openSockets.add(socket)
     socket.once('close', () => openSockets.delete(socket))
   }

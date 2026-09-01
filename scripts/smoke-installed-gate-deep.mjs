@@ -8,6 +8,8 @@ const options = parseArgs(process.argv.slice(2))
 const baseUrl = new URL(options['base-url'] || 'http://127.0.0.1:3092')
 const stateFile = options['state-file']
 const workspaceRoot = options['workspace-root']
+const promptCheck = options['prompt-check'] === 'true'
+const coalescedCheck = options['coalesced-check'] === 'true'
 if (!stateFile) throw new Error('--state-file is required')
 if (!workspaceRoot) throw new Error('--workspace-root is required')
 
@@ -77,6 +79,61 @@ try {
   valueOf('llm.models', await rpc('llm.models', {}))
   passed.push('session.models', 'commands/list', 'subagent.list', 'pluginInventory/list', 'llm.models')
 
+  let coalescedRange = null
+  if (promptCheck) {
+    assertOk('session.prompt', await rpc('session.prompt', {
+      sessionId,
+      mode: 'queue',
+      content: [{
+        type: 'text',
+        text: coalescedCheck
+          ? '请只输出一段不少于300个汉字的连续正文，不要使用工具，不要列点。'
+          : '只回复 DSH_STREAM_COMPAT_OK',
+      }],
+    }))
+    passed.push('session.prompt')
+    await muxEvents.waitFor(frame => frame?.payload?.type === 'session/event'
+      && frame.payload.sessionId === sessionId
+      && frame.payload.event?.type === 'assistant/chunk', 45_000)
+    passed.push('realtime.assistant-chunk')
+    if (coalescedCheck) {
+      await muxEvents.waitFor(frame => frame?.payload?.type === 'session/event'
+        && frame.payload.sessionId === sessionId
+        && frame.payload.event?.type === 'turn/end', 60_000)
+      const deltas = muxEvents.matching(frame => {
+        const event = frame?.payload?.event
+        const chunk = event?.data?.chunk
+        return frame?.payload?.type === 'session/event'
+          && frame.payload.sessionId === sessionId
+          && event?.type === 'assistant/chunk'
+          && ['text-delta', 'reasoning-delta', 'tool-call-delta'].includes(chunk?.type)
+      })
+      const ranged = deltas.find(frame => {
+        const event = frame.payload.event
+        return Number.isSafeInteger(event.seq) && Number.isSafeInteger(event.seqEnd)
+          && event.seqEnd > event.seq
+      })
+      const trace = muxEvents.matching(frame => frame?.payload?.type === 'session/event'
+        && frame.payload.sessionId === sessionId).slice(-40).map(frame => ({
+        seq: frame.payload.event?.seq,
+        seqEnd: frame.payload.event?.seqEnd,
+        event: frame.payload.event?.type,
+        chunk: frame.payload.event?.data?.chunk?.type,
+        finish: frame.payload.event?.data?.chunk?.type === 'finish'
+          ? frame.payload.event.data.chunk : undefined,
+        reason: frame.payload.event?.data?.reason?.kind,
+        error: frame.payload.event?.data?.reason?.kind === 'error'
+          ? frame.payload.event.data.reason : undefined,
+        message: Array.isArray(frame.payload.event?.data?.message?.content)
+          ? frame.payload.event.data.message.content.map(part => part?.type).filter(Boolean)
+          : undefined,
+      }))
+      assert.ok(ranged, `no coalesced realtime delta; observed ${deltas.length} delta frame(s); trace=${JSON.stringify(trace)}`)
+      coalescedRange = ranged.payload.event.seqEnd - ranged.payload.event.seq + 1
+      passed.push('realtime.coalesced-delta', 'realtime.turn-end')
+    }
+  }
+
   assertOk('session.rename', await rpc('session.rename', {
     sessionId,
     title: 'Compatibility smoke session',
@@ -92,6 +149,7 @@ try {
     baseUrl: baseUrl.origin,
     passed,
     sessionSearch: searchStatus,
+    ...(coalescedRange === null ? {} : { coalescedRange }),
   }))
 } finally {
   hostEvents.close()
@@ -148,6 +206,9 @@ function createEventCollector(eventPath) {
         }
         waiters.add(inspect)
       })
+    },
+    matching(predicate) {
+      return frames.filter(predicate)
     },
     close() {
       try { socket.terminate() } catch {}

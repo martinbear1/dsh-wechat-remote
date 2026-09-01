@@ -201,7 +201,14 @@ interface AdapterHttpStream {
 interface AdapterWebSocketStream {
   readonly kind: 'adapter-websocket'
   readonly controller: AbortController
+  readonly batchEnabled: boolean
+  batchMessages: { flags: number; payload: ByteArray }[]
+  batchBytes: number
+  batchTimer: NodeJS.Timeout | null
+  deltaBurstStarted: boolean
 }
+
+type BatchableWebSocketStream = WebSocketStream | AdapterWebSocketStream
 
 type Stream = HttpStream | WebSocketStream | RemotePromptStream | AdapterHttpStream | AdapterWebSocketStream
 
@@ -365,22 +372,29 @@ export class DshTunnelAgent {
   private openWebSocket(streamId: number, path: string, value: Record<string, unknown>): void {
     if (this.openDshEvents) {
       const controller = new AbortController()
-      const stream: AdapterWebSocketStream = { kind: 'adapter-websocket', controller }
+      const stream: AdapterWebSocketStream = {
+        kind: 'adapter-websocket',
+        controller,
+        batchEnabled: supportsEventBatch(value),
+        batchMessages: [],
+        batchBytes: 0,
+        batchTimer: null,
+        deltaBurstStarted: false,
+      }
       this.streams.set(streamId, stream)
       this.queue(encode(ACCEPT, streamId, 0, json({ opened: true })))
       void (async () => {
         try {
           for await (const message of this.openDshEvents!(path, controller.signal)) {
             if (this.streams.get(streamId) !== stream) return
-            const parts = pieces(message)
-            parts.forEach((part, index) => this.queue(encode(
-              DATA,
-              streamId,
-              index === parts.length - 1 ? FLAG_FINAL : 0,
-              part,
-            )))
+            // Modern DSH is an adapter source, but the phone-facing tunnel is
+            // still the released 1.5.5 transport. Keep its negotiated delta
+            // batching instead of turning every alpha token into a standalone
+            // encrypted WebSocket packet.
+            this.sendWebSocketMessage(streamId, stream, message, false)
           }
           if (this.streams.get(streamId) === stream) {
+            this.flushEventBatch(streamId, stream)
             this.streams.delete(streamId)
             this.queue(encode(END, streamId, 0, json({ code: 1000, reason: '' })))
           }
@@ -431,7 +445,7 @@ export class DshTunnelAgent {
     socket.on('error', error => this.fail(streamId, error))
   }
 
-  private sendWebSocketMessage(streamId: number, stream: WebSocketStream, message: ByteArray, isBinary: boolean): void {
+  private sendWebSocketMessage(streamId: number, stream: BatchableWebSocketStream, message: ByteArray, isBinary: boolean): void {
     const flags = (isBinary ? FLAG_BINARY : 0) | FLAG_FINAL
     if (stream.batchEnabled && isStreamDelta(message, isBinary)) {
       if (!stream.deltaBurstStarted) {
@@ -460,7 +474,7 @@ export class DshTunnelAgent {
     })
   }
 
-  private flushEventBatch(streamId: number, stream: WebSocketStream): void {
+  private flushEventBatch(streamId: number, stream: BatchableWebSocketStream): void {
     if (stream.batchTimer) clearTimeout(stream.batchTimer)
     stream.batchTimer = null
     if (!stream.batchMessages.length) return
@@ -631,6 +645,11 @@ export class DshTunnelAgent {
       if (stream.kind === 'adapter-http') {
         stream.chunks = []
         stream.bytes = 0
+      } else {
+        if (stream.batchTimer) clearTimeout(stream.batchTimer)
+        stream.batchTimer = null
+        stream.batchMessages = []
+        stream.batchBytes = 0
       }
     } else if (stream.kind === KIND_HTTP) stream.request.destroy()
     else {

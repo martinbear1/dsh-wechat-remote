@@ -18,6 +18,7 @@ const connection = {
         const endpoint = new URL(request.url).pathname.slice('/api/'.length)
         let value = { acknowledged: true }
         if (endpoint === 'session/list') value = { items: [{ sessionId: 's1', running: false, blank: false }] }
+        if (endpoint === 'session/create') value = { sessionId: 's-created' }
         if (endpoint === '$events/result') value = { accepted: true }
         return Response.json({
           type: 'server-response', rpcId: body.rpcId,
@@ -81,6 +82,66 @@ const streams = {
           content: [{ type: 'tool-result', toolCallId: 'write-live', isError: false }],
         },
       },
+    },
+  }, {
+    // DSH 0.1.2-alpha.1 and alpha.2 both publish live SessionEventEntry
+    // frames directly after the opening snapshot. The plugin must preserve
+    // consecutive scalar deltas as one bounded mini-program wire event.
+    type: 'event',
+    event: {
+      type: 'assistant/chunk', seq: 9, time: 6,
+      data: {
+        turn: 1, step: 1,
+        chunk: { type: 'text-delta', index: 0, text: 'first ' },
+      },
+    },
+  }, {
+    type: 'event',
+    event: {
+      type: 'assistant/chunk', seq: 10, time: 7,
+      data: {
+        turn: 1, step: 1,
+        chunk: { type: 'text-delta', index: 0, text: 'live token' },
+      },
+    },
+  }, {
+    // Packed chunk rows are an alpha durable history/snapshot shape. This
+    // synthetic live fixture is defensive coverage: if a Host forwards one,
+    // the adapter must preserve it rather than drop the answer after start.
+    type: 'chunks',
+    event: {
+      type: 'chunkrow/reasoning-chunks', seq: 11, time: 8,
+      data: {
+        turn: 1, step: 1, index: 0,
+        texts: ['packed ', 'reasoning'], dt: [2],
+      },
+    },
+  }, {
+    type: 'chunks',
+    event: {
+      type: 'chunkrow/text-chunks', seq: 13, time: 11,
+      data: {
+        turn: 1, step: 1, index: 1,
+        texts: ['packed ', 'answer'], dt: [3],
+      },
+    },
+  }, {
+    type: 'chunks',
+    event: {
+      type: 'chunkrow/tool-call-chunks', seq: 15, time: 15,
+      data: {
+        turn: 1, step: 1, index: 2, id: 'call-1', name: 'write',
+        args: ['{\"path\":', '\"x.txt\"}'], dt: [1],
+      },
+    },
+  }, {
+    // A real non-delta boundary flushes the final pending tool arguments.
+    // The adapter must never rely on an unref'ed timer to make terminal state
+    // observable, because a quiet/closing Host may have no later token.
+    type: 'event',
+    event: {
+      type: 'turn/end', seq: 17, time: 17,
+      data: { turn: 1, reason: { kind: 'completed' } },
     },
   }],
   'session/control': [],
@@ -182,11 +243,45 @@ const realtime = adapter.events('/api/events.mux', realtimeAbort.signal)[Symbol.
 const subscribed = JSON.parse(new TextDecoder().decode((await realtime.next()).value))
 const realtimeCall = JSON.parse(new TextDecoder().decode((await realtime.next()).value))
 const realtimeEvent = JSON.parse(new TextDecoder().decode((await realtime.next()).value))
+const realtimeChunk = JSON.parse(new TextDecoder().decode((await realtime.next()).value))
+const realtimePackedReasoning = JSON.parse(new TextDecoder().decode((await realtime.next()).value))
+const realtimePackedText = JSON.parse(new TextDecoder().decode((await realtime.next()).value))
+const realtimePackedTool = JSON.parse(new TextDecoder().decode((await realtime.next()).value))
+const realtimeTurnEnd = JSON.parse(new TextDecoder().decode((await realtime.next()).value))
 assert.equal(subscribed.payload.type, 'session/subscribed')
 assert.equal(realtimeCall.payload.event.type, 'tool/call')
 assert.deepEqual(realtimeEvent.payload.view, {
   view: { card: 'diff', diffs: [{ path: 'live.txt' }] },
 })
+assert.equal(realtimeChunk.payload.type, 'session/event')
+assert.deepEqual(realtimeChunk.payload.event, {
+  type: 'assistant/chunk', seq: 9, seqEnd: 10, time: 6,
+  data: {
+    turn: 1, step: 1,
+    chunk: { type: 'text-delta', index: 0, text: 'first live token' },
+  },
+})
+assert.deepEqual([
+  realtimePackedReasoning.payload.event,
+  realtimePackedText.payload.event,
+  realtimePackedTool.payload.event,
+], [{
+  type: 'assistant/chunk', seq: 11, seqEnd: 12, time: 8,
+  data: { turn: 1, step: 1, chunk: { type: 'reasoning-delta', index: 0, text: 'packed reasoning' } },
+}, {
+  type: 'assistant/chunk', seq: 13, seqEnd: 14, time: 11,
+  data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 1, text: 'packed answer' } },
+}, {
+  type: 'assistant/chunk', seq: 15, seqEnd: 16, time: 15,
+  data: {
+    turn: 1, step: 1,
+    chunk: {
+      type: 'tool-call-delta', index: 2, id: 'call-1', name: 'write',
+      argumentsDelta: '{\"path\":\"x.txt\"}',
+    },
+  },
+}])
+assert.equal(realtimeTurnEnd.payload.event.type, 'turn/end')
 realtimeAbort.abort()
 await adapter.call('agentPreset.select', {
   sessionId: 's1', agentPreset: 'standard',
@@ -205,7 +300,135 @@ assert.deepEqual(calls.at(-1).body.payload, {
     request: { objective: 'ship it' },
   },
 })
+
+// Alpha cold starts can admit session.create before their $events waterfall
+// publishes api-session/added. The authoritative RPC result must immediately
+// synthesize the same legacy host event and attach the new follow stream.
+const createdHostAbort = new AbortController()
+const createdHost = adapter.events('/api/events.host', createdHostAbort.signal)[Symbol.asyncIterator]()
+const created = await adapter.call('session.create', {
+  workspaceId: 'workspace-1',
+}, new AbortController().signal)
+assert.equal(created.value.sessionId, 's-created')
+const createdHostFrame = JSON.parse(new TextDecoder().decode((await createdHost.next()).value))
+assert.equal(createdHostFrame.payload.type, 'host/session-added')
+assert.equal(createdHostFrame.payload.sessionId, 's-created')
+createdHostAbort.abort()
 adapter.dispose()
+
+// An alpha Session follow may remain open yet stop advancing after its Agent
+// generation changes. A newer history cursor must replace only that stale
+// Session lease, and prompt admission must wait for one fresh follow snapshot.
+const staleWorkspace = new ControlledStream()
+const staleControl = new ControlledStream()
+const staleEvents = new ControlledStream()
+const historyOpeningOne = new ControlledStream()
+const liveOpeningOne = new ControlledStream()
+const historyOpeningTwo = new ControlledStream()
+const liveOpeningTwo = new ControlledStream()
+const promptOpening = new ControlledStream()
+historyOpeningOne.push({
+  type: 'snapshot', cursor: 10, hasMore: false,
+  records: [{ type: 'event', event: {
+    type: 'turn/end', seq: 10, time: 10,
+    data: { turn: 1, reason: { kind: 'completed' } },
+  } }],
+  projections: { values: {} },
+})
+liveOpeningOne.push({
+  type: 'snapshot', cursor: 10, hasMore: false, records: [], projections: { values: {} },
+})
+historyOpeningTwo.push({
+  type: 'snapshot', cursor: 20, hasMore: false,
+  records: [{ type: 'event', event: {
+    type: 'turn/end', seq: 20, time: 20,
+    data: { turn: 2, reason: { kind: 'completed' } },
+  } }],
+  projections: { values: {} },
+})
+liveOpeningTwo.push({
+  type: 'snapshot', cursor: 20, hasMore: false, records: [], projections: { values: {} },
+})
+promptOpening.push({
+  type: 'snapshot', cursor: 20, hasMore: false, records: [], projections: { values: {} },
+})
+const staleFollowOpenings = [
+  historyOpeningOne, liveOpeningOne, historyOpeningTwo, liveOpeningTwo, promptOpening,
+]
+const staleConnection = {
+  fetch: { register() {} },
+  requestRejection() {},
+  createSharedFetchHandler() {
+    return { async fetch(request) {
+      const body = await request.json()
+      return Response.json({
+        type: 'server-response', rpcId: body.rpcId,
+        result: { ok: true, value: { acknowledged: true } },
+      })
+    } }
+  },
+}
+const staleGateway = {
+  wireStream: {
+    open(endpoint, _payload, signal) {
+      if (endpoint === 'session/follow') {
+        const opening = staleFollowOpenings.shift()
+        if (!opening) throw new Error('unexpected stale-session follow open')
+        return opening.iterate(signal)
+      }
+      if (endpoint === 'workspace/follow') return staleWorkspace.iterate(signal)
+      if (endpoint === 'session/control') return staleControl.iterate(signal)
+      if (endpoint === '$events') return staleEvents.iterate(signal)
+      throw new Error(`unexpected stale-session stream ${endpoint}`)
+    },
+  },
+  async invoke({ namespace, method }) {
+    if (`${namespace}/${method}` === 'session/list') {
+      return { items: [{ sessionId: 's-stale', running: false, blank: false }] }
+    }
+    return {}
+  },
+}
+const staleAdapter = new DshHostAdapterRuntime({
+  inject(_services, callback) {
+    return callback({ connection: staleConnection, typertGateway: staleGateway })
+  },
+})
+const staleMux = openFrames(staleAdapter, '/api/events.mux')
+assert.equal((await staleAdapter.call('session.history', {
+  sessionId: 's-stale', maxMessages: 8,
+}, new AbortController().signal)).ok, true)
+assert.equal((await nextFrame(staleMux.iterator,
+  frame => frame.payload?.type === 'session/subscribed')).payload.lastSeq, 10)
+
+assert.equal((await staleAdapter.call('session.history', {
+  sessionId: 's-stale', maxMessages: 8,
+}, new AbortController().signal)).ok, true)
+assert.equal((await nextFrame(staleMux.iterator,
+  frame => frame.payload?.type === 'session/subscribed')).payload.lastSeq, 20)
+assert.equal(liveOpeningOne.openCount, 1)
+assert.equal(liveOpeningTwo.openCount, 1,
+  'history advancing past the bridge head must replace the stale Session follow')
+
+assert.equal((await staleAdapter.call('session.prompt', {
+  sessionId: 's-stale', mode: 'queue',
+  content: [{ type: 'text', text: 'stream now' }],
+}, new AbortController().signal)).ok, true)
+assert.equal((await nextFrame(staleMux.iterator,
+  frame => frame.payload?.type === 'session/subscribed')).payload.lastSeq, 20)
+promptOpening.push({
+  type: 'event',
+  event: {
+    type: 'assistant/chunk', seq: 21, time: 21,
+    data: { turn: 3, step: 1, chunk: { type: 'text-delta', index: 0, text: 'live' } },
+  },
+})
+assert.equal((await nextFrame(staleMux.iterator,
+  frame => frame.payload?.event?.seq === 21)).payload.event.data.chunk.text, 'live')
+assert.equal(promptOpening.openCount, 1,
+  'prompt admission must own a freshly established per-Session follow')
+staleMux.abort.abort()
+staleAdapter.dispose()
 
 // Every downstream mux socket is its own client generation. A second healthy
 // subscriber and a later reconnect must receive the cached authoritative
@@ -261,9 +484,14 @@ const replayCtx = {
 }
 const replayAdapter = new DshHostAdapterRuntime(replayCtx)
 const firstMux = openFrames(replayAdapter, '/api/events.mux')
-await waitUntil(() => replayStreams['session/follow'].openCount === 1
-  && replayStreams['session/control'].openCount === 1
+await waitUntil(() => replayStreams['session/control'].openCount === 1
   && replayStreams.$events.openCount === 1)
+replayStreams.$events.push({ type: 'ready', clientId: 'modern-client-1' })
+replayStreams.$events.push({
+  type: 'emit', event: 'api-session/added',
+  args: [{ sessionId: 's-replay', running: true, blank: false }],
+})
+await waitUntil(() => replayStreams['session/follow'].openCount === 1)
 replayStreams['session/follow'].push({
   type: 'snapshot', cursor: 12, hasMore: false, records: [], projections: { values: {} },
 })
@@ -282,7 +510,6 @@ replayStreams['session/control'].push({
     },
   },
 })
-replayStreams.$events.push({ type: 'ready', clientId: 'modern-client-1' })
 replayStreams.$events.push({
   type: 'waterfall', clientId: 'modern-client-1', eventId: 'approval-event-1',
   event: 'approval/request', agentId: 's-replay',
@@ -379,6 +606,10 @@ const faultGateway = {
           })
         } else if (endpoint === '$events') {
           stream.push({ type: 'ready', clientId: `fault-client-${count}` })
+          stream.push({
+            type: 'emit', event: 'api-session/added',
+            args: [{ sessionId: 's-fault', running: false, blank: false }],
+          })
         } else if (endpoint === 'session/follow') {
           stream.push({
             type: 'snapshot', cursor: count * 10, hasMore: false,
@@ -458,7 +689,17 @@ const tunnel = new DshTunnelAgent({
   },
   openDshEvents: async function *(_path, signal) {
     signal.throwIfAborted()
-    yield encoded({ rpcId: 'push-1', payload: { type: 'host/session-status', sessionId: 's1', running: true } })
+    yield encoded({ rpcId: 'push-1', payload: { type: 'session/event', sessionId: 's1', event: {
+      type: 'assistant/chunk', seq: 1, time: 1,
+      data: { turn: 1, chunk: { type: 'text-delta', index: 0, text: 'first' } },
+    } } })
+    yield encoded({ rpcId: 'push-2', payload: { type: 'session/event', sessionId: 's1', event: {
+      type: 'assistant/chunk', seq: 2, time: 2,
+      data: { turn: 1, chunk: { type: 'text-delta', index: 0, text: 'second' } },
+    } } })
+    yield encoded({ rpcId: 'push-3', payload: { type: 'session/event', sessionId: 's1', event: {
+      type: 'turn/end', seq: 3, time: 3, data: { turn: 1, reason: { kind: 'completed' } },
+    } } })
   },
 })
 tunnel.receive(tunnelFrame(1, 1, encoded({ kind: 'http', path: '/api/session.list', method: 'POST' })))
@@ -469,9 +710,14 @@ assert.equal(trustedFetches, 1)
 assert.ok(sent.some(frame => frame[1] === 2), 'adapter HTTP must accept')
 assert.ok(sent.some(frame => frame[1] === 4), 'adapter HTTP must end')
 sent.length = 0
-tunnel.receive(tunnelFrame(1, 3, encoded({ kind: 'websocket', path: '/api/events.host', headers: {} })))
+tunnel.receive(tunnelFrame(1, 3, encoded({
+  kind: 'websocket', path: '/api/events.host',
+  headers: { 'x-harness-transport-batch': '1' },
+})))
 await new Promise(resolve => setTimeout(resolve, 20))
 assert.ok(sent.some(frame => frame[1] === 3), 'adapter realtime must emit data')
+assert.ok(sent.some(frame => frame[1] === 7),
+  'modern adapter realtime must preserve the released tunnel batch transport')
 tunnel.close()
 
 const promptFrames = []
@@ -550,7 +796,13 @@ async function collectFrameTypes(iterator, types) {
   const found = new Map()
   const deadline = Date.now() + 1_500
   while (found.size < types.size) {
-    const frame = await nextFrame(iterator, () => true, Math.max(1, deadline - Date.now()))
+    let frame
+    try {
+      frame = await nextFrame(iterator, () => true, Math.max(1, deadline - Date.now()))
+    } catch (error) {
+      const missing = Array.from(types).filter(type => !found.has(type))
+      throw new Error(`${error.message}; missing ${missing.join(', ')}`)
+    }
     const type = frame.payload?.type
     if (types.has(type) && !found.has(type)) found.set(type, frame)
   }

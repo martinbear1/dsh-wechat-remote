@@ -17,6 +17,11 @@ const LEGACY_TIMEOUT_MS = 60_000
 const STREAM_RESTART_BASE_MS = 250
 const STREAM_RESTART_MAX_MS = 15_000
 const STREAM_STABLE_RESET_MS = 30_000
+// Bound the phone-facing event rate independently of whatever batching a DSH
+// release chooses internally. WeChat must receive progressive updates, but a
+// token-per-WebSocket-message stream can monopolize its single JS/render loop.
+const LIVE_DELTA_FLUSH_MS = 32
+const LIVE_DELTA_MAX_BYTES = 16 * 1024
 
 export type DshAdapterMode = 'probing' | 'legacy' | 'modern' | 'unavailable'
 
@@ -268,7 +273,20 @@ class ModernDshAdapter {
         }
         return { ok: true, value: frame.value }
       }
-      if (method === 'session.history') return await this.history(payload, signal)
+      if (method === 'session.history') {
+        const result = await this.history(payload, signal)
+        if (result.ok && typeof payload.sessionId === 'string') {
+          // A long-lived alpha Session follow can remain open after its
+          // underlying Agent generation stopped delivering. Compare the
+          // phone's authoritative history tail with the bridge head and
+          // replace only this Session's stale lease before returning history.
+          await waitWithSignal(this.eventsHub.ensureSessionFollow(
+            payload.sessionId,
+            legacyHistoryTail(result.value?.events),
+          ), signal)
+        }
+        return result
+      }
       if (method === 'session.models') return await this.models(payload, signal, rpcId)
       if (method === 'llm.providers' || method === 'llm.models') {
         return await this.legacyLlmDirectory(method, signal, rpcId)
@@ -277,8 +295,26 @@ class ModernDshAdapter {
         return await this.callModern('session/openWorkspacePath', { request: payload }, signal, rpcId)
       }
 
+      if (method === 'session.prompt' && typeof payload.sessionId === 'string') {
+        // Establish a fresh per-Session follow snapshot before prompt
+        // admission. The HTTP RPC and realtime stream are separate carriers;
+        // accepting a prompt behind a stale follow would otherwise make the
+        // reply visible only after a later history refresh.
+        await waitWithSignal(this.eventsHub.refreshSessionFollow(payload.sessionId), signal)
+      }
+
       const translated = translateLegacyCall(method, payload, rpcId)
-      return await this.callModern(translated.endpoint, translated.args, signal, rpcId)
+      const result = await this.callModern(translated.endpoint, translated.args, signal, rpcId)
+      // Alpha releases changed when the remote-event waterfall becomes ready.
+      // Reconcile mutations from their authoritative RPC result as well, so a
+      // new Session is followed immediately even if api-session/added is late
+      // or absent for this particular DSH/client version combination.
+      if (result.ok && method === 'session.create') {
+        this.eventsHub.observeSessionCreated(result.value)
+      } else if (result.ok && method === 'session.list') {
+        this.eventsHub.reconcileSessionCatalog(result.value?.items)
+      }
+      return result
     } catch (error) {
       if (signal.aborted) throw signal.reason
       return unavailable(messageOf(error))
@@ -426,6 +462,15 @@ class ModernLegacyEventHub {
     readonly seq: number
   }>>()
   private readonly sessionHeads = new Map<string, number>()
+  private readonly sessionSummaries = new Map<string, Record<string, any>>()
+  private readonly desiredSessions = new Set<string>()
+  private readonly liveDeltas = new Map<string, {
+    readonly key: string
+    readonly field: 'text' | 'argumentsDelta'
+    readonly event: Record<string, any>
+    bytes: number
+    timer: NodeJS.Timeout
+  }>()
   private clientId = ''
   private started = false
   private generation = 0
@@ -433,7 +478,12 @@ class ModernLegacyEventHub {
   private restartTimer: NodeJS.Timeout | null = null
   private stableTimer: NodeJS.Timeout | null = null
   private restartAttempt = 0
-  private readonly followedSessions = new Map<string, number>()
+  private readonly followedSessions = new Map<string, {
+    readonly generation: number
+    readonly controller: AbortController
+    readonly ready: Promise<number>
+    readonly reject: (error: unknown) => void
+  }>()
 
   constructor(
     private readonly gateway: ModernGateway,
@@ -445,6 +495,7 @@ class ModernLegacyEventHub {
   ) {}
 
   dispose(): void {
+    this.flushAllSessionDeltas()
     this.lifetime.abort(new Error('DSH modern compatibility bridge disposed'))
     this.generationAbort?.abort(new Error('DSH modern compatibility bridge disposed'))
     this.generationAbort = null
@@ -460,7 +511,11 @@ class ModernLegacyEventHub {
     this.queueBaselines.clear()
     this.projectionBaselines.clear()
     this.sessionHeads.clear()
-    this.followedSessions.clear()
+    this.sessionSummaries.clear()
+    this.desiredSessions.clear()
+    for (const sessionId of Array.from(this.followedSessions.keys())) {
+      this.stopSessionFollow(sessionId, 'DSH modern compatibility bridge disposed')
+    }
   }
 
   subscribe(path: string, signal: AbortSignal): AsyncIterable<Uint8Array> {
@@ -476,7 +531,10 @@ class ModernLegacyEventHub {
     // A downstream WebSocket generation is independent from the long-lived
     // modern DSH streams. Replaying only into this queue prevents a newly
     // connected phone from duplicating frames in already healthy clients.
-    if (target === '/api/events.mux') this.replayMux(queue)
+    if (target === '/api/events.mux') {
+      this.flushAllSessionDeltas()
+      this.replayMux(queue)
+    }
     this.start()
     const close = (): void => {
       subscribers.delete(queue)
@@ -513,6 +571,69 @@ class ModernLegacyEventHub {
         : { accepted: false, reason: response.error?.code || 'rejected' }
     } finally {
       if (this.pending.get(rpcId) === pending) pending.responding = false
+    }
+  }
+
+  observeSessionCreated(value: unknown): void {
+    if (!isRecord(value)) return
+    const nested = isRecord(value.session) ? value.session : value
+    const sessionId = typeof nested.sessionId === 'string' ? nested.sessionId : ''
+    if (!sessionId) return
+    const previous = this.sessionSummaries.get(sessionId)
+    const summary = { ...(previous || {}), ...nested, sessionId }
+    this.sessionSummaries.set(sessionId, summary)
+    if (!previous) this.host({ type: 'host/session-added', ...summary })
+    void this.ensureSessionFollow(sessionId)
+  }
+
+  ensureSessionFollow(sessionId: string, throughSeq?: number): Promise<number> {
+    if (!sessionId) return Promise.reject(new Error('Session follow requires sessionId'))
+    this.desiredSessions.add(sessionId)
+    this.ensureGenerationActive()
+    const head = this.sessionHeads.get(sessionId) ?? -1
+    const stale = Number.isSafeInteger(throughSeq) && Number(throughSeq) > head
+    return this.followSession(sessionId, this.generation, this.generationAbort?.signal, stale)
+  }
+
+  refreshSessionFollow(sessionId: string): Promise<number> {
+    if (!sessionId) return Promise.reject(new Error('Session follow requires sessionId'))
+    this.desiredSessions.add(sessionId)
+    this.ensureGenerationActive()
+    return this.followSession(sessionId, this.generation, this.generationAbort?.signal, true)
+  }
+
+  private ensureGenerationActive(): void {
+    if (this.started) return
+    if (this.restartTimer) {
+      clearTimeout(this.restartTimer)
+      this.restartTimer = null
+    }
+    this.start()
+  }
+
+  reconcileSessionCatalog(items: unknown): void {
+    if (!Array.isArray(items)) return
+    const observed = new Set<string>()
+    for (const item of items) {
+      if (!isRecord(item) || typeof item.sessionId !== 'string') continue
+      const sessionId = item.sessionId
+      observed.add(sessionId)
+      const previous = this.sessionSummaries.get(sessionId)
+      this.sessionSummaries.set(sessionId, item)
+      if (!previous) this.host({ type: 'host/session-added', ...item })
+      else if (Boolean(previous.running) !== Boolean(item.running)) {
+        this.host({ type: 'host/session-status', sessionId, running: Boolean(item.running) })
+      }
+    }
+    for (const sessionId of Array.from(this.sessionSummaries.keys())) {
+      if (observed.has(sessionId)) continue
+      this.sessionSummaries.delete(sessionId)
+      this.desiredSessions.delete(sessionId)
+      this.stopSessionFollow(sessionId, 'DSH Session was removed')
+      this.queueBaselines.delete(sessionId)
+      this.projectionBaselines.delete(sessionId)
+      this.sessionHeads.delete(sessionId)
+      this.host({ type: 'host/session-removed', sessionId })
     }
   }
 
@@ -554,12 +675,15 @@ class ModernLegacyEventHub {
     this.clientId = ''
     if (this.stableTimer) clearTimeout(this.stableTimer)
     this.stableTimer = null
-    for (const [sessionId, owner] of this.followedSessions) {
-      if (owner === generation) this.followedSessions.delete(sessionId)
+    for (const [sessionId, owner] of Array.from(this.followedSessions.entries())) {
+      if (owner.generation === generation) {
+        this.stopSessionFollow(sessionId, 'DSH modern compatibility generation replaced')
+      }
     }
     // A waterfall belongs to one upstream $events clientId. Retire its local
     // card before reconnecting; the new $events generation will replay any
     // still-authoritative request with a fresh clientId and the same event id.
+    this.flushAllSessionDeltas()
     this.retirePending()
     this.broadcastError(error)
     const delay = Math.min(
@@ -601,16 +725,25 @@ class ModernLegacyEventHub {
   private consumeEmit(event: string, args: unknown[]): void {
     if (event === 'api-session/added' && isRecord(args[0])) {
       const summary = args[0]
-      this.host({ type: 'host/session-added', ...summary })
-      this.followSession(String(summary.sessionId || ''))
+      const sessionId = String(summary.sessionId || '')
+      const previous = this.sessionSummaries.get(sessionId)
+      if (sessionId) this.sessionSummaries.set(sessionId, summary)
+      if (!previous) this.host({ type: 'host/session-added', ...summary })
+      void this.ensureSessionFollow(sessionId)
     } else if (event === 'api-session/removed') {
       const sessionId = String(args[0] || '')
+      this.sessionSummaries.delete(sessionId)
+      this.desiredSessions.delete(sessionId)
+      this.stopSessionFollow(sessionId, 'DSH Session was removed')
       this.queueBaselines.delete(sessionId)
       this.projectionBaselines.delete(sessionId)
       this.sessionHeads.delete(sessionId)
       this.host({ type: 'host/session-removed', sessionId: args[0] })
     } else if (event === 'api-session/status') {
-      this.host({ type: 'host/session-status', sessionId: args[0], running: args[1] })
+      const sessionId = String(args[0] || '')
+      const previous = this.sessionSummaries.get(sessionId)
+      if (previous) this.sessionSummaries.set(sessionId, { ...previous, running: Boolean(args[1]) })
+      this.host({ type: 'host/session-status', sessionId, running: args[1] })
     } else if (event === 'api-session/error') {
       this.host({ type: 'host/agent-error', sessionId: args[0], message: args[1] })
     } else {
@@ -698,54 +831,97 @@ class ModernLegacyEventHub {
     if (!result.ok || !Array.isArray(result.value?.items)) {
       throw new Error(result.error?.message || 'DSH session catalog is unavailable')
     }
+    const available = new Set<string>()
     for (const item of result.value.items) {
-      if (typeof item?.sessionId === 'string') this.followSession(item.sessionId, generation, signal)
+      if (typeof item?.sessionId !== 'string') continue
+      this.sessionSummaries.set(item.sessionId, item)
+      available.add(item.sessionId)
+    }
+    // Catalog discovery stays lightweight. Only Sessions explicitly opened by
+    // the phone (or newly created while connected) own a live follow stream.
+    // This avoids an O(history-count) waterfall during every cold reconnect.
+    for (const sessionId of this.desiredSessions) {
+      if (available.has(sessionId)) void this.followSession(sessionId, generation, signal)
     }
   }
 
-  private followSession(sessionId: string, generation = this.generation, signal?: AbortSignal): void {
-    if (!sessionId || this.followedSessions.get(sessionId) === generation) return
-    this.followedSessions.set(sessionId, generation)
+  private followSession(
+    sessionId: string,
+    generation = this.generation,
+    signal?: AbortSignal,
+    replace = false,
+  ): Promise<number> {
+    if (!sessionId) return Promise.reject(new Error('Session follow requires sessionId'))
+    const previous = this.followedSessions.get(sessionId)
+    if (previous && previous.generation === generation && !replace) return previous.ready
+    if (previous) this.stopSessionFollow(sessionId, 'DSH Session follow refreshed')
+
+    const controller = new AbortController()
     const generationSignal = signal ?? this.generationAbort?.signal ?? this.lifetime.signal
+    const followSignal = AbortSignal.any([generationSignal, controller.signal])
+    let resolveReady!: (cursor: number) => void
+    let rejectReady!: (error: unknown) => void
+    let readySettled = false
+    const ready = new Promise<number>((resolve, reject) => {
+      resolveReady = value => { readySettled = true; resolve(value) }
+      rejectReady = error => { readySettled = true; reject(error) }
+    })
+    // Catalog and $events discovery intentionally start follows without
+    // awaiting them; keep a failed opening from becoming an unhandled Promise.
+    void ready.catch(() => {})
+    const lease = { generation, controller, ready, reject: rejectReady }
+    this.followedSessions.set(sessionId, lease)
     void (async () => {
       const legacyViewState = createLegacyViewState()
       try {
         const stream = await openModernStream(this.gateway, 'session/follow', {
           args: { request: { address: { kind: 'session', sessionId } } },
-        }, generationSignal)
+        }, followSignal)
         let opened = false
         for await (const value of stream) {
           if (!isRecord(value)) continue
           if (!opened && value.type === 'snapshot') {
             opened = true
+            this.flushSessionDelta(sessionId)
             // Seed pending mutation calls from the opening window. A tool result
             // may arrive immediately after the snapshot for a call it contains.
             legacyHistoryEntries(value.records, legacyViewState)
-            if (Number.isSafeInteger(value.cursor)) this.sessionHeads.set(sessionId, Number(value.cursor))
+            if (Number.isSafeInteger(value.cursor)) {
+              this.sessionHeads.set(sessionId, Number(value.cursor))
+              if (!readySettled) resolveReady(Number(value.cursor))
+            } else throw new Error(`DSH Session snapshot cursor is invalid for ${sessionId}`)
             this.mux({ type: 'session/subscribed', sessionId, lastSeq: value.cursor })
           } else if (value.type === 'event' && isRecord(value.event)) {
             const synthesizedView = legacyMutationView(value.event, legacyViewState)
-            if (Number.isSafeInteger(value.event.seq)) {
-              const seq = Number(value.event.seq)
-              this.sessionHeads.set(sessionId, Math.max(this.sessionHeads.get(sessionId) ?? -1, seq))
-            }
-            this.mux({
-              type: 'session/event',
-              sessionId,
-              event: value.event,
-              ...(Object.hasOwn(value, 'view')
-                ? { view: value.view }
-                : synthesizedView === undefined ? {} : { view: synthesizedView }),
-            })
+            const view = Object.hasOwn(value, 'view') ? value.view : synthesizedView
+            this.publishSessionEvent(sessionId, value.event, view)
+          } else if (value.type === 'chunks' && isRecord(value.event)) {
+            // Current official follow streams use scalar SessionEventEntry
+            // frames after their snapshot; packed chunk rows are a durable
+            // history/snapshot shape. Keep this defensive branch for a Host
+            // that forwards such a row live, without claiming alpha.3 does so.
+            // Preserve it as one legacy occurrence with an inclusive seqEnd.
+            const event = coalesceChunkRowEvent(value.event)
+            if (event) this.publishSessionEvent(sessionId, event)
           }
         }
-        if (!generationSignal.aborted) throw new Error(`DSH Session stream ended for ${sessionId}`)
+        if (!followSignal.aborted) throw new Error(`DSH Session stream ended for ${sessionId}`)
       } catch (error) {
-        if (!generationSignal.aborted) this.failGeneration(generation, error)
+        if (!readySettled) rejectReady(error)
+        if (!followSignal.aborted) this.failGeneration(generation, error)
       } finally {
-        if (this.followedSessions.get(sessionId) === generation) this.followedSessions.delete(sessionId)
+        if (this.followedSessions.get(sessionId) === lease) this.followedSessions.delete(sessionId)
       }
     })()
+    return ready
+  }
+
+  private stopSessionFollow(sessionId: string, reason: string): void {
+    const current = this.followedSessions.get(sessionId)
+    if (!current) return
+    this.followedSessions.delete(sessionId)
+    current.reject(new Error(reason))
+    current.controller.abort(new Error(reason))
   }
 
   private cacheQueue(sessionId: string, items: unknown): void {
@@ -818,6 +994,78 @@ class ModernLegacyEventHub {
 
   private mux(payload: object, rpcId?: string): void {
     this.broadcast(this.muxSubscribers, payload, rpcId)
+  }
+
+  /**
+   * Coalesce scalar delta occurrences at the one common phone-facing boundary.
+   * This covers old DSH scalar streams, alpha packed rows and future releases
+   * without leaking release-specific transport behavior into the mini program.
+   */
+  private publishSessionEvent(sessionId: string, event: Record<string, any>, view?: unknown): void {
+    const descriptor = liveDeltaDescriptor(event)
+    if (!descriptor || view !== undefined) {
+      this.flushSessionDelta(sessionId)
+      this.commitSessionHead(sessionId, event)
+      this.mux({
+        type: 'session/event', sessionId, event,
+        ...(view === undefined ? {} : { view }),
+      })
+      return
+    }
+
+    const startSeq = Number(event.seq)
+    const endSeq = eventRangeEnd(event)
+    const pending = this.liveDeltas.get(sessionId)
+    const nextBytes = Buffer.byteLength(descriptor.value)
+    if (pending && (pending.key !== descriptor.key
+      || startSeq !== eventRangeEnd(pending.event) + 1
+      || pending.bytes + nextBytes > LIVE_DELTA_MAX_BYTES)) {
+      this.flushSessionDelta(sessionId)
+    }
+
+    const current = this.liveDeltas.get(sessionId)
+    if (current) {
+      const chunk = current.event.data.chunk
+      chunk[current.field] += descriptor.value
+      current.event.seqEnd = endSeq
+      current.bytes += nextBytes
+      return
+    }
+
+    const chunk = { ...event.data.chunk, [descriptor.field]: descriptor.value }
+    const normalized = {
+      ...event,
+      seqEnd: endSeq,
+      data: { ...event.data, chunk },
+    }
+    const timer = setTimeout(() => this.flushSessionDelta(sessionId), LIVE_DELTA_FLUSH_MS)
+    timer.unref?.()
+    this.liveDeltas.set(sessionId, {
+      key: descriptor.key,
+      field: descriptor.field,
+      event: normalized,
+      bytes: nextBytes,
+      timer,
+    })
+  }
+
+  private flushSessionDelta(sessionId: string): void {
+    const pending = this.liveDeltas.get(sessionId)
+    if (!pending) return
+    this.liveDeltas.delete(sessionId)
+    clearTimeout(pending.timer)
+    this.commitSessionHead(sessionId, pending.event)
+    this.mux({ type: 'session/event', sessionId, event: pending.event })
+  }
+
+  private flushAllSessionDeltas(): void {
+    for (const sessionId of Array.from(this.liveDeltas.keys())) this.flushSessionDelta(sessionId)
+  }
+
+  private commitSessionHead(sessionId: string, event: Record<string, any>): void {
+    const seq = eventRangeEnd(event)
+    if (!Number.isSafeInteger(seq)) return
+    this.sessionHeads.set(sessionId, Math.max(this.sessionHeads.get(sessionId) ?? -1, seq))
   }
 
   private broadcast(subscribers: Set<AsyncFrameQueue>, payload: object, rpcId?: string): void {
@@ -972,7 +1220,8 @@ function legacyHistoryEntries(
       })
       continue
     }
-    for (const event of expandChunkRowEvent(record.event)) entries.push({ event })
+    const event = coalesceChunkRowEvent(record.event)
+    if (event) entries.push({ event })
   }
   return entries
 }
@@ -1052,35 +1301,94 @@ function pathValue(value: unknown): string | null {
   return typeof value === 'string' && value.trim().length > 0 ? value : null
 }
 
-/** Expand alpha's packed delta row back to the legacy raw event contract. */
-function expandChunkRowEvent(event: Record<string, any>): Record<string, any>[] {
+/**
+ * Translate one alpha packed row to one wire occurrence.
+ *
+ * `seq` remains the first native occurrence and `seqEnd` is the inclusive last
+ * occurrence represented by the coalesced delta. Older DSH rows still flow as
+ * ordinary single-seq events; the optional range is a compatible extension of
+ * the mini-program protocol rather than a second Timeline shape.
+ */
+function coalesceChunkRowEvent(event: Record<string, any>): Record<string, any> | null {
   const type = String(event.type || '')
   const data = isRecord(event.data) ? event.data : null
-  if (!data || !Number.isSafeInteger(event.seq) || !Number.isSafeInteger(event.time)) return []
+  if (!data || !Number.isSafeInteger(event.seq) || !Number.isSafeInteger(event.time)) return null
   const members = type === 'chunkrow/tool-call-chunks' ? data.args : data.texts
-  if (!Array.isArray(members) || !Array.isArray(data.dt)) return []
-  const output: Record<string, any>[] = []
-  let time = event.time
-  for (let index = 0; index < members.length; index += 1) {
-    if (index > 0) time += Number(data.dt[index - 1] || 0)
-    let chunk: Record<string, unknown>
-    if (type === 'chunkrow/text-chunks') {
-      chunk = { type: 'text-delta', index: data.index, text: members[index] }
-    } else if (type === 'chunkrow/reasoning-chunks') {
-      chunk = { type: 'reasoning-delta', index: data.index, text: members[index] }
-    } else if (type === 'chunkrow/tool-call-chunks') {
-      chunk = {
-        type: 'tool-call-delta', index: data.index, id: data.id,
-        ...(typeof data.name === 'string' ? { name: data.name } : {}),
-        argumentsDelta: members[index],
-      }
-    } else return []
-    output.push({
-      type: 'assistant/chunk', seq: event.seq + index, time,
-      data: { turn: data.turn, step: data.step, chunk },
-    })
+  if (!Array.isArray(members) || members.length === 0 || !Array.isArray(data.dt)) return null
+  const joined = members.map(member => typeof member === 'string' ? member : String(member ?? '')).join('')
+  let chunk: Record<string, unknown>
+  if (type === 'chunkrow/text-chunks') {
+    chunk = { type: 'text-delta', index: data.index, text: joined }
+  } else if (type === 'chunkrow/reasoning-chunks') {
+    chunk = { type: 'reasoning-delta', index: data.index, text: joined }
+  } else if (type === 'chunkrow/tool-call-chunks') {
+    chunk = {
+      type: 'tool-call-delta', index: data.index, id: data.id,
+      ...(typeof data.name === 'string' ? { name: data.name } : {}),
+      argumentsDelta: joined,
+    }
+  } else return null
+  return {
+    type: 'assistant/chunk',
+    seq: event.seq,
+    seqEnd: event.seq + members.length - 1,
+    time: event.time,
+    data: { turn: data.turn, step: data.step, chunk },
   }
-  return output
+}
+
+function eventRangeEnd(event: Record<string, any>): number {
+  return Number.isSafeInteger(event.seqEnd) && Number(event.seqEnd) >= Number(event.seq)
+    ? Number(event.seqEnd)
+    : Number(event.seq)
+}
+
+function legacyHistoryTail(entries: unknown): number | undefined {
+  if (!Array.isArray(entries)) return undefined
+  let tail = -1
+  for (const entry of entries) {
+    if (!isRecord(entry) || !isRecord(entry.event) || !Number.isSafeInteger(entry.event.seq)) continue
+    tail = Math.max(tail, eventRangeEnd(entry.event))
+  }
+  return tail >= 0 ? tail : undefined
+}
+
+function waitWithSignal<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason)
+  return new Promise<T>((resolve, reject) => {
+    const abort = (): void => {
+      cleanup()
+      reject(signal.reason)
+    }
+    const cleanup = (): void => signal.removeEventListener('abort', abort)
+    signal.addEventListener('abort', abort, { once: true })
+    promise.then(value => {
+      cleanup()
+      resolve(value)
+    }, error => {
+      cleanup()
+      reject(error)
+    })
+  })
+}
+
+function liveDeltaDescriptor(event: Record<string, any>): {
+  readonly key: string
+  readonly field: 'text' | 'argumentsDelta'
+  readonly value: string
+} | null {
+  if (event.type !== 'assistant/chunk' || !Number.isSafeInteger(event.seq)
+    || !isRecord(event.data) || !isRecord(event.data.chunk)) return null
+  const chunk = event.data.chunk
+  const type = String(chunk.type || '')
+  const field = type === 'tool-call-delta'
+    ? 'argumentsDelta'
+    : type === 'text-delta' || type === 'reasoning-delta' ? 'text' : null
+  if (!field || typeof chunk[field] !== 'string') return null
+  const key = [
+    event.data.turn, event.data.step, type, chunk.index, chunk.id, chunk.name,
+  ].map(value => String(value ?? '')).join('\u0000')
+  return { key, field, value: chunk[field] }
 }
 
 function legacyResponseOutcome(event: string, result: unknown): object {

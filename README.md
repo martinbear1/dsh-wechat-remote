@@ -1,6 +1,6 @@
-> **仅供隔离测试 / PREVIEW — 1.6.0-preview.20260905.1**
+> **仅供隔离测试 / PREVIEW — 1.6.0-preview.20260905.2**
 > 非正式发布，不用于普通用户自动更新。此包来自 v1.5.5 基线；测试新旧 DSH 适配、旧用户升级提醒及插件更新事务。正式支持范围以正式发布说明为准。
-> 从旧插件首次手工安装：在原 DSH_HOME 和原 profile 下，停止该实例后执行 `dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.6.0-preview.20260905.1`，再按原方式启动；非 web profile 请使用原名称，不删除节点/会话。预发布自动更新还需要管理员显式配置测试清单和 preview 通道。
+> 从旧插件首次手工安装：在原 DSH_HOME 和原 profile 下，停止该实例后执行 `dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.6.0-preview.20260905.2`，再按原方式启动；非 web profile 请使用原名称，不删除节点/会话。预发布自动更新还需要管理员显式配置测试清单和 preview 通道。
 
 # 鲸常在 · DeepSeek Harness 微信连接插件
 

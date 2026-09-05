@@ -5,5 +5,4 @@ miniprogram_npm/
 *.tsbuildinfo
 *.map
 *.tgz
-lib/index.d.ts
 backups/

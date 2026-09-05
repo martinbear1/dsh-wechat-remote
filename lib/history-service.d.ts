@@ -77,6 +77,7 @@ declare module '@deepseek-ai/cordis' {
     }
 }
 export declare class WechatHistoryService extends TypertRemoteService {
+    private readonly hostContext;
     private readonly dshPort;
     private readonly timeoutMs;
     private readonly snapshotThresholdBytes;

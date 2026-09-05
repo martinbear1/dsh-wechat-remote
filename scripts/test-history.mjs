@@ -199,6 +199,25 @@ fakeSocket.emit('message', hostStatus('session-prewarm1234', false), false)
 await waitFor(() => warmed.length === 2)
 prewarmer.stop()
 
+let deliverHostEvent
+let observerReleased = false
+const inProcessWarm = []
+const inProcessPrewarmer = new HistorySnapshotPrewarmer({
+  socketFactory() { throw new Error('modern prewarmer must not open the old WebSocket endpoint') },
+  hostEventSource(receive) {
+    deliverHostEvent = receive
+    return () => { observerReleased = true }
+  },
+  settleDelayMs: 0,
+  async warm(sessionId) { inProcessWarm.push(sessionId); return 'inline' },
+})
+inProcessPrewarmer.start()
+deliverHostEvent(hostStatus('session-process1234', true))
+deliverHostEvent(hostStatus('session-process1234', false))
+await waitFor(() => inProcessWarm.length === 1)
+inProcessPrewarmer.stop()
+assert.equal(observerReleased, true)
+
 // Production wiring must capture the Cordis service inside an inject fiber.
 // Reading a sibling service later from the parent plugin context is rejected by
 // Cordis and used to terminate DSH when the Host socket opened.
@@ -308,5 +327,12 @@ abortSocket.emit('message', hostStatus('session-abort123456', false), false)
 await waitFor(() => activeStarted)
 abortPrewarmer.stop()
 await waitFor(() => activeAborted)
+
+const unavailableSource = new HistorySnapshotPrewarmer({
+  hostEventSource() { throw new Error('optional gateway unavailable during reload') },
+  warm: async () => { throw new Error('must not warm without source') },
+})
+assert.doesNotThrow(() => unavailableSource.start(), 'optional prewarming must not prevent plugin startup')
+unavailableSource.stop()
 
 console.log('history service tests passed')

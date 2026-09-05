@@ -4,11 +4,11 @@
  * WeChat gate's loopback-only door; this client page only presents status and
  * requests a short-lived QR code when the user explicitly asks for one.
  */
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client';
+import type { Context } from '@deepseek-ai/cordis';
 import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client';
 /** Required services for the slot registration. */
 export declare const inject: string[];
-type HarnessRemoteClientContext = ClientContext & {
+type HarnessRemoteClientContext = Context & {
     connection: ConnectionHandle;
 };
 /**

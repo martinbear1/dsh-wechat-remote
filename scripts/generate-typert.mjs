@@ -32,6 +32,10 @@ try {
   const hostSources = [
     'index.ts',
     'gate-runtime.ts',
+    'update-policy.ts',
+    'update-download.ts',
+    'update-worker.ts',
+    'update-service.ts',
     'directory-service.ts',
     'directory-worker.ts',
     'host-platform.ts',
@@ -48,6 +52,10 @@ try {
     'dsh-tunnel-agent.ts',
     'agent-metadata.ts',
     'gate-ports.ts',
+    'dsh-runtime.ts',
+    'dsh-protocol-compat.ts',
+    'dsh-realtime-compat.ts',
+    'dsh-compatibility-api.ts',
     'secure-file.ts',
     'history-prewarmer.ts',
   ]

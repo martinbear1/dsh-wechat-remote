@@ -1,17 +1,20 @@
 # 鲸常在 · DeepSeek Harness 微信连接插件
 
-在 Windows 或 macOS 的 DeepSeek Harness 中安装本插件，即可用「鲸常在」微信小程序扫码添加这台电脑，在手机上查看工作区与会话、发送任务并接收运行结果。
+本版本是 **`1.6.0-rc.4` 功能预览版**，从正式版 `1.5.5` 整理，非 Latest、未合并 main。包含多版本 / 三主机适配及安全更新能力。请先阅读 [发布与兼容说明](RELEASE-NOTES.md)，不把未认证组合当作正式支持。
+
+在 Windows、macOS 或 Linux 的 DeepSeek Harness 中安装本插件，即可用「鲸常在」微信小程序扫码添加这台电脑，在手机上查看工作区与会话、发送任务并接收运行结果。
 
 小程序是独立的 DSH 客户端：数据和任务仍由用户自己的电脑及 DeepSeek Harness 处理。本插件不会修改 DSH 本体，也不会替换或抓取 WebUI。
 
 ## 功能
 
-- 扫码添加 Windows 或 Mac 上的 DSH
+- 扫码添加 Windows、Mac 或 Linux 上的 DSH
 - 同一 Wi-Fi 下优先使用局域网直连
 - 离开局域网后可切换到加密远程连接
 - 查看工作区、会话历史和实时任务状态
 - 发送文字、图片及后续指令
-- 一个插件版本同时支持 Windows 和 macOS
+- 一个候选插件适配三个操作系统，确切验证范围见文末
+- 小程序节点版本提醒；WebUI 检查适合当前 DSH 的插件更新
 
 局域网连接免费使用。远程连接由「鲸常在」小程序中的公网访问权益控制；没有公网权益时，不影响同一局域网内使用。
 
@@ -24,10 +27,10 @@
 
 ## 安装
 
-Windows PowerShell 和 macOS Terminal 使用同一条 DSH 原生命令：
+主动测试本预览版时，Windows、macOS 和 Linux 使用同一条固定标签命令。先结束任务并正常停止目标 DSH；保留原 `DSH_HOME`、profile 和端口，非 web profile 请替换名称：
 
 ```bash
-dsh plugin --profile web add github:martinbear1/dsh-wechat-remote
+npm exec --yes --package=pnpm@11 -- dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.6.0-rc.4
 ```
 
 安装完成后，在没有任务运行时重新启动 DSH：
@@ -52,7 +55,7 @@ npm install -g pnpm@11
 
 ### 固定安装某个版本
 
-普通用户不需要填写版本号；默认安装 `main` 上的最新正式版。只有复现或回退时才需要指定标签，例如：
+不带 `#标签` 的 GitHub 安装来源是默认分支 main，不是 releases/latest。本次两者均保持原值；安装 RC4 必须指定上面的标签。复现正式 v1.5.5 可指定：
 
 ```bash
 dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.5.5
@@ -73,6 +76,20 @@ dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.5.5
 添加完成后通常不需要再次扫码。小程序会根据当前网络在可用连接之间自动选择；电脑需保持 DSH 运行。
 
 ## 更新
+
+### WebUI 更新（本预览版新增）
+
+进入 **设置 → 微信连接 → 插件更新与兼容**，先检查，再确认“更新插件并重启 DSH”。只选择支持当前 DSH、系统和架构的最新正式插件，不一定是全仓库最大版本；不会自动升级或降级 DSH。
+
+只有存在通过 URL、SHA-256、大小及包内容校验的正式发布资产，且安装与启动方式可验证时才显示更新按钮。当前自动事务验证范围为 x64 的普通 Node CLI、独立可写 profile、pnpm 11；系统服务、受监管进程、未知架构和安装方式保留手工方式。不支持时会解释原因，不会猜测进程后强制结束。
+
+进度依次显示下载、暂存、保存与备份、重启和校验。会话运行中拒绝进入重启阶段；重启前及重启验证期间暂停新请求。失败尝试恢复原插件；无法自动恢复时保留 `<DSH_HOME>/harness-remote-updates/<任务标识>/` 的记录和备份，提示人工处理，不覆盖新产生的用户数据。该目录含私密配置，不应上传或发给他人；暂无自动清理，确认升级稳定后再由用户清理旧备份。
+
+正常成功后原节点无需重新扫码。页面关闭后重新打开可以读取进度。首次使用此功能，需要先手工把不带该功能的旧插件升级一次。
+
+正式云端 v1.2.3 检查接口已上线，但暂未启用新插件正式目标。没有匹配正式资产时不会提供安装按钮。预发布更新须管理员显式设置本地清单与 preview 通道；安装 RC 本身不会订阅预发布。检查缺失、过期或未知不会影响对话。
+
+### 手工更新
 
 重新执行安装命令即可更新到当前正式版：
 
@@ -119,17 +136,17 @@ dsh plugin --profile web remove @harness-remote/dsh-wechat-remote
 
 ### 插件会影响 DSH 或 WebUI 吗
 
-不会。插件通过 DSH 的插件机制加载，异常会限制在插件功能内；卸载后 DSH 与 WebUI 仍按原方式工作。
+插件通过 DSH 的插件机制加载，不修改 DSH 本体文件。用户确认一键更新后，会短暂暂停请求并重启当前 DSH；其余时间不接管 WebUI。卸载后 DSH 与 WebUI 仍按原方式工作。
 
 ## 支持范围
 
 | 平台 | 状态 |
 | --- | --- |
-| Windows | 支持 |
-| macOS | 支持 |
-| Linux | 尚未列入正式测试范围 |
+| Windows x64 | 开发候选实机自动测试 |
+| macOS Intel x64 | 开发候选实机自动测试 |
+| Linux Ubuntu x64 | 开发候选实机自动测试 |
 
-当前版本：`v1.5.5`
+测试的 DSH 为 `0.1.1-rc.1`、`0.1.1-rc.2`、`0.1.2-rc.1`，均为 RC。RC4 继承本轮同源候选证据，不宣称 RC4 标签包已逐格重跑。Windows 已有真实 GitHub 下载、按钮更新、重启恢复证据；ARM / Apple Silicon、受监管服务、共享 HOME / profile、断电与长期弱网未认证。详细证据分级见发布说明。
 
 ## 许可证
 

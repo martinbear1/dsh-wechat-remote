@@ -1,6 +1,7 @@
 /** Multiplexes authenticated E2EE streams onto the local DSH HTTP/WebSocket API. */
 import http, { type ClientRequest, type IncomingHttpHeaders, type IncomingMessage } from 'node:http'
 import { WebSocket } from 'ws'
+import type { DshCompatibilityTransport } from './dsh-compatibility-api.js'
 
 const VERSION = 1
 const OPEN = 1
@@ -168,17 +169,35 @@ interface HttpStream {
   bytes: number
 }
 
-interface WebSocketStream {
-  readonly kind: 'websocket'
-  readonly socket: WebSocket
-  fragments: ByteArray[]
-  fragmentBytes: number
-  paused: boolean
+interface EventBatchState {
   readonly batchEnabled: boolean
   batchMessages: { flags: number; payload: ByteArray }[]
   batchBytes: number
   batchTimer: NodeJS.Timeout | null
   deltaBurstStarted: boolean
+}
+
+interface WebSocketStream extends EventBatchState {
+  readonly kind: 'websocket'
+  readonly socket: WebSocket
+  fragments: ByteArray[]
+  fragmentBytes: number
+  paused: boolean
+}
+
+interface CompatibilityHttpStream {
+  readonly kind: 'compat-http'
+  readonly controller: AbortController
+  readonly path: string
+  readonly method: string
+  chunks: ByteArray[]
+  bytes: number
+  ended: boolean
+}
+
+interface CompatibilityEventStream extends EventBatchState {
+  readonly kind: 'compat-events'
+  detach: () => void
 }
 
 interface RemotePromptStream {
@@ -188,12 +207,14 @@ interface RemotePromptStream {
   bytes: number
 }
 
-type Stream = HttpStream | WebSocketStream | RemotePromptStream
+type Stream = HttpStream | WebSocketStream | RemotePromptStream | CompatibilityHttpStream | CompatibilityEventStream
 
 export interface DshTunnelAgentOptions {
   readonly send: (frame: ByteArray) => void | Promise<void>
   readonly dshPort?: number
   readonly maxStreams?: number
+  /** Authenticated in-process dispatch for post-0.1.2 DSH. */
+  readonly compatibilityApi?: DshCompatibilityTransport
   /**
    * Public-E2EE-only route bootstrap. It is handled inside this virtual tunnel
    * and is never forwarded to DSH/WebUI or exposed on the LAN HTTP door.
@@ -209,6 +230,7 @@ export class DshTunnelAgent {
   private readonly sendCallback: DshTunnelAgentOptions['send']
   private readonly dshPort: number
   private readonly maxStreams: number
+  private readonly compatibilityApi?: DshCompatibilityTransport
   private readonly issueLanCredential?: DshTunnelAgentOptions['issueLanCredential']
   private readonly materializeAttachment?: DshTunnelAgentOptions['materializeAttachment']
   private readonly streams = new Map<number, Stream>()
@@ -220,6 +242,7 @@ export class DshTunnelAgent {
     this.sendCallback = options.send
     this.dshPort = options.dshPort || 3080
     this.maxStreams = options.maxStreams || 128
+    this.compatibilityApi = options.compatibilityApi
     this.issueLanCredential = options.issueLanCredential
     this.materializeAttachment = options.materializeAttachment
   }
@@ -289,12 +312,20 @@ export class DshTunnelAgent {
   }
 
   private openHttp(streamId: number, path: string, value: Record<string, unknown>): void {
+    if (this.compatibilityApi && this.compatibilityApi.handlesPath?.(path) !== false) {
+      this.streams.set(streamId, {
+        kind: 'compat-http', path, method: safeMethod(value.method),
+        controller: new AbortController(), chunks: [], bytes: 0, ended: false,
+      })
+      return
+    }
+    const headers = requestHeaders(value.headers)
     const request = http.request({
       host: '127.0.0.1',
       port: this.dshPort,
       path,
       method: safeMethod(value.method),
-      headers: requestHeaders(value.headers),
+      headers,
       timeout: 30_000,
     }, response => {
       const active = this.streams.get(streamId)
@@ -324,8 +355,15 @@ export class DshTunnelAgent {
   }
 
   private openWebSocket(streamId: number, path: string, value: Record<string, unknown>): void {
+    if (this.compatibilityApi && this.compatibilityApi.handlesPath?.(path) !== false) {
+      this.openCompatibilityEvents(streamId, path, value)
+      return
+    }
+    const headers: Record<string, string> = {
+      'user-agent': 'HarnessRemote-PublicAgent/1',
+    }
     const socket = new WebSocket(`ws://127.0.0.1:${this.dshPort}${path}`, {
-      headers: { 'user-agent': 'HarnessRemote-PublicAgent/1' },
+      headers,
       maxPayload: 1024 * 1024,
       perMessageDeflate: false,
       handshakeTimeout: 10_000,
@@ -365,7 +403,42 @@ export class DshTunnelAgent {
     socket.on('error', error => this.fail(streamId, error))
   }
 
-  private sendWebSocketMessage(streamId: number, stream: WebSocketStream, message: ByteArray, isBinary: boolean): void {
+  private openCompatibilityEvents(streamId: number, path: string, value: Record<string, unknown>): void {
+    const stream: CompatibilityEventStream = {
+      kind: 'compat-events', detach: () => {},
+      batchEnabled: supportsEventBatch(value), batchMessages: [], batchBytes: 0,
+      batchTimer: null, deltaBurstStarted: false,
+    }
+    this.streams.set(streamId, stream)
+    const tunnel = this
+    let accepted = false
+    const openingMessages: string[] = []
+    const detach = this.compatibilityApi!.connectEvents(path, {
+      get readyState() { return tunnel.streams.get(streamId) === stream && !tunnel.closed ? 1 : 3 },
+      get bufferedAmount() { return tunnel.pendingSendBytes },
+      send(message) {
+        if (tunnel.streams.get(streamId) === stream && !tunnel.closed) {
+          if (!accepted) openingMessages.push(message)
+          else tunnel.sendWebSocketMessage(streamId, stream, Buffer.from(message), false)
+        }
+      },
+      close(code, reason) {
+        if (tunnel.streams.get(streamId) !== stream) return
+        tunnel.flushEventBatch(streamId, stream)
+        tunnel.cancel(stream, streamId)
+        tunnel.queue(encode(END, streamId, 0, json({ code, reason })))
+      },
+    })
+    stream.detach = detach
+    if (this.streams.get(streamId) !== stream) detach()
+    else {
+      this.queue(encode(ACCEPT, streamId, 0, json({ opened: true })))
+      accepted = true
+      for (const message of openingMessages) this.sendWebSocketMessage(streamId, stream, Buffer.from(message), false)
+    }
+  }
+
+  private sendWebSocketMessage(streamId: number, stream: EventBatchState, message: ByteArray, isBinary: boolean): void {
     const flags = (isBinary ? FLAG_BINARY : 0) | FLAG_FINAL
     if (stream.batchEnabled && isStreamDelta(message, isBinary)) {
       if (!stream.deltaBurstStarted) {
@@ -394,7 +467,7 @@ export class DshTunnelAgent {
     })
   }
 
-  private flushEventBatch(streamId: number, stream: WebSocketStream): void {
+  private flushEventBatch(streamId: number, stream: EventBatchState): void {
     if (stream.batchTimer) clearTimeout(stream.batchTimer)
     stream.batchTimer = null
     if (!stream.batchMessages.length) return
@@ -405,6 +478,14 @@ export class DshTunnelAgent {
   }
 
   private data(stream: Stream, streamId: number, flags: number, payload: ByteArray): void {
+    if (stream.kind === 'compat-events') throw new Error('DSH compatibility events are downlinks only')
+    if (stream.kind === 'compat-http') {
+      if (stream.ended) throw new Error('DSH request has already ended')
+      stream.bytes += payload.length
+      if (stream.bytes > MAX_REQUEST_BYTES) throw new Error('DSH request exceeds 16 MiB')
+      stream.chunks.push(new Uint8Array(payload))
+      return
+    }
     if (stream.kind === 'remote-prompt') {
       stream.bytes += payload.length
       if (stream.bytes > MAX_REMOTE_PROMPT_BYTES) throw new Error('Encrypted prompt descriptor exceeds 256 KiB')
@@ -428,6 +509,18 @@ export class DshTunnelAgent {
   }
 
   private end(stream: Stream, streamId: number, payload: ByteArray): void {
+    if (stream.kind === 'compat-http') {
+      if (stream.ended) throw new Error('DSH request has already ended')
+      stream.ended = true
+      void this.forwardCompatibilityHttp(streamId, stream)
+      return
+    }
+    if (stream.kind === 'compat-events') {
+      this.flushEventBatch(streamId, stream)
+      this.cancel(stream, streamId)
+      this.queue(encode(END, streamId))
+      return
+    }
     if (stream.kind === 'remote-prompt') {
       void this.forwardRemotePrompt(streamId, stream)
       return
@@ -487,7 +580,7 @@ export class DshTunnelAgent {
         headers: { 'content-type': 'application/json' },
       })
       const active = this.streams.get(streamId)
-      if (!active || active.kind !== KIND_HTTP) throw new Error('Local DSH prompt stream did not open')
+      if (!active || (active.kind !== KIND_HTTP && active.kind !== 'compat-http')) throw new Error('Local DSH prompt stream did not open')
       const body = json(envelope)
       this.data(active, streamId, 0, body)
       this.end(active, streamId, new Uint8Array(0))
@@ -503,7 +596,7 @@ export class DshTunnelAgent {
 
   private cancel(stream: Stream, streamId: number): void {
     this.streams.delete(streamId)
-    if (stream.kind === 'remote-prompt') {
+    if (stream.kind === 'remote-prompt' || stream.kind === 'compat-http') {
       stream.controller.abort(new Error('Encrypted prompt cancelled'))
       stream.chunks = []
       stream.bytes = 0
@@ -513,7 +606,8 @@ export class DshTunnelAgent {
       stream.batchTimer = null
       stream.batchMessages = []
       stream.batchBytes = 0
-      stream.socket.terminate()
+      if (stream.kind === 'compat-events') stream.detach()
+      else stream.socket.terminate()
     }
   }
 
@@ -552,10 +646,35 @@ export class DshTunnelAgent {
 
   private resumeSources(): void {
     for (const stream of this.streams.values()) {
-      if (stream.kind === 'remote-prompt' || !stream.paused) continue
+      if ((stream.kind !== KIND_HTTP && stream.kind !== KIND_WEBSOCKET) || !stream.paused) continue
       stream.paused = false
       if (stream.kind === KIND_HTTP) stream.response?.resume()
       else stream.socket.resume()
+    }
+  }
+
+  private async forwardCompatibilityHttp(streamId: number, stream: CompatibilityHttpStream): Promise<void> {
+    const signal = stream.controller.signal
+    try {
+      const body = concat(...stream.chunks)
+      stream.chunks = []
+      const response = await this.compatibilityApi!.request({
+        method: stream.method, path: stream.path, body, signal,
+      })
+      if (signal.aborted || this.closed || this.streams.get(streamId) !== stream) return
+      this.queue(encode(ACCEPT, streamId, 0, json({ statusCode: response.statusCode, headers: response.headers })))
+      for (const part of pieces(response.body)) {
+        if (signal.aborted || this.closed) return
+        this.queue(encode(DATA, streamId, 0, part))
+        // Retain native streaming backpressure for large in-process histories.
+        if (this.pendingSendBytes >= SEND_QUEUE_PAUSE_BYTES) await this.sendChain
+      }
+      if (!signal.aborted && !this.closed) this.queue(encode(END, streamId))
+    } catch (error) {
+      if (!signal.aborted && !this.closed) this.sendError(streamId, error)
+    } finally {
+      if (this.streams.get(streamId) === stream) this.streams.delete(streamId)
+      stream.chunks = []
     }
   }
 }

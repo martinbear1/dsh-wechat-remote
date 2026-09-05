@@ -351,3 +351,8 @@
     align-items: center;
   }
 }
+.updateCard { border: 1px solid var(--border-color, #ddd); border-radius: 12px; padding: 20px; margin-top: 20px; line-height: 1.6; overflow-wrap: anywhere; }
+.updateLabel { color: inherit; }
+.updateLabel[data-severity="required"] { color: #d54052; }
+.updateLabel[data-severity="recommended"], .updateLabel[data-severity="info"] { color: #b5861d; }
+.updateProgress { width: 100%; height: 12px; margin-top: 16px; accent-color: #7487ef; }

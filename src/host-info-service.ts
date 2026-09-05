@@ -39,6 +39,8 @@ export interface WechatHostInfoConfig {
 export interface WechatHostDescribeValue {
   readonly computerName: string
   readonly pluginVersion: string
+  readonly hostArch: string
+  readonly updateProtocolVersion: 1
   /** Additive v1 Agent-host identity; legacy clients safely ignore these fields. */
   readonly descriptorVersion: 1
   readonly hostId: string
@@ -95,6 +97,8 @@ export class WechatHostInfoService extends TypertRemoteService {
       value: {
         computerName: hostname(),
         pluginVersion: installedPluginVersion(),
+        hostArch: process.arch,
+        updateProtocolVersion: 1,
         descriptorVersion: descriptor.schemaVersion,
         hostId: descriptor.hostId,
         agentInstanceId: descriptor.agentInstanceId,

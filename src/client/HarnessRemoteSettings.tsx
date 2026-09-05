@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { FishLogo } from '@deepseek-ai/dsh-client-ui-primitives'
 import styles from './HarnessRemoteSettings.module.css'
+import { PluginUpdateCard } from './PluginUpdateCard.tsx'
 
 interface PairCodeResp {
   code: string
@@ -117,6 +118,7 @@ export function HarnessRemoteSettings({
   const [status, setStatus] = useState<GateStatusResp | null>(null)
   const [runtime, setRuntime] = useState<GateRuntimeInfo | null>(null)
   const [host, setHost] = useState<HarnessRemoteHostDescription | null>(null)
+  const [localOrigin, setLocalOrigin] = useState<string | null>(null)
   const [qr, setQr] = useState<PairCodeResp | null>(null)
   const [error, setError] = useState<string | null>(null)
   const mountedRef = useRef(true)
@@ -126,6 +128,7 @@ export function HarnessRemoteSettings({
       const discovered = await discoverLocalOrigin(describeHost)
       if (!mountedRef.current) return
       setRuntime(discovered.runtime)
+      setLocalOrigin(discovered.origin)
       setHost(discovered.host)
       if (
         discovered.runtime !== null &&
@@ -340,6 +343,7 @@ export function HarnessRemoteSettings({
           </p>
         </div>
       )}
+      {localOrigin ? <PluginUpdateCard localOrigin={localOrigin} /> : null}
     </section>
   )
 }

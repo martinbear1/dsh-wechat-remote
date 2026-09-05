@@ -22,9 +22,9 @@
  *        - GET /pair/code  官方 Web Settings 配对页数据（CORS for :3080）
  *        - GET /gate/status 局域网门与端到端加密公网 Agent 状态
  *
- * 状态（token + 待配对码 + openid↔token 绑定）存于
- * ~/.dsh/gate-wechat-state.json；微信 appid/secret 配置存于
- * ~/.dsh/gate-wechat.json（未配置时降级为开发态身份，功能全通）。
+ * web/default 的历史状态路径保持为 ~/.dsh/gate-wechat-state.json；其他
+ * profile 按稳定 Agent 实例隔离。微信 appid/secret 配置仍存于
+ * ~/.dsh/gate-wechat.json。
  * 随 DSH 同生共死 —— 无独立进程。
  */
 import http, { type IncomingMessage, type ServerResponse } from 'node:http'
@@ -37,6 +37,7 @@ import zlib from 'node:zlib'
 import type { Socket } from 'node:net'
 import httpProxy from 'http-proxy'
 import QRCode from 'qrcode'
+import { WebSocketServer } from 'ws'
 import type { Context, Plugin } from '@deepseek-ai/cordis'
 import WechatDirectoryService from './directory-service.js'
 import WechatHostInfoService, {
@@ -58,12 +59,17 @@ import {
 } from './public-relay-agent.js'
 import {
   agentProfileScope,
+  defaultGateStatePath,
   loadAgentDescriptor,
   type AgentDescriptor,
 } from './agent-metadata.js'
 import { hostPlatformDescriptor, selectLanIPv4 } from './host-platform.js'
 import { deriveGatePorts, describeGateListenFailure } from './gate-ports.js'
+import { adapterDshHome, isAllowedDshWebOrigin, resolveDshWebRuntime } from './dsh-runtime.js'
+import { resolveTypertGateway } from './dsh-protocol-compat.js'
+import { DshCompatibilityApi } from './dsh-compatibility-api.js'
 import { tightenPrivateFile, writePrivateJsonAtomic } from './secure-file.js'
+import { PluginUpdateService } from './update-service.js'
 
 interface PendingPair {
   expiresAt: number
@@ -133,8 +139,9 @@ function recordOf(value: unknown): Record<string, unknown> | null {
  * and are therefore scoped to this exact plugin instance.
  */
 export function mountWechatGate(ctx: Context): () => void {
-  const UPSTREAM_PORT = Number(process.env.DSH_PORT || 3080)
-  const STATE_FILE = path.join(os.homedir(), '.dsh', 'gate-wechat-state.json')
+  const dshWebRuntime = resolveDshWebRuntime(ctx)
+  const UPSTREAM_PORT = dshWebRuntime.port
+  const STATE_FILE = defaultGateStatePath()
   const TARGET = {
     target: 'http://127.0.0.1:' + UPSTREAM_PORT,
     changeOrigin: true,
@@ -321,23 +328,9 @@ export function mountWechatGate(ctx: Context): () => void {
   function setCors(req: IncomingMessage, res: ServerResponse): void {
     const origin =
       typeof req.headers.origin === 'string' ? req.headers.origin : ''
-    try {
-      const parsed = new URL(origin)
-      const loopback =
-        parsed.hostname === '127.0.0.1' ||
-        parsed.hostname === 'localhost' ||
-        parsed.hostname === '[::1]'
-      const port = parsed.port || (parsed.protocol === 'https:' ? '443' : '80')
-      if (
-        loopback &&
-        parsed.protocol === 'http:' &&
-        port === String(UPSTREAM_PORT)
-      ) {
-        res.setHeader('Access-Control-Allow-Origin', origin)
-        res.setHeader('Vary', 'Origin')
-      }
-    } catch {
-      /* requests without a browser Origin are still allowed locally */
+    if (isAllowedDshWebOrigin(origin, UPSTREAM_PORT)) {
+      res.setHeader('Access-Control-Allow-Origin', origin)
+      res.setHeader('Vary', 'Origin')
     }
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
@@ -352,7 +345,7 @@ export function mountWechatGate(ctx: Context): () => void {
     try {
       const line = `${new Date().toISOString()} ${req.socket.remoteAddress ?? '?'} ${req.method} ${req.url ?? '?'} ${note}\n`
       fs.appendFileSync(
-        path.join(os.homedir(), '.dsh', 'wechat-gate-access.log'),
+        path.join(adapterDshHome(), 'wechat-gate-access.log'),
         line,
       )
     } catch (e) {
@@ -414,6 +407,13 @@ export function mountWechatGate(ctx: Context): () => void {
   }
 
   const proxy = httpProxy.createProxyServer({})
+  const updater = new PluginUpdateService(ctx, { web: UPSTREAM_PORT, gate: PUBLIC_PORT, local: LOCAL_PORT })
+  const compatibilityApi = new DshCompatibilityApi(ctx, UPSTREAM_PORT, () => updater.isMaintaining())
+  updater.trackPublicRequests(() => compatibilityApi.hasInFlightRequests())
+  const compatibilityWebSockets = new WebSocketServer({
+    noServer: true,
+    clientTracking: false,
+  })
   proxy.on('error', (err, req, res) => {
     console.error('[wechat-gate] proxy error:', err.message)
     if (res && 'writeHead' in res && !res.headersSent) {
@@ -467,19 +467,63 @@ export function mountWechatGate(ctx: Context): () => void {
     })
   })
 
-  function readBody(req: IncomingMessage): Promise<string> {
+  function readBody(req: IncomingMessage, maxBytes = 1e6): Promise<string> {
     return new Promise<string>((resolve, reject) => {
-      let data = ''
+      const chunks: Buffer[] = []
+      let bytes = 0
       req.on('data', (chunk: Buffer | string) => {
-        data += chunk.toString()
-        if (data.length > 1e6) {
+        const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+        bytes += value.length
+        if (bytes > maxBytes) {
           reject(new Error('body too large'))
           req.destroy()
+          return
         }
+        chunks.push(value)
       })
-      req.on('end', () => resolve(data))
+      req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
       req.on('error', reject)
     })
+  }
+
+  async function serveCompatibleDshRpc(
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): Promise<void> {
+    const gateway = resolveTypertGateway(ctx)
+    const probe = updater.isVerificationProbe(req)
+    if (!gateway && (probe || !compatibilityApi.handlesPath(req.url || '/'))) {
+      proxy.web(req, res, { ...TARGET, selfHandleResponse: true })
+      return
+    }
+    const controller = new AbortController()
+    const abort = (): void => controller.abort(new Error('client disconnected'))
+    req.once('aborted', abort)
+    res.once('close', abort)
+    try {
+      const raw = await readBody(req, 32 * 1024 * 1024)
+      const request = {
+        method: req.method || '', path: req.url || '/',
+        body: Buffer.from(raw), signal: controller.signal,
+      }
+      const response = await (probe ? compatibilityApi.verificationProbe(request) : compatibilityApi.request(request))
+      if (res.destroyed) return
+      res.writeHead(response.statusCode, {
+        ...response.headers,
+        'Content-Length': response.body.byteLength,
+      })
+      res.end(response.body)
+    } catch (error: unknown) {
+      if (res.destroyed) return
+      res.writeHead(400, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'no-store',
+      })
+      res.end(JSON.stringify({ error: messageOf(error) }))
+    } finally {
+      req.off('aborted', abort)
+      res.off('close', abort)
+    }
   }
 
   async function makePairEntry(): Promise<PairEntry> {
@@ -607,7 +651,7 @@ code{color:#7aa2ff;font-size:15px;letter-spacing:3px}
   //    走微信 code2session，否则用确定性开发态哈希），记录 openid↔token 绑定；
   //    每次启动可经 /pair/verify-wechat 复核，成功即轮换 token。
 
-  const WECHAT_CONFIG_FILE = path.join(os.homedir(), '.dsh', 'gate-wechat.json')
+  const WECHAT_CONFIG_FILE = path.join(adapterDshHome(), 'gate-wechat.json')
 
   function loadWechatConfig(): WechatConfig | null {
     try {
@@ -774,12 +818,17 @@ code{color:#7aa2ff;font-size:15px;letter-spacing:3px}
   }
 
   const localServer = http.createServer((req, res) => {
+    // Simple cross-origin GET responses need the same allow-origin header as
+    // preflight responses. The old implementation only decorated OPTIONS,
+    // so every Settings-page status request was rejected by the browser.
+    setCors(req, res)
     if (req.method === 'OPTIONS') {
-      setCors(req, res)
       res.writeHead(204)
       return res.end()
     }
     const url = new URL(req.url ?? '/', 'http://gate.local')
+    if (url.pathname.startsWith('/gate/update/')) { void updater.handle(req, res); return }
+    if (updater.isMaintaining()) { res.writeHead(503, { 'retry-after': '5' }); res.end('Plugin update in progress'); return }
     if (url.pathname === '/pair') return servePairQR(req, res)
     if (url.pathname === '/pair/code') return servePairCode(req, res)
     if (url.pathname === '/gate/status') return serveGateStatus(req, res)
@@ -788,6 +837,8 @@ code{color:#7aa2ff;font-size:15px;letter-spacing:3px}
   })
 
   const publicServer = http.createServer((req, res) => {
+    if (updater.isMaintaining() && !updater.isVerificationProbe(req)) { res.writeHead(503, { 'retry-after': '5' }); res.end('Plugin update in progress'); return }
+    if ((req.url || '').startsWith('/gate/update/')) { res.writeHead(403); res.end('Local WebUI only'); return }
     if (req.method === 'OPTIONS') {
       res.writeHead(204)
       return res.end()
@@ -825,10 +876,14 @@ code{color:#7aa2ff;font-size:15px;letter-spacing:3px}
     // （Web UI 直连 3080，不受影响）。
     stripBrowserMarkers(req)
     accessLog(req, 'ok')
+    if (req.method === 'POST' && url.pathname.startsWith('/api/')) {
+      return serveCompatibleDshRpc(req, res)
+    }
     proxy.web(req, res, { ...TARGET, selfHandleResponse: true })
   })
 
   publicServer.on('upgrade', (req, socket, head) => {
+    if (updater.isMaintaining()) { socket.destroy(); return }
     // A remote client can reset a WebSocket while the proxy is connecting to
     // DSH. Without this listener, Node treats ECONNRESET as an unhandled Socket
     // error and terminates the entire Harness process.
@@ -848,6 +903,18 @@ code{color:#7aa2ff;font-size:15px;letter-spacing:3px}
       return socket.destroy()
     }
     stripBrowserMarkers(req)
+    const url = new URL(req.url ?? '/', 'http://gate.local')
+    const gateway = resolveTypertGateway(ctx)
+    if (gateway
+        && (url.pathname === '/api/events.mux' || url.pathname === '/api/events.host')) {
+      const legacyPath = url.pathname === '/api/events.mux'
+        ? '/api/events.mux' as const
+        : '/api/events.host' as const
+      compatibilityWebSockets.handleUpgrade(req, socket, head, (webSocket) => {
+        compatibilityApi.realtime.attach(legacyPath, webSocket)
+      })
+      return
+    }
     proxy.ws(req, socket, head, WS_TARGET)
   })
 
@@ -884,6 +951,8 @@ code{color:#7aa2ff;font-size:15px;letter-spacing:3px}
   // removes registered listeners but does not emit an application event.
   const dispose = (): void => {
     disposed = true
+    updater.dispose()
+    compatibilityApi.dispose()
     doorRuntime.localDoor.state = 'stopped'
     doorRuntime.publicDoor.state = 'stopped'
     try {
@@ -982,12 +1051,14 @@ code{color:#7aa2ff;font-size:15px;letter-spacing:3px}
         hostPlatform: agentDescriptor.hostPlatform,
         capabilities: agentDescriptor.capabilities,
         dshPort: UPSTREAM_PORT,
+        // Public E2EE dispatches in-process; it does not depend on LAN listen
+        // availability or consume the shared loopback IP rate budget.
+        compatibilityApi,
         // Persist only short-lived encrypted OSS object descriptors. Scope the
         // private index by stable Agent identity so multiple profiles on one
         // host cannot reuse another public node's object ticket.
         historyCachePath: path.join(
-          os.homedir(),
-          '.dsh',
+          adapterDshHome(),
           `wechat-history-snapshots-${agentDescriptor.agentInstanceId}.json`,
         ),
         onDiagnostic: (level, message) => {
@@ -998,6 +1069,7 @@ code{color:#7aa2ff;font-size:15px;letter-spacing:3px}
         // pinned E2EE relay tunnel. It is not a DSH Remote and cannot be called
         // by WebUI or unauthenticated LAN clients.
         issueLanCredential: (rotate = false) => {
+          if (updater.isMaintaining()) throw new Error('插件正在更新，请稍后重连')
           if (doorRuntime.publicDoor.state !== 'listening') {
             throw new Error(
               doorRuntime.publicDoor.message ||
@@ -1034,6 +1106,15 @@ code{color:#7aa2ff;font-size:15px;letter-spacing:3px}
       void Promise.resolve(
         bindHistorySnapshotPrewarmer(ctx, {
           dshPort: UPSTREAM_PORT,
+          ...(resolveTypertGateway(ctx) ? {
+            hostEventSource: (receive: (raw: unknown) => void, disconnected: () => void) =>
+              compatibilityApi.connectEvents('/api/events.host', {
+                readyState: 1,
+                bufferedAmount: 0,
+                send: receive,
+                close: disconnected,
+              }),
+          } : {}),
           warm: (service, sessionId, signal) =>
             prewarmLatestHistory(service, sessionId, signal),
           onDiagnostic: (level, message) => {

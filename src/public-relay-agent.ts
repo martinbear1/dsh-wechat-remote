@@ -21,14 +21,24 @@ import path from 'node:path'
 import { WebSocket } from 'ws'
 
 import { defaultAgentIdentityPath, type AgentCapability } from './agent-metadata.js'
+import { adapterDshHome } from './dsh-runtime.js'
 import type { HostPlatformDescriptor } from './host-platform.js'
 import { readPrivateJson, writePrivateJsonAtomic } from './secure-file.js'
 
-const CONFIG_PATH = path.join(homedir(), '.dsh', 'harness-remote-public.json')
+const CONFIG_PATH = path.join(adapterDshHome(), 'harness-remote-public.json')
 export const DEFAULT_PUBLIC_RELAY_ORIGIN = 'https://relay.xyxfood.xyz'
 const ROUTING_HEADER_BYTES = 18
 const MAX_AGENT_BUFFERED_BYTES = 2 * 1024 * 1024
 const AGENT_BUFFER_DRAIN_TIMEOUT_MS = 15_000
+const RELAY_PING_INTERVAL_MS = 25_000
+const RELAY_PONG_TIMEOUT_MS = 20_000
+const RELAY_HANDSHAKE_TIMEOUT_MS = 15_000
+
+function transportDelay(value: number | undefined, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? Math.max(1, Math.floor(value))
+    : fallback
+}
 
 function wait(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -104,6 +114,12 @@ export interface PublicRelayAgentOptions {
   readonly fetchImpl?: typeof fetch
   /** Test/portable profile override; production defaults to ~/.dsh. */
   readonly identityPath?: string
+  /** Transport-test timing overrides; no client protocol or user settings change. */
+  readonly transportTiming?: {
+    readonly pingIntervalMs?: number
+    readonly pongTimeoutMs?: number
+    readonly handshakeTimeoutMs?: number
+  }
 }
 
 export function agentNodeIdForPublicKey(publicKeyPem: string): string {
@@ -167,6 +183,8 @@ export class PublicRelayAgent {
   private stopped = true
   private reconnectAttempt = 0
   private reconnectTimer: NodeJS.Timeout | null = null
+  private clearHeartbeat: (() => void) | null = null
+  private lifecycleRevision = 0
   private enrollment: Promise<{
     ticket?: string
     expiresAt?: number
@@ -205,6 +223,7 @@ export class PublicRelayAgent {
   async start(): Promise<void> {
     if (!this.stopped) return
     this.stopped = false
+    this.lifecycleRevision += 1
     await this.enrollAndConnect()
   }
 
@@ -224,17 +243,22 @@ export class PublicRelayAgent {
 
   stop(): void {
     this.stopped = true
+    this.lifecycleRevision += 1
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
     this.reconnectTimer = null
+    this.clearHeartbeat?.()
+    this.clearHeartbeat = null
     this.socket?.close(1000, 'Agent stopped')
     this.socket = null
     this.update({ state: 'offline' })
   }
 
   private async enrollAndConnect(): Promise<void> {
+    const revision = this.lifecycleRevision
     try {
       this.update({ state: 'enrolling', lastError: undefined })
       const body = await this.enrollWithIdentityRecovery()
+      if (this.stopped || revision !== this.lifecycleRevision) return
       this.update({
         pairingTicket: body.ticket,
         pairingExpiresAt: body.expiresAt,
@@ -243,6 +267,7 @@ export class PublicRelayAgent {
       })
       this.connect()
     } catch (error) {
+      if (this.stopped || revision !== this.lifecycleRevision) return
       this.update({ state: 'offline', lastError: error instanceof Error ? error.message : String(error) })
       this.scheduleReconnect()
     }
@@ -341,6 +366,7 @@ export class PublicRelayAgent {
   }
 
   private connect(): void {
+    if (this.stopped) return
     const timestamp = Date.now()
     const nonce = randomBytes(18).toString('base64url')
     const signature = sign(
@@ -362,12 +388,62 @@ export class PublicRelayAgent {
       },
       maxPayload: 1024 * 1024,
       perMessageDeflate: false,
+      handshakeTimeout: transportDelay(this.options.transportTiming?.handshakeTimeoutMs, RELAY_HANDSHAKE_TIMEOUT_MS),
     })
     this.socket = socket
+    let pingTimer: NodeJS.Timeout | null = null
+    let pongTimer: NodeJS.Timeout | null = null
+    let pendingPing: Buffer | null = null
+    let transportFailure: string | undefined
+    const clearHeartbeat = (): void => {
+      if (pingTimer) clearTimeout(pingTimer)
+      if (pongTimer) clearTimeout(pongTimer)
+      pingTimer = pongTimer = null
+      pendingPing = null
+      if (this.clearHeartbeat === clearHeartbeat) this.clearHeartbeat = null
+    }
+    this.clearHeartbeat = clearHeartbeat
+    const failTransport = (reason: string): void => {
+      if (this.socket !== socket || this.stopped) return
+      transportFailure = reason
+      clearHeartbeat()
+      this.update({ state: 'offline', lastError: reason })
+      // A proxy may retain OPEN locally after the relay has already forgotten
+      // this connection. A close handshake can hang too: force the local socket
+      // down so the ordinary close/re-enrollment/E2EE cleanup path runs.
+      socket.terminate()
+    }
+    const schedulePing = (): void => {
+      if (this.stopped || this.socket !== socket || socket.readyState !== WebSocket.OPEN) return
+      pingTimer = setTimeout(() => {
+        pingTimer = null
+        if (this.stopped || this.socket !== socket || socket.readyState !== WebSocket.OPEN) return
+        pendingPing = randomBytes(8)
+        pongTimer = setTimeout(() => failTransport('Relay heartbeat timed out'),
+          transportDelay(this.options.transportTiming?.pongTimeoutMs, RELAY_PONG_TIMEOUT_MS))
+        pongTimer.unref?.()
+        try {
+          // RFC 6455 control frames are answered by the existing relay's ws
+          // transport. No new application frame or mini-program heartbeat.
+          socket.ping(pendingPing, undefined, error => {
+            if (error) failTransport('Relay heartbeat send failed')
+          })
+        } catch { failTransport('Relay heartbeat send failed') }
+      }, transportDelay(this.options.transportTiming?.pingIntervalMs, RELAY_PING_INTERVAL_MS))
+      pingTimer.unref?.()
+    }
     socket.on('open', () => {
-      if (this.socket !== socket) return
+      if (this.socket !== socket || this.stopped) return
       this.reconnectAttempt = 0
       this.update({ state: 'online', lastError: undefined })
+      schedulePing()
+    })
+    socket.on('pong', data => {
+      if (this.socket !== socket || !pendingPing || !pendingPing.equals(data)) return
+      if (pongTimer) clearTimeout(pongTimer)
+      pongTimer = null
+      pendingPing = null
+      schedulePing()
     })
     socket.on('message', (data, isBinary) => {
       if (!isBinary) {
@@ -403,9 +479,10 @@ export class PublicRelayAgent {
       void this.dispatchFrame({ clientId, payload: frame.subarray(ROUTING_HEADER_BYTES), reply })
     })
     socket.on('close', (_code, reason) => {
+      clearHeartbeat()
       if (this.socket !== socket) return
       this.socket = null
-      this.update({ state: 'offline', lastError: reason.toString() || 'Relay connection closed' })
+      this.update({ state: 'offline', lastError: transportFailure || reason.toString() || 'Relay connection closed' })
       try { this.options.onTransportDisconnect?.() } catch { /* isolation boundary */ }
       this.scheduleReconnect()
     })

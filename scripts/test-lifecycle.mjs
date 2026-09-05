@@ -30,6 +30,7 @@ const childSource = `
   import { Context } from '@deepseek-ai/cordis'
 
   const entry = await import(${JSON.stringify(entryUrl)})
+  assert.deepEqual(entry.inject, ['webServer'])
   const stateFile = path.join(process.env.USERPROFILE || process.env.HOME, '.dsh', 'gate-wechat-state.json')
   assert.equal(existsSync(stateFile), false, 'importing the plugin must not create credentials')
 
@@ -48,7 +49,10 @@ const childSource = `
   process.env.DSH_PORT = '1'
 
   const ctx = new Context()
-  const fiber = await ctx.plugin(entry, {})
+  // Exercise apply/dispose directly with the explicit DSH_PORT fallback. The
+  // shipped entry's webServer dependency is asserted above and covered by the
+  // real DSH compatibility smoke test.
+  const fiber = await ctx.plugin({ name: entry.name, apply: entry.apply }, {})
   const deadline = Date.now() + 3000
   let response
   while (Date.now() < deadline) {

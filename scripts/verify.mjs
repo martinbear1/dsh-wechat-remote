@@ -49,6 +49,7 @@ check(!/\.[0-9][0-9a-f]{6}_[A-Za-z]/.test(client), 'lib/client.js 生成了数�
 // 2. 宿主网关：微信专用表面与加固基线。
 const entry = readFileSync(path.join(root, 'lib/index.js'), 'utf8')
 const host = readFileSync(path.join(root, 'lib/gate-runtime.js'), 'utf8')
+const agentMetadata = readFileSync(path.join(root, 'lib/agent-metadata.js'), 'utf8')
 check(entry.includes('export const apply ='), 'lib/index.js 缺少函数式 apply 导出（宿主插件不会加载）')
 check(!entry.includes('export function apply'), 'lib/index.js 不应使用会被 Cordis 识别为构造器的普通 function apply')
 check(entry.includes("export const name = 'gate'"), 'lib/index.js 缺少 gate name 导出')
@@ -57,9 +58,15 @@ for (const forbidden of ['createServer(', 'loadAgentDescriptor()', 'loadState()'
   check(!entry.includes(forbidden), `lib/index.js 导入阶段残留运行时副作用：${forbidden}`)
 }
 check(host.includes("from './gate-ports.js'"), 'lib/gate-runtime.js 未使用多 profile 端口推导')
+check(host.includes("from './dsh-runtime.js'"), 'lib/gate-runtime.js 未使用 DSH Web 运行时发现')
+check(host.includes("from './dsh-protocol-compat.js'"), 'lib/gate-runtime.js 未挂载 DSH 代际协议适配器')
+check(host.includes("from './dsh-compatibility-api.js'"), 'lib/gate-runtime.js 未挂载共用 DSH 适配入口')
+check(host.includes('setCors(req, res)'), '本地门没有为实际 GET 响应设置严格回环 CORS')
 check(host.includes('selectedGatePorts.publicPort'), 'lib/index.js 未使用推导出的局域网门')
 check(host.includes('selectedGatePorts.localPort'), 'lib/index.js 未使用推导出的本地门')
-check(host.includes('gate-wechat-state.json'), 'lib/index.js 状态文件不是独立的 gate-wechat-state.json')
+check(host.includes('defaultGateStatePath()'), '宿主未按 DSH profile 选择状态文件')
+check(agentMetadata.includes("normalized === 'web' || normalized === 'default'"), '默认 profile 未保留发布版凭证迁移路径')
+check(agentMetadata.includes("'gate-wechat-state.json'"), '状态文件名不是 gate-wechat-state.json')
 check(host.includes("url.pathname === '/pair/claim-wechat'"), 'lib/index.js 缺少 /pair/claim-wechat 端点')
 check(host.includes("url.pathname === '/pair/verify-wechat'"), 'lib/index.js 缺少 /pair/verify-wechat 端点')
 check(!host.includes("url.pathname === '/pair/claim'"), 'lib/index.js 不应暴露 iOS 风格 /pair/claim 端点')
@@ -84,6 +91,9 @@ check(pkg.exports?.['.']?.types === './lib/index.d.ts', 'package.json 根类型�
 check(Array.isArray(pkg.files) && pkg.files.includes('lib/index.d.ts'), 'package.json files 缺少真实 Host 入口声明')
 check(pkg.exports?.['./directory']?.default === './lib/directory-service.js', 'package.json exports["./directory"] 未指向目录服务')
 check(pkg.exports?.['./host-info']?.default === './lib/host-info-service.js', 'package.json exports["./host-info"] 未指向微信 Host 信息服务')
+check(pkg.exports?.['./dsh-runtime']?.default === './lib/dsh-runtime.js', 'package.json exports["./dsh-runtime"] 未指向 DSH 兼容层')
+check(pkg.exports?.['./dsh-protocol-compat']?.default === './lib/dsh-protocol-compat.js', 'package.json exports["./dsh-protocol-compat"] 未指向 DSH 协议适配层')
+check(pkg.exports?.['./dsh-realtime-compat']?.default === './lib/dsh-realtime-compat.js', 'package.json exports["./dsh-realtime-compat"] 未指向 DSH 实时适配层')
 check(pkg.exports?.['./history']?.default === './lib/history-service.js', 'package.json exports["./history"] 未指向微信历史服务')
 check(pkg.exports?.['./attachment']?.default === './lib/attachment-service.js', 'package.json exports["./attachment"] 未指向微信附件对象服务')
 check(pkg.exports?.['./public-relay']?.default === './lib/public-relay-agent.js', 'package.json exports["./public-relay"] 未指向公网出站 Agent')
@@ -172,6 +182,7 @@ check(!publicRelay.includes('createServer('), '公网 Agent 不得创建入站 H
 check(host.includes('loadPublicRelayConfig()'), '宿主没有加载公网 Agent 产品配置')
 check(host.includes('if (relayConfig)'), '缺少公网 Agent 显式关闭分支')
 check(host.includes('new PublicRelayGateway'), '宿主未挂载加密公网网关')
+check(host.includes('compatibilityApi,'), '新版 DSH 公网链路未复用宿主协议适配边界')
 check(host.includes('issueLanCredential:'), '宿主入口未把 E2EE 局域网凭证能力挂载到公网网关')
 check(host.includes('authenticated E2EE client requested LAN route bootstrap'), '宿主制品缺少局域网凭证安全诊断点')
 const e2ee = readFileSync(path.join(root, 'lib/e2ee-session.js'), 'utf8')
@@ -181,6 +192,7 @@ for (const required of ['AgentE2EESession', 'sign(null', 'nacl.box.before', 'nac
 const tunnel = readFileSync(path.join(root, 'lib/dsh-tunnel-agent.js'), 'utf8')
 check(tunnel.includes("startsWith('/api/')"), '公网隧道没有限制到 DSH /api 表面')
 check(tunnel.includes("host: '127.0.0.1'"), '公网隧道上游不是固定 loopback DSH')
+check(tunnel.includes('this.compatibilityApi.request(') || tunnel.includes('this.compatibilityApi?.request('), '公网隧道未使用进程内适配入口')
 check(!tunnel.includes('createServer('), '公网隧道不得新增入站监听器')
 check(tunnel.includes('MAX_SEND_QUEUE_BYTES'), '公网隧道缺少明确的待发队列字节上限')
 check(tunnel.includes('response.pause()'), '公网 HTTP 隧道缺少上游背压暂停')
@@ -201,7 +213,7 @@ check(gatePorts.includes('EADDRINUSE'), '端口推导模块缺少占用错误的
 for (const s of ['scripts/restart-dsh.cmd', 'scripts/restart-dsh.ps1']) {
   check(!Array.isArray(pkg.files) || !pkg.files.includes(s), `package.json files 不应包含危险重启脚本 ${s}`)
 }
-for (const artifact of ['lib/gate-runtime.js', 'lib/agent-metadata.js', 'lib/gate-ports.js', 'lib/secure-file.js', 'lib/host-platform.js', 'lib/directory-worker.js']) {
+for (const artifact of ['lib/gate-runtime.js', 'lib/dsh-runtime.js', 'lib/dsh-runtime.d.ts', 'lib/dsh-protocol-compat.js', 'lib/dsh-protocol-compat.d.ts', 'lib/dsh-realtime-compat.js', 'lib/dsh-realtime-compat.d.ts', 'lib/agent-metadata.js', 'lib/gate-ports.js', 'lib/secure-file.js', 'lib/host-platform.js', 'lib/directory-worker.js']) {
   check(Array.isArray(pkg.files) && pkg.files.includes(artifact), `package.json files 缺少 ${artifact}`)
 }
 

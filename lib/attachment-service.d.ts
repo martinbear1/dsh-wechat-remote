@@ -73,6 +73,7 @@ declare module '@deepseek-ai/cordis' {
     }
 }
 export declare class WechatAttachmentService extends TypertRemoteService {
+    private readonly hostContext;
     private readonly dshPort;
     private readonly timeoutMs;
     private readonly storeAttachment?;

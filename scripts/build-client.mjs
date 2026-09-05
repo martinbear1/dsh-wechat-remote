@@ -21,10 +21,13 @@ const cssModules = {
   setup(buildApi) {
     buildApi.onLoad({ filter: /\.module\.css$/ }, async ({ path: file }) => {
       const source = await readFile(file, 'utf8')
+      const relativeFile = path.relative(root, file).split(path.sep).join('/')
       // CSS identifiers cannot begin with a digit. Prefixing the digest keeps
       // every generated selector valid regardless of the hash's first nibble.
+      // Hash the repository-relative path, not an absolute checkout path: a
+      // release worktree on another machine must produce byte-identical CSS.
       const prefix = `hr_${createHash('sha256')
-        .update(`${file}\0${source}`)
+        .update(`${relativeFile}\0${source}`)
         .digest('hex')
         .slice(0, 7)}`
       const names = [...source.matchAll(/\.([A-Za-z_][A-Za-z0-9_-]*)/g)].map(

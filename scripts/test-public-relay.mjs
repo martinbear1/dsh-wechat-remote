@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { createHash, randomBytes } from 'node:crypto'
 import { inflateRawSync } from 'node:zlib'
+import { createServer } from 'node:http'
+import { WebSocketServer } from 'ws'
 import {
   agentNodeIdForPublicKey,
   DEFAULT_PUBLIC_RELAY_ORIGIN,
@@ -16,6 +18,35 @@ import PublicRelayGateway from '../lib/public-relay-gateway.js'
 import { DshTunnelAgent } from '../lib/dsh-tunnel-agent.js'
 import { writePrivateJsonAtomic } from '../lib/secure-file.js'
 import HistorySnapshotCache from '../lib/history-snapshot-cache.js'
+
+function tunnelFrame(type, streamId, value) {
+  const payload = value === undefined
+    ? Buffer.alloc(0)
+    : Buffer.from(JSON.stringify(value))
+  const frame = Buffer.alloc(8 + payload.length)
+  frame[0] = 1
+  frame[1] = type
+  frame.writeUInt32BE(streamId, 2)
+  payload.copy(frame, 8)
+  return frame
+}
+
+function tunnelFrameInfo(frame) {
+  const value = Buffer.from(frame)
+  return {
+    type: value[1],
+    streamId: value.readUInt32BE(2),
+    payload: value.subarray(8),
+  }
+}
+
+async function waitFor(predicate, message) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (predicate()) return
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  throw new Error(message)
+}
 
 function unzipSingleEntry(archive) {
   const value = Buffer.from(archive)
@@ -313,6 +344,123 @@ try {
   assert.ok(boundedTunnel.pendingSendBytes <= 4 * 1024 * 1024)
   releaseBlockedSend()
   await boundedTunnel.sendChain
+
+  // Pre-Gateway DSH still uses the original loopback HTTP/WebSocket route.
+  const compatibilityRequests = []
+  const compatibilityServer = createServer((req, res) => {
+    compatibilityRequests.push({
+      kind: 'http',
+      path: req.url,
+      authorization: req.headers.authorization,
+    })
+    req.resume()
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end('{"ok":true}')
+    })
+  })
+  const compatibilityWebSockets = new WebSocketServer({ noServer: true })
+  compatibilityServer.on('upgrade', (req, socket, head) => {
+    compatibilityRequests.push({
+      kind: 'websocket',
+      path: req.url,
+      authorization: req.headers.authorization,
+    })
+    compatibilityWebSockets.handleUpgrade(req, socket, head, webSocket => {
+      webSocket.send('compat-ready')
+    })
+  })
+  await new Promise((resolve, reject) => {
+    compatibilityServer.once('error', reject)
+    compatibilityServer.listen(0, '127.0.0.1', resolve)
+  })
+  const compatibilityPort = compatibilityServer.address().port
+  const routedFrames = []
+  const routedTunnel = new DshTunnelAgent({
+    dshPort: compatibilityPort,
+    send(frame) { routedFrames.push(tunnelFrameInfo(frame)) },
+  })
+  routedTunnel.receive(tunnelFrame(1, 1, {
+    kind: 'http',
+    path: '/api/session.list',
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+  }))
+  routedTunnel.receive(tunnelFrame(4, 1))
+  await waitFor(
+    () => routedFrames.some(frame => frame.streamId === 1 && frame.type === 4),
+    'compatibility HTTP tunnel did not finish',
+  )
+  assert.deepEqual(compatibilityRequests[0], {
+    kind: 'http',
+    path: '/api/session.list',
+    authorization: undefined,
+  })
+
+  routedTunnel.receive(tunnelFrame(1, 3, {
+    kind: 'websocket',
+    path: '/api/events.host',
+    headers: {},
+  }))
+  await waitFor(
+    () => routedFrames.some(frame => frame.streamId === 3 && frame.type === 3),
+    'compatibility WebSocket tunnel did not receive a frame',
+  )
+  assert.deepEqual(compatibilityRequests[1], {
+    kind: 'websocket',
+    path: '/api/events.host',
+    authorization: undefined,
+  })
+  assert.equal(
+    routedFrames.find(frame => frame.streamId === 3 && frame.type === 3).payload.toString(),
+    'compat-ready',
+  )
+  routedTunnel.close()
+  await new Promise(resolve => compatibilityWebSockets.close(resolve))
+  await new Promise(resolve => compatibilityServer.close(resolve))
+
+  // The modern branch works with no listening DSH/LAN door and preserves
+  // large-response backpressure, downlink frame order, and cancellation.
+  const inProcessFrames = []
+  let detached = false
+  let cancelledSignal
+  const inProcessTunnel = new DshTunnelAgent({
+    dshPort: 1,
+    compatibilityApi: {
+      async request({ path, body, signal }) {
+        if (path === '/api/cancel-me') {
+          cancelledSignal = signal
+          await new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }))
+        }
+        assert.equal(Buffer.from(body).toString(), '{}')
+        return { statusCode: 200, headers: {}, body: Buffer.alloc(5 * 1024 * 1024, 65) }
+      },
+      connectEvents(path, peer) {
+        assert.equal(path, '/api/events.mux')
+        peer.send('synchronous-baseline')
+        return () => { detached = true }
+      },
+    },
+    send(frame) { inProcessFrames.push(tunnelFrameInfo(frame)) },
+  })
+  inProcessTunnel.receive(tunnelFrame(1, 1, { kind: 'http', method: 'POST', path: '/api/session.history' }))
+  inProcessTunnel.receive(tunnelFrame(3, 1, {}))
+  inProcessTunnel.receive(tunnelFrame(4, 1))
+  await waitFor(() => inProcessFrames.some(frame => frame.streamId === 1 && frame.type === 4), 'large in-process response did not finish')
+  assert.equal(inProcessFrames.filter(frame => frame.streamId === 1 && frame.type === 3).reduce((sum, frame) => sum + frame.payload.length, 0), 5 * 1024 * 1024)
+  assert.equal(inProcessTunnel.closed, false, 'large history must drain without dropping the node tunnel')
+  inProcessTunnel.receive(tunnelFrame(1, 3, { kind: 'websocket', path: '/api/events.mux' }))
+  await waitFor(() => inProcessFrames.some(frame => frame.streamId === 3 && frame.type === 3), 'in-process baseline missing')
+  assert.deepEqual(inProcessFrames.filter(frame => frame.streamId === 3).map(frame => frame.type), [2, 3], 'ACCEPT precedes even a synchronous baseline')
+  inProcessTunnel.receive(tunnelFrame(1, 5, { kind: 'http', method: 'POST', path: '/api/cancel-me' }))
+  inProcessTunnel.receive(tunnelFrame(4, 5))
+  await waitFor(() => !!cancelledSignal, 'cancellable request was not dispatched')
+  inProcessTunnel.receive(tunnelFrame(6, 5))
+  assert.equal(cancelledSignal.aborted, true)
+  await new Promise(resolve => setTimeout(resolve, 10))
+  assert.equal(inProcessFrames.some(frame => frame.streamId === 5), false, 'cancelled requests cannot emit a late response')
+  inProcessTunnel.close()
+  assert.equal(detached, true)
 
   // Regression: when the physical Agent socket drops, every cloud client id
   // from that socket is stale and must be removed before reconnecting.

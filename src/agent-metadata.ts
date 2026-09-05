@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 
 import { readPrivateJson, writePrivateJsonAtomic } from './secure-file.js'
 import { hostPlatformDescriptor, type HostPlatformDescriptor } from './host-platform.js'
+import { adapterDshHome } from './dsh-runtime.js'
 
 export interface AgentCapability {
   readonly id: string
@@ -29,7 +30,7 @@ interface StableMetadata {
   readonly id: string
 }
 
-const ROOT = path.join(homedir(), '.dsh', 'harness-remote')
+const ROOT = path.join(adapterDshHome(), 'harness-remote')
 const HOST_PATH = path.join(ROOT, 'host.json')
 let cachedDescriptor: AgentDescriptor | null = null
 
@@ -60,26 +61,70 @@ function stableId(file: string): string {
 
 /** Installed DSH profile name without exposing its filesystem path. */
 export function agentProfileScope(): string {
-  const modulePath = fileURLToPath(import.meta.url)
-  const match = /[\\/]\.dsh[\\/]profiles[\\/]([^\\/]+)[\\/]node_modules[\\/]/i.exec(modulePath)
-  if (match && /^[A-Za-z0-9._-]{1,80}$/.test(match[1])) return match[1]
+  return resolveAgentProfileScope(fileURLToPath(import.meta.url), process.argv, adapterDshHome())
+}
+
+export function resolveAgentProfileScope(modulePath: string, argv: readonly string[], dshHome: string): string {
+  const valid = (value: string | undefined): value is string => Boolean(value)
+    && value!.length <= 80 && !/[\\/\u0000-\u001f]/.test(value!)
+    && value !== '.' && value !== '..' && value !== 'node_modules'
+  // Explicit launch arguments also cover linked packages whose real module
+  // path lives outside the profile's pnpm tree.
+  for (let index = 2; index < argv.length && argv[index] !== '--'; index++) {
+    const arg = argv[index]
+    const candidate = arg === '--profile' ? argv[index + 1]
+      : arg.startsWith('--profile=') ? arg.slice('--profile='.length) : undefined
+    if (valid(candidate)) return candidate
+  }
+  const relative = path.relative(path.join(dshHome, 'profiles'), modulePath)
+  const parts = relative.split(/[\\/]/)
+  if (valid(parts[0]) && parts[1] === 'node_modules') return parts[0]
+  if (argv[2] === 'web') return 'web'
   return 'default'
 }
 
-function instanceStorageKey(): string {
+function instanceStorageKey(profileScope = agentProfileScope()): string {
   return createHash('sha256')
-    .update(`deepseek-harness\0${agentProfileScope()}`)
+    .update(`deepseek-harness\0${profileScope}`)
     .digest('hex')
     .slice(0, 24)
+}
+
+/**
+ * Keep the historic web/default credential path so an upgrade never unpairs
+ * existing users. Every additional DSH profile gets an isolated state file;
+ * otherwise installing a test profile can silently rotate the production
+ * profile's LAN token and WeChat binding.
+ */
+export function gateStatePathForProfile(
+  profileScope: string,
+  homeDirectory = homedir(),
+  dshHome = path.join(homeDirectory, '.dsh'),
+): string {
+  const normalized = profileScope.trim().toLowerCase()
+  if (normalized === 'web' || normalized === 'default') {
+    return path.join(dshHome, 'gate-wechat-state.json')
+  }
+  return path.join(
+    dshHome,
+    'harness-remote',
+    'instances',
+    instanceStorageKey(profileScope),
+    'gate-wechat-state.json',
+  )
+}
+
+export function defaultGateStatePath(): string {
+  return gateStatePathForProfile(agentProfileScope(), homedir(), adapterDshHome())
 }
 
 export function defaultAgentIdentityPath(): string {
   const scope = agentProfileScope()
   // Preserve an existing default web nodeId and its cloud ownership.
   if (scope === 'web' || scope === 'default') {
-    return path.join(homedir(), '.dsh', 'harness-remote-public-identity.json')
+    return path.join(adapterDshHome(), 'harness-remote-public-identity.json')
   }
-  return path.join(ROOT, 'instances', instanceStorageKey(), 'identity.json')
+  return path.join(ROOT, 'instances', instanceStorageKey(scope), 'identity.json')
 }
 
 function packageVersionFromAncestors(start: string): string | null {

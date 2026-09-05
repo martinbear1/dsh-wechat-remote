@@ -1,6 +1,6 @@
 {
   "name": "@harness-remote/dsh-wechat-remote",
-  "version": "1.5.5",
+  "version": "1.6.0-preview.20260905.1",
   "description": "鲸常在：同一插件自动适配 Windows、macOS 与 Linux 上的 DeepSeek Harness，提供微信身份绑定、局域网直连及端到端加密公网连接",
   "private": true,
   "license": "MIT",
@@ -26,6 +26,18 @@
     "./host-info": {
       "types": "./lib/host-info-service.d.ts",
       "default": "./lib/host-info-service.js"
+    },
+    "./dsh-runtime": {
+      "types": "./lib/dsh-runtime.d.ts",
+      "default": "./lib/dsh-runtime.js"
+    },
+    "./dsh-protocol-compat": {
+      "types": "./lib/dsh-protocol-compat.d.ts",
+      "default": "./lib/dsh-protocol-compat.js"
+    },
+    "./dsh-realtime-compat": {
+      "types": "./lib/dsh-realtime-compat.d.ts",
+      "default": "./lib/dsh-realtime-compat.js"
     },
     "./history": {
       "types": "./lib/history-service.d.ts",
@@ -69,10 +81,8 @@
       "platform": "web",
       "inject": [
         "@deepseek-ai/dsh-client-connection",
-        "@deepseek-ai/dsh-client-runtime",
         "@deepseek-ai/dsh-client-ui-settings",
-        "@deepseek-ai/dsh-client-ui-primitives",
-        "@deepseek-ai/dsh-client-ui-slots"
+        "@deepseek-ai/dsh-client-ui-primitives"
       ]
     }
   },
@@ -80,15 +90,20 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "bundle": "tsc -p tsconfig.json && node scripts/clean-client-types.mjs && tsc -p tsconfig.client.json && node scripts/build-client.mjs && node scripts/generate-typert.mjs",
     "verify": "node scripts/verify.mjs",
-    "test": "npm run test:lifecycle && npm run test:client && npm run test:attachment && npm run test:directory && npm run test:host-platform && npm run test:history && npm run test:gate-ports && npm run test:public-relay",
+    "test": "npm run test:lifecycle && npm run test:client && npm run test:attachment && npm run test:directory && npm run test:host-platform && npm run test:history && npm run test:gate-ports && npm run test:dsh-runtime && npm run test:dsh-protocol-compat && npm run test:dsh-realtime-compat && npm run test:dsh-compatibility-api && npm run test:public-relay && npm run test:updates",
     "test:lifecycle": "node scripts/test-lifecycle.mjs",
     "test:client": "node scripts/test-client-bundle.mjs",
+    "test:updates": "node scripts/test-update-policy.mjs && node scripts/test-update-safety.mjs",
     "test:directory": "node scripts/test-directory.mjs",
     "test:host-platform": "node scripts/test-host-platform.mjs",
     "test:history": "node scripts/test-history.mjs",
     "test:attachment": "node scripts/test-attachment.mjs",
     "test:gate-ports": "node scripts/test-gate-ports.mjs",
-    "test:public-relay": "node scripts/test-public-relay.mjs"
+    "test:dsh-runtime": "node scripts/test-dsh-runtime.mjs",
+    "test:dsh-protocol-compat": "node scripts/test-dsh-protocol-compat.mjs",
+    "test:dsh-realtime-compat": "node scripts/test-dsh-realtime-compat.mjs",
+    "test:dsh-compatibility-api": "node scripts/test-dsh-compatibility-api.mjs",
+    "test:public-relay": "node scripts/test-public-relay.mjs && node scripts/test-relay-liveness.mjs"
   },
   "dependencies": {
     "http-proxy": "^1.18.1",
@@ -156,10 +171,20 @@
     "typescript": "^5.8.3"
   },
   "files": [
+    "lib/update-*.js",
+    "lib/update-*.d.ts",
     "lib/index.js",
     "lib/index.d.ts",
     "lib/gate-runtime.js",
     "lib/gate-runtime.d.ts",
+    "lib/dsh-runtime.js",
+    "lib/dsh-runtime.d.ts",
+    "lib/dsh-protocol-compat.js",
+    "lib/dsh-protocol-compat.d.ts",
+    "lib/dsh-realtime-compat.js",
+    "lib/dsh-realtime-compat.d.ts",
+    "lib/dsh-compatibility-api.js",
+    "lib/dsh-compatibility-api.d.ts",
     "lib/client.js",
     "lib/directory-service.js",
     "lib/directory-service.d.ts",

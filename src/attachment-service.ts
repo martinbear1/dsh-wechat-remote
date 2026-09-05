@@ -14,6 +14,7 @@ import http from 'node:http'
 
 import type { Context } from '@deepseek-ai/cordis'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
+import { resolveTypertGateway } from './dsh-protocol-compat.js'
 
 const MAX_BATCH_ATTACHMENTS = 6
 const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
@@ -103,6 +104,7 @@ declare module '@deepseek-ai/cordis' {
 }
 
 export class WechatAttachmentService extends TypertRemoteService {
+  private readonly hostContext: Context
   private readonly dshPort: number
   private readonly timeoutMs: number
   private readonly storeAttachment?: WechatAttachmentConfig['storeAttachment']
@@ -115,6 +117,7 @@ export class WechatAttachmentService extends TypertRemoteService {
 
   constructor(ctx: Context, config: WechatAttachmentConfig = {}) {
     super(ctx, 'wechatAttachment')
+    this.hostContext = ctx
     this.dshPort = Number.isSafeInteger(config.dshPort) && Number(config.dshPort) > 0
       ? Number(config.dshPort)
       : 3080
@@ -236,6 +239,21 @@ export class WechatAttachmentService extends TypertRemoteService {
     attachmentId: string,
     signal: AbortSignal,
   ): Promise<NativeAttachmentResponse> {
+    const gateway = resolveTypertGateway(this.hostContext)
+    if (gateway) {
+      return gateway.invoke({
+        namespace: 'session',
+        method: 'attachment',
+        args: { request: { sessionId, attachmentId } },
+        signal,
+      }).then(
+        value => ({ ok: true, value }) as NativeAttachmentResponse,
+        error => ({
+          ok: false,
+          error: { message: error instanceof Error ? error.message : String(error) },
+        }),
+      )
+    }
     const body = Buffer.from(JSON.stringify({
       type: 'client-request',
       rpcId: `wechat-attachment-${Date.now().toString(36)}`,

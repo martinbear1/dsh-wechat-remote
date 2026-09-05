@@ -17,6 +17,7 @@ import http from 'node:http'
 
 import type { Context } from '@deepseek-ai/cordis'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
+import { invokeLegacyRpc, resolveTypertGateway } from './dsh-protocol-compat.js'
 
 const DEFAULT_PAGE_MESSAGES = 8
 const MAX_PAGE_MESSAGES = 30
@@ -105,6 +106,7 @@ declare module '@deepseek-ai/cordis' {
 }
 
 export class WechatHistoryService extends TypertRemoteService {
+  private readonly hostContext: Context
   private readonly dshPort: number
   private readonly timeoutMs: number
   private readonly snapshotThresholdBytes: number
@@ -112,6 +114,7 @@ export class WechatHistoryService extends TypertRemoteService {
 
   constructor(ctx: Context, config: WechatHistoryConfig = {}) {
     super(ctx, 'wechatHistory')
+    this.hostContext = ctx
     this.dshPort = Number.isSafeInteger(config.dshPort) && Number(config.dshPort) > 0
       ? Number(config.dshPort)
       : 3080
@@ -171,6 +174,18 @@ export class WechatHistoryService extends TypertRemoteService {
     payload: { readonly sessionId: string; readonly maxMessages: number; readonly beforeSeq?: number },
     signal: AbortSignal,
   ): Promise<NativeHistoryResponse> {
+    const gateway = resolveTypertGateway(this.hostContext)
+    if (gateway) {
+      return invokeLegacyRpc(gateway, {
+        type: 'client-request',
+        rpcId: `wechat-history-${Date.now().toString(36)}`,
+        method: 'session.history',
+        payload,
+      }, {
+        signal,
+        describeHost: () => ({}),
+      }).then(response => response.result as NativeHistoryResponse)
+    }
     const body = Buffer.from(JSON.stringify({
       type: 'client-request',
       rpcId: `wechat-history-${Date.now().toString(36)}`,

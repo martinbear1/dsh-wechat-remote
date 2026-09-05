@@ -9,6 +9,7 @@ export interface HistorySnapshotPrewarmerOptions {
     readonly dshPort?: number;
     readonly warm: (sessionId: string, signal: AbortSignal) => Promise<'inline' | 'object'>;
     readonly socketFactory?: (url: string) => SocketLike;
+    readonly hostEventSource?: (receive: (raw: unknown) => void, disconnected: () => void) => () => void;
     readonly settleDelayMs?: number;
     readonly retryDelayMs?: number;
     readonly maxQueue?: number;
@@ -30,6 +31,8 @@ export declare class HistorySnapshotPrewarmer {
     private readonly dshPort;
     private readonly warmCallback;
     private readonly socketFactory;
+    private readonly hostEventSource?;
+    private releaseObserver?;
     private readonly settleDelayMs;
     private readonly retryDelayMs;
     private readonly maxQueue;

@@ -24,6 +24,7 @@ export interface HistorySnapshotPrewarmerOptions {
   readonly dshPort?: number
   readonly warm: (sessionId: string, signal: AbortSignal) => Promise<'inline' | 'object'>
   readonly socketFactory?: (url: string) => SocketLike
+  readonly hostEventSource?: (receive: (raw: unknown) => void, disconnected: () => void) => () => void
   readonly settleDelayMs?: number
   readonly retryDelayMs?: number
   readonly maxQueue?: number
@@ -56,6 +57,7 @@ export function bindHistorySnapshotPrewarmer(
     const prewarmer = new HistorySnapshotPrewarmer({
       dshPort: options.dshPort,
       socketFactory: options.socketFactory,
+      hostEventSource: options.hostEventSource,
       settleDelayMs: options.settleDelayMs,
       retryDelayMs: options.retryDelayMs,
       maxQueue: options.maxQueue,
@@ -71,6 +73,8 @@ export class HistorySnapshotPrewarmer {
   private readonly dshPort: number
   private readonly warmCallback: HistorySnapshotPrewarmerOptions['warm']
   private readonly socketFactory: NonNullable<HistorySnapshotPrewarmerOptions['socketFactory']>
+  private readonly hostEventSource?: HistorySnapshotPrewarmerOptions['hostEventSource']
+  private releaseObserver?: () => void
   private readonly settleDelayMs: number
   private readonly retryDelayMs: number
   private readonly maxQueue: number
@@ -91,6 +95,7 @@ export class HistorySnapshotPrewarmer {
       ? Number(options.dshPort)
       : 3080
     this.warmCallback = options.warm
+    this.hostEventSource = options.hostEventSource
     this.socketFactory = options.socketFactory || (url => new WebSocket(url, {
       headers: { 'user-agent': 'HarnessRemote-HistoryPrewarmer/1' },
       maxPayload: 1024 * 1024,
@@ -112,6 +117,8 @@ export class HistorySnapshotPrewarmer {
   stop(): void {
     if (this.stopped) return
     this.stopped = true
+    this.releaseObserver?.()
+    this.releaseObserver = undefined
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
     this.reconnectTimer = null
     for (const timer of this.settleTimers.values()) clearTimeout(timer)
@@ -128,7 +135,27 @@ export class HistorySnapshotPrewarmer {
   }
 
   private connect(): void {
-    if (this.stopped || this.socket) return
+    if (this.stopped || this.socket || this.releaseObserver) return
+    if (this.hostEventSource) {
+      let ended = false
+      let release: () => void
+      try {
+        release = this.hostEventSource(raw => this.observe(raw), () => {
+          if (ended) return
+          ended = true
+          this.releaseObserver?.()
+          this.releaseObserver = undefined
+          this.scheduleReconnect()
+        })
+      } catch {
+        ended = true
+        this.scheduleReconnect()
+        return
+      }
+      if (ended || this.stopped) release()
+      else this.releaseObserver = release
+      return
+    }
     let socket: SocketLike
     try {
       socket = this.socketFactory(`ws://127.0.0.1:${this.dshPort}/api/events.host`)

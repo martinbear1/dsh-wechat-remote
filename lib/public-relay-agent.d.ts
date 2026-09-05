@@ -60,6 +60,12 @@ export interface PublicRelayAgentOptions {
     readonly fetchImpl?: typeof fetch;
     /** Test/portable profile override; production defaults to ~/.dsh. */
     readonly identityPath?: string;
+    /** Transport-test timing overrides; no client protocol or user settings change. */
+    readonly transportTiming?: {
+        readonly pingIntervalMs?: number;
+        readonly pongTimeoutMs?: number;
+        readonly handshakeTimeoutMs?: number;
+    };
 }
 export declare function agentNodeIdForPublicKey(publicKeyPem: string): string;
 export declare function loadPublicRelayConfig(configPath?: string): PublicRelayConfig | null;
@@ -74,6 +80,8 @@ export declare class PublicRelayAgent {
     private stopped;
     private reconnectAttempt;
     private reconnectTimer;
+    private clearHeartbeat;
+    private lifecycleRevision;
     private enrollment;
     private status;
     constructor(config: PublicRelayConfig, options: PublicRelayAgentOptions);

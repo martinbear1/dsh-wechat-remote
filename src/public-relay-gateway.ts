@@ -1,6 +1,7 @@
 /** Product boundary that joins relay routing, E2EE sessions, and local DSH virtual streams. */
 import { createHash } from 'node:crypto'
 import { DshTunnelAgent } from './dsh-tunnel-agent.js'
+import type { DshCompatibilityTransport } from './dsh-compatibility-api.js'
 import { AgentE2EESession } from './e2ee-session.js'
 import {
   PublicRelayAgent,
@@ -41,6 +42,7 @@ export interface PublicRelayGatewayOptions {
   readonly capabilities?: readonly AgentCapability[]
   readonly displayName?: string
   readonly dshPort?: number
+  readonly compatibilityApi?: DshCompatibilityTransport
   readonly maxClients?: number
   readonly maxStreamsPerClient?: number
   readonly issueLanCredential?: (rotate?: boolean) => { readonly baseUrl: string; readonly token: string }
@@ -55,6 +57,7 @@ export class PublicRelayGateway {
   readonly agent: PublicRelayAgent
   private readonly clients = new Map<string, ClientContext>()
   private readonly dshPort: number
+  private readonly compatibilityApi?: DshCompatibilityTransport
   private readonly maxClients: number
   private readonly maxStreamsPerClient: number
   private readonly issueLanCredential?: PublicRelayGatewayOptions['issueLanCredential']
@@ -69,6 +72,7 @@ export class PublicRelayGateway {
 
   constructor(config: PublicRelayConfig, options: PublicRelayGatewayOptions) {
     this.dshPort = options.dshPort || 3080
+    this.compatibilityApi = options.compatibilityApi
     // One personal Agent should only have a handful of simultaneously active
     // phone clients. Keep the bound small so an owned relay account cannot
     // exhaust the desktop DSH process.
@@ -222,6 +226,7 @@ export class PublicRelayGateway {
       if (result.ready && !client.tunnel) {
         client.tunnel = new DshTunnelAgent({
           dshPort: this.dshPort,
+          compatibilityApi: this.compatibilityApi,
           maxStreams: this.maxStreamsPerClient,
           issueLanCredential: this.issueLanCredential,
           materializeAttachment: async (raw, signal) => {

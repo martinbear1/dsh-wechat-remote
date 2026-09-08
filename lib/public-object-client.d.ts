@@ -14,9 +14,10 @@ interface ObjectTicket {
 }
 export declare class PublicObjectClient {
     private readonly relayOrigin;
-    private readonly identity;
+    private readonly identitySource;
     private readonly fetchImpl;
-    constructor(relayOrigin: string, identity: AgentIdentity, fetchImpl?: typeof fetch);
+    constructor(relayOrigin: string, identitySource: AgentIdentity | (() => AgentIdentity), fetchImpl?: typeof fetch);
+    private get identity();
     download(objectId: string, expectedMaximum?: number, signal?: AbortSignal): Promise<Uint8Array>;
     upload(purpose: 'attachment' | 'artifact' | 'history', body: Uint8Array, signal?: AbortSignal): Promise<ObjectTicket>;
     private requestJson;

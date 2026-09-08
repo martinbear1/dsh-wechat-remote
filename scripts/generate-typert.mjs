@@ -57,6 +57,7 @@ try {
     'dsh-realtime-compat.ts',
     'dsh-compatibility-api.ts',
     'secure-file.ts',
+    'secure-lan.ts',
     'history-prewarmer.ts',
   ]
   for (const file of hostSources) {

@@ -111,6 +111,7 @@ export interface PublicRelayAgentOptions {
   readonly onClientError?: (clientId: string, error: unknown) => void
   /** The physical Agent socket was lost; all relay client ids are now stale. */
   readonly onTransportDisconnect?: () => void
+  readonly onIdentityChange?: () => void
   readonly fetchImpl?: typeof fetch
   /** Test/portable profile override; production defaults to ~/.dsh. */
   readonly identityPath?: string
@@ -238,6 +239,14 @@ export class PublicRelayAgent {
       pairingExpiresAt: body.expiresAt,
       ...(body.remoteAccess ? { remoteAccess: body.remoteAccess } : {}),
     })
+    // Rotation invalidates the entire transport, not just the QR identity.
+    // Normal startup already connects after enrollment; a live pairing refresh
+    // must do the same when it retired the previous identity's socket.
+    if (!this.stopped && !this.socket) {
+      if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = null
+      this.connect()
+    }
     return this.snapshot()
   }
 
@@ -292,8 +301,16 @@ export class PublicRelayAgent {
   }
 
   private rotateRevokedIdentity(): void {
+    this.clearHeartbeat?.()
+    this.clearHeartbeat = null
+    const previous = this.socket
+    this.socket = null
+    previous?.terminate()
+    try { this.options.onTransportDisconnect?.() } catch { /* isolation boundary */ }
     this.identity = replaceAgentIdentity(this.identityPath)
+    this.options.onIdentityChange?.()
     this.update({
+      state: 'offline',
       nodeId: this.identity.nodeId,
       identityPublicKey: this.identity.publicKeyPem,
       pairingTicket: undefined,
@@ -366,7 +383,7 @@ export class PublicRelayAgent {
   }
 
   private connect(): void {
-    if (this.stopped) return
+    if (this.stopped || this.socket) return
     const timestamp = Date.now()
     const nonce = randomBytes(18).toString('base64url')
     const signature = sign(
@@ -446,6 +463,7 @@ export class PublicRelayAgent {
       schedulePing()
     })
     socket.on('message', (data, isBinary) => {
+      if (this.socket !== socket || this.stopped) return
       if (!isBinary) {
         try {
           const event = JSON.parse(data.toString()) as {
@@ -486,7 +504,17 @@ export class PublicRelayAgent {
       try { this.options.onTransportDisconnect?.() } catch { /* isolation boundary */ }
       this.scheduleReconnect()
     })
-    socket.on('error', () => { /* close drives the retry state */ })
+    socket.on('unexpected-response', (_request, response) => {
+      response.resume()
+      failTransport(`Relay handshake rejected (HTTP ${response.statusCode || 0})`)
+    })
+    socket.on('error', error => {
+      const code = (error as NodeJS.ErrnoException).code
+      if (['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'ENETUNREACH', 'CERT_HAS_EXPIRED', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE'].includes(code || '')) {
+        transportFailure = `Relay transport failed (${code})`
+      }
+      // close owns cleanup/retry; do not log URLs, headers or proofs.
+    })
   }
 
   private scheduleReconnect(): void {

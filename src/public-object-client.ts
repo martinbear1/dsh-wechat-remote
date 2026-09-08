@@ -22,9 +22,13 @@ function proofMessage(method: string, pathname: string, nodeId: string, timestam
 export class PublicObjectClient {
   constructor(
     private readonly relayOrigin: string,
-    private readonly identity: AgentIdentity,
+    private readonly identitySource: AgentIdentity | (() => AgentIdentity),
     private readonly fetchImpl: typeof fetch = fetch,
   ) {}
+
+  private get identity(): AgentIdentity {
+    return typeof this.identitySource === 'function' ? this.identitySource() : this.identitySource
+  }
 
   async download(
     objectId: string,

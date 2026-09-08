@@ -44,6 +44,7 @@ export const AGENT_CAPABILITIES: readonly AgentCapability[] = Object.freeze([
   Object.freeze({ id: 'harness.lan-bootstrap', version: 1 }),
   Object.freeze({ id: 'harness.host-platform', version: 1 }),
   Object.freeze({ id: 'harness.oss-e2ee-objects', version: 1 }),
+  Object.freeze({ id: 'harness.secure-lan', version: 1 }),
 ])
 
 function stableId(file: string): string {

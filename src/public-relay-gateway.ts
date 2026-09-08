@@ -47,6 +47,7 @@ export interface PublicRelayGatewayOptions {
   readonly maxStreamsPerClient?: number
   readonly issueLanCredential?: (rotate?: boolean) => { readonly baseUrl: string; readonly token: string }
   readonly onStatus?: (status: AgentStatus) => void
+  readonly onIdentityChange?: () => void
   readonly fetchImpl?: typeof fetch
   readonly identityPath?: string
   readonly historyCachePath?: string
@@ -93,13 +94,14 @@ export class PublicRelayGateway {
       fetchImpl: options.fetchImpl,
       identityPath: options.identityPath,
       onStatus: options.onStatus,
+      onIdentityChange: options.onIdentityChange,
       onFrame: frame => this.receive(frame),
       onClientDisconnect: clientId => this.disconnect(clientId),
       onClientError: clientId => this.disconnect(clientId),
       onTransportDisconnect: () => this.disconnectAll(),
     }
     this.agent = new PublicRelayAgent(config, agentOptions)
-    this.objectClient = new PublicObjectClient(config.relayOrigin, this.agent.identity, this.agent.fetchImpl)
+    this.objectClient = new PublicObjectClient(config.relayOrigin, () => this.agent.identity, this.agent.fetchImpl)
     this.historySnapshots = new HistorySnapshotCache({
       file: options.historyCachePath,
       onDiagnostic: options.onDiagnostic,
@@ -130,7 +132,7 @@ export class PublicRelayGateway {
         archiveBase64: Buffer.from(archive).toString('base64'),
       }
     }
-    const digest = createHash('sha256').update(payloadJson).digest('base64url')
+    const digest = createHash('sha256').update(this.agent.identity.nodeId).update('\0').update(payloadJson).digest('base64url')
     const cached = this.historySnapshots.get(digest)
     if (cached) return cached
     const pending = this.pendingHistorySnapshots.get(digest)
@@ -162,6 +164,7 @@ export class PublicRelayGateway {
     signal?: AbortSignal,
   ): Promise<WechatAttachmentObjectDescriptor> {
     const digest = createHash('sha256')
+      .update(this.agent.identity.nodeId).update('\0')
       .update(data)
       .update('\0')
       .update(metadata.mediaType)
@@ -223,19 +226,9 @@ export class PublicRelayGateway {
     try {
       const result = client.e2ee.receive(frame.payload)
       for (const outbound of result.outbound || []) await client.reply(outbound)
+      if (this.clients.get(frame.clientId) !== client) return
       if (result.ready && !client.tunnel) {
-        client.tunnel = new DshTunnelAgent({
-          dshPort: this.dshPort,
-          compatibilityApi: this.compatibilityApi,
-          maxStreams: this.maxStreamsPerClient,
-          issueLanCredential: this.issueLanCredential,
-          materializeAttachment: async (raw, signal) => {
-            const descriptor = raw as RemoteAttachmentDescriptor
-            const ciphertext = await this.objectClient.download(descriptor.objectId, undefined, signal)
-            return decryptRemoteAttachment(ciphertext, descriptor)
-          },
-          send: clearFrame => client!.reply(client!.e2ee.seal(clearFrame)),
-        })
+        client.tunnel = this.createAuthenticatedTunnel(clearFrame => client!.reply(client!.e2ee.seal(clearFrame)))
       }
       if (result.data) {
         if (!client.tunnel) throw new Error('DSH tunnel arrived before E2EE key confirmation')
@@ -245,6 +238,24 @@ export class PublicRelayGateway {
       this.disconnect(frame.clientId)
       throw error
     }
+  }
+
+  /** Only carriers that completed identity pinning AND client authorization
+   * may enter this shared DSH boundary. LAN and relay use identical features.
+   */
+  createAuthenticatedTunnel(send: (frame: Uint8Array) => Promise<void>): DshTunnelAgent {
+    return new DshTunnelAgent({
+      dshPort: this.dshPort,
+      compatibilityApi: this.compatibilityApi,
+      maxStreams: this.maxStreamsPerClient,
+      issueLanCredential: this.issueLanCredential,
+      materializeAttachment: async (raw, signal) => {
+        const descriptor = raw as RemoteAttachmentDescriptor
+        const ciphertext = await this.objectClient.download(descriptor.objectId, undefined, signal)
+        return decryptRemoteAttachment(ciphertext, descriptor)
+      },
+      send,
+    })
   }
 
   private disconnect(clientId: string): void {

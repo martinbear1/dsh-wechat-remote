@@ -57,6 +57,7 @@ export interface PublicRelayAgentOptions {
     readonly onClientError?: (clientId: string, error: unknown) => void;
     /** The physical Agent socket was lost; all relay client ids are now stale. */
     readonly onTransportDisconnect?: () => void;
+    readonly onIdentityChange?: () => void;
     readonly fetchImpl?: typeof fetch;
     /** Test/portable profile override; production defaults to ~/.dsh. */
     readonly identityPath?: string;

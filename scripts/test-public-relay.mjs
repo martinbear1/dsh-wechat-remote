@@ -205,7 +205,8 @@ try {
   const cachedPayload = JSON.stringify({ events: [{ text: clearMarker }, {
     text: randomBytes(180 * 1024).toString('base64'),
   }] })
-  const cachedDigest = createHash('sha256').update(cachedPayload).digest('base64url')
+  const cacheIdentity = loadOrCreateAgentIdentity(path.join(root, 'cached-gateway-identity.json'))
+  const cachedDigest = createHash('sha256').update(cacheIdentity.nodeId).update('\0').update(cachedPayload).digest('base64url')
   const encryptedDescriptor = {
     v: 1,
     scheme: 'xsalsa20-poly1305-chunks-v1',
@@ -295,6 +296,13 @@ try {
   )
   assert.deepEqual(await cachedGateway.prepareHistorySnapshot(cachedPayload), encryptedDescriptor)
   cachedGateway.stop()
+  const otherOwnerGateway = new PublicRelayGateway(
+    { enabled: true, relayOrigin: 'https://relay.example.test' },
+    { agentVersion: 'test', identityPath: path.join(root, 'other-cache-identity.json'), historyCachePath: cachePath,
+      fetchImpl() { throw new Error('new identity needs a new object ticket') } },
+  )
+  await assert.rejects(otherOwnerGateway.prepareHistorySnapshot(cachedPayload), /new identity needs a new object ticket/)
+  otherOwnerGateway.stop()
 
   // Regression: a synchronous gateway error must be isolated to that client.
   // Promise.resolve(callback()) does not catch a synchronous callback throw

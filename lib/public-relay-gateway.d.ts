@@ -1,3 +1,4 @@
+import { DshTunnelAgent } from './dsh-tunnel-agent.js';
 import type { DshCompatibilityTransport } from './dsh-compatibility-api.js';
 import { PublicRelayAgent, type AgentStatus, type PublicRelayConfig } from './public-relay-agent.js';
 import type { AgentCapability } from './agent-metadata.js';
@@ -23,6 +24,7 @@ export interface PublicRelayGatewayOptions {
         readonly token: string;
     };
     readonly onStatus?: (status: AgentStatus) => void;
+    readonly onIdentityChange?: () => void;
     readonly fetchImpl?: typeof fetch;
     readonly identityPath?: string;
     readonly historyCachePath?: string;
@@ -53,6 +55,10 @@ export declare class PublicRelayGateway {
     }, signal?: AbortSignal): Promise<WechatAttachmentObjectDescriptor>;
     ensurePairingStatus(): Promise<AgentStatus>;
     private receive;
+    /** Only carriers that completed identity pinning AND client authorization
+     * may enter this shared DSH boundary. LAN and relay use identical features.
+     */
+    createAuthenticatedTunnel(send: (frame: Uint8Array) => Promise<void>): DshTunnelAgent;
     private disconnect;
     private disconnectAll;
 }

@@ -161,7 +161,27 @@ try {
     assert.equal(stopped.agent.reconnectTimer, null)
     console.log('PASS stop during enrollment cannot resurrect the connection')
   } finally { await stopped.close() }
-  console.log('relay liveness: 6 checks passed')
+  let revoke = false
+  const rotated = await fixture({ fetchImpl: async () => {
+    if (revoke) { revoke = false; return Response.json({ error: { code: 'agent_revoked' } }, { status: 409 }) }
+    return Response.json({ ticket: 'local-only', expiresAt: Date.now() + 600000 })
+  } })
+  try {
+    await rotated.agent.start()
+    await until(() => rotated.agent.snapshot().state === 'online', 'initial socket did not connect')
+    const old = rotated.agent.identity.nodeId
+    let identityChanges = 0
+    rotated.agent.options.onIdentityChange = () => { identityChanges++ }
+    revoke = true
+    await Promise.all([rotated.agent.ensurePairingTicket(3600000), rotated.agent.ensurePairingTicket(3600000)])
+    await until(() => rotated.counters().connections === 2 && rotated.agent.snapshot().state === 'online', 'new identity never connected')
+    assert.notEqual(rotated.agent.identity.nodeId, old)
+    assert.equal(identityChanges, 1)
+    assert.equal(rotated.counters().disconnects, 1)
+    assert.equal(rotated.counters().connections, 2)
+    console.log('PASS concurrent QR refresh retires old socket and reconnects exactly once after identity rotation')
+  } finally { await rotated.close() }
+  console.log('relay liveness: 7 checks passed')
 } finally {
   assert.equal(path.dirname(path.resolve(root)), fixtureParent)
   assert(path.basename(root).startsWith('harness-relay-liveness-'))

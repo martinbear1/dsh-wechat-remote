@@ -38,6 +38,7 @@ import type { Socket } from 'node:net'
 import httpProxy from 'http-proxy'
 import QRCode from 'qrcode'
 import { WebSocketServer } from 'ws'
+import { SecureLanServer } from './secure-lan.js'
 import type { Context, Plugin } from '@deepseek-ai/cordis'
 import WechatDirectoryService from './directory-service.js'
 import WechatHostInfoService, {
@@ -77,6 +78,7 @@ interface PendingPair {
 }
 
 interface GateState {
+  publicIdentityNodeId?: string
   token: string
   pending: Record<string, PendingPair>
   wechatBindings: Record<string, string>
@@ -283,6 +285,7 @@ export function mountWechatGate(ctx: Context): () => void {
           token: raw.token,
           pending: validPendingPairs(raw.pending),
           wechatBindings: validWechatBindings(raw.wechatBindings),
+          publicIdentityNodeId: typeof raw.publicIdentityNodeId === 'string' ? raw.publicIdentityNodeId : undefined,
         }
       }
     } catch {
@@ -308,6 +311,17 @@ export function mountWechatGate(ctx: Context): () => void {
   }
 
   const state = loadState()
+
+  function synchronizeLanIdentity(nodeId: string): void {
+    if (state.publicIdentityNodeId === nodeId) return
+    state.token = crypto.randomBytes(32).toString('base64url')
+    state.wechatBindings = {}
+    state.pending = {}
+    state.publicIdentityNodeId = nodeId
+    // Persist the grant's owner with its token atomically. On restart, a
+    // mismatching identity retires the grant again, including interrupted saves.
+    writePrivateJsonAtomic(STATE_FILE, state)
+  }
 
   function randomCode(len = 8): string {
     let out = ''
@@ -542,6 +556,13 @@ export function mountWechatGate(ctx: Context): () => void {
     let expiresAt = state.pending[code].expiresAt
     const gateway = publicRelayGateway
     if (gateway) {
+      // An already paired phone can refresh a moved host's address even if
+      // the cloud is blocked. This QR is a locator, never an authorization.
+      const locatorPayload = (): string => JSON.stringify({ v: 1, mode: 'secure-lan-route',
+        nodeId: gateway.agent.identity.nodeId,
+        identityPublicKey: gateway.agent.identity.publicKeyPem,
+        relayOrigin: gateway.agent.config.relayOrigin, lan: payloadObj })
+      payload = locatorPayload()
       try {
         publicRelayStatus = await gateway.ensurePairingStatus()
         const raw = publicPairingPayload(publicRelayStatus)
@@ -555,8 +576,9 @@ export function mountWechatGate(ctx: Context): () => void {
           expiresAt = Number(publicPayload.expiresAt) || expiresAt
         }
       } catch (error: unknown) {
+        payload = locatorPayload()
         console.warn(
-          '[wechat-gate] public pairing ticket unavailable; serving LAN QR:',
+          '[wechat-gate] public pairing ticket unavailable; serving identity-pinned route locator:',
           messageOf(error),
         )
       }
@@ -882,6 +904,16 @@ code{color:#7aa2ff;font-size:15px;letter-spacing:3px}
     proxy.web(req, res, { ...TARGET, selfHandleResponse: true })
   })
 
+  const secureLan = new SecureLanServer({
+    identity: () => publicRelayGateway?.agent.identity,
+    token: () => state.token,
+    dshPort: UPSTREAM_PORT,
+    compatibilityApi,
+    createTunnel: send => {
+      if (!publicRelayGateway) throw new Error('Agent identity unavailable')
+      return publicRelayGateway.createAuthenticatedTunnel(send)
+    },
+  })
   publicServer.on('upgrade', (req, socket, head) => {
     if (updater.isMaintaining()) { socket.destroy(); return }
     // A remote client can reset a WebSocket while the proxy is connecting to
@@ -897,6 +929,11 @@ code{color:#7aa2ff;font-size:15px;letter-spacing:3px}
     if (!allowRequest(req, false)) {
       socket.write('HTTP/1.1 429 Too Many Requests\r\n\r\n')
       return socket.destroy()
+    }
+    if (req.url === '/wechat-remote/secure-lan') {
+      if (secureLan.sockets.clients.size >= 8) { socket.destroy(); return }
+      secureLan.sockets.handleUpgrade(req, socket, head, ws => secureLan.attach(ws))
+      return
     }
     if (!authorized(req)) {
       socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n')
@@ -952,6 +989,7 @@ code{color:#7aa2ff;font-size:15px;letter-spacing:3px}
   const dispose = (): void => {
     disposed = true
     updater.dispose()
+    secureLan.close()
     compatibilityApi.dispose()
     doorRuntime.localDoor.state = 'stopped'
     doorRuntime.publicDoor.state = 'stopped'
@@ -1096,12 +1134,20 @@ code{color:#7aa2ff;font-size:15px;letter-spacing:3px}
           return {
             baseUrl: `http://${lanIPv4()}:${PUBLIC_PORT}`,
             token: state.token,
+            secureLan: 1,
           }
         },
         onStatus: (status) => {
           publicRelayStatus = status
         },
+        onIdentityChange: () => {
+          // Cloud revocation is a security boundary, not a display rename.
+          // Retire local grants too; never carry a former owner's LAN token
+          // into the newly enrollable public identity.
+          if (publicRelayGateway) synchronizeLanIdentity(publicRelayGateway.agent.identity.nodeId)
+        },
       })
+      synchronizeLanIdentity(publicRelayGateway.agent.identity.nodeId)
       void publicRelayGateway.start()
       void Promise.resolve(
         bindHistorySnapshotPrewarmer(ctx, {

@@ -1,6 +1,6 @@
 # 鲸常在 · DeepSeek Harness 微信连接插件
 
-本版本是 **`1.6.0-rc.4` 功能预览版**，从正式版 `1.5.5` 整理，非 Latest、未合并 main。包含多版本 / 三主机适配及安全更新能力。请先阅读 [发布与兼容说明](RELEASE-NOTES.md)，不把未认证组合当作正式支持。
+本版本是 **`1.6.0-rc.5` 功能预览版**，沿用由正式版 `1.5.5` 整理的 RC4 基线，非 Latest、未合并 main。包含多版本 / 三主机适配、安全更新、加密局域网和网络切换恢复能力。请先阅读 [发布与兼容说明](RELEASE-NOTES.md)，尤其是 LAN 凭据迁移和旧客户端边界，不把未认证组合当作正式支持。
 
 在 Windows、macOS 或 Linux 的 DeepSeek Harness 中安装本插件，即可用「鲸常在」微信小程序扫码添加这台电脑，在手机上查看工作区与会话、发送任务并接收运行结果。
 
@@ -30,7 +30,7 @@
 主动测试本预览版时，Windows、macOS 和 Linux 使用同一条固定标签命令。先结束任务并正常停止目标 DSH；保留原 `DSH_HOME`、profile 和端口，非 web profile 请替换名称：
 
 ```bash
-npm exec --yes --package=pnpm@11 -- dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.6.0-rc.4
+npm exec --yes --package=pnpm@11 -- dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.6.0-rc.5
 ```
 
 安装完成后，在没有任务运行时重新启动 DSH：

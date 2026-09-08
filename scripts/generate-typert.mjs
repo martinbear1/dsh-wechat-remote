@@ -54,6 +54,7 @@ try {
     'gate-ports.ts',
     'dsh-runtime.ts',
     'dsh-protocol-compat.ts',
+    'dsh-session-address.ts',
     'dsh-realtime-compat.ts',
     'dsh-compatibility-api.ts',
     'secure-file.ts',

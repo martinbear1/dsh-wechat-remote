@@ -1,5 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { setTimeout as delay } from 'node:timers/promises'
+import { resolveDshSessionAddress } from './dsh-session-address.js'
 
 type JsonRecord = Record<string, unknown>
 
@@ -352,7 +353,7 @@ async function historyValue(
   const maxMessages = Number.isSafeInteger(request.maxMessages)
     ? Math.max(1, Math.min(30, Number(request.maxMessages)))
     : 8
-  const address = { kind: 'session', sessionId }
+  const address = await resolveDshSessionAddress(gateway, sessionId, signal)
   const first = recordOf(await firstStreamFrame(
     gateway,
     'session',
@@ -465,10 +466,11 @@ async function sessionModelsValue(
 ): Promise<unknown> {
   const sessionId = typeof request.sessionId === 'string' ? request.sessionId : ''
   if (!sessionId) throw new Error('session.models requires sessionId')
+  const address = await resolveDshSessionAddress(gateway, sessionId, signal)
   const [rawCatalog, rawSnapshot] = await Promise.all([
     gateway.invoke({ namespace: 'session', method: 'modelCatalog', args: {}, signal }),
     firstStreamFrame(gateway, 'session', 'follow', {
-      request: { address: { kind: 'session', sessionId }, maxMessages: 1 },
+      request: { address, maxMessages: 1 },
     }, signal),
   ])
   const catalog = recordOf(rawCatalog)

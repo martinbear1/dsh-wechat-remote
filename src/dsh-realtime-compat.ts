@@ -2,6 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { WebSocket } from 'ws'
 
 import { resolveTypertGateway, type TypertGatewayLike } from './dsh-protocol-compat.js'
+import { resolveDshSessionAddress, isSessionReadError } from './dsh-session-address.js'
 
 type JsonRecord = Record<string, unknown>
 
@@ -201,9 +202,9 @@ export class DshRealtimeCompatibility {
     return gateway
   }
 
-  private run(state: SocketState, task: () => Promise<void>, signal = state.lifetime.signal): void {
+  private run(state: SocketState, task: () => Promise<void>, signal = state.lifetime.signal, allowCompletion = false): void {
     void task().then(() => {
-      if (!signal.aborted && !this.disposed) throw new Error('DSH event source ended unexpectedly')
+      if (!allowCompletion && !signal.aborted && !this.disposed) throw new Error('DSH event source ended unexpectedly')
     }).catch((error: unknown) => {
       if (signal.aborted || state.lifetime.signal.aborted || this.disposed) return
       console.warn('[wechat-gate] legacy realtime adapter failed:',
@@ -314,12 +315,14 @@ export class DshRealtimeCompatibility {
     const controller = new AbortController()
     const combined = AbortSignal.any([state.lifetime.signal, controller.signal])
     state.sessionLifetimes.set(sessionId, controller)
-    this.run(state, async () => {
+    const follow = async () => {
       try {
-        const iterable = await this.gateway().stream({
+        const gateway = this.gateway()
+        const address = await resolveDshSessionAddress(gateway, sessionId, combined)
+        const iterable = await gateway.stream({
           namespace: 'session',
           method: 'follow',
-          args: { request: { address: { kind: 'session', sessionId }, maxMessages: 1 } },
+          args: { request: { address, maxMessages: 1 } },
           signal: combined,
         })
         for await (const raw of iterable) {
@@ -333,12 +336,26 @@ export class DshRealtimeCompatibility {
             this.send(state, { type: 'session/event', sessionId, event: frame.event })
           }
         }
+        if (!combined.aborted) throw new Error('DSH Session stream ended unexpectedly')
+      } catch (error) {
+        if (combined.aborted) return
+        if (!isSessionReadError(error)) throw error
+        // A subsequent explicit read may retry it, but reconnecting another
+        // client must not resurrect an already failed/deleted subscription.
+        this.knownSessions.delete(sessionId)
+        this.send(state, {
+          type: 'host/agent-error', sessionId,
+          message: error instanceof Error ? error.message : 'DSH 会话暂不可读取',
+        })
       } finally {
         if (state.sessionLifetimes.get(sessionId) === controller) {
           state.sessionLifetimes.delete(sessionId)
         }
       }
-    }, combined)
+    }
+    // Session-local failures are contained above; transport/source failures
+    // still close the socket so the client's normal reconnect can recover it.
+    this.run(state, follow, combined, true)
   }
 
   private async followRemoteEvents(state: SocketState): Promise<void> {

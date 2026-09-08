@@ -56,6 +56,7 @@ const calls = []
 const gateway = {
   async invoke(value) {
     calls.push(['invoke', value])
+    if (value.namespace === 'session' && value.method === 'list') return { items: [{ sessionId: 's1' }] }
     if (value.namespace === 'session' && value.method === 'page') {
       return {
         records: [{ type: 'event', event: { type: 'turn/start', seq: 1, time: 1, data: { turn: 1 } } }],
@@ -140,6 +141,7 @@ const defaultModel = { provider: 'provider-a', model: 'default' }
 const modelGateway = {
   async invoke({ namespace, method, args }) {
     assert.equal(namespace, 'session')
+    if (method === 'list') return { items: [{ sessionId: 's1' }, { sessionId: 's2' }] }
     if (method === 'modelCatalog') return { groups: [], default: defaultModel }
     assert.equal(method, 'selectModel')
     const { sessionId, ...selection } = args.request
@@ -233,6 +235,7 @@ let permissionCalls = 0
 let permissionCurrent = 'workspace-write'
 const permissionGateway = {
   async invoke({ namespace, method, args }) {
+    if (namespace === 'session' && method === 'list') return { items: [{ sessionId: 's1' }] }
     permissionCalls++
     assert.equal(namespace, 'commands')
     assert.equal(method, 'execute')
@@ -262,7 +265,8 @@ for (const response of [undefined, {}, { result: { kind: 'error', text: 'unknown
   const failed = await invokeLegacyRpc({ ...permissionGateway, async invoke() { return response } }, permissionRequest('/permission read-only'), options)
   assert.equal(failed.result.error.code, 'adapter/command-failed')
 }
-const notApplied = await invokeLegacyRpc({ ...permissionGateway, async invoke() {
+const notApplied = await invokeLegacyRpc({ ...permissionGateway, async invoke(call) {
+  if (call.method === 'list') return { items: [{ sessionId: 's1' }] }
   return { commandId: 'lying-ack', result: { kind: 'success' } }
 } }, permissionRequest('/permission read-only'), options)
 assert.equal(notApplied.result.error.code, 'adapter/permission-not-applied')

@@ -31,7 +31,11 @@ function source(signal) {
   return stream
 }
 const gateway = {
-  async invoke() {},
+  async invoke({ namespace, method, args }) {
+    if (namespace === 'subagents') return { entries: [{ id: 'child', kind: 'child', mode: 'one-shot' }] }
+    return { items: [...Array.from({ length: 65 }, (_, i) => ({ sessionId: `session-${i}` })),
+      { sessionId: 'child', origin: 'subagent', parentSessionId: 'session-64' }] }
+  },
   async stream({ namespace, method, args, signal }) {
     const stream = source(signal)
     sources.push({ namespace, method, args, signal, stream })
@@ -84,7 +88,7 @@ await until(() => host.messages.length > 0)
 assert.equal(host.messages.filter(frame => frame.payload.type === 'host/session-status').length, 1)
 
 for (let i = 0; i < 65; i++) adapter.subscribeSession(`session-${i}`)
-await until(() => sources.some(value => value.args.request?.address.sessionId === 'session-0' && value.signal.aborted))
+await until(() => sources.filter(value => value.method === 'follow' && value.namespace === 'session' && !value.signal.aborted).length === 128)
 await new Promise(resolve => setTimeout(resolve, 20))
 assert.deepEqual(firstMux.closes, [], 'evicting a Session must not close the node connection')
 assert.deepEqual(secondMux.closes, [])
@@ -105,6 +109,19 @@ assert.equal(remoteSources.length, 2, 'another client takes over when the upstre
 remoteSources[1].stream.push({ type: 'emit', event: 'api-session/status', args: ['session-1', false] })
 await until(() => host.messages.filter(frame => frame.payload.type === 'host/session-status').length === 2)
 assert.deepEqual(secondMux.closes, [])
+adapter.subscribeSession('child')
+await until(() => sources.some(value => value.args.request?.address.childSessionId === 'child'))
+const childSource = sources.find(value => value.args.request?.address.childSessionId === 'child')
+assert.deepEqual(childSource.args.request.address, { kind: 'subagent', parentSessionId: 'session-64', childSessionId: 'child', mode: 'one-shot' })
+childSource.stream.push({ type: 'event', event: { type: 'turn/end', seq: 2, data: {} } })
+await until(() => secondMux.messages.some(frame => frame.payload.sessionId === 'child' && frame.payload.type === 'session/event'))
+adapter.subscribeSession('deleted')
+await until(() => secondMux.messages.some(frame => frame.payload.sessionId === 'deleted' && frame.payload.type === 'host/agent-error'))
+assert.deepEqual(secondMux.closes, [], 'a missing child/session must not disconnect other Sessions')
+const reconnected = peer()
+adapter.connect('/api/events.mux', reconnected)
+await until(() => reconnected.messages.some(frame => frame.payload.type === 'session/subscribed' && frame.payload.sessionId === 'child'))
+assert(!reconnected.messages.some(frame => frame.payload.sessionId === 'deleted'), 'reconnection must not resurrect a failed subscription')
 adapter.dispose()
 assert.equal(sources.every(value => value.signal.aborted), true)
 console.log('DSH realtime compatibility tests passed')

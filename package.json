@@ -100,7 +100,7 @@
     "test:attachment": "node scripts/test-attachment.mjs",
     "test:gate-ports": "node scripts/test-gate-ports.mjs",
     "test:dsh-runtime": "node scripts/test-dsh-runtime.mjs",
-    "test:dsh-protocol-compat": "node scripts/test-dsh-protocol-compat.mjs",
+    "test:dsh-protocol-compat": "node scripts/test-dsh-protocol-compat.mjs && node scripts/test-dsh-session-address.mjs",
     "test:dsh-realtime-compat": "node scripts/test-dsh-realtime-compat.mjs",
     "test:dsh-compatibility-api": "node scripts/test-dsh-compatibility-api.mjs",
     "test:public-relay": "node scripts/test-public-relay.mjs && node scripts/test-relay-liveness.mjs"
@@ -184,6 +184,8 @@
     "lib/dsh-runtime.d.ts",
     "lib/dsh-protocol-compat.js",
     "lib/dsh-protocol-compat.d.ts",
+    "lib/dsh-session-address.js",
+    "lib/dsh-session-address.d.ts",
     "lib/dsh-realtime-compat.js",
     "lib/dsh-realtime-compat.d.ts",
     "lib/dsh-compatibility-api.js",

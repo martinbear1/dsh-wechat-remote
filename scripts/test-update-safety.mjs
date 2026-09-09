@@ -10,7 +10,8 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { EventEmitter } from 'node:events'
 import { spawn } from 'node:child_process'
-import { validateJob, healthy } from '../lib/update-worker.js'
+import { quiesceNativeHost } from '../lib/install-control.js'
+import { validateJob, healthy, releaseOwnedUpdateLock, migrateLegacyGrantOwner } from '../lib/update-worker.js'
 const files = [ ['package/package.json', JSON.stringify({ name: '@harness-remote/dsh-wechat-remote', version: '1.7.0' })], ['package/lib/index.js', ''], ['package/lib/client.js', ''] ]
 function pack(entries) {
   const chunks = []
@@ -54,27 +55,19 @@ await test('updater requires exact Origin Host loopback and no proxy headers', (
 await test('malformed and broad updater filesystem targets rejected', () => {
   assert.throws(() => validateJob({ id: '../bad', directory: '/', profile: '/', home: '/' }))
 })
-await test('maintenance fence persists idle sessions, rejects busy race and restores original WebUI', async () => {
-  let running = false, flushed = 0
-  const server = http.createServer((req, res) => {
-    res.setHeader('content-type', 'application/json')
-    res.end(JSON.stringify(req.url === '/api/session.list' ? { result: { ok: true, value: { items: [{ sessionId: 'test', running }] } } } : { ok: true }))
-  })
-  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
-  const port = server.address().port
-  const sessions = { list: () => [{}], get: () => ({}), flush: async () => { flushed++; return true } }
-  const service = new PluginUpdateService({ get: name => name === 'webServer' ? { server, upgradedSockets: new Set() } : name === 'sessions' ? sessions : null }, { web: port, gate: port + 2, local: port + 3 })
-  try {
-    await service.quiesce()
-    assert.equal(flushed, 1); assert(service.isMaintaining())
-    assert.equal((await fetch(`http://127.0.0.1:${port}/some-write`, { method: 'POST' })).status, 503)
-    service.restoreFence()
-    assert.equal((await fetch(`http://127.0.0.1:${port}/`)).status, 200)
-    running = true
-    await assert.rejects(service.quiesce())
-    assert(!service.isMaintaining()); assert.equal(flushed, 1)
-    assert.equal((await fetch(`http://127.0.0.1:${port}/`)).status, 200)
-  } finally { service.dispose(); await new Promise(resolve => server.close(resolve)) }
+await test('native disposal flushes idle sessions and rejects a busy race before shutdown', async () => {
+  let running = false, flushed = 0, disposed = 0, raced = false
+  const ctx = { get: () => ({ list: () => [{}], flush: async () => { flushed++; if (raced) running = true; return true } }),
+    fiber: { dispose: async () => { disposed++ } } }
+  const read = async () => ({ items: [{ running }] })
+  await quiesceNativeHost(ctx, read, () => {})
+  assert.equal(flushed, 1); assert.equal(disposed, 1)
+  running = true
+  await assert.rejects(quiesceNativeHost(ctx, read, () => {}))
+  assert.equal(flushed, 1); assert.equal(disposed, 1)
+  running = false; raced = true
+  await assert.rejects(quiesceNativeHost(ctx, read, () => {}))
+  assert.equal(flushed, 2); assert.equal(disposed, 1)
 })
 await test('silent HTTP peer cannot multiply the overall restart health deadline', async () => {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'harness-update-deadline-test-')))
@@ -91,25 +84,14 @@ await test('silent HTTP peer cannot multiply the overall restart health deadline
     fs.rmSync(root, { recursive: true })
   }
 })
-await test('old worker completion cannot clear a newer job or its owned lock', async () => {
+await test('old job cannot remove a newer owned lock', () => {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'harness-update-lock-test-')))
   const lock = path.join(root, 'lock')
-  const service = new PluginUpdateService({ get: () => null }, { web: 1000, gate: 1002, local: 1003 })
   try {
-    const old = new EventEmitter(), next = new EventEmitter()
-    service.child = old; service.watchWorker(old, lock, 'old')
-    service.child = next; service.busy = true; let restored = false
-    service.restoreFence = () => { restored = true }
-    fs.writeFileSync(lock, 'next')
-    old.emit('message', { type: 'finished' }); old.emit('exit', 0)
-    assert(service.busy); assert(!restored); assert.equal(fs.readFileSync(lock, 'utf8'), 'next')
-    service.watchWorker(next, lock, 'next'); next.emit('message', { type: 'finished' })
-    assert(!service.busy); assert(restored); assert(!fs.existsSync(lock))
-  } finally {
-    service.dispose()
-    assert(path.basename(root).startsWith('harness-update-lock-test-') && path.dirname(root) === fs.realpathSync(os.tmpdir()))
-    fs.rmSync(root, { recursive: true })
-  }
+    fs.writeFileSync(lock, 'next'); releaseOwnedUpdateLock(lock, 'old')
+    assert.equal(fs.readFileSync(lock, 'utf8'), 'next')
+    releaseOwnedUpdateLock(lock, 'next'); assert(!fs.existsSync(lock))
+  } finally { fs.rmSync(root, { recursive: true }) }
 })
 await test('ready helper does not mutate without explicit initiating-parent start authorization', async () => {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'harness-update-handshake-test-')))
@@ -120,7 +102,7 @@ await test('ready helper does not mutate without explicit initiating-parent star
     executable: process.execPath, cwd: root, pnpm: process.execPath, parentPid: process.pid, webPort: 1000, gatePort: 1002, localPort: 1003,
     targetVersion: '1.7.0', previousVersion: '1.6.0', dshVersion: '0.1.2-rc.1', statusToken: 'b'.repeat(48) }
   fs.writeFileSync(path.join(directory, 'job.json'), JSON.stringify(job)); fs.writeFileSync(path.join(directory, 'package.json'), '{"type":"module"}')
-  for (const file of ['update-worker.js', 'secure-file.js', 'install-profile.js', 'install-runtime.js']) fs.copyFileSync(fileURLToPath(new URL('../lib/' + file, import.meta.url)), path.join(directory, file))
+  for (const file of ['update-worker.js', 'secure-file.js', 'install-profile.js', 'install-runtime.js', 'install-lifecycle.js']) fs.copyFileSync(fileURLToPath(new URL('../lib/' + file, import.meta.url)), path.join(directory, file))
   const child = spawn(process.execPath, [path.join(directory, 'update-worker.js'), path.join(directory, 'job.json')], { cwd: root, windowsHide: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'] })
   const exited = new Promise(resolve => child.once('exit', resolve))
   try {

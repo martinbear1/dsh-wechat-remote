@@ -38,6 +38,8 @@ try {
     'update-service.ts',
     'install-runtime.ts',
     'install-profile.ts',
+    'install-lifecycle.ts',
+    'install-control.ts',
     'directory-service.ts',
     'directory-worker.ts',
     'host-platform.ts',

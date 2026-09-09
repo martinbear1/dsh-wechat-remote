@@ -23,7 +23,6 @@ export declare class PluginUpdateService {
     private ticket?;
     private busy;
     private maintenance;
-    private child?;
     private activeJob?;
     private restoreFence?;
     private startupJob?;
@@ -47,9 +46,7 @@ export declare class PluginUpdateService {
     private recovery;
     check(force?: boolean): Promise<UpdateAdvice>;
     private eligibility;
-    private quiesce;
     private begin;
-    private watchWorker;
     handle(req: IncomingMessage, res: ServerResponse): Promise<void>;
     dispose(): void;
 }

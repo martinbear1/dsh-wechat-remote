@@ -3,11 +3,12 @@ import fs from 'node:fs'
 import path from 'node:path'
 import http from 'node:http'
 import { spawn, type ChildProcess } from 'node:child_process'
-import { createHash, randomBytes } from 'node:crypto'
+import { createHash, createPublicKey, randomBytes } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { writePrivateJsonAtomic } from './secure-file.js'
 import { stageProfile } from './install-profile.js'
 import { INSTALL_PNPM_VERSION } from './install-runtime.js'
+import { validateManager, startManagedHost, stopManagedHost, type HostManager } from './install-lifecycle.js'
 
 export interface UpdateJob {
   id: string; directory: string; profile: string; home: string; stateFile: string
@@ -15,6 +16,8 @@ export interface UpdateJob {
   pnpm: string; parentPid: number; webPort: number; gatePort: number; localPort: number
   targetVersion: string; previousVersion: string; dshVersion: string
   statusToken: string
+  controlOrigin?: string; manager?: HostManager
+  identityFile?: string
 }
 export interface UpdateProgress { phase: string; progress: number; message: string; terminal: boolean; ok?: boolean; rollback?: boolean }
 export function releaseOwnedUpdateLock(lock: string, id: string): void {
@@ -38,7 +41,34 @@ export function validateJob(job: UpdateJob): void {
       || ![job.webPort, job.gatePort, job.localPort].every(p => Number.isInteger(p) && p > 0 && p <= 65535)
       || !job.argv.includes(job.cli) || !job.argv.includes('web') || !/^[\w.+-]{1,80}$/.test(job.targetVersion)) throw new Error('更新任务范围校验失败')
   safePlainDirectory(job.profile); safePlainDirectory(job.directory)
-  for (const f of [job.executable, job.cli, job.pnpm, job.stateFile]) if (!fs.statSync(f).isFile()) throw new Error('安装运行时已变化')
+  if (job.identityFile && !within(job.home, job.identityFile)) throw new Error('节点身份文件不属于当前 DSH')
+  if (job.controlOrigin) {
+    const u = new URL(job.controlOrigin)
+    if (u.protocol !== 'http:' || u.hostname !== '127.0.0.1' || !u.port || u.username || u.password || u.pathname !== '/' || u.search || u.hash) throw new Error('安装控制地址无效')
+    validateManager(job.manager!)
+  }
+  for (const f of [job.executable, job.cli, job.pnpm, ...(job.previousVersion === '0.0.0' ? [] : [job.stateFile])]) if (!fs.statSync(f).isFile()) throw new Error('安装运行时已变化')
+}
+export async function control(job: UpdateJob, operation: string, input: unknown = {}): Promise<any> {
+  let res: Response | undefined
+  for (let attempt = 0; attempt < (operation === 'describe' ? 3 : 1); attempt++) {
+    try {
+      res = await fetch(job.controlOrigin + '/' + operation, { method: 'POST', headers: {
+        authorization: `Bearer ${job.statusToken}`, 'content-type': 'application/json', connection: 'close',
+      }, body: JSON.stringify(input), signal: AbortSignal.timeout(operation === 'quiesce' ? 20000 : 12000), redirect: 'error' })
+      break
+    } catch (error) {
+      if (operation !== 'describe' || attempt === 2) throw new Error(`安装控制 ${operation} 未完成`, { cause: error })
+      await wait(150)
+    }
+  }
+  if (!res) throw new Error('安装控制通道未响应')
+  const value = await res.json() as any
+  if (!res.ok) throw new Error(value.error || '无法确认当前主机状态')
+  return value
+}
+async function beforeRpc(job: UpdateJob, method: string, payload = {}): Promise<any> {
+  return job.controlOrigin ? control(job, 'read', { method, payload }) : rpc(job, method, payload)
 }
 async function rpc(job: UpdateJob, method: string, payload = {}, deadline?: AbortSignal): Promise<any> {
   const state = JSON.parse(fs.readFileSync(job.stateFile, 'utf8'))
@@ -72,12 +102,28 @@ function durableSnapshot(job: UpdateJob): Record<string, string> {
       result[e.name] = hashFile(f)
     }
   }
-  const state = JSON.parse(fs.readFileSync(job.stateFile, 'utf8'))
-  result['$binding'] = createHash('sha256').update(JSON.stringify([state.token, state.wechatBindings])).digest('hex')
+  if (fs.existsSync(job.stateFile)) {
+    const state = JSON.parse(fs.readFileSync(job.stateFile, 'utf8'))
+    result['$binding'] = createHash('sha256').update(JSON.stringify([state.token, state.wechatBindings])).digest('hex')
+  }
   return result
 }
 function assertPreserved(before: Record<string, string>, after: Record<string, string>): void {
   for (const [key, hash] of Object.entries(before)) if (after[key] !== hash) throw new Error('升级后数据校验不一致；停止自动操作并保留备份')
+}
+/** Legacy grants acquire an owner only inside this verified, backed-up upgrade.
+ * A later actual identity replacement still invalidates the old grants normally.
+ */
+export function migrateLegacyGrantOwner(job: UpdateJob): void {
+  if (job.previousVersion !== '1.5.5' || !job.identityFile || !fs.existsSync(job.identityFile)) return
+  const state = JSON.parse(fs.readFileSync(job.stateFile, 'utf8'))
+  if (state.publicIdentityNodeId) return
+  const identity = JSON.parse(fs.readFileSync(job.identityFile, 'utf8'))
+  const publicKey = createPublicKey(identity.privateKeyPem).export({ format: 'der', type: 'spki' })
+  const savedKey = createPublicKey(identity.publicKeyPem).export({ format: 'der', type: 'spki' })
+  const nodeId = createHash('sha256').update(publicKey).digest().subarray(0, 18).toString('base64url')
+  if (!publicKey.equals(savedKey) || identity.nodeId !== nodeId) throw new Error('旧节点身份校验未通过，未迁移配对')
+  writePrivateJsonAtomic(job.stateFile, { ...state, publicIdentityNodeId: nodeId })
 }
 async function describe(job: UpdateJob, deadline?: AbortSignal): Promise<any> {
   const value = await rpc(job, 'wechatHost/describe', { args: { request: {} } }, deadline)
@@ -106,7 +152,8 @@ async function verifyFence(job: UpdateJob): Promise<void> {
     if (res.status !== 503) throw new Error('新插件未保持重启验证保护，不能确认安全更新')
   }
 }
-function start(job: UpdateJob): ChildProcess {
+function start(job: UpdateJob): ChildProcess | undefined {
+  if (job.manager && job.manager.kind !== 'process') { startManagedHost(job.manager); return }
   const log = fs.openSync(path.join(job.directory, 'restart.log'), 'a', 0o600)
   const child = spawn(job.executable, [...job.execArgv, ...job.argv], {
     cwd: job.cwd, env: { ...process.env, HARNESS_REMOTE_UPDATE_JOB: job.directory }, stdio: ['ignore', log, log], detached: true, windowsHide: true,
@@ -117,6 +164,21 @@ function start(job: UpdateJob): ChildProcess {
   if (!child.pid) throw new Error('无法启动原 DSH 命令')
   writePrivateJsonAtomic(path.join(job.directory, 'restarted-process.json'), { pid: child.pid, cli: job.cli, home: job.home, webPort: job.webPort })
   return child
+}
+async function stopOriginal(job: UpdateJob): Promise<void> {
+  if (!job.controlOrigin) {
+    if (process.connected !== true || process.ppid !== job.parentPid) throw new Error('启动身份已变化，未停止 DSH')
+    await stopChild(job.parentPid); return
+  }
+  const host = await control(job, 'describe')
+  if (host.pid !== job.parentPid || host.cli !== job.cli || host.profile !== job.profile) throw new Error('当前 DSH 身份已变化')
+  if (job.manager && job.manager.kind !== 'process') stopManagedHost(job.manager)
+  else await control(job, 'shutdown')
+  for (let i = 0; i < 150; i++) {
+    try { process.kill(job.parentPid, 0) } catch { return }
+    await wait(100)
+  }
+  throw new Error('原 DSH 尚未结束，未替换插件')
 }
 async function stopRestarted(child: ChildProcess): Promise<void> {
   // Retain the process handle and exit state. A failed launch may already have
@@ -145,18 +207,24 @@ export async function executeUpdate(job: UpdateJob, progress: (p: UpdateProgress
   let staged = ''
   const previous = path.join(job.directory, 'profile-before')
   const emit = (phase: string, n: number, message: string) => progress({ phase, progress: n, message, terminal: false })
-  let stopped = false, swapped = false, newChild: ChildProcess | undefined
-  let before: Record<string, string> = {}, sessionIds: string[] = []
+  let stopped = false, disposed = false, swapped = false, newChild: ChildProcess | undefined
+  let before: Record<string, string> = {}, sessionIds: string[] = [], readableIds: string[] = []
   try {
     emit('staging', 25, '暂存更新与依赖，当前节点仍可使用')
     staged = await stageProfile({ profile: job.profile, directory: job.directory, cli: job.cli,
       targetVersion: job.targetVersion, runtime: { executable: job.executable, cli: job.pnpm, version: INSTALL_PNPM_VERSION } })
     emit('checking', 50, '确认会话空闲并保存状态')
-    if ((await describe(job)).pluginVersion !== job.previousVersion) throw new Error('当前插件在检查后发生变化')
-    const list = (await rpc(job, 'session.list')).items
+    const old = job.controlOrigin ? await control(job, 'describe') : await describe(job)
+    if (old.pluginVersion !== job.previousVersion) throw new Error('当前插件在检查后发生变化')
+    const list = (await beforeRpc(job, 'session.list')).items
     if (!Array.isArray(list) || list.some((s: any) => s.running !== false)) throw new Error('请等待全部会话结束后再更新')
     sessionIds = list.map((s: any) => s.sessionId).sort()
+    // A history already unreadable before an update is not a new regression.
+    for (const sessionId of sessionIds) {
+      try { await beforeRpc(job, 'session.history', { sessionId, maxMessages: 1 }); readableIds.push(sessionId) } catch { /* baseline unavailable */ }
+    }
     await quiesce() // Parent installs a maintenance fence, checks and flushes native sessions.
+    disposed = Boolean(job.controlOrigin)
     before = durableSnapshot(job)
     writePrivateJsonAtomic(path.join(job.directory, 'before-hashes.json'), before)
     emit('backup', 60, '备份配置与数据')
@@ -172,9 +240,9 @@ export async function executeUpdate(job: UpdateJob, progress: (p: UpdateProgress
     emit('restarting', 70, '正在重启当前 DSH，连接会暂时断开')
     // Only our still-attached IPC parent is stopped; do not resolve an arbitrary
     // listener and kill it. PID reuse is excluded while that parent is alive.
-    if (process.connected !== true || process.ppid !== job.parentPid) throw new Error('启动身份已变化，未停止 DSH')
-    await stopChild(job.parentPid); stopped = true
+    await stopOriginal(job); stopped = true
     assertPreserved(before, durableSnapshot(job))
+    migrateLegacyGrantOwner(job)
     safePlainDirectory(job.profile)
     fs.renameSync(job.profile, previous)
     try { fs.renameSync(staged, job.profile); swapped = true } catch (error) { fs.renameSync(previous, job.profile); throw error }
@@ -185,15 +253,22 @@ export async function executeUpdate(job: UpdateJob, progress: (p: UpdateProgress
     assertPreserved(before, durableSnapshot(job))
     const after = (await rpc(job, 'session.list')).items.map((s: any) => s.sessionId).sort()
     if (JSON.stringify(after) !== JSON.stringify(sessionIds)) throw new Error('重启后会话列表不一致')
-    for (const id of sessionIds) await rpc(job, 'session.history', { sessionId: id, maxMessages: 1 })
+    for (const id of readableIds) await rpc(job, 'session.history', { sessionId: id, maxMessages: 1 })
     writePrivateJsonAtomic(path.join(job.directory, 'verification-complete.json'), { id: job.id })
     return { phase: 'complete', progress: 100, message: '插件更新完成，DSH 已恢复；原节点无需重新配对。', terminal: true, ok: true }
   } catch (error) {
     let rollback = false
-    if (stopped) {
+    writePrivateJsonAtomic(path.join(job.directory, 'failure.json'), { message: error instanceof Error ? error.message : 'unknown',
+      stack: error instanceof Error ? error.stack : undefined, cause: error instanceof Error && error.cause instanceof Error ? error.cause.message : undefined })
+    if (job.controlOrigin && !disposed) {
+      try { disposed = (await control(job, 'describe')).quiesced === true } catch {}
+    }
+    if (stopped || disposed) {
       emit('rolling-back', 90, '更新未通过验证，正在恢复原插件')
       try {
+        if (!stopped) { await stopOriginal(job); stopped = true }
         if (newChild) await stopRestarted(newChild)
+        else if (swapped && job.manager && job.manager.kind !== 'process') stopManagedHost(job.manager)
         if (swapped) {
           fs.renameSync(job.profile, path.join(job.directory, 'profile-failed'))
           fs.renameSync(previous, job.profile)
@@ -210,7 +285,7 @@ export async function executeUpdate(job: UpdateJob, progress: (p: UpdateProgress
 async function workerMain(filename: string): Promise<void> {
   const job = JSON.parse(fs.readFileSync(filename, 'utf8')) as UpdateJob
   validateJob(job)
-  if (process.ppid !== job.parentPid || !process.connected) throw new Error('Updater requires its initiating parent')
+  if (!job.controlOrigin && (process.ppid !== job.parentPid || !process.connected)) throw new Error('Updater requires its initiating parent')
   let status: UpdateProgress = { phase: 'starting', progress: 20, message: '正在准备更新', terminal: false }
   const record = (value: UpdateProgress) => {
     status = value
@@ -231,7 +306,16 @@ async function workerMain(filename: string): Promise<void> {
   })
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
   try {
-    await new Promise<void>((resolve, reject) => {
+    if (job.controlOrigin) {
+      writePrivateJsonAtomic(path.join(job.directory, 'worker-ready.json'), { id: job.id, origin: `http://127.0.0.1:${(server.address() as any).port}` })
+      let authorized = false
+      for (let i = 0; i < 150; i++) {
+        try { authorized = JSON.parse(fs.readFileSync(path.join(job.directory, 'authorized.json'), 'utf8')).id === job.id } catch {}
+        if (authorized) break
+        await wait(100)
+      }
+      if (!authorized || (await control(job, 'describe')).pid !== job.parentPid) throw new Error('Updater start authorization expired')
+    } else await new Promise<void>((resolve, reject) => {
       const cleanup = () => { clearTimeout(timer); process.off('message', message); process.off('disconnect', disconnected) }
       const message = (m: any) => { if (m.type === 'start' && m.id === job.id) { cleanup(); resolve() } }
       const disconnected = () => { cleanup(); reject(new Error('Initiating parent disconnected before authorization')) }
@@ -240,7 +324,7 @@ async function workerMain(filename: string): Promise<void> {
       process.send?.({ type: 'ready', origin: `http://127.0.0.1:${(server.address() as any).port}` })
     })
   } catch (error) { server.close(); throw error }
-  const quiesce = () => new Promise<void>((resolve, reject) => {
+  const quiesce = () => job.controlOrigin ? control(job, 'quiesce').then(() => {}) : new Promise<void>((resolve, reject) => {
     const timeout = setTimeout(() => { process.off('message', handler); reject(new Error('无法确认会话状态已保存')) }, 15000)
     const handler = (message: any) => {
       if (message.type !== 'quiesced') return
@@ -257,6 +341,7 @@ async function workerMain(filename: string): Promise<void> {
   }
   const lock = path.join(job.profile, '.harness-remote-update.lock')
   releaseOwnedUpdateLock(lock, job.id)
+  if (job.controlOrigin) { try { await control(job, 'close') } catch {} }
   if (process.connected) process.send?.({ type: 'finished' })
   // Keep progress available across DSH restart; no permanent extra service.
   const timer = setTimeout(() => { server.close(); if (process.connected) process.disconnect() }, 120000)

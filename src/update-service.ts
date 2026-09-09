@@ -1,6 +1,5 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { spawn, type ChildProcess } from 'node:child_process'
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import type { IncomingMessage, ServerResponse } from 'node:http'
@@ -9,8 +8,9 @@ import { adapterDshHome, isAllowedDshWebOrigin } from './dsh-runtime.js'
 import { agentProfileScope, defaultGateStatePath, loadAgentDescriptor } from './agent-metadata.js'
 import { assessUpdate, validateCatalog, trustedReleaseAsset, type RuntimeVersion, type UpdateCatalog, type UpdateAdvice, type Release } from './update-policy.js'
 import { boundedFetch, downloadRelease } from './update-download.js'
-import { validateJob, releaseOwnedUpdateLock, type UpdateJob } from './update-worker.js'
-import { resolveTypertGateway, invokeLegacyRpc } from './dsh-protocol-compat.js'
+import { validateJob, releaseOwnedUpdateLock, control, type UpdateJob } from './update-worker.js'
+import { createInstallControl } from './install-control.js'
+import { currentHostManager } from './install-lifecycle.js'
 import { tightenPrivateFile, writePrivateJsonAtomic } from './secure-file.js'
 import { resolveInstallRuntime, verifyInstallRuntime } from './install-runtime.js'
 
@@ -35,7 +35,7 @@ export function updateAction(advice: UpdateAdvice, release: Release | undefined,
   // Host-side command, not an executable instruction supplied by the WebUI.
   const profile = agentProfileScope()
   const manualCommand = release.channel === 'stable' && /^\d+\.\d+\.\d+$/.test(release.version) && /^[A-Za-z0-9_-]+$/.test(profile)
-    ? `npm exec --yes --package=pnpm@11 -- dsh plugin --profile ${profile} add github:martinbear1/dsh-wechat-remote#v${release.version}` : ''
+    ? `npx -y dsh-wechat-remote@latest${profile === 'web' ? '' : ` --profile ${profile}`}` : ''
   return { canInstall: false, mode: 'manual', reason: !eligible.eligible ? eligible.reason : '自动更新包暂不可用，请手动更新。', manualCommand }
 }
 export function acceptsUpdateRequest(req: Pick<IncomingMessage, 'headers' | 'socket'>, webPort: number, localPort: number): boolean {
@@ -60,7 +60,6 @@ export class PluginUpdateService {
   private ticket?: { value: string; expiresAt: number; revision: string; release: Release }
   private busy = false
   private maintenance = false
-  private child?: ChildProcess
   private activeJob?: UpdateJobReference
   private restoreFence?: () => void
   private startupJob?: UpdateJob
@@ -83,8 +82,17 @@ export class PluginUpdateService {
   // verifies durable data. Automatic phone reconnects must not rotate a token
   // or append a message in the middle of that comparison.
   private fenceStartup(): void {
-    const directory = process.env.HARNESS_REMOTE_UPDATE_JOB
-    if (!directory) return
+    let directory = process.env.HARNESS_REMOTE_UPDATE_JOB
+    if (!directory) {
+      try {
+        const ref = JSON.parse(fs.readFileSync(this.progressIndex(), 'utf8'))
+        if (!/^[a-f0-9]{32}$/.test(ref.jobId)) return
+        const candidate = path.join(adapterDshHome(), 'harness-remote-updates', ref.jobId)
+        const result = JSON.parse(fs.readFileSync(path.join(candidate, 'result.json'), 'utf8'))
+        if (result.terminal || !['restarting', 'verifying', 'rolling-back'].includes(result.phase)) return
+        directory = candidate
+      } catch { return }
+    }
     const job = JSON.parse(fs.readFileSync(path.join(directory, 'job.json'), 'utf8')) as UpdateJob
     validateJob(job)
     if (job.directory !== directory || job.home !== adapterDshHome()
@@ -167,10 +175,8 @@ export class PluginUpdateService {
     try {
       const current = this.current()
       if (!supportedDsh.includes(current.agentVersion) || process.arch !== 'x64') throw new Error('此 DSH / 架构的自动重启尚未验证，请手工更新')
-      // The worker only restarts ordinary node CLI instances, never a service
-      // manager/container/Electron process or a command with secret arguments.
-      if (process.env.INVOCATION_ID || process.env.PM2_HOME || process.env.NODE_APP_INSTANCE || process.versions.electron
-          || process.env.KUBERNETES_SERVICE_HOST || process.env.container || process.env.LAUNCH_JOBKEY_LABEL) throw new Error('由服务管理器启动的 DSH，请通过原服务管理方式更新')
+      if (process.versions.electron) throw new Error('此启动方式尚不支持自动重启')
+      currentHostManager()
       if (!process.argv.includes('web') || process.argv.some(a => /(?:api.?key|password|secret|token)[= ]/i.test(a))
           || process.execArgv.length) throw new Error('此启动方式不能安全自动重启，请手工更新')
       const cli = fs.realpathSync(process.argv[1])
@@ -186,66 +192,6 @@ export class PluginUpdateService {
       return { eligible: true, reason: '', profile, pnpm: resolveInstallRuntime(ownRoot).cli, cli }
     } catch (error) { return { eligible: false, reason: error instanceof Error ? error.message : '安装环境暂不支持自动更新' } }
   }
-  private async quiesce(): Promise<void> {
-    const web = this.ctx.get('webServer') as any
-    const server = web?.server
-    if (!server?.listeners) throw new Error('无法暂停主机请求')
-    // This short fence applies to the native WebUI AND the LAN proxy. Public
-    // in-process calls are fenced by DshCompatibilityApi below.
-    const requests = server.listeners('request'), upgrades = server.listeners('upgrade')
-    const paused = (req: IncomingMessage, res: ServerResponse) => {
-      if (req.method === 'POST' && req.url === '/api/session.list' && req.headers['x-harness-update-read'] === this.readToken
-          && ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress || '')) {
-        requests.forEach((listener: (req: IncomingMessage, res: ServerResponse) => void) => listener.call(server, req, res)); return
-      }
-      res.writeHead(503, { 'retry-after': '15' }); res.end('Plugin update in progress')
-    }
-    const upgradePaused = (_req: unknown, socket: { destroy(): void }) => socket.destroy()
-    server.removeAllListeners('request'); server.removeAllListeners('upgrade')
-    server.on('request', paused); server.on('upgrade', upgradePaused)
-    this.maintenance = true
-    this.restoreFence = () => {
-      server.removeListener('request', paused); server.removeListener('upgrade', upgradePaused)
-      requests.forEach((listener: (...args: any[]) => void) => server.on('request', listener))
-      upgrades.forEach((listener: (...args: any[]) => void) => server.on('upgrade', listener))
-      this.maintenance = false; this.restoreFence = undefined
-    }
-    try {
-      for (const socket of web.upgradedSockets || []) socket.destroy()
-      const deadline = Date.now() + 5000
-      while (this.nativeRequests.size || this.otherInFlight()) {
-        if (Date.now() > deadline) throw new Error('仍有请求未完成')
-        await new Promise(resolve => setTimeout(resolve, 50))
-      }
-      const gateway = resolveTypertGateway(this.ctx)
-      const request = { type: 'client-request' as const, rpcId: 'update-idle', method: 'session.list', payload: {} }
-      let value: any
-      if (gateway) {
-        const reply = await invokeLegacyRpc(gateway, request, { signal: AbortSignal.timeout(5000), describeHost: () => ({}) })
-        if (!reply.result.ok) throw new Error('无法确认会话空闲')
-        value = reply.result.value
-      } else {
-        const response = await fetch(`http://127.0.0.1:${this.ports.web}/api/session.list`, {
-          method: 'POST', headers: { 'content-type': 'application/json', 'x-harness-update-read': this.readToken },
-          body: JSON.stringify(request), signal: AbortSignal.timeout(5000), redirect: 'error',
-        })
-        const reply = await response.json() as any
-        if (!reply.result?.ok) throw new Error('无法确认会话空闲')
-        value = reply.result.value
-      }
-      if (!Array.isArray(value?.items) || value.items.some((item: any) => item.running !== false)) throw new Error('会话仍在运行')
-      // Native session service shape is stable on the three explicitly tested
-      // DSHs; do not reach across namespaces or maintain a shadow session store.
-      const sessions = this.ctx.get('sessions') as any
-      const items = sessions.list?.()
-      if (!Array.isArray(items)) throw new Error('无法枚举待保存会话')
-      for (const session of items) {
-        if (!await sessions.flush(session)) throw new Error('会话未保存')
-      }
-      // Upgraded sockets were closed above; this closes idle HTTP keep-alives.
-      server.closeAllConnections?.()
-    } catch (error) { this.restoreFence?.(); throw error }
-  }
   private async begin(ticket: string): Promise<unknown> {
     if (this.isMaintaining()) throw new Error('当前实例正在验证或重启，请稍后重试')
     if (this.busy) return this.activeJob || { phase: 'preparing' }
@@ -257,7 +203,7 @@ export class PluginUpdateService {
     let lockPath = ''
     let ownedLock = false
     let ownedLockId = ''
-    let startedChild: ChildProcess | undefined
+    let controller: Awaited<ReturnType<typeof createInstallControl>> | undefined
     try {
       const advice = await this.check(true)
       const refreshed = this.catalog?.releases.find(r => r.version === advice.targetVersion)
@@ -274,58 +220,50 @@ export class PluginUpdateService {
       await verifyInstallRuntime(resolveInstallRuntime(ownRoot))
       const archive = await downloadRelease(plan.release)
       fs.writeFileSync(path.join(directory, 'release.tgz'), archive, { flag: 'wx', mode: 0o600 })
+      const statusToken = randomBytes(24).toString('hex')
+      controller = await createInstallControl(this.ctx, { directory, token: statusToken, pnpm: eligible.pnpm! })
       const job: UpdateJob = { id, directory, profile: eligible.profile!, home, stateFile: defaultGateStatePath(),
         cli: eligible.cli!, argv: [eligible.cli!, ...process.argv.slice(2)], execArgv: process.execArgv,
         executable: process.execPath, cwd: process.cwd(), pnpm: eligible.pnpm!, parentPid: process.pid,
         webPort: this.ports.web, gatePort: this.ports.gate, localPort: this.ports.local,
         targetVersion: plan.release.version, previousVersion: ownVersion(), dshVersion: this.current().agentVersion,
-        statusToken: randomBytes(24).toString('hex') }
+        statusToken, controlOrigin: controller.origin, manager: currentHostManager() }
       validateJob(job)
       writePrivateJsonAtomic(path.join(directory, 'job.json'), job)
       writePrivateJsonAtomic(path.join(directory, 'package.json'), { type: 'module' })
       // Keep the worker's complete built-in-only module closure outside the
       // profile that will be renamed. No model credentials serialized to disk.
-      for (const name of ['update-worker.js', 'secure-file.js', 'install-profile.js', 'install-runtime.js']) fs.copyFileSync(path.join(ownRoot, 'lib', name), path.join(directory, name))
-      const log = fs.openSync(path.join(directory, 'worker.log'), 'a', 0o600)
-      this.child = spawn(process.execPath, [path.join(directory, 'update-worker.js'), path.join(directory, 'job.json')], {
-        detached: true, windowsHide: true, stdio: ['ignore', log, log, 'ipc'], env: process.env, cwd: process.cwd(),
-      })
-      fs.closeSync(log); tightenPrivateFile(path.join(directory, 'worker.log'))
-      const child = this.child
-      startedChild = child
-      this.watchWorker(child, lockPath, id)
-      const statusOrigin = await new Promise<string>((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error('更新辅助进程启动超时')), 10000)
-        child.once('error', () => { clearTimeout(timer); reject(new Error('无法启动更新辅助进程')) })
-        child.on('message', (m: any) => { if (m.type === 'ready') { clearTimeout(timer); resolve(m.origin) } })
-      })
+      for (const name of ['update-worker.js', 'secure-file.js', 'install-profile.js', 'install-runtime.js', 'install-lifecycle.js']) fs.copyFileSync(path.join(ownRoot, 'lib', name), path.join(directory, name))
+      await control(job, 'launch')
+      let statusOrigin = ''
+      for (let i = 0; i < 100; i++) {
+        try {
+          const ready = JSON.parse(fs.readFileSync(path.join(directory, 'worker-ready.json'), 'utf8'))
+          if (ready.id === id && /^http:\/\/127\.0\.0\.1:\d+$/.test(ready.origin)) { statusOrigin = ready.origin; break }
+        } catch {}
+        await new Promise(resolve => setTimeout(resolve, 100))
+      }
+      if (!statusOrigin) throw new Error('更新辅助进程启动超时')
       this.activeJob = { jobId: id, statusOrigin, statusToken: job.statusToken }
       writePrivateJsonAtomic(this.progressIndex(), this.activeJob)
-      // Readiness is not permission to mutate. A timed-out helper cannot keep
-      // going after the WebUI was told that startup failed.
-      child.send({ type: 'start', id })
+      writePrivateJsonAtomic(path.join(directory, 'authorized.json'), { id })
+      const timer = setInterval(() => {
+        try {
+          const result = JSON.parse(fs.readFileSync(path.join(directory, 'result.json'), 'utf8'))
+          if (!result.terminal) return
+          clearInterval(timer)
+          if (this.activeJob?.jobId === id) this.busy = false
+          controller?.close()
+        } catch {}
+      }, 1000)
+      timer.unref()
       return this.activeJob
     } catch (error) {
-      if (startedChild && startedChild.exitCode === null && startedChild.signalCode === null) startedChild.kill('SIGTERM')
+      controller?.close()
       this.busy = false; this.restoreFence?.()
       if (ownedLock) releaseOwnedUpdateLock(lockPath, ownedLockId)
       throw error
     }
-  }
-  private watchWorker(child: ChildProcess, lockPath: string, id: string): void {
-    const settled = () => {
-      // A previous job's temporary progress server can exit while the next job
-      // is running. It must not clear that newer job's fence or lock.
-      if (this.child !== child) return
-      this.restoreFence?.(); this.busy = false; releaseOwnedUpdateLock(lockPath, id)
-    }
-    child.on('message', (m: any) => {
-      if (this.child !== child) return
-      const reply = (ok: boolean) => { if (child.connected) child.send({ type: 'quiesced', ok }, () => {}) }
-      if (m.type === 'quiesce') void this.quiesce().then(() => reply(true), () => reply(false))
-      if (m.type === 'finished') settled()
-    })
-    child.on('exit', settled)
   }
   async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const json = (code: number, body: unknown) => { res.writeHead(code, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(body)) }

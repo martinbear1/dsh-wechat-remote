@@ -6,7 +6,7 @@ import net from 'node:net'
 import { spawn } from 'node:child_process'
 import { randomBytes, createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
-import { attachControl, waitForJson } from './native-control.mjs'
+import { attachControl, waitForJson, waitForInstallControl } from './native-control.mjs'
 import { resolveInstallRuntime, verifyInstallRuntime } from '../lib/install-runtime.js'
 import { validateCatalog, releaseMatches, compareVersions } from '../lib/update-policy.js'
 import { boundedFetch, downloadRelease, auditArchive } from '../lib/update-download.js'
@@ -89,14 +89,27 @@ export async function install({ profileName = 'web', cli = findDsh(), assetsRoot
     fs.copyFileSync(path.join(root, 'lib/install-control.js'), helper)
     writePrivateJsonAtomic(path.join(directory, 'package.json'), { type: 'module' })
     remove = attachControl(profile, helper, { directory, token, pnpm: runtime.cli })
-    try { ref = await waitForJson(path.join(directory, 'control-ready.json'), v => Number.isInteger(v.pid), 5000) }
-    catch {
-      if (launched || await portBusy(Number(process.env.DSH_PORT || 3080))) throw new Error('当前 DSH 尚未完成安装握手，未替换插件。')
-      const log = fs.openSync(path.join(directory, 'startup.log'), 'a', 0o600)
-      launched = spawn(process.execPath, [cli, 'web', '--profile', profileName, '--no-open'], {
-        cwd: process.cwd(), env: process.env, detached: true, windowsHide: true, stdio: ['ignore', log, log] })
-      fs.closeSync(log); launched.on('error', () => {}); launched.unref()
-      ref = await waitForJson(path.join(directory, 'control-ready.json'), v => v.pid === launched.pid, 20000)
+    const handshakeStarted = Date.now()
+    try {
+      ref = await waitForInstallControl(path.join(directory, 'control-ready.json'), {
+        accept: v => Number.isInteger(v.pid) && v.pid > 0 && (!launched || v.pid === launched.pid),
+        onWaiting: () => console.log('正在等待 DSH 完成安装准备，请勿重复执行命令…'),
+        ensureRunning: async () => {
+          if (launched || await portBusy(Number(process.env.DSH_PORT || 3080))) return
+          const log = fs.openSync(path.join(directory, 'startup.log'), 'a', 0o600)
+          launched = spawn(process.execPath, [cli, 'web', '--profile', profileName, '--no-open'], {
+            cwd: process.cwd(), env: process.env, detached: true, windowsHide: true, stdio: ['ignore', log, log] })
+          fs.closeSync(log); launched.on('error', () => {}); launched.unref()
+        },
+      })
+      writePrivateJsonAtomic(path.join(directory, 'handshake.json'), {
+        state: 'ready', elapsedMs: Date.now() - handshakeStarted, startedHost: Boolean(launched),
+      })
+    } catch {
+      writePrivateJsonAtomic(path.join(directory, 'handshake.json'), {
+        state: 'timeout', elapsedMs: Date.now() - handshakeStarted, startedHost: Boolean(launched),
+      })
+      throw new Error('DSH 安装准备超时，原插件未替换。本机安装记录：' + path.join(directory, 'handshake.json'))
     }
     job = { controlOrigin: ref.origin, statusToken: token }
     const host = await control(job, 'describe')

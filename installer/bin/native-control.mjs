@@ -53,3 +53,18 @@ export async function waitForJson(filename, accept, timeout = 20000) {
   }
   throw new Error('DSH 没有完成安装握手；原插件未替换。请确认 DSH WebUI 正在运行且允许原生插件热加载。')
 }
+
+/** One bounded native handshake, including a possible offline host start.
+ * A listening WebUI is not proof that the asynchronous profile reload finished.
+ * Keep the same control entry/token while waiting; never restart a live host. */
+export async function waitForInstallControl(filename, {
+  accept, ensureRunning, onWaiting = () => {}, timeoutMs = 60000, initialWaitMs = 5000,
+}) {
+  const deadline = Date.now() + timeoutMs
+  try { return await waitForJson(filename, accept, Math.min(initialWaitMs, timeoutMs)) }
+  catch {
+    onWaiting()
+    if (Date.now() < deadline) await ensureRunning()
+    return await waitForJson(filename, accept, Math.max(0, deadline - Date.now()))
+  }
+}

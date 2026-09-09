@@ -120,7 +120,7 @@ await test('ready helper does not mutate without explicit initiating-parent star
     executable: process.execPath, cwd: root, pnpm: process.execPath, parentPid: process.pid, webPort: 1000, gatePort: 1002, localPort: 1003,
     targetVersion: '1.7.0', previousVersion: '1.6.0', dshVersion: '0.1.2-rc.1', statusToken: 'b'.repeat(48) }
   fs.writeFileSync(path.join(directory, 'job.json'), JSON.stringify(job)); fs.writeFileSync(path.join(directory, 'package.json'), '{"type":"module"}')
-  for (const file of ['update-worker.js', 'secure-file.js']) fs.copyFileSync(fileURLToPath(new URL('../lib/' + file, import.meta.url)), path.join(directory, file))
+  for (const file of ['update-worker.js', 'secure-file.js', 'install-profile.js', 'install-runtime.js']) fs.copyFileSync(fileURLToPath(new URL('../lib/' + file, import.meta.url)), path.join(directory, file))
   const child = spawn(process.execPath, [path.join(directory, 'update-worker.js'), path.join(directory, 'job.json')], { cwd: root, windowsHide: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc'] })
   const exited = new Promise(resolve => child.once('exit', resolve))
   try {

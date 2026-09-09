@@ -36,6 +36,8 @@ try {
     'update-download.ts',
     'update-worker.ts',
     'update-service.ts',
+    'install-runtime.ts',
+    'install-profile.ts',
     'directory-service.ts',
     'directory-worker.ts',
     'host-platform.ts',

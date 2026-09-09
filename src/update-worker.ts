@@ -6,8 +6,9 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { createHash, randomBytes } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { writePrivateJsonAtomic } from './secure-file.js'
+import { stageProfile } from './install-profile.js'
+import { INSTALL_PNPM_VERSION } from './install-runtime.js'
 
-const PLUGIN = '@harness-remote/dsh-wechat-remote'
 export interface UpdateJob {
   id: string; directory: string; profile: string; home: string; stateFile: string
   cli: string; argv: string[]; execArgv: string[]; executable: string; cwd: string
@@ -38,16 +39,6 @@ export function validateJob(job: UpdateJob): void {
       || !job.argv.includes(job.cli) || !job.argv.includes('web') || !/^[\w.+-]{1,80}$/.test(job.targetVersion)) throw new Error('更新任务范围校验失败')
   safePlainDirectory(job.profile); safePlainDirectory(job.directory)
   for (const f of [job.executable, job.cli, job.pnpm, job.stateFile]) if (!fs.statSync(f).isFile()) throw new Error('安装运行时已变化')
-}
-function run(job: UpdateJob, args: string[], cwd: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const log = fs.openSync(path.join(job.directory, 'install.log'), 'a', 0o600)
-    const child = spawn(job.executable, args, { cwd, env: { ...process.env, CI: 'true' }, stdio: ['ignore', log, log], windowsHide: true })
-    fs.closeSync(log)
-    const timer = setTimeout(() => { child.kill(); reject(new Error('暂存安装超时，原插件未替换')) }, 180000)
-    child.once('error', () => { clearTimeout(timer); reject(new Error('无法启动本机包管理器')) })
-    child.once('exit', code => { clearTimeout(timer); code === 0 ? resolve() : reject(new Error('暂存安装失败，原插件未替换；诊断日志保留在主机')) })
-  })
 }
 async function rpc(job: UpdateJob, method: string, payload = {}, deadline?: AbortSignal): Promise<any> {
   const state = JSON.parse(fs.readFileSync(job.stateFile, 'utf8'))
@@ -151,34 +142,15 @@ async function stopChild(pid: number): Promise<void> {
 export async function executeUpdate(job: UpdateJob, progress: (p: UpdateProgress) => void,
   quiesce: () => Promise<void>): Promise<UpdateProgress> {
   validateJob(job)
-  const staged = path.join(job.directory, 'profile-staged'), previous = path.join(job.directory, 'profile-before')
+  let staged = ''
+  const previous = path.join(job.directory, 'profile-before')
   const emit = (phase: string, n: number, message: string) => progress({ phase, progress: n, message, terminal: false })
   let stopped = false, swapped = false, newChild: ChildProcess | undefined
   let before: Record<string, string> = {}, sessionIds: string[] = []
   try {
     emit('staging', 25, '暂存更新与依赖，当前节点仍可使用')
-    fs.cpSync(job.profile, staged, { recursive: true, filter: p => !['node_modules', '.harness-remote-update.lock'].includes(path.basename(p)), dereference: false })
-    // Relative file/link/workspace dependencies would resolve differently in a
-    // staged directory. Refuse them, excluding the one plugin being replaced.
-    const manifest = JSON.parse(fs.readFileSync(path.join(staged, 'package.json'), 'utf8'))
-    for (const [name, spec] of Object.entries(manifest.dependencies || {})) {
-      if (name !== PLUGIN && !/^[~^]?\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(String(spec))) throw new Error('此 profile 含需手工处理的依赖来源')
-    }
-    for (const e of fs.readdirSync(staged, { withFileTypes: true })) if (e.isSymbolicLink()) throw new Error('此 profile 配置包含链接，需手工更新')
-    const archive = path.join(staged, 'harness-remote-update.tgz')
-    fs.copyFileSync(path.join(job.directory, 'release.tgz'), archive)
-    manifest.dependencies = { ...manifest.dependencies, [PLUGIN]: 'file:harness-remote-update.tgz' }
-    writePrivateJsonAtomic(path.join(staged, 'package.json'), manifest)
-    await run(job, [job.pnpm, 'install', '--ignore-scripts', '--no-frozen-lockfile', '--prefer-offline',
-      '--config.manage-package-manager-versions=false', '--reporter=append-only'], staged)
-    const installed = path.join(staged, 'node_modules', PLUGIN)
-    if (!within(staged, fs.realpathSync(installed))) throw new Error('暂存插件不在更新目录内')
-    if (JSON.parse(fs.readFileSync(path.join(installed, 'package.json'), 'utf8')).version !== job.targetVersion) throw new Error('安装后插件版本校验失败')
-    for (const name of Object.keys(manifest.dependencies)) if (name !== PLUGIN) {
-      const oldFile = path.join(job.profile, 'node_modules', name, 'package.json')
-      const newFile = path.join(staged, 'node_modules', name, 'package.json')
-      if (hashFile(oldFile) !== hashFile(newFile)) throw new Error('暂存安装试图改变其他插件，需手工更新')
-    }
+    staged = await stageProfile({ profile: job.profile, directory: job.directory, cli: job.cli,
+      targetVersion: job.targetVersion, runtime: { executable: job.executable, cli: job.pnpm, version: INSTALL_PNPM_VERSION } })
     emit('checking', 50, '确认会话空闲并保存状态')
     if ((await describe(job)).pluginVersion !== job.previousVersion) throw new Error('当前插件在检查后发生变化')
     const list = (await rpc(job, 'session.list')).items

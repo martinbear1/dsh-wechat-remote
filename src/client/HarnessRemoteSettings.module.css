@@ -353,6 +353,14 @@
 }
 .updateCard { border: 1px solid var(--border-color, #ddd); border-radius: 12px; padding: 20px; margin-top: 20px; line-height: 1.6; overflow-wrap: anywhere; }
 .updateLabel { color: inherit; }
+.updateLabel[data-severity="none"] { color: #218b5c; }
+.updateLabel[data-severity="unknown"] { color: var(--text-secondary, #858b96); }
 .updateLabel[data-severity="required"] { color: #d54052; }
 .updateLabel[data-severity="recommended"], .updateLabel[data-severity="info"] { color: #b5861d; }
 .updateProgress { width: 100%; height: 12px; margin-top: 16px; accent-color: #7487ef; }
+.updateVersions { display: flex; flex-wrap: wrap; gap: 10px 24px; margin: 12px 0; }
+.updateVersions span { color: var(--text-secondary, #858b96); }
+.updateVersions strong { color: var(--text-primary, inherit); font-weight: 500; }
+.updateCommand { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 12px; }
+.updateCommand code { flex: 1 1 240px; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+.updateChecked { display: block; margin-top: 10px; color: var(--text-secondary, #858b96); }

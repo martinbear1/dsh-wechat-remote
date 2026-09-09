@@ -5,7 +5,8 @@ const now = Date.now()
 const release = (version, dsh, extra = {}) => ({ version, dsh, platforms: ['windows', 'macos', 'linux'], architectures: ['x64', 'arm64'], channel: 'stable', ...extra })
 const catalog = { schemaVersion: 1, revision: 'test-1', issuedAt: now - 1000, expiresAt: now + 86400000,
   releases: [release('1.5.5', ['0.1.1-rc.2']), release('1.7.0', ['0.1.1-rc.2', '0.1.2-rc.1']),
-    release('1.8.0', ['0.2.0']), release('1.9.0-rc.1', ['0.1.2-rc.1'], { channel: 'preview' })], blocked: [], retiredDsh: ['0.0.1'] }
+    release('1.8.0', ['0.2.0']), release('1.9.0-rc.1', ['0.1.2-rc.1'], { channel: 'preview' })],
+  blocked: [{ pluginVersion: '1.5.5', dsh: ['0.1.2-rc.1'], reason: 'Confirmed native protocol incompatibility' }], retiredDsh: ['0.0.1'] }
 const current = { agentKind: 'deepseek-harness', agentVersion: '0.1.2-rc.1', pluginVersion: '1.5.5', platform: 'windows', arch: 'x64' }
 let count = 0
 const test = (label, fn) => { fn(); count++; console.log('PASS ' + label) }
@@ -37,7 +38,8 @@ test('legacy 1.5.5 without updater or architecture still receives an actionable 
 })
 test('no downgrade from preview', () => assert.equal(assessUpdate(catalog, { ...current, pluginVersion: '1.9.0-rc.1' }, now).code, 'compatible'))
 test('unknown current version with known target not automatically required', () => assert.equal(assessUpdate(catalog, { ...current, pluginVersion: '1.4.0' }, now).severity, 'recommended'))
-test('unsupported architecture not installable', () => assert.equal(assessUpdate(catalog, { ...current, arch: 'riscv64' }, now).code, 'unverified'))
+test('absence of positive compatibility evidence alone is not a known failure', () => assert.equal(assessUpdate({ ...catalog, blocked: [] }, current, now).severity, 'recommended'))
+test('unsupported architecture not installable', () => assert.equal(assessUpdate({ ...catalog, blocked: [] }, { ...current, arch: 'riscv64' }, now).code, 'unverified'))
 test('missing architecture never claims verified compatibility or a mandatory matching install', () => {
   const advice = assessUpdate(catalog, { ...current, arch: '' }, now)
   assert.equal(advice.code, 'plugin-check-host'); assert.equal(advice.severity, 'recommended')

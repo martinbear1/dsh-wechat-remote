@@ -77,16 +77,15 @@ export function PluginUpdateCard({ localOrigin }: { localOrigin: string }): JSX.
     }
   }
   return <div className={styles.updateCard}>
-    <div className={styles.pairingHead}><div><strong>插件更新与兼容</strong>
-      <p>只更新连接插件，保留原节点与会话</p></div>
+    <div className={styles.pairingHead}><div><strong>插件更新</strong></div>
       <button type="button" className={styles.secondaryButton} disabled={checking || busy} onClick={() => void refresh()}>{checking ? '检查中…' : '检查更新'}</button></div>
-    {check ? <>{check.channel === 'preview' ? <p role="note">仅供隔离测试：已由此主机管理员启用预发布更新，不代表正式发布或正式兼容承诺。</p> : null}<p>DSH {check.advice.current.agentVersion} · 插件 {check.advice.current.pluginVersion}</p>
+    {check ? <>{check.channel === 'preview' ? <span className={styles.updateLabel} data-severity="recommended">预览通道</span> : null}<p>DSH {check.advice.current.agentVersion} · 插件 {check.advice.current.pluginVersion}</p>
+      {check.advice.targetVersion ? <p>{check.canInstall ? '可更新至' : '目标版本'} {check.advice.targetVersion}</p> : null}
       <strong className={styles.updateLabel} data-severity={check.advice.severity}>{check.advice.label}</strong>
-      <p>{check.advice.message}</p>
-      {!check.canInstall ? <p>{check.reason}</p> : <button type="button" className={styles.primaryButton} disabled={busy} onClick={() => void install()}>更新插件并重启 DSH</button>}</> : null}
+      {!check.canInstall && check.reason ? <details><summary>查看原因</summary><p>{check.reason}</p><p>{check.advice.message}</p></details> : null}
+      {check.canInstall ? <button type="button" className={styles.primaryButton} disabled={busy} onClick={() => void install()}>更新并重启</button> : null}</> : null}
     {error ? <p role="alert">{error}</p> : null}
     {progress ? <div role="status" aria-live="polite"><progress className={styles.updateProgress} max={100} value={progress.progress} /><p>{progress.message}</p>
       {progress.ok ? <button type="button" className={styles.secondaryButton} onClick={() => window.location.reload()}>重新载入 WebUI</button> : null}</div> : null}
-    <p className={styles.securityNote}>更新失败会尝试恢复原插件。受管理的服务或未验证的安装方式请按<a href="https://github.com/martinbear1/dsh-wechat-remote#readme" target="_blank" rel="noreferrer">安装说明</a>手工更新。首次从旧插件升级后才会出现此按钮。</p>
   </div>
 }

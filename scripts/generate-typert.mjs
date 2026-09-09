@@ -55,6 +55,7 @@ try {
     'dsh-runtime.ts',
     'dsh-protocol-compat.ts',
     'dsh-session-address.ts',
+    'session-presentation.ts',
     'dsh-realtime-compat.ts',
     'dsh-compatibility-api.ts',
     'secure-file.ts',

@@ -32,7 +32,7 @@ check(!client.includes('sidebar.footer.action'), 'lib/client.js 不应再占用�
 check(client.includes('wechatHost/describe'), 'lib/client.js 没有通过 DSH 原生 RPC 发现当前 profile 的本地门')
 check(!client.includes('/api/wechatHost.describe'), 'lib/client.js 残留错误的手写 Web API 地址')
 check(client.includes('http://127.0.0.1:3093'), 'lib/client.js 缺少旧 web/default 3093 回退')
-for (const required of ['鲸常在', '添加到微信', '生成配对码', '局域网直连', '远程访问', '微信账号保护']) {
+for (const required of ['Agent远程管理助手', '添加到微信', '生成配对码', '局域网直连', '远程访问', '微信账号保护']) {
   check(client.includes(required), `lib/client.js 用户配对界面缺少「${required}」`)
 }
 for (const privateDetail of ['relayOrigin', 'lastError', '本机配对门', 'xyxfood.xyz']) {

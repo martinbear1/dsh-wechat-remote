@@ -242,7 +242,7 @@ export function HarnessRemoteSettings({
             <FishLogo size={28} />
           </span>
           <div className={styles.identityCopy}>
-            <h3 id="harness-remote-title">鲸常在</h3>
+            <h3 id="harness-remote-title">Agent远程管理助手</h3>
             <p>
               {agentName}
               <span aria-hidden> · </span>
@@ -294,7 +294,7 @@ export function HarnessRemoteSettings({
         <div className={styles.connectCard}>
           <div>
             <strong>添加到微信</strong>
-            <p>打开「鲸常在」→ 添加节点，扫描配对码。</p>
+            <p>打开「Agent远程管理助手」→ 添加节点，扫描配对码。</p>
           </div>
           <button
             type="button"
@@ -322,7 +322,7 @@ export function HarnessRemoteSettings({
           </div>
           <div className={styles.qrArea}>
             {qrState === 'ready' && qr !== null ? (
-              <img className={styles.qr} src={qr.qrDataUrl} alt="鲸常在配对二维码" />
+              <img className={styles.qr} src={qr.qrDataUrl} alt="Agent远程管理助手配对二维码" />
             ) : (
               <div className={styles.qrPlaceholder} aria-live="polite">
                 {qrState === 'error' ? '生成失败' : '正在生成…'}

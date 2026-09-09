@@ -3,6 +3,7 @@ import type { WebSocket } from 'ws'
 
 import { resolveTypertGateway, type TypertGatewayLike } from './dsh-protocol-compat.js'
 import { resolveDshSessionAddress, isSessionReadError } from './dsh-session-address.js'
+import { presentationProjection } from './session-presentation.js'
 
 type JsonRecord = Record<string, unknown>
 
@@ -254,6 +255,10 @@ export class DshRealtimeCompatibility {
       ...(rpcId ? { rpcId } : {}),
       payload,
     }))
+    if (payload.type === 'session/projection' && typeof payload.key === 'string') {
+      const facet = presentationProjection(payload.key, payload.value)
+      if (facet) this.send(state, { ...payload, ...facet })
+    }
   }
 
   private async followWorkspace(state: SocketState): Promise<void> {

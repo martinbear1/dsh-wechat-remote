@@ -1,7 +1,7 @@
 {
   "name": "@harness-remote/dsh-wechat-remote",
   "version": "1.6.0-rc.5",
-  "description": "鲸常在：同一插件自动适配 Windows、macOS 与 Linux 上的 DeepSeek Harness，提供微信身份绑定、局域网直连及端到端加密公网连接",
+  "description": "Agent远程管理助手：支持 Windows、macOS 与 Linux 上的 DeepSeek Harness，提供微信配对、安全局域网直连及端到端加密公网连接",
   "private": true,
   "license": "MIT",
   "type": "module",
@@ -100,7 +100,7 @@
     "test:attachment": "node scripts/test-attachment.mjs",
     "test:gate-ports": "node scripts/test-gate-ports.mjs",
     "test:dsh-runtime": "node scripts/test-dsh-runtime.mjs",
-    "test:dsh-protocol-compat": "node scripts/test-dsh-protocol-compat.mjs && node scripts/test-dsh-session-address.mjs",
+    "test:dsh-protocol-compat": "node scripts/test-dsh-protocol-compat.mjs && node scripts/test-dsh-session-address.mjs && node scripts/test-session-presentation.mjs",
     "test:dsh-realtime-compat": "node scripts/test-dsh-realtime-compat.mjs",
     "test:dsh-compatibility-api": "node scripts/test-dsh-compatibility-api.mjs",
     "test:public-relay": "node scripts/test-public-relay.mjs && node scripts/test-relay-liveness.mjs"
@@ -186,6 +186,8 @@
     "lib/dsh-protocol-compat.d.ts",
     "lib/dsh-session-address.js",
     "lib/dsh-session-address.d.ts",
+    "lib/session-presentation.js",
+    "lib/session-presentation.d.ts",
     "lib/dsh-realtime-compat.js",
     "lib/dsh-realtime-compat.d.ts",
     "lib/dsh-compatibility-api.js",

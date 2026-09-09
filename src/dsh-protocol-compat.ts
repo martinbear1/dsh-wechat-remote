@@ -1,6 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { setTimeout as delay } from 'node:timers/promises'
 import { resolveDshSessionAddress } from './dsh-session-address.js'
+import { withPresentationProjections } from './session-presentation.js'
 
 type JsonRecord = Record<string, unknown>
 
@@ -386,7 +387,7 @@ async function historyValue(
   return {
     events: historyEvents(first.records),
     hasMore: first.hasMore === true,
-    projections: first.projections,
+    projections: withPresentationProjections(first.projections),
     historyEndSeq: first.cursor,
   }
 }

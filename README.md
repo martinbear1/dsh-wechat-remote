@@ -24,3 +24,5 @@ npx -y dsh-wechat-remote@latest
 - 安装需要能访问 npm；下载或检查失败不会绕过 TLS 校验。更新失败时尝试恢复原插件；无法确认恢复结果会保留本机备份并明确提示。
 
 [本版更新说明](RELEASE-NOTES.md)
+
+插件与安装器当前均为 `1.7.1`。开发与验收范围见 [当前基线](docs/CURRENT-BASELINE.md)。

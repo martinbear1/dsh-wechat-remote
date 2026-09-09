@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { writePrivateJsonAtomic } from './secure-file.js'
 import { stageProfile } from './install-profile.js'
 import { INSTALL_PNPM_VERSION } from './install-runtime.js'
-import { validateManager, startManagedHost, stopManagedHost, type HostManager } from './install-lifecycle.js'
+import { validateManager, startManagedHost, stopManagedHost, finishUpdateWorker, type HostManager } from './install-lifecycle.js'
 
 export interface UpdateJob {
   id: string; directory: string; profile: string; home: string; stateFile: string
@@ -344,7 +344,10 @@ async function workerMain(filename: string): Promise<void> {
   if (job.controlOrigin) { try { await control(job, 'close') } catch {} }
   if (process.connected) process.send?.({ type: 'finished' })
   // Keep progress available across DSH restart; no permanent extra service.
-  const timer = setTimeout(() => { server.close(); if (process.connected) process.disconnect() }, 120000)
+  const timer = setTimeout(() => {
+    server.close(); if (process.connected) process.disconnect()
+    finishUpdateWorker(job.manager, job.directory)
+  }, 120000)
   timer.unref()
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

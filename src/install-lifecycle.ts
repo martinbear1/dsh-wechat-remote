@@ -80,3 +80,10 @@ export function startUpdateWorker(manager: HostManager, directory: string, execu
     if (!child.pid) throw new Error('无法启动更新进程')
   }
 }
+
+/** Remove only this operation's transient launchd label after its progress lease. */
+export function finishUpdateWorker(manager: HostManager | undefined, directory: string): void {
+  const id = path.basename(directory)
+  if (manager?.kind !== 'launchd' || !/^[a-f0-9]{32}$/.test(id)) return
+  try { run('/bin/launchctl', ['remove', `dsh.wechat.update.${id}`]) } catch { /* The job may terminate itself during removal. */ }
+}

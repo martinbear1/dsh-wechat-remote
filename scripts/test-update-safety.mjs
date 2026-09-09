@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { gzipSync } from 'node:zlib'
-import { createHash } from 'node:crypto'
+import { createHash, generateKeyPairSync } from 'node:crypto'
 import { auditArchive, boundedFetch } from '../lib/update-download.js'
 import { acceptsUpdateRequest, PluginUpdateService } from '../lib/update-service.js'
 import http from 'node:http'
@@ -121,6 +121,27 @@ await test('ready helper does not mutate without explicit initiating-parent star
     if (child.exitCode === null && child.signalCode === null) { child.kill(); await exited }
     assert(path.basename(root).startsWith('harness-update-handshake-test-') && path.dirname(root) === fs.realpathSync(os.tmpdir()))
     fs.rmSync(root, { recursive: true })
+  }
+})
+await test('legacy grant migration preserves tokens and refuses mismatched private/public identity', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'legacy-grant-proof-'))
+  const stateFile = path.join(directory, 'state.json'), identityFile = path.join(directory, 'identity.json')
+  const keys = generateKeyPairSync('ed25519'), other = generateKeyPairSync('ed25519')
+  const publicKey = keys.publicKey.export({ format: 'der', type: 'spki' })
+  const nodeId = createHash('sha256').update(publicKey).digest().subarray(0, 18).toString('base64url')
+  const identity = { nodeId, privateKeyPem: keys.privateKey.export({format:'pem',type:'pkcs8'}), publicKeyPem: keys.publicKey.export({format:'pem',type:'spki'}) }
+  const original = { token: 'synthetic-lan-token', wechatBindings: ['synthetic-binding'] }
+  try {
+    fs.writeFileSync(stateFile, JSON.stringify(original)); fs.writeFileSync(identityFile, JSON.stringify(identity))
+    migrateLegacyGrantOwner({ previousVersion: '1.5.5', stateFile, identityFile })
+    assert.deepEqual(JSON.parse(fs.readFileSync(stateFile)), { ...original, publicIdentityNodeId: nodeId })
+    fs.writeFileSync(stateFile, JSON.stringify(original))
+    fs.writeFileSync(identityFile, JSON.stringify({ ...identity, publicKeyPem: other.publicKey.export({format:'pem',type:'spki'}) }))
+    assert.throws(() => migrateLegacyGrantOwner({ previousVersion: '1.5.5', stateFile, identityFile }))
+    assert.deepEqual(JSON.parse(fs.readFileSync(stateFile)), original)
+  } finally {
+    assert(path.dirname(directory) === os.tmpdir() && path.basename(directory).startsWith('legacy-grant-proof-'))
+    fs.rmSync(directory, { recursive: true })
   }
 })
 console.log(JSON.stringify({ ok: true, cases }))

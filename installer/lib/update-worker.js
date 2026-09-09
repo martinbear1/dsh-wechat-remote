@@ -235,6 +235,14 @@ function startManagedHost(manager) {
   else if (manager.kind === "launchd") run("/bin/launchctl", ["bootstrap", manager.domain, manager.plist]);
   else throw new Error("\u666E\u901A DSH \u8FDB\u7A0B\u5FC5\u987B\u7531\u539F\u73AF\u5883\u542F\u52A8\u3002");
 }
+function finishUpdateWorker(manager, directory) {
+  const id = path2.basename(directory);
+  if (manager?.kind !== "launchd" || !/^[a-f0-9]{32}$/.test(id)) return;
+  try {
+    run("/bin/launchctl", ["remove", `dsh.wechat.update.${id}`]);
+  } catch {
+  }
+}
 
 // src/update-worker.ts
 function releaseOwnedUpdateLock(lock, id) {
@@ -651,6 +659,7 @@ async function workerMain(filename) {
   const timer = setTimeout(() => {
     server.close();
     if (process.connected) process.disconnect();
+    finishUpdateWorker(job.manager, job.directory);
   }, 12e4);
   timer.unref();
 }

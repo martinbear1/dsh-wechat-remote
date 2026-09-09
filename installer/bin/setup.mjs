@@ -38,7 +38,7 @@ function portBusy(port) {
     socket.setTimeout(500, () => end(false)); socket.once('connect', () => end(true)); socket.once('error', () => end(false))
   })
 }
-async function selectRelease(host, assetsRoot = path.join(root, 'assets')) {
+async function selectRelease(host, assetsRoot = path.join(root, 'assets'), repair = false) {
   const current = { agentKind: 'dsh', agentVersion: host.dshVersion, pluginVersion: host.pluginVersion,
     platform: { win32: 'windows', darwin: 'macos', linux: 'linux' }[host.platform], arch: host.arch }
   const pinned = JSON.parse(fs.readFileSync(path.join(assetsRoot, 'release.json'), 'utf8'))
@@ -53,14 +53,15 @@ async function selectRelease(host, assetsRoot = path.join(root, 'assets')) {
   const release = releases.filter(r => r.channel === 'stable' && releaseMatches(r, current))
     .sort((a, b) => compareVersions(b.version, a.version))[0]
   if (!release) throw new Error('当前 DSH 版本或系统尚无已验证的插件版本；没有修改现有安装。')
-  if (host.pluginVersion !== '0.0.0' && compareVersions(host.pluginVersion, release.version) >= 0) return { release, archive: null }
+  if (host.pluginVersion !== '0.0.0' && (compareVersions(host.pluginVersion, release.version) > 0
+    || (compareVersions(host.pluginVersion, release.version) === 0 && !repair))) return { release, archive: null }
   let archive
   if (release.version === pinned.version) archive = fs.readFileSync(path.join(assetsRoot, 'plugin.tgz'))
   else archive = await downloadRelease(release)
   auditArchive(archive, release)
   return { release, archive }
 }
-export async function install({ profileName = 'web', cli = findDsh(), assetsRoot, open = true } = {}) {
+export async function install({ profileName = 'web', cli = findDsh(), assetsRoot, open = true, repair = false } = {}) {
   if (!/^[A-Za-z0-9_-]{1,80}$/.test(profileName)) throw new Error('无效的 profile 名称。')
   const runtime = resolveInstallRuntime(root); await verifyInstallRuntime(runtime)
   const home = path.resolve(process.env.DSH_HOME || path.join(os.homedir(), '.dsh'))
@@ -102,7 +103,7 @@ export async function install({ profileName = 'web', cli = findDsh(), assetsRoot
     if (host.home !== home || host.profile !== profile || host.cli !== fs.realpathSync(cli) || (launched && host.pid !== launched.pid)) throw new Error('当前 DSH 身份与安装目标不一致，未修改安装。')
     remove(); remove = undefined
     await sleep(600)
-    const selected = await selectRelease(host, assetsRoot)
+    const selected = await selectRelease(host, assetsRoot, repair)
     if (!selected.archive) { console.log(`插件 ${host.pluginVersion} 无需更新。`); return { version: host.pluginVersion, changed: false } }
     console.log(`正在安装插件 ${selected.release.version}，保留原配对与会话…`)
     job = { ...host, id, directory, parentPid: host.pid, pnpm: runtime.cli, targetVersion: selected.release.version,
@@ -143,8 +144,9 @@ export async function install({ profileName = 'web', cli = findDsh(), assetsRoot
   }
 }
 if (process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const args = process.argv.slice(2)
-  if (args.includes('--help') || args.includes('-h')) console.log('安装或升级 DSH 微信连接插件：npx -y dsh-wechat-remote@latest\n可选：--profile <名称>（默认 web）')
+  const args = process.argv.slice(2), repair = args.includes('--repair')
+  if (repair) args.splice(args.indexOf('--repair'), 1)
+  if (args.includes('--help') || args.includes('-h')) console.log('安装或升级 DSH 微信连接插件：npx -y dsh-wechat-remote@latest\n可选：--profile <名称>（默认 web）；--repair（重新安装当前兼容版本，不降级）')
   else if (args.length && !(args.length === 2 && args[0] === '--profile')) { console.error('不支持的参数。使用 --help 查看用法。'); process.exitCode = 1 }
-  else install({ profileName: args[1] || 'web' }).catch(error => { console.error(error.message); process.exitCode = 1 })
+  else install({ profileName: args[1] || 'web', repair }).catch(error => { console.error(error.message); process.exitCode = 1 })
 }

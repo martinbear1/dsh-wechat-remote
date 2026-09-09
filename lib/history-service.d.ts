@@ -1,5 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis';
 import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol';
+import { turnDetails } from './turn-presentation.js';
 interface HistoryEntry {
     readonly event?: {
         readonly type?: unknown;
@@ -94,5 +95,5 @@ export declare class WechatHistoryService extends TypertRemoteService {
  */
 export declare function prewarmLatestHistory(service: WechatHistoryService, sessionId: string, signal: AbortSignal): Promise<'inline' | 'object'>;
 /** Exported pure coordinator for deterministic plugin regression tests. */
-export declare function buildHistoryWindow(request: WechatHistoryWindowRequest, fetchPage: FetchPage, signal: AbortSignal): Promise<BuildHistoryWindowResult>;
+export declare function buildHistoryWindow(request: WechatHistoryWindowRequest, fetchPage: FetchPage, signal: AbortSignal, usageFold?: Parameters<typeof turnDetails>[1]): Promise<BuildHistoryWindowResult>;
 export default WechatHistoryService;

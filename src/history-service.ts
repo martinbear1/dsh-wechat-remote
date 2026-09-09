@@ -18,6 +18,7 @@ import http from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { invokeLegacyRpc, resolveTypertGateway } from './dsh-protocol-compat.js'
+import { nativeTurnUsage, turnDetails } from './turn-presentation.js'
 
 const DEFAULT_PAGE_MESSAGES = 8
 const MAX_PAGE_MESSAGES = 30
@@ -138,7 +139,7 @@ export class WechatHistoryService extends TypertRemoteService {
     try {
       const built = await buildHistoryWindow(request, (payload, pageSignal) => (
         this.fetchNativePage(payload, pageSignal)
-      ), signal)
+      ), signal, await nativeTurnUsage())
       if (!built.ok) return built
       const payloadJson = JSON.stringify(built.value)
       return this.deliver(payloadJson, request)
@@ -275,6 +276,7 @@ export async function buildHistoryWindow(
   request: WechatHistoryWindowRequest,
   fetchPage: FetchPage,
   signal: AbortSignal,
+  usageFold?: Parameters<typeof turnDetails>[1],
 ): Promise<BuildHistoryWindowResult> {
   const validation = validateRequest(request)
   if (validation) return { ok: false, error: validation }
@@ -332,6 +334,7 @@ export async function buildHistoryWindow(
         value: {
           ...(tailValue || {}),
           events: compactEntries(pages.flat(), completedTurns, durableMessageTurns),
+          facets: { 'agent.turn-details.v1': turnDetails(pages.flat(), usageFold) },
           hasMore: oldestValue?.hasMore === true,
           historyStartSeq,
           historyEndSeq,

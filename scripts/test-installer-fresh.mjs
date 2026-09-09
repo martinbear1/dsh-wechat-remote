@@ -28,7 +28,7 @@ try {
   const code = await new Promise((resolve, reject) => { installer.once('error', reject); installer.once('exit', resolve) })
   assert.equal(code, 0)
   const installed = JSON.parse(fs.readFileSync(path.join(home, 'profiles/web/node_modules/@harness-remote/dsh-wechat-remote/package.json')))
-  assert.equal(installed.version, '1.7.0')
+  assert.equal(installed.version, JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version)
   console.log('PASS native first install, restart and empty-session/identity verification; no model calls')
 } finally {
   if (child.exitCode === null && child.signalCode === null) child.kill()

@@ -1,8 +1,8 @@
-# 鲸常在 · DeepSeek Harness 微信连接插件
+# Agent远程管理助手 · DeepSeek Harness 微信连接插件
 
-本版本是 **`1.6.0-rc.5` 功能预览版**，沿用由正式版 `1.5.5` 整理的 RC4 基线，非 Latest、未合并 main。包含多版本 / 三主机适配、安全更新、加密局域网和网络切换恢复能力。请先阅读 [发布与兼容说明](RELEASE-NOTES.md)，尤其是 LAN 凭据迁移和旧客户端边界，不把未认证组合当作正式支持。
+当前正式版 **`1.6.1`**。支持已验证的 DSH 版本组合，提供微信配对、加密连接和 WebUI 插件更新。升级前请阅读 [发布与兼容说明](RELEASE-NOTES.md)，尤其是旧客户端的局域网授权迁移。
 
-在 Windows、macOS 或 Linux 的 DeepSeek Harness 中安装本插件，即可用「鲸常在」微信小程序扫码添加这台电脑，在手机上查看工作区与会话、发送任务并接收运行结果。
+在 Windows、macOS 或 Linux 的 DeepSeek Harness 中安装本插件，即可用「Agent远程管理助手」微信小程序扫码添加电脑，在手机上查看工作区与会话、发送任务并接收运行结果。
 
 小程序是独立的 DSH 客户端：数据和任务仍由用户自己的电脑及 DeepSeek Harness 处理。本插件不会修改 DSH 本体，也不会替换或抓取 WebUI。
 
@@ -13,10 +13,10 @@
 - 离开局域网后可切换到加密远程连接
 - 查看工作区、会话历史和实时任务状态
 - 发送文字、图片及后续指令
-- 一个候选插件适配三个操作系统，确切验证范围见文末
+- 一个插件适配三个操作系统，确切验证范围见文末
 - 小程序节点版本提醒；WebUI 检查适合当前 DSH 的插件更新
 
-局域网连接免费使用。远程连接由「鲸常在」小程序中的公网访问权益控制；没有公网权益时，不影响同一局域网内使用。
+安全局域网连接需要支持该能力的小程序版本。远程连接由小程序账户的公网访问权益控制。旧版小程序升级插件后可能需要通过公网继续连接，详见发布说明。
 
 ## 安装前准备
 
@@ -27,10 +27,10 @@
 
 ## 安装
 
-主动测试本预览版时，Windows、macOS 和 Linux 使用同一条固定标签命令。先结束任务并正常停止目标 DSH；保留原 `DSH_HOME`、profile 和端口，非 web profile 请替换名称：
+Windows、macOS 和 Linux 使用同一条安装命令。先结束任务并正常停止目标 DSH；保留原 `DSH_HOME`、profile 和端口，非 web profile 请替换名称：
 
 ```bash
-npm exec --yes --package=pnpm@11 -- dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.6.0-rc.5
+npm exec --yes --package=pnpm@11 -- dsh plugin --profile web add github:martinbear1/dsh-wechat-remote
 ```
 
 安装完成后，在没有任务运行时重新启动 DSH：
@@ -89,7 +89,7 @@ kill $(lsof -tiTCP:3080 -sTCP:LISTEN) 2>/dev/null || true; sleep 1; nohup dsh we
 
 不要使用 `pkill node`，它会误杀其他 Node.js 程序。如果修改过 DSH Web 端口，请把命令中的 `3080` 换成实际端口。若后台启动失败，请先在可见终端运行 `dsh web`，或查看 `~/dsh-web.log`。
 
-打开 DSH WebUI，进入 **设置 → 微信连接**。看到「鲸常在」连接页面即表示插件已加载。
+打开 DSH WebUI，进入 **设置 → 微信连接**。看到「Agent远程管理助手」连接页面即表示插件已加载。已有公网配对通常不需要重新扫码。
 
 ### 提示找不到 pnpm
 
@@ -103,17 +103,17 @@ npm install -g pnpm@11
 
 ### 固定安装某个版本
 
-不带 `#标签` 的 GitHub 安装来源是默认分支 main，不是 releases/latest。本次两者均保持原值；安装 RC4 必须指定上面的标签。复现正式 v1.5.5 可指定：
+不带 `#标签` 的 GitHub 安装来源是正式分支 main，而非 releases/latest。需要固定到本次版本时：
 
 ```bash
-dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.5.5
+dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.6.1
 ```
 
 ## 添加电脑
 
 1. 在电脑的 DSH WebUI 中打开 **设置 → 微信连接**。
 2. 点击 **生成配对码**。
-3. 打开「鲸常在」小程序，进入 **添加节点**。
+3. 打开「Agent远程管理助手」小程序，进入 **添加节点**。
 4. 扫描电脑上的二维码并确认添加。
 5. 添加成功后即可查看这台电脑上的工作区和会话。
 
@@ -125,7 +125,7 @@ dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.5.5
 
 ## 更新
 
-### WebUI 更新（本预览版新增）
+### WebUI 更新
 
 进入 **设置 → 微信连接 → 插件更新与兼容**，先检查，再确认“更新插件并重启 DSH”。只选择支持当前 DSH、系统和架构的最新正式插件，不一定是全仓库最大版本；不会自动升级或降级 DSH。
 
@@ -135,7 +135,7 @@ dsh plugin --profile web add github:martinbear1/dsh-wechat-remote#v1.5.5
 
 正常成功后原节点无需重新扫码。页面关闭后重新打开可以读取进度。首次使用此功能，需要先手工把不带该功能的旧插件升级一次。
 
-正式云端 v1.2.3 检查接口已上线，但暂未启用新插件正式目标。没有匹配正式资产时不会提供安装按钮。预发布更新须管理员显式设置本地清单与 preview 通道；安装 RC 本身不会订阅预发布。检查缺失、过期或未知不会影响对话。
+检查结果由正式兼容清单决定，不因 GitHub 出现更大版本就直接安装。清单确认的目标还需校验下载资产和本机安装条件；没有匹配目标时不会提供安装按钮。预发布更新须管理员显式选择，普通用户不会被自动推荐预览版。清单缺失、过期或未知不等于当前不可用，也不影响对话。
 
 ### 手工更新
 
@@ -190,11 +190,11 @@ dsh plugin --profile web remove @harness-remote/dsh-wechat-remote
 
 | 平台 | 状态 |
 | --- | --- |
-| Windows x64 | 开发候选实机自动测试 |
-| macOS Intel x64 | 开发候选实机自动测试 |
-| Linux Ubuntu x64 | 开发候选实机自动测试 |
+| Windows x64 | 已测试 |
+| macOS Intel x64 | 已测试 |
+| Linux Ubuntu x64 | 已测试 |
 
-测试的 DSH 为 `0.1.1-rc.1`、`0.1.1-rc.2`、`0.1.2-rc.1`，均为 RC。RC4 继承本轮同源候选证据，不宣称 RC4 标签包已逐格重跑。Windows 已有真实 GitHub 下载、按钮更新、重启恢复证据；ARM / Apple Silicon、受监管服务、共享 HOME / profile、断电与长期弱网未认证。详细证据分级见发布说明。
+正式兼容声明为 `0.1.1-rc.2`、`0.1.2-rc.1`，均为 x64 三系统。`0.1.1-rc.1` 有早期候选测试，但纯 rc.1 全局安装的内部组件一致性证据不足，本次不扩大正式声明。ARM / Apple Silicon、未列出的 DSH、受监管服务的一键重启、共享 HOME / profile、断电与长期弱网未认证。详细证据分级见发布说明。
 
 ## 许可证
 

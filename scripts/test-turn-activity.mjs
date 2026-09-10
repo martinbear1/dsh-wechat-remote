@@ -18,7 +18,7 @@ const run=(reason='completed',prefix=true)=>{
  return out
 }
 const done=run().at(-1)
-assert.deepEqual(done.process,{startSeq:3,endSeq:10,toolCount:1,subagentCount:1,messageCount:1,complete:true})
+assert.deepEqual(done.process,{startSeq:1,endSeq:10,boundary:'turn',answerParts:[],includesContext:true,contextCount:0,toolCount:1,subagentCount:1,messageCount:1,complete:true})
 assert.deepEqual(done.changedFiles,[{reference:'report.md'}])
 assert(!run('failed').some(f=>f.process));assert(!run('completed',false).some(f=>f.process))
 const noAnswer=new TurnActivityCompatibility()
@@ -29,3 +29,26 @@ assert.equal(mutationPath('write','{"file_path":"x"}'),null)
 assert.equal(mutationPath('edit','{"file_path":"x","old_string":"a","new_string":"a"}'),null)
 assert.equal(mutationPath('str_replace_editor','{"command":"insert","path":"x","insert_line":0,"new_str":"a"}'),'x')
 console.log('turn activity: completion boundary, reply-only counts, subagents, partial/replaced events, real mutations passed')
+
+const parts=new TurnActivityCompatibility()
+parts.accept({type:'turn/start',seq:1,data:{turn:2}})
+parts.accept({type:'user/message',seq:2,data:{source:{kind:'user'}}})
+parts.accept({type:'user/message',seq:3,data:{source:{kind:'plugin'}}})
+parts.accept({type:'step/start',seq:4,data:{turn:2,step:1}})
+parts.accept({type:'assistant/message',seq:5,data:{turn:2,step:1,message:{content:[{type:'reasoning',text:'Think'},{type:'text',text:'Done'}]}}})
+const spec=parts.accept({type:'turn/end',seq:6,data:{turn:2,reason:{kind:'completed'}}})
+assert.deepEqual(spec.process.answerParts,['reasoning'])
+assert.equal(spec.process.contextCount,1);assert.equal(spec.process.toolCount,0);assert.equal(spec.process.messageCount,0)
+
+const steering=new TurnActivityCompatibility()
+for(const e of [
+ {type:'turn/start',seq:1,data:{turn:1}},
+ {type:'user/message',seq:2,data:{source:{kind:'user'}}},
+ {type:'user/message',seq:3,data:{source:{kind:'external-provider'}}},
+ {type:'user/message',seq:4,data:{source:{kind:'user'}}},
+ {type:'step/start',seq:5,data:{turn:1,step:1}},
+ {type:'assistant/message',seq:6,data:{turn:1,step:1,message:{content:[{type:'reasoning',text:'reconsider'},{type:'text',text:'answer'}]}}},
+])steering.accept(e)
+const steered=steering.accept({type:'turn/end',seq:7,data:{turn:1,reason:{kind:'completed'}}})
+assert.deepEqual(steered.process.answerParts,[],'native in-turn steering keeps final reasoning visible')
+assert.equal(steered.process.contextCount,1,'all known non-human producer kinds are context')

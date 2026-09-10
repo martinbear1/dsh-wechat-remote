@@ -5,6 +5,8 @@ import {
   parseLegacyClientRequest,
   planLegacyRpc,
   unpackChunkRow,
+  resolveTypertGateway,
+  commandArguments,
 } from '../lib/dsh-protocol-compat.js'
 
 const request = (method, payload = {}, rpcId = 'rpc-1') => ({
@@ -306,3 +308,13 @@ const rejectedDirect = await invokeLegacyRpc(permissionGateway,request('commands
   args:{agentId:'s1',line:'/permission read-only',submittedAttachments:[{type:'file',receiptId:'x'}]}
 }),options)
 assert.equal(rejectedDirect.result.error.code,'adapter/invalid-permission-command')
+
+for(const field of ['images','submittedAttachments']) {
+ const host={get(key){return key==='typertGateway'?permissionGateway:key==='typert'?{local:{get:()=>({parameters:['agentId','line',field].map(wire=>({wire}))})}}:undefined}}
+ const resolved=resolveTypertGateway(host)
+ assert.deepEqual(Object.keys(commandArguments(resolved,{agentId:'s',line:'/permission',images:[],submittedAttachments:[]})).sort(),['agentId','line',field].sort())
+}
+for(const registry of [{local:{get:()=>({parameters:[{wire:'unknown'}]})}},{local:{get:()=>undefined,hasSeen:()=>true}}]){
+ const resolved=resolveTypertGateway({get:key=>key==='typertGateway'?permissionGateway:key==='typert'?registry:undefined})
+ assert.throws(()=>commandArguments(resolved,{agentId:'s',line:'/permission'}))
+}

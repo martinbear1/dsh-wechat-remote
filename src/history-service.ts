@@ -6,7 +6,7 @@
  * assistant/message 取代的增量完整搬到手机。本服务仍以 DSH 原生历史为
  * 唯一数据源，只在电脑端完成两项确定性变换：
  *
- * 1. 向前补齐到最新轮次的 turn/start，避免工具和生成产物被分页截断；
+ * 1. 向前补齐窗口中最早一轮的 turn/start，避免旧轮次被分页截断；
  * 2. 仅删除 reason.kind=completed 轮次的 assistant/chunk，保留消息、工具、
  *    view、投影与失败/中断轮次的部分输出。
  *
@@ -320,7 +320,7 @@ export async function buildHistoryWindow(
     rawEvents += entries.length
     if (!tailValue) {
       tailValue = value
-      targetTurn = tailTurnOf(entries)
+      targetTurn = firstTurnOf(entries)
       historyEndSeq = eventSeqOf(entries[entries.length - 1])
     }
     oldestValue = value
@@ -332,12 +332,21 @@ export async function buildHistoryWindow(
 
     if (targetTurn === undefined || hasTurnStart(entries, targetTurn)
       || value.hasMore !== true || entries.length === 0) {
+      const collected = pages.flat()
+      const targetStart = collected.findIndex(entry => entry.event?.type === 'turn/start'
+        && String(entry.event.data?.turn) === targetTurn)
+      // Backfill can overshoot into an even older turn. Leave that prefix for
+      // the next cursor instead of returning another half-turn (or recursively
+      // loading the entire session). Preserve the full origin when reached.
+      const trim = oldestValue?.hasMore === true && targetStart > 0 ? targetStart : 0
+      const windowEntries = collected.slice(trim)
+      historyStartSeq = eventSeqOf(windowEntries[0])
       const activity = new TurnActivityCompatibility()
       return {
         ok: true,
         value: {
           ...(tailValue || {}),
-          events: compactEntries(pages.flat(), completedTurns, durableMessageTurns).map(entry => {
+          events: compactEntries(windowEntries, completedTurns, durableMessageTurns).map(entry => {
             const resources = resourcePresentation((entry.event || {}) as Record<string, unknown>)
             const attempt = assistantAttemptPresentation((entry.event || {}) as Record<string, unknown>)
             const turnActivity = activity.accept(entry.event || {})
@@ -353,8 +362,8 @@ export async function buildHistoryWindow(
               ...(turnActivity?{agentActivity:turnActivity}:{}),
               ...(resources?{agentResources:resources}:{}),...(attempt?{agentTranscript:attempt}:{})}} : projected
           }),
-          facets: { 'agent.turn-details.v1': turnDetails(pages.flat(), usageFold) },
-          hasMore: oldestValue?.hasMore === true,
+          facets: { 'agent.turn-details.v1': turnDetails(windowEntries, usageFold) },
+          hasMore: trim > 0 || oldestValue?.hasMore === true,
           historyStartSeq,
           historyEndSeq,
           pages: pages.length,
@@ -404,8 +413,8 @@ function eventSeqOf(entry: HistoryEntry | undefined): number | undefined {
   return typeof seq === 'number' && Number.isSafeInteger(seq) && seq >= 0 ? seq : undefined
 }
 
-function tailTurnOf(entries: readonly HistoryEntry[]): string | undefined {
-  for (let index = entries.length - 1; index >= 0; index -= 1) {
+function firstTurnOf(entries: readonly HistoryEntry[]): string | undefined {
+  for (let index = 0; index < entries.length; index += 1) {
     const turn = entries[index]?.event?.data?.turn
     if (turn !== undefined && turn !== null) return String(turn)
   }

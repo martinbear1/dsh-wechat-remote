@@ -80,6 +80,29 @@ assert.equal(completed.value.events.some(entry => entry.event.type === 'assistan
 assert.equal(completed.value.events.some(entry => entry.view?.view?.diffs?.[0]?.path === 'E:\\Project\\report.docx'), true)
 assert.equal(completed.value.projections.values.title, '完整轮次')
 
+// The first page contains an older partial turn AND a fully closed latest
+// turn. Completing only the latest one silently loses older usage/activity.
+const h=(type,seq,turn,extra={})=>({event:{type,seq,time:seq*100,data:{turn,...extra}}})
+const splitCalls=[]
+const split=await buildHistoryWindow({sessionId:'older-partial'},async payload=>{
+  splitCalls.push(payload.beforeSeq)
+  return {ok:true,value:{hasMore:true,events:payload.beforeSeq===12?[
+    h('assistant/message',3,0,{step:1,message:{id:'older',content:[{type:'text',text:'older'}]}}),
+    h('turn/end',4,0,{reason:{kind:'completed'}}),h('turn/start',10,1),h('step/start',11,1,{step:1})
+  ]:[
+    h('deliverables/presented',12,1,{files:[{path:'a.pdf'}]}),
+    h('assistant/message',13,1,{step:1,message:{id:'first',content:[{type:'reasoning',text:'think'},{type:'text',text:'first'}]}}),
+    h('turn/end',14,1,{reason:{kind:'completed'}}),h('turn/start',20,2),h('step/start',21,2,{step:1}),
+    h('assistant/message',22,2,{step:1,message:{id:'second',content:[{type:'text',text:'second'}]}}),h('turn/end',23,2,{reason:{kind:'completed'}})
+  ]}}
+},signal,()=>({totalTokens:12,outputTokens:3}))
+assert.deepEqual(splitCalls,[undefined,12])
+assert.equal(split.value.historyStartSeq,10,'overshot older prefix left behind the next cursor')
+assert.equal(split.value.hasMore,true)
+assert.deepEqual(split.value.facets['agent.turn-details.v1'].map(x=>x.messageId),['first','second'])
+assert.equal(split.value.events.find(e=>e.event.seq===12).view.agentResources.files.length,1)
+assert.deepEqual(split.value.events.find(e=>e.event.seq===14).view.agentActivity.process.answerParts,['reasoning'])
+
 const interrupted = await buildHistoryWindow({ sessionId: 'session-error' }, async () => ({
   ok: true,
   value: {

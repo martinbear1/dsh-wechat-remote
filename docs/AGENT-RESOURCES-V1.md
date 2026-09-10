@@ -23,6 +23,8 @@ Capabilities are checked per scope/connection; missing namespace, unknown schema
 
 ## Presentation
 
+Declarations belong to the scope's turn, not to each assistant message. Retain them by turn and project them once on the completed turn's final text reply. Process folding, file changes and usage/timing remain independent. The native evidence and optional activity range/answer-parts contract are recorded in [the rendering audit](CONVERSATION-RENDERING-20260910.md).
+
 The adapter augments, never renumbers, durable event entries:
 
 ```json

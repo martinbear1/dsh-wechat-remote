@@ -19,9 +19,16 @@ export class TurnActivityCompatibility {
   accept(event:Row):Row|undefined {
     const d=record(event.data),seq=event.seq
     if(!Number.isSafeInteger(seq))return
-    if(event.type==='turn/start')this.state={turn:d.turn,start:seq,calls:new Map(),results:new Set(),changes:[],messages:[],visible:[],tools:[],subagents:[],answer:null,step:null}
+    if(event.type==='turn/start')this.state={turn:d.turn,start:seq,calls:new Map(),results:new Set(),changes:[],messages:[],visible:[],contexts:[],humans:[],tools:[],subagents:[],answer:null,reasoning:false,step:null}
     const s=this.state
-    if(!s||d.turn!==s.turn)return
+    if(!s)return
+    // Native user-message events have no turn field. Their enclosing durable
+    // turn owns injected context, while human/steering messages stay separate.
+    if(event.type==='user/message' && typeof d.source?.kind==='string'
+      && (event.surfaceOp===undefined||event.surfaceOp==='append')) {
+      (d.source.kind==='user'?s.humans:s.contexts).push(seq)
+    }
+    if(d.turn!==s.turn)return
     if(event.type==='step/start'){s.step=d.step;s.answer=null}
     if(event.type==='tool/call') {
       if(!s.calls.has(d.callId))(d.name==='subagent'||d.name?.startsWith('subagent_')?s.subagents:s.tools).push(seq)
@@ -41,7 +48,10 @@ export class TurnActivityCompatibility {
       const reply=content.some((b:Row)=>b.type==='text'?typeof b.text==='string'&&b.text.trim()!=='':['image','file','audio','video'].includes(b.type))
       if(reply)s.messages.push({seq,step:d.step})
       if(reply||content.some((b:Row)=>b.type==='reasoning'&&b.text?.trim()))s.visible.push({seq,step:d.step})
-      if(d.step===s.step)s.answer=reply&&!content.some((b:Row)=>b.type==='tool-call')?seq:null
+      if(d.step===s.step){
+        s.answer=reply&&!content.some((b:Row)=>b.type==='tool-call')?seq:null
+        s.reasoning=content.some((b:Row)=>b.type==='reasoning'&&b.text?.trim())
+      }
     }
     if(event.type!=='turn/end')return
     this.state=undefined
@@ -50,9 +60,13 @@ export class TurnActivityCompatibility {
     if(d.reason?.kind!=='completed'||!s.answer)return
     const before=(n:number)=>n<s.answer
     const tools=s.tools.filter(before),subagents=s.subagents.filter(before),messages=s.messages.filter((m:Row)=>m.step<s.step)
-    const start=Math.min(...tools,...subagents,...s.visible.filter((m:Row)=>m.step<s.step).map((m:Row)=>m.seq))
+    const hasProcess=tools.length||subagents.length||s.contexts.length||s.reasoning||s.visible.some((m:Row)=>m.step<s.step)
+    // Native compactAnswer preserves reasoning after in-turn human steering.
+    // Input messages stay independent; never erase their surrounding context.
+    const compactReasoning=s.reasoning&&s.humans.filter(before).length<=1
     return {schema:'agent.activity.v1',turn:s.turn,answerSeq:s.answer,
       changedFiles:[...new Set(s.changes.filter((c:Row)=>c.seq<=s.answer).map((c:Row)=>c.path))].map(reference=>({reference})),
-      ...(Number.isFinite(start)?{process:{startSeq:start,endSeq:s.answer,toolCount:tools.length,subagentCount:subagents.length,messageCount:messages.length,complete:true}}:{})}
+      ...(hasProcess?{process:{startSeq:s.start,endSeq:s.answer,boundary:'turn',answerParts:compactReasoning?['reasoning']:[],includesContext:true,
+        contextCount:s.contexts.filter(before).length,toolCount:tools.length,subagentCount:subagents.length,messageCount:messages.length,complete:true}}:{})}
   }
 }

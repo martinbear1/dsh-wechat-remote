@@ -52,3 +52,43 @@ for(const e of [
 const steered=steering.accept({type:'turn/end',seq:7,data:{turn:1,reason:{kind:'completed'}}})
 assert.deepEqual(steered.process.answerParts,[],'native in-turn steering keeps final reasoning visible')
 assert.equal(steered.process.contextCount,1,'all known non-human producer kinds are context')
+
+// Native chat-snapshot-builder ordering is separate from completion. Context
+// can precede an opening input in the log; process evidence excludes context.
+const openingEvent={type:'user/message',seq:34,surfaceOp:'append',data:{source:{kind:'user'}}}
+const beforeInput={type:'user/message',seq:33,surfaceOp:'append',data:{source:{kind:'arbitrary-runtime'}}}
+const ordering=new TurnActivityCompatibility()
+ordering.accept({type:'turn/start',seq:29,data:{turn:2}})
+ordering.accept(beforeInput)
+const layout=ordering.accept(openingEvent)
+assert.deepEqual(layout.layout,{startSeq:29,openingInputSeq:34})
+assert.equal(layout.process,undefined,'ordering applies immediately, without hiding a running process')
+assert.equal(ordering.accept({...openingEvent,seq:36}),undefined,'later inputs do not replace the opening anchor')
+for(const evidence of [
+ {type:'tool/call',data:{callId:'c',name:'read',arguments:'{}'}},
+ {type:'tool/result',data:{message:{content:[]}}},
+ {type:'llm/retry',data:{}},
+ {type:'assistant/message',data:{message:{content:[{type:'text',text:'working'}]}}},
+ {type:'assistant/live-chunk',data:{chunk:{type:'reasoning-delta',text:'thinking'}}},
+ {type:'assistant/live-chunk',data:{chunk:{type:'block-start',blockType:'image'}}},
+ {type:'assistant/live-chunk',data:{chunk:{type:'block-end',block:{type:'text',text:'working'}}}},
+]) {
+ const a=new TurnActivityCompatibility()
+ a.accept({type:'turn/start',seq:29,data:{turn:2}})
+ a.accept({...evidence,seq:32,surfaceOp:'append',data:{...evidence.data,turn:2,step:1}})
+ a.accept(beforeInput)
+ assert.equal(a.accept(openingEvent),undefined,'human input after '+evidence.type+' remains steering')
+}
+for(const nonEvidence of [
+ {type:'assistant/live-chunk',data:{chunk:{type:'text-delta',text:' '}}},
+ {type:'assistant/live-chunk',data:{chunk:{type:'block-start',blockType:'tool-call'}}},
+ {type:'assistant/message',surfaceOp:'replace',data:{message:{content:[{type:'text',text:'cached'}]}}},
+ {type:'tool/result',surfaceOp:'replace',data:{message:{content:[]}}},
+]) {
+ const a=new TurnActivityCompatibility()
+ a.accept({type:'turn/start',seq:29,data:{turn:2}})
+ a.accept({...nonEvidence,seq:32,data:{...nonEvidence.data,turn:2,step:1}})
+ assert.deepEqual(a.accept(openingEvent).layout,layout.layout)
+}
+assert.equal(new TurnActivityCompatibility().accept(openingEvent),undefined,'partial prefixes cannot attest an opening input')
+console.log('native opening-input projection: running/context/steering/live chunks/replacements passed')

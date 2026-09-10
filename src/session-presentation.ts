@@ -10,7 +10,7 @@ export function presentationProjection(key: string, raw: unknown): { key: string
   const base = object(raw), v = base.values ? object(base.values) : base
   let name: string, value: unknown
   switch (key) {
-    case 'sessionStats': name = 'metrics'; value = numbers(v, [['turns','turns'],['steps','steps'],['toolMs','toolMs'],['llmMs','modelMs'],['ttftMs','firstTokenMs'],['ttftSteps','firstTokenSamples']]); break
+    case 'sessionStats': name = 'metrics'; value = numbers(v, [['turns','turns'],['steps','steps'],['toolMs','toolMs'],['llmMs','modelMs'],['ttftMs','firstTokenMs'],['ttftSteps','firstTokenSamples'],['decodeMs','decodeMs'],['decodeTokens','decodeTokens']]); break
     case 'tokenUsage': name = 'usage'; value = numbers(v, [['uncachedInputTokens','input'],['outputTokens','output'],['cacheReadTokens','cacheRead'],['cacheWriteTokens','cacheWrite']]); break
     case 'contextPressure': name = 'context'; value = { estimated: true, ...numbers(v, [[v.projectedTokens === undefined ? 'pressureTokens' : 'projectedTokens','used'],['contextWindow','capacity']]) }; break
     case 'contextBreakdown': name = 'composition'; value = numbers(v, [['systemTokens','system'],['toolsTokens','tools'],['messageTokens','messages']]); break

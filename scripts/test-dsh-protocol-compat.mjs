@@ -240,7 +240,8 @@ const permissionGateway = {
     assert.equal(namespace, 'commands')
     assert.equal(method, 'execute')
     assert.equal(args.agentId, 's1')
-    assert.deepEqual(args.images, [])
+    assert.deepEqual(args.images ?? args.submittedAttachments, [])
+    assert.equal(Object.hasOwn(args,'images') && Object.hasOwn(args,'submittedAttachments'),false,'strict named fields reject both generations together')
     const next = args.line.split(' ')[1]
     if (next) permissionCurrent = next
     return { commandId: 'command-1', result: { kind: 'success', text: 'preset ' + permissionCurrent } }
@@ -292,7 +293,7 @@ console.log('DSH protocol compatibility tests passed')
 
 for (const field of ['images','submittedAttachments']) {
   let executed = 0, persisted = 0
-  const direct = await invokeLegacyRpc({...permissionGateway,async invoke(call){
+  const direct = await invokeLegacyRpc({...permissionGateway,commandAttachmentField:()=>field,async invoke(call){
     if(call.namespace==='commands') { executed++; assert.deepEqual(call.args[field],[]) }
     return permissionGateway.invoke(call)
   }},request('commands/execute',{args:{agentId:'s1',line:'/permission read-only',images:[]}}),

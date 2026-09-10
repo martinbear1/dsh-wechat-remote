@@ -1,6 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis';
 type JsonRecord = Record<string, unknown>;
 export interface TypertGatewayLike {
+    readonly commandAttachmentField?: () => 'images' | 'submittedAttachments';
     readonly wireStream?: {
         open(endpoint: string, payload: unknown, signal: AbortSignal): Promise<AsyncIterable<unknown>>;
     };
@@ -71,6 +72,7 @@ type InvocationPlan = {
 export declare function planLegacyRpc(request: LegacyClientRequest): InvocationPlan;
 /** Feature detection keeps the same package loadable on pre-Gateway DSH. */
 export declare function resolveTypertGateway(ctx: Context): TypertGatewayLike | null;
+export declare function commandArguments(gateway: Pick<TypertGatewayLike, 'commandAttachmentField'>, args: Readonly<JsonRecord>): JsonRecord;
 /** Expand 0.1.2 packed history rows back into the stable event vocabulary. */
 export declare function unpackChunkRow(event: JsonRecord): JsonRecord[];
 /** The 0.1.1 Gateway has invoke but no stream; retain its native history API. */

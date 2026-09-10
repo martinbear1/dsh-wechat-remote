@@ -6,6 +6,7 @@ import { withPresentationProjections } from './session-presentation.js'
 type JsonRecord = Record<string, unknown>
 
 export interface TypertGatewayLike {
+  readonly commandAttachmentField?: () => 'images' | 'submittedAttachments'
   readonly wireStream?: {
     open(endpoint: string, payload: unknown, signal: AbortSignal): Promise<AsyncIterable<unknown>>
   }
@@ -124,8 +125,8 @@ export function planLegacyRpc(request: LegacyClientRequest): InvocationPlan {
         }
         return {kind:'permission-command',sessionId:args.agentId,line,nativeReceipt:true,...(match[1]?{preset:match[1]}:{})}
       }
-      // Typert decodes named parameters, not the complete args object. Supply
-      // both generations in ONE invocation; never retry a mutating command.
+      // Keep both representations in the plan only. The active Host descriptor
+      // selects ONE field before invocation; strict gateways reject extras.
       const images = Array.isArray(args.images) ? args.images : []
       return {kind:'invoke',namespace,method:remoteMethod,args:{...args,images,
         submittedAttachments:args.submittedAttachments ?? images.map(image=>({...recordOf(image),type:'image'}))}}
@@ -268,11 +269,34 @@ export function planLegacyRpc(request: LegacyClientRequest): InvocationPlan {
 /** Feature detection keeps the same package loadable on pre-Gateway DSH. */
 export function resolveTypertGateway(ctx: Context): TypertGatewayLike | null {
   const candidate = ctx.get('typertGateway') as Partial<TypertGatewayLike> | undefined
-  return candidate
-    && typeof candidate.invoke === 'function'
-    && typeof candidate.stream === 'function'
-    ? candidate as TypertGatewayLike
-    : null
+  if (!candidate || typeof candidate.invoke !== 'function' || typeof candidate.stream !== 'function') return null
+  return {
+    wireStream: candidate.wireStream,
+    invoke: request => candidate.invoke!(request),
+    stream: request => candidate.stream!(request),
+    commandAttachmentField: () => {
+      const registry = ctx.get('typert') as { local?: { get(endpoint: string): {parameters?: readonly {wire?: string}[]} | undefined; hasSeen?(endpoint: string): boolean } } | undefined
+      const descriptor = registry?.local?.get('commands/execute')
+      if (descriptor) {
+        const fields = descriptor.parameters?.map(parameter => parameter.wire) || []
+        if (fields.includes('submittedAttachments') && !fields.includes('images')) return 'submittedAttachments'
+        if (fields.includes('images') && !fields.includes('submittedAttachments')) return 'images'
+        throw new Error('DSH 命令附件参数已变更；未执行命令')
+      }
+      if (registry?.local?.hasSeen?.('commands/execute')) throw new Error('DSH 命令接口正在更新，请稍后重试')
+      // Development SRC mode predates/omits strict registration. The native
+      // fileUploads service is present only with submitted-attachment commands.
+      return ctx.get('fileUploads') ? 'submittedAttachments' : 'images'
+    },
+  }
+}
+
+export function commandArguments(gateway: Pick<TypertGatewayLike, 'commandAttachmentField'>, args: Readonly<JsonRecord>): JsonRecord {
+  const field = gateway.commandAttachmentField?.() || 'images'
+  const {images, submittedAttachments, ...rest} = args
+  const value = field === 'submittedAttachments' ? submittedAttachments ?? (Array.isArray(images) ? images.map(image => ({...recordOf(image),type:'image'})) : []) : images ?? []
+  if (field === 'images' && Array.isArray(submittedAttachments) && submittedAttachments.some(part => recordOf(part)?.type !== 'image')) throw new Error('此版本 DSH 命令不支持文件附件')
+  return {...rest,[field]:value}
 }
 
 function errorResult(error: unknown): LegacyRpcResult {
@@ -427,7 +451,7 @@ async function workspaceValue(
 }
 
 async function permissionCommandValue(
-  gateway: Pick<TypertGatewayLike, 'invoke'>,
+  gateway: Pick<TypertGatewayLike, 'invoke' | 'commandAttachmentField'>,
   plan: Extract<InvocationPlan, { kind: 'permission-command' }>,
   signal: AbortSignal,
   readHistory: (sessionId: string, signal: AbortSignal) => Promise<unknown>,
@@ -436,7 +460,7 @@ async function permissionCommandValue(
   signal.throwIfAborted()
   const command = recordOf(await gateway.invoke({
     namespace: 'commands', method: 'execute',
-    args: { agentId: plan.sessionId, line: plan.line, images: [], submittedAttachments: [] }, signal,
+    args: commandArguments(gateway, { agentId: plan.sessionId, line: plan.line, images: [], submittedAttachments: [] }), signal,
   }))
   const result = recordOf(command?.result)
   if (result?.kind !== 'success') {
@@ -532,7 +556,7 @@ export async function invokeLegacyRpc(
           value = await gateway.invoke({
             namespace: plan.namespace,
             method: plan.method,
-            args: plan.args,
+            args: plan.namespace === 'commands' && plan.method === 'execute' ? commandArguments(gateway, plan.args) : plan.args,
             signal: options.signal,
           })
           break

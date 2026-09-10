@@ -47,6 +47,10 @@
       "types": "./lib/attachment-service.d.ts",
       "default": "./lib/attachment-service.js"
     },
+    "./resources": {
+      "types": "./lib/agent-resources.d.ts",
+      "default": "./lib/agent-resources.js"
+    },
     "./public-relay": {
       "types": "./lib/public-relay-agent.d.ts",
       "default": "./lib/public-relay-agent.js"
@@ -101,7 +105,7 @@
     "test:gate-ports": "node scripts/test-gate-ports.mjs",
     "test:dsh-runtime": "node scripts/test-dsh-runtime.mjs",
     "test:dsh-protocol-compat": "node scripts/test-dsh-protocol-compat.mjs && node scripts/test-dsh-session-address.mjs && node scripts/test-session-presentation.mjs",
-    "test:dsh-realtime-compat": "node scripts/test-dsh-realtime-compat.mjs",
+    "test:dsh-realtime-compat": "node scripts/test-dsh-realtime-compat.mjs && node scripts/test-assistant-stream.mjs && node scripts/test-agent-resources.mjs",
     "test:dsh-compatibility-api": "node scripts/test-dsh-compatibility-api.mjs",
     "test:public-relay": "node scripts/test-public-relay.mjs && node scripts/test-relay-liveness.mjs"
   },
@@ -215,6 +219,10 @@
     "lib/history-snapshot-cache.js",
     "lib/history-snapshot-cache.d.ts",
     "lib/attachment-service.js",
+    "lib/agent-resources.js",
+    "lib/agent-resources.d.ts",
+    "lib/assistant-stream-compat.js",
+    "lib/assistant-stream-compat.d.ts",
     "lib/attachment-service.d.ts",
     "lib/public-relay-agent.js",
     "lib/public-relay-agent.d.ts",

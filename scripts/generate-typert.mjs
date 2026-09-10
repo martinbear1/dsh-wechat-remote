@@ -48,6 +48,8 @@ try {
     'history-archive.ts',
     'history-snapshot-cache.ts',
     'attachment-service.ts',
+    'agent-resources.ts',
+    'assistant-stream-compat.ts',
     'public-relay-agent.ts',
     'public-relay-gateway.ts',
     'public-object-client.ts',
@@ -75,6 +77,7 @@ try {
     'host-info-service.d.ts',
     'history-service.d.ts',
     'attachment-service.d.ts',
+    'agent-resources.d.ts',
   ]) {
     copyFileSync(path.join(root, 'lib', file), path.join(packageRoot, 'lib', file))
   }

@@ -4,6 +4,8 @@ import type { WebSocket } from 'ws'
 import { resolveTypertGateway, type TypertGatewayLike } from './dsh-protocol-compat.js'
 import { resolveDshSessionAddress, isSessionReadError } from './dsh-session-address.js'
 import { presentationProjection } from './session-presentation.js'
+import { AssistantStreamCompatibility, assistantAttemptPresentation } from './assistant-stream-compat.js'
+import { resourcePresentation } from './agent-resources.js'
 
 type JsonRecord = Record<string, unknown>
 
@@ -327,9 +329,11 @@ export class DshRealtimeCompatibility {
         const iterable = await gateway.stream({
           namespace: 'session',
           method: 'follow',
-          args: { request: { address, maxMessages: 1 } },
+          args: { request: { address, maxMessages: 1, assistantStream: true } },
           signal: combined,
         })
+        const assistant = new AssistantStreamCompatibility(event =>
+          this.send(state, { type: 'session/event', sessionId, event }))
         for await (const raw of iterable) {
           const frame = recordOf(raw)
           if (frame?.type === 'snapshot') {
@@ -337,8 +341,14 @@ export class DshRealtimeCompatibility {
               type: 'session/subscribed', sessionId,
               lastSeq: Number.isSafeInteger(frame.cursor) ? frame.cursor : -1,
             })
+            assistant.baseline(recordOf(frame.assistantStream) || undefined)
+          } else if (frame?.type === 'assistant-stream') {
+            assistant.follow(recordOf(frame.frame) || {})
           } else if (frame?.type === 'event' && recordOf(frame.event)) {
-            this.send(state, { type: 'session/event', sessionId, event: frame.event })
+            const resources = resourcePresentation(frame.event as JsonRecord)
+            const attempt = assistantAttemptPresentation(frame.event as JsonRecord)
+            this.send(state, { type: 'session/event', sessionId, event: frame.event,
+              ...((resources || attempt) ? {view:{...(resources?{agentResources:resources}:{}),...(attempt?{agentTranscript:attempt}:{})}} : {}) })
           }
         }
         if (!combined.aborted) throw new Error('DSH Session stream ended unexpectedly')

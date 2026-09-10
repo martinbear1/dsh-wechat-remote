@@ -1,5 +1,6 @@
 import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
+import { firstCompactTokenTime } from './assistant-stream-compat.js'
 
 type Value = Record<string, any>
 type UsageFold = (events: readonly Value[]) => Value | undefined
@@ -36,6 +37,10 @@ function timing(events: Value[], start: Value, end: Value): Value {
         || chunk.type === 'tool-call-delta' && (!!chunk.argumentsDelta || chunk.name !== undefined)
       if (token && open.first === undefined && number(event.time)) open.first = event.time
     } else if (event.type === 'assistant/message') {
+      // V3 no longer has durable assistant/chunk events. Their original times
+      // live inside the settled attempt; never substitute socket arrival time.
+      const compactFirst=firstCompactTokenTime(data.stream)
+      if(open && open.step===data.step && open.first===undefined && number(compactFirst) && compactFirst>=open.time)open.first=compactFirst
       // An untimed lowest step makes first-token latency unavailable too.
       if (number(data.step) && data.step < firstStep) {
         firstStep = data.step

@@ -23,4 +23,11 @@ const built = await buildHistoryWindow({sessionId:'s'}, async () => ({ok:true,va
 assert.equal(built.value.events.some(x => x.event.type === 'assistant/chunk'), false)
 assert.deepEqual(built.value.facets['agent.turn-details.v1'][0], detail, 'details precede chunk compaction')
 assert.equal(called, 2)
+const compact=events.filter(e=>e.event.type!=='assistant/chunk').map(e=>JSON.parse(JSON.stringify(e)))
+compact.find(e=>e.event.type==='assistant/message').event.data.stream=[{type:'text-chunks',index:0,time0:120,dt:[10],texts:['','Hi']}]
+assert.deepEqual(turnDetails(compact)[0].timing,detail.timing,'V3 compact timestamps restore the same TTFT and decode rate')
+const compactWindow=await buildHistoryWindow({sessionId:'s'},async()=>({ok:true,value:{events:compact,hasMore:false}}),new AbortController().signal)
+assert.equal(compactWindow.value.events.find(e=>e.event.type==='assistant/message').event.data.stream,undefined,'token samples are omitted only from transport projection')
+assert(compact.find(e=>e.event.type==='assistant/message').event.data.stream,'native events remain untouched')
+assert.deepEqual(compactWindow.value.facets['agent.turn-details.v1'][0].timing,detail.timing)
 console.log('turn details: native accounting boundary, timing, missing/partial turns, identity, pre-compaction passed')

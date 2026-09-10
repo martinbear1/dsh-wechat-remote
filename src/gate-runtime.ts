@@ -51,6 +51,7 @@ import WechatHistoryService, {
 import WechatAttachmentService, {
   type WechatAttachmentConfig,
 } from './attachment-service.js'
+import { AgentResourcesService } from './agent-resources.js'
 import PublicRelayGateway from './public-relay-gateway.js'
 import { bindHistorySnapshotPrewarmer } from './history-prewarmer.js'
 import {
@@ -1072,6 +1073,12 @@ code{color:#7aa2ff;font-size:15px;letter-spacing:3px}
     },
   }
   mountChild('attachment', WechatAttachmentService, attachmentConfig)
+  mountChild('agent-resources', AgentResourcesService, {
+    store: async (data: Uint8Array, signal: AbortSignal) => {
+      if (!publicRelayGateway) throw new Error('公网文件服务暂不可用，请连接局域网后重试')
+      return publicRelayGateway.uploadArtifactObject(data, signal)
+    },
+  })
   // Product mode uses the official outbound-only relay by default so one QR
   // provisions public + LAN routes. A local config may explicitly disable or
   // override it; failures stay isolated and never alter LAN/WebUI behavior.

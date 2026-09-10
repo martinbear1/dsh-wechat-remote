@@ -7,8 +7,17 @@ import type { WechatAttachmentBatchRequest, WechatAttachmentBatchResult } from '
 import type { WechatDirectoryCreateRequest, WechatDirectoryCreateResult, WechatDirectoryListRequest, WechatDirectoryListResult, WechatDirectoryRootsRequest, WechatDirectoryRootsResult } from '@harness-remote/dsh-wechat-remote/directory'
 import type { WechatHistoryWindowRequest, WechatHistoryWindowResult } from '@harness-remote/dsh-wechat-remote/history'
 import type { WechatHostDescribeRequest, WechatHostDescribeResult } from '@harness-remote/dsh-wechat-remote/host-info'
+import type { ResourceResult } from '@harness-remote/dsh-wechat-remote/resources'
 
 declare module '@deepseek-ai/dsh-typert-protocol' {
+  interface TypertRemoteNamespace$6167656e745265736f7572636573 {
+    capabilities: (request: { scope: string; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
+    chunk: (request: { scope: string; transferId: string; offset: number; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
+    list: (request: { scope: string; directoryId?: string; cursor?: number; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
+    prepare: (request: { scope: string; id: string; delivery: 'chunks' | 'object'; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
+    release: (request: { scope: string; transferId: string; }) => Promise<RemoteResult<ResourceResult>>
+    resolve: (request: { scope: string; reference: string; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
+  }
   interface TypertRemoteNamespace$7765636861744174746163686d656e74 {
     prepareBatch: (request: WechatAttachmentBatchRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatAttachmentBatchResult>>
   }
@@ -24,6 +33,12 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     describe: (request: WechatHostDescribeRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatHostDescribeResult>>
   }
   interface TypertRemoteMap {
+    'agentResources/capabilities': (request: { scope: string; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
+    'agentResources/chunk': (request: { scope: string; transferId: string; offset: number; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
+    'agentResources/list': (request: { scope: string; directoryId?: string; cursor?: number; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
+    'agentResources/prepare': (request: { scope: string; id: string; delivery: 'chunks' | 'object'; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
+    'agentResources/release': (request: { scope: string; transferId: string; }) => Promise<RemoteResult<ResourceResult>>
+    'agentResources/resolve': (request: { scope: string; reference: string; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
     'wechatAttachment/prepareBatch': (request: WechatAttachmentBatchRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatAttachmentBatchResult>>
     'wechatDirectory/create': (request: WechatDirectoryCreateRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatDirectoryCreateResult>>
     'wechatDirectory/list': (request: WechatDirectoryListRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatDirectoryListResult>>
@@ -32,6 +47,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'wechatHost/describe': (request: WechatHostDescribeRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatHostDescribeResult>>
   }
   interface TypertRemoteNamespaceMap {
+    'agentResources': TypertRemoteNamespace$6167656e745265736f7572636573
     'wechatAttachment': TypertRemoteNamespace$7765636861744174746163686d656e74
     'wechatDirectory': TypertRemoteNamespace$7765636861744469726563746f7279
     'wechatHistory': TypertRemoteNamespace$776563686174486973746f7279

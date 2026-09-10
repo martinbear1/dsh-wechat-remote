@@ -158,6 +158,12 @@ export class PublicRelayGateway {
     }
   }
 
+  async uploadArtifactObject(data: Uint8Array, signal: AbortSignal): Promise<Record<string, unknown>> {
+    const encrypted = encryptCloudObject(data, 'artifact')
+    const ticket = await this.objectClient.upload('artifact', encrypted.ciphertext, signal)
+    return { ...encrypted.descriptor, objectId: ticket.objectId, expiresAt: ticket.expiresAt }
+  }
+
   async uploadAttachmentObject(
     data: Uint8Array,
     metadata: { readonly attachmentId: string; readonly mediaType: string; readonly name?: string },

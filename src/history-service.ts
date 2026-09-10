@@ -14,6 +14,8 @@
  * session.history 契约，也不新增监听端口。
  */
 import http from 'node:http'
+import { resourcePresentation } from './agent-resources.js'
+import { assistantAttemptPresentation } from './assistant-stream-compat.js'
 
 import type { Context } from '@deepseek-ai/cordis'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
@@ -333,7 +335,20 @@ export async function buildHistoryWindow(
         ok: true,
         value: {
           ...(tailValue || {}),
-          events: compactEntries(pages.flat(), completedTurns, durableMessageTurns),
+          events: compactEntries(pages.flat(), completedTurns, durableMessageTurns).map(entry => {
+            const resources = resourcePresentation((entry.event || {}) as Record<string, unknown>)
+            const attempt = assistantAttemptPresentation((entry.event || {}) as Record<string, unknown>)
+            // The phone already has settled text or the normalized partial.
+            // Do not transfer thousands of native token samples a second time.
+            const event=entry.event
+            let projected=entry
+            if((event?.type==='assistant/message' || event?.type==='assistant/attempt') && Array.isArray(event.data?.stream)) {
+              const {stream:_,...data}=event.data
+              projected={...entry,event:{...event,data}}
+            }
+            return resources || attempt ? {...projected, view:{...(entry.view as Record<string, unknown> || {}),
+              ...(resources?{agentResources:resources}:{}),...(attempt?{agentTranscript:attempt}:{})}} : projected
+          }),
           facets: { 'agent.turn-details.v1': turnDetails(pages.flat(), usageFold) },
           hasMore: oldestValue?.hasMore === true,
           historyStartSeq,

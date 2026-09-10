@@ -58,7 +58,7 @@ type InvocationPlan =
   | { readonly kind: 'workspace-list' }
   | { readonly kind: 'session-models'; readonly request: JsonRecord }
   | { readonly kind: 'session-history'; readonly request: JsonRecord }
-  | { readonly kind: 'permission-command'; readonly sessionId: string; readonly line: string; readonly preset?: string }
+  | { readonly kind: 'permission-command'; readonly sessionId: string; readonly line: string; readonly preset?: string; readonly nativeReceipt?: boolean }
 
 const SINGLE_REQUEST_METHODS = new Set([
   'session.attachment',
@@ -113,6 +113,23 @@ export function planLegacyRpc(request: LegacyClientRequest): InvocationPlan {
       throw new Error(`unsupported Remote endpoint: ${method}`)
     }
     const supplied = recordOf(payload.args)
+    if (namespace === 'commands' && remoteMethod === 'execute') {
+      const args = supplied ?? {}
+      const line = typeof args.line === 'string' ? args.line.trim() : ''
+      if (/^\/permission(?:\s|$)/.test(line)) {
+        const match = /^\/permission(?:[ \t]+([a-z][a-z0-9-]*))?[ \t]*$/.exec(line)
+        if (!match || typeof args.agentId !== 'string' || !args.agentId.trim()
+          || ['images', 'submittedAttachments'].some(key => args[key] !== undefined && (!Array.isArray(args[key]) || (args[key] as unknown[]).length))) {
+          throw Object.assign(new Error('权限命令格式无效；未更改权限'), {code:'adapter/invalid-permission-command'})
+        }
+        return {kind:'permission-command',sessionId:args.agentId,line,nativeReceipt:true,...(match[1]?{preset:match[1]}:{})}
+      }
+      // Typert decodes named parameters, not the complete args object. Supply
+      // both generations in ONE invocation; never retry a mutating command.
+      const images = Array.isArray(args.images) ? args.images : []
+      return {kind:'invoke',namespace,method:remoteMethod,args:{...args,images,
+        submittedAttachments:args.submittedAttachments ?? images.map(image=>({...recordOf(image),type:'image'}))}}
+    }
     return { kind: 'invoke', namespace, method: remoteMethod, args: supplied ?? {} }
   }
   if (method === 'host.describe') return { kind: 'host-describe' }
@@ -419,7 +436,7 @@ async function permissionCommandValue(
   signal.throwIfAborted()
   const command = recordOf(await gateway.invoke({
     namespace: 'commands', method: 'execute',
-    args: { agentId: plan.sessionId, line: plan.line, images: [] }, signal,
+    args: { agentId: plan.sessionId, line: plan.line, images: [], submittedAttachments: [] }, signal,
   }))
   const result = recordOf(command?.result)
   if (result?.kind !== 'success') {
@@ -440,7 +457,7 @@ async function permissionCommandValue(
       code: 'adapter/permission-not-applied',
     })
   }
-  return { accepted: true, command: true, permission: current, commandId: command?.commandId }
+  return plan.nativeReceipt ? command : { accepted: true, command: true, permission: current, commandId: command?.commandId }
 }
 
 /** The 0.1.1 Gateway has invoke but no stream; retain its native history API. */

@@ -13,7 +13,7 @@ import {
 import type { AgentCapability } from './agent-metadata.js'
 import type { WechatAttachmentObjectDescriptor } from './attachment-service.js'
 import type { HostPlatformDescriptor } from './host-platform.js'
-import { decryptRemoteAttachment, encryptCloudObject, type RemoteAttachmentDescriptor } from './object-crypto.js'
+import { decryptRemoteAttachment, decryptCloudObject, encryptCloudObject, type EncryptedCloudObjectDescriptor, type RemoteAttachmentDescriptor } from './object-crypto.js'
 import { archiveHistoryJson, HISTORY_ARCHIVE_ENTRY } from './history-archive.js'
 import { PublicObjectClient } from './public-object-client.js'
 import HistorySnapshotCache from './history-snapshot-cache.js'
@@ -162,6 +162,11 @@ export class PublicRelayGateway {
     const encrypted = encryptCloudObject(data, 'artifact')
     const ticket = await this.objectClient.upload('artifact', encrypted.ciphertext, signal)
     return { ...encrypted.descriptor, objectId: ticket.objectId, expiresAt: ticket.expiresAt }
+  }
+  async downloadInputObject(descriptor: Record<string, any>, signal:AbortSignal):Promise<Uint8Array>{
+    if(descriptor.contentKind!=='artifact'||!Number.isSafeInteger(descriptor.plainBytes)||descriptor.plainBytes<1||descriptor.plainBytes>20*1024*1024)throw Error('附件对象无效')
+    const ciphertext=await this.objectClient.download(descriptor.objectId,20*1024*1024+4096,signal)
+    return decryptCloudObject(ciphertext,descriptor as EncryptedCloudObjectDescriptor)
   }
 
   async uploadAttachmentObject(

@@ -61,6 +61,7 @@ type InvocationPlan = {
     readonly sessionId: string;
     readonly line: string;
     readonly preset?: string;
+    readonly nativeReceipt?: boolean;
 };
 /**
  * Translate the stable mini-program RPC vocabulary into the post-0.1.2

@@ -10,6 +10,10 @@ import type { WechatHostDescribeRequest, WechatHostDescribeResult } from '@harne
 import type { ResourceResult } from '@harness-remote/dsh-wechat-remote/resources'
 
 declare module '@deepseek-ai/dsh-typert-protocol' {
+  interface TypertRemoteNamespace$6167656e74496e70757473 {
+    capabilities: (request: { scope: string; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
+    upload: (request: { scope: string; name: string; data?: string; descriptorJson?: string; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
+  }
   interface TypertRemoteNamespace$6167656e745265736f7572636573 {
     capabilities: (request: { scope: string; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
     chunk: (request: { scope: string; transferId: string; offset: number; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
@@ -33,6 +37,8 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     describe: (request: WechatHostDescribeRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatHostDescribeResult>>
   }
   interface TypertRemoteMap {
+    'agentInputs/capabilities': (request: { scope: string; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
+    'agentInputs/upload': (request: { scope: string; name: string; data?: string; descriptorJson?: string; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
     'agentResources/capabilities': (request: { scope: string; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
     'agentResources/chunk': (request: { scope: string; transferId: string; offset: number; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
     'agentResources/list': (request: { scope: string; directoryId?: string; cursor?: number; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
@@ -47,6 +53,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'wechatHost/describe': (request: WechatHostDescribeRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatHostDescribeResult>>
   }
   interface TypertRemoteNamespaceMap {
+    'agentInputs': TypertRemoteNamespace$6167656e74496e70757473
     'agentResources': TypertRemoteNamespace$6167656e745265736f7572636573
     'wechatAttachment': TypertRemoteNamespace$7765636861744174746163686d656e74
     'wechatDirectory': TypertRemoteNamespace$7765636861744469726563746f7279

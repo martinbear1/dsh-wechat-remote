@@ -289,3 +289,19 @@ const diskFailure = await invokeLegacyRpc(permissionGateway, permissionRequest('
 assert.equal(diskFailure.result.error.code, 'storage/failed', 'failed persistence never produces a success receipt')
 
 console.log('DSH protocol compatibility tests passed')
+
+for (const field of ['images','submittedAttachments']) {
+  let executed = 0, persisted = 0
+  const direct = await invokeLegacyRpc({...permissionGateway,async invoke(call){
+    if(call.namespace==='commands') { executed++; assert.deepEqual(call.args[field],[]) }
+    return permissionGateway.invoke(call)
+  }},request('commands/execute',{args:{agentId:'s1',line:'/permission read-only',images:[]}}),
+  {...options,async flushPermission(){persisted++}})
+  assert.equal(direct.result.ok,true)
+  assert.equal(direct.result.value.result.kind,'success','released clients retain native receipt shape')
+  assert.equal(executed,1); assert.equal(persisted,1)
+}
+const rejectedDirect = await invokeLegacyRpc(permissionGateway,request('commands/execute',{
+  args:{agentId:'s1',line:'/permission read-only',submittedAttachments:[{type:'file',receiptId:'x'}]}
+}),options)
+assert.equal(rejectedDirect.result.error.code,'adapter/invalid-permission-command')

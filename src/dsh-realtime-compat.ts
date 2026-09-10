@@ -6,6 +6,7 @@ import { resolveDshSessionAddress, isSessionReadError } from './dsh-session-addr
 import { presentationProjection } from './session-presentation.js'
 import { AssistantStreamCompatibility, assistantAttemptPresentation } from './assistant-stream-compat.js'
 import { resourcePresentation } from './agent-resources.js'
+import { TurnActivityCompatibility } from './turn-activity.js'
 
 type JsonRecord = Record<string, unknown>
 
@@ -334,9 +335,14 @@ export class DshRealtimeCompatibility {
         })
         const assistant = new AssistantStreamCompatibility(event =>
           this.send(state, { type: 'session/event', sessionId, event }))
+        const activity = new TurnActivityCompatibility()
         for await (const raw of iterable) {
           const frame = recordOf(raw)
           if (frame?.type === 'snapshot') {
+            for(const entry of Array.isArray(frame.records)?frame.records:[]) {
+              const record=recordOf(entry)
+              activity.accept(recordOf(record?.event) || record || {})
+            }
             this.send(state, {
               type: 'session/subscribed', sessionId,
               lastSeq: Number.isSafeInteger(frame.cursor) ? frame.cursor : -1,
@@ -347,8 +353,9 @@ export class DshRealtimeCompatibility {
           } else if (frame?.type === 'event' && recordOf(frame.event)) {
             const resources = resourcePresentation(frame.event as JsonRecord)
             const attempt = assistantAttemptPresentation(frame.event as JsonRecord)
+            const turnActivity = activity.accept(frame.event as JsonRecord)
             this.send(state, { type: 'session/event', sessionId, event: frame.event,
-              ...((resources || attempt) ? {view:{...(resources?{agentResources:resources}:{}),...(attempt?{agentTranscript:attempt}:{})}} : {}) })
+              ...((resources || attempt || turnActivity) ? {view:{...(resources?{agentResources:resources}:{}),...(attempt?{agentTranscript:attempt}:{}),...(turnActivity?{agentActivity:turnActivity}:{})}} : {}) })
           }
         }
         if (!combined.aborted) throw new Error('DSH Session stream ended unexpectedly')

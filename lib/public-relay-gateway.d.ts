@@ -49,6 +49,7 @@ export declare class PublicRelayGateway {
     snapshot(): AgentStatus;
     prepareHistorySnapshot(payloadJson: string): Promise<Record<string, unknown>>;
     uploadArtifactObject(data: Uint8Array, signal: AbortSignal): Promise<Record<string, unknown>>;
+    downloadInputObject(descriptor: Record<string, any>, signal: AbortSignal): Promise<Uint8Array>;
     uploadAttachmentObject(data: Uint8Array, metadata: {
         readonly attachmentId: string;
         readonly mediaType: string;

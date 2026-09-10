@@ -15,6 +15,7 @@
  */
 import http from 'node:http'
 import { resourcePresentation } from './agent-resources.js'
+import { TurnActivityCompatibility } from './turn-activity.js'
 import { assistantAttemptPresentation } from './assistant-stream-compat.js'
 
 import type { Context } from '@deepseek-ai/cordis'
@@ -331,6 +332,7 @@ export async function buildHistoryWindow(
 
     if (targetTurn === undefined || hasTurnStart(entries, targetTurn)
       || value.hasMore !== true || entries.length === 0) {
+      const activity = new TurnActivityCompatibility()
       return {
         ok: true,
         value: {
@@ -338,6 +340,7 @@ export async function buildHistoryWindow(
           events: compactEntries(pages.flat(), completedTurns, durableMessageTurns).map(entry => {
             const resources = resourcePresentation((entry.event || {}) as Record<string, unknown>)
             const attempt = assistantAttemptPresentation((entry.event || {}) as Record<string, unknown>)
+            const turnActivity = activity.accept(entry.event || {})
             // The phone already has settled text or the normalized partial.
             // Do not transfer thousands of native token samples a second time.
             const event=entry.event
@@ -346,7 +349,8 @@ export async function buildHistoryWindow(
               const {stream:_,...data}=event.data
               projected={...entry,event:{...event,data}}
             }
-            return resources || attempt ? {...projected, view:{...(entry.view as Record<string, unknown> || {}),
+            return resources || attempt || turnActivity ? {...projected, view:{...(entry.view as Record<string, unknown> || {}),
+              ...(turnActivity?{agentActivity:turnActivity}:{}),
               ...(resources?{agentResources:resources}:{}),...(attempt?{agentTranscript:attempt}:{})}} : projected
           }),
           facets: { 'agent.turn-details.v1': turnDetails(pages.flat(), usageFold) },

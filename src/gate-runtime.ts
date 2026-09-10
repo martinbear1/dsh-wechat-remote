@@ -52,6 +52,7 @@ import WechatAttachmentService, {
   type WechatAttachmentConfig,
 } from './attachment-service.js'
 import { AgentResourcesService } from './agent-resources.js'
+import { AgentInputsService } from './agent-inputs.js'
 import PublicRelayGateway from './public-relay-gateway.js'
 import { bindHistorySnapshotPrewarmer } from './history-prewarmer.js'
 import {
@@ -1077,6 +1078,12 @@ code{color:#7aa2ff;font-size:15px;letter-spacing:3px}
     store: async (data: Uint8Array, signal: AbortSignal) => {
       if (!publicRelayGateway) throw new Error('公网文件服务暂不可用，请连接局域网后重试')
       return publicRelayGateway.uploadArtifactObject(data, signal)
+    },
+  })
+  mountChild('agent-inputs',AgentInputsService,{
+    load:async(descriptor:Record<string,any>,signal:AbortSignal)=>{
+      if(!publicRelayGateway)throw Error('公网附件服务暂不可用，请连接局域网后重试')
+      return publicRelayGateway.downloadInputObject(descriptor,signal)
     },
   })
   // Product mode uses the official outbound-only relay by default so one QR

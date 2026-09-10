@@ -102,6 +102,15 @@ export class DshCompatibilityApi implements DshCompatibilityTransport {
         return response(200, await this.realtime.respond(body))
       }
       const legacy = parseLegacyClientRequest(decodeURIComponent(url.pathname.slice(5)), body)
+      if(legacy.method==='session.prompt' && Array.isArray(legacy.payload.content)) {
+        if(legacy.payload.content.filter(part=>part?.type==='file').length>6)throw Error('每条消息最多 6 个文件')
+        const inputs=this.ctx.get('agentInputs') as {resolve:(scope:string,token:string)=>unknown}|undefined
+        legacy.payload.content=legacy.payload.content.map(part=>{
+          if(part?.type!=='file'||!part.inputToken)return part
+          if(!inputs)throw Error('此节点尚不支持文件附件')
+          return inputs.resolve(String(legacy.payload.sessionId),part.inputToken)
+        })
+      }
       if (!gateway) {
         const signal = AbortSignal.any([request.signal, AbortSignal.timeout(90_000)])
         const reply = await invokeLegacyPermissionRpc(invoker as Pick<TypertGatewayLike, 'invoke'>, legacy, signal, async sessionId => {

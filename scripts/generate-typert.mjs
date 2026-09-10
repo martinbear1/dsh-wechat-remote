@@ -49,6 +49,8 @@ try {
     'history-snapshot-cache.ts',
     'attachment-service.ts',
     'agent-resources.ts',
+    'agent-inputs.ts',
+    'turn-activity.ts',
     'assistant-stream-compat.ts',
     'public-relay-agent.ts',
     'public-relay-gateway.ts',
@@ -78,6 +80,7 @@ try {
     'history-service.d.ts',
     'attachment-service.d.ts',
     'agent-resources.d.ts',
+    'agent-inputs.d.ts',
   ]) {
     copyFileSync(path.join(root, 'lib', file), path.join(packageRoot, 'lib', file))
   }

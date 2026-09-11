@@ -17,7 +17,7 @@ if (process.argv[2]) {
   const version = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version
   const archive = fs.readFileSync(process.argv[2]), assets = path.join(root, 'installer/assets')
   fs.mkdirSync(assets, { recursive: true })
-  const release = { version, channel: 'stable', dsh: ['0.1.1-rc.2', '0.1.2-rc.1'],
+  const release = { version, channel: 'stable', dsh: ['0.1.1-rc.2', '0.1.2-rc.1', '0.1.5-rc.1'],
     platforms: ['windows', 'macos', 'linux'], architectures: ['x64'], asset: {
       url: `https://github.com/martinbear1/dsh-wechat-remote/releases/download/v${version}/harness-remote-dsh-wechat-remote-${version}.tgz`,
       sha256: createHash('sha256').update(archive).digest('hex'), bytes: archive.length } }

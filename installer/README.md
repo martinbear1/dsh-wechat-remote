@@ -10,6 +10,8 @@ npx -y dsh-wechat-remote@latest
 
 安装器仅选择适配当前 DSH 和主机的正式插件，保留原配置、配对和会话，不会升级 DSH 本体。请先结束运行中的任务；安装完成后自动重启原 DSH 并尝试打开 WebUI。
 
-支持已验证的 DSH `0.1.1-rc.2`、`0.1.2-rc.1`，Windows / macOS Intel / Linux x64。普通 Node 启动、独立的 macOS launchd 和 Linux 用户级 systemd 服务可自动恢复；无法确认启动方式时不自动停止主机。
+支持已验证的 DSH `0.1.1-rc.2`、`0.1.2-rc.1`、`0.1.5-rc.1`，Windows / macOS Intel / Linux x64。普通 Node 启动、独立的 macOS launchd 和 Linux 用户级 systemd 服务可自动恢复；无法确认启动方式时不自动停止主机。
+
+旧插件 1.7.1 在 DSH 0.1.5 上无法一键更新时，可用本安装命令过渡一次。从插件 1.7.2 起，后续已验证的兼容更新不再受旧的 DSH 版本列表限制；不需要因此降低 DSH 版本或删除节点。
 
 使用其他配置时附加 `--profile 配置名称`。安装损坏需要重装时附加 `--repair`；不会自动降级。

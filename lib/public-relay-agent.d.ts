@@ -88,8 +88,13 @@ export declare class PublicRelayAgent {
     constructor(config: PublicRelayConfig, options: PublicRelayAgentOptions);
     snapshot(): AgentStatus;
     start(): Promise<void>;
-    /** Ensure a desktop pairing surface never serves an expired cloud ticket. */
-    ensurePairingTicket(minValidityMs?: number): Promise<AgentStatus>;
+    /** Background status can reuse a ticket; an explicit pairing surface must
+     * refresh because an unexpired single-use ticket may already be consumed.
+     * Enrollment retains the existing identity and owner (except revoked keys).
+     */
+    ensurePairingTicket(minValidityMs?: number, options?: {
+        readonly refresh?: boolean;
+    }): Promise<AgentStatus>;
     stop(): void;
     private enrollAndConnect;
     private enrollWithIdentityRecovery;
@@ -101,4 +106,13 @@ export declare class PublicRelayAgent {
     private sendRouted;
     private update;
 }
-export declare function publicPairingPayload(status: AgentStatus): string | null;
+/** Additive QR v1 compatibility. `relay` is the original wire field;
+ * released clients also inspect `relayOrigin` before deciding whether to
+ * claim or recover a LAN route. Both must always come from the same identity
+ * status, never independent configuration or user-supplied aliases.
+ */
+export declare function publicPairingPayload(status: AgentStatus, lan?: {
+    readonly host: string;
+    readonly port: number;
+    readonly code?: string;
+}): string | null;

@@ -69,6 +69,14 @@ await test('native disposal flushes idle sessions and rejects a busy race before
   await assert.rejects(quiesceNativeHost(ctx, read, () => {}))
   assert.equal(flushed, 2); assert.equal(disposed, 1)
 })
+await test('failed save or unreadable sessions never disposes the native host', async () => {
+  let disposed = false
+  const ctx = { get: () => ({ list: () => [{}], flush: async () => false }),
+    fiber: { dispose: async () => { disposed = true } } }
+  await assert.rejects(quiesceNativeHost(ctx, async () => ({ items: [{ running: false }] }), () => {}), /保存未完成/)
+  await assert.rejects(quiesceNativeHost(ctx, async () => { throw Error('unreadable session state') }, () => {}))
+  assert.equal(disposed, false)
+})
 await test('silent HTTP peer cannot multiply the overall restart health deadline', async () => {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'harness-update-deadline-test-')))
   const stateFile = path.join(root, 'state.json'); fs.writeFileSync(stateFile, '{"token":"synthetic"}')

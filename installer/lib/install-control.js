@@ -573,7 +573,7 @@ function presentationProjection(key, raw) {
   switch (key) {
     case "sessionStats":
       name = "metrics";
-      value = numbers(v, [["turns", "turns"], ["steps", "steps"], ["toolMs", "toolMs"], ["llmMs", "modelMs"], ["ttftMs", "firstTokenMs"], ["ttftSteps", "firstTokenSamples"]]);
+      value = numbers(v, [["turns", "turns"], ["steps", "steps"], ["toolMs", "toolMs"], ["llmMs", "modelMs"], ["ttftMs", "firstTokenMs"], ["ttftSteps", "firstTokenSamples"], ["decodeMs", "decodeMs"], ["decodeTokens", "decodeTokens"]]);
       break;
     case "tokenUsage":
       name = "usage";
@@ -660,6 +660,23 @@ function planLegacyRpc(request) {
       throw new Error(`unsupported Remote endpoint: ${method}`);
     }
     const supplied = recordOf(payload.args);
+    if (namespace === "commands" && remoteMethod === "execute") {
+      const args = supplied ?? {};
+      const line = typeof args.line === "string" ? args.line.trim() : "";
+      if (/^\/permission(?:\s|$)/.test(line)) {
+        const match = /^\/permission(?:[ \t]+([a-z][a-z0-9-]*))?[ \t]*$/.exec(line);
+        if (!match || typeof args.agentId !== "string" || !args.agentId.trim() || ["images", "submittedAttachments"].some((key) => args[key] !== void 0 && (!Array.isArray(args[key]) || args[key].length))) {
+          throw Object.assign(new Error("\u6743\u9650\u547D\u4EE4\u683C\u5F0F\u65E0\u6548\uFF1B\u672A\u66F4\u6539\u6743\u9650"), { code: "adapter/invalid-permission-command" });
+        }
+        return { kind: "permission-command", sessionId: args.agentId, line, nativeReceipt: true, ...match[1] ? { preset: match[1] } : {} };
+      }
+      const images = Array.isArray(args.images) ? args.images : [];
+      return { kind: "invoke", namespace, method: remoteMethod, args: {
+        ...args,
+        images,
+        submittedAttachments: args.submittedAttachments ?? images.map((image) => ({ ...recordOf(image), type: "image" }))
+      } };
+    }
     return { kind: "invoke", namespace, method: remoteMethod, args: supplied ?? {} };
   }
   if (method === "host.describe") return { kind: "host-describe" };
@@ -798,7 +815,31 @@ function planLegacyRpc(request) {
 }
 function resolveTypertGateway(ctx) {
   const candidate = ctx.get("typertGateway");
-  return candidate && typeof candidate.invoke === "function" && typeof candidate.stream === "function" ? candidate : null;
+  if (!candidate || typeof candidate.invoke !== "function" || typeof candidate.stream !== "function") return null;
+  return {
+    wireStream: candidate.wireStream,
+    invoke: (request) => candidate.invoke(request),
+    stream: (request) => candidate.stream(request),
+    commandAttachmentField: () => {
+      const registry = ctx.get("typert");
+      const descriptor = registry?.local?.get("commands/execute");
+      if (descriptor) {
+        const fields = descriptor.parameters?.map((parameter) => parameter.wire) || [];
+        if (fields.includes("submittedAttachments") && !fields.includes("images")) return "submittedAttachments";
+        if (fields.includes("images") && !fields.includes("submittedAttachments")) return "images";
+        throw new Error("DSH \u547D\u4EE4\u9644\u4EF6\u53C2\u6570\u5DF2\u53D8\u66F4\uFF1B\u672A\u6267\u884C\u547D\u4EE4");
+      }
+      if (registry?.local?.hasSeen?.("commands/execute")) throw new Error("DSH \u547D\u4EE4\u63A5\u53E3\u6B63\u5728\u66F4\u65B0\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5");
+      return ctx.get("fileUploads") ? "submittedAttachments" : "images";
+    }
+  };
+}
+function commandArguments(gateway, args) {
+  const field = gateway.commandAttachmentField?.() || "images";
+  const { images, submittedAttachments, ...rest } = args;
+  const value = field === "submittedAttachments" ? submittedAttachments ?? (Array.isArray(images) ? images.map((image) => ({ ...recordOf(image), type: "image" })) : []) : images ?? [];
+  if (field === "images" && Array.isArray(submittedAttachments) && submittedAttachments.some((part) => recordOf(part)?.type !== "image")) throw new Error("\u6B64\u7248\u672C DSH \u547D\u4EE4\u4E0D\u652F\u6301\u6587\u4EF6\u9644\u4EF6");
+  return { ...rest, [field]: value };
 }
 function errorResult(error) {
   const value = recordOf(error);
@@ -926,7 +967,7 @@ async function permissionCommandValue(gateway, plan, signal, readHistory, flushP
   const command = recordOf(await gateway.invoke({
     namespace: "commands",
     method: "execute",
-    args: { agentId: plan.sessionId, line: plan.line, images: [] },
+    args: commandArguments(gateway, { agentId: plan.sessionId, line: plan.line, images: [], submittedAttachments: [] }),
     signal
   }));
   const result = recordOf(command?.result);
@@ -943,7 +984,7 @@ async function permissionCommandValue(gateway, plan, signal, readHistory, flushP
       code: "adapter/permission-not-applied"
     });
   }
-  return { accepted: true, command: true, permission: current, commandId: command?.commandId };
+  return plan.nativeReceipt ? command : { accepted: true, command: true, permission: current, commandId: command?.commandId };
 }
 async function sessionModelsValue(gateway, request, signal) {
   const sessionId = typeof request.sessionId === "string" ? request.sessionId : "";
@@ -989,7 +1030,7 @@ async function invokeLegacyRpc(gateway, request, options) {
           value = await gateway.invoke({
             namespace: plan.namespace,
             method: plan.method,
-            args: plan.args,
+            args: plan.namespace === "commands" && plan.method === "execute" ? commandArguments(gateway, plan.args) : plan.args,
             signal: options.signal
           });
           break;
@@ -1074,6 +1115,24 @@ function startUpdateWorker(manager, directory, executable) {
 
 // src/install-control.ts
 import { homedir as homedir4 } from "node:os";
+
+// src/install-capabilities.ts
+function assertNativeUpdateCapabilities(context) {
+  const ctx = context.root || context;
+  const web = ctx.get("webServer");
+  const sessions = ctx.get("sessions");
+  const missing = [];
+  for (const name of ["on", "listeners", "removeAllListeners", "removeListener"]) {
+    if (typeof web?.server?.[name] !== "function") missing.push("webServer." + name);
+  }
+  for (const name of ["get", "list", "flush"]) {
+    if (typeof sessions?.[name] !== "function") missing.push("sessions." + name);
+  }
+  if (typeof ctx.fiber?.dispose !== "function") missing.push("lifecycle.dispose");
+  if (missing.length) throw new Error("\u5F53\u524D\u5BBF\u4E3B\u7F3A\u5C11\u5B89\u5168\u66F4\u65B0\u6240\u9700\u80FD\u529B\uFF0C\u672A\u505C\u6B62\u8282\u70B9\uFF1A" + missing.join(", "));
+}
+
+// src/install-control.ts
 async function quiesceNativeHost(ctx, read, disposing) {
   const items = (await read("session.list")).items;
   if (!Array.isArray(items) || items.some((s) => s.running !== false)) throw new Error("\u8BF7\u7B49\u5F85\u8FD0\u884C\u4E2D\u7684\u4F1A\u8BDD\u7ED3\u675F\u540E\u518D\u66F4\u65B0\u3002");
@@ -1086,6 +1145,7 @@ async function quiesceNativeHost(ctx, read, disposing) {
 }
 async function createInstallControl(context, config) {
   const ctx = context.root;
+  assertNativeUpdateCapabilities(ctx);
   const home = adapterDshHome(), id = path5.basename(config.directory);
   if (!/^[a-f0-9]{32}$/.test(id) || !/^[a-f0-9]{48}$/.test(config.token) || path5.dirname(config.directory) !== path5.join(home, "harness-remote-updates") || fs2.realpathSync(config.directory) !== config.directory) throw new Error("\u5B89\u88C5\u63A7\u5236\u8BF7\u6C42\u4E0D\u5C5E\u4E8E\u5F53\u524D DSH\u3002");
   const scope = resolveAgentProfileScope("", process.argv, home), profile = path5.join(home, "profiles", scope);

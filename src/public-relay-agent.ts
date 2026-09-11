@@ -228,9 +228,12 @@ export class PublicRelayAgent {
     await this.enrollAndConnect()
   }
 
-  /** Ensure a desktop pairing surface never serves an expired cloud ticket. */
-  async ensurePairingTicket(minValidityMs = 60_000): Promise<AgentStatus> {
-    if (this.status.pairingTicket && (this.status.pairingExpiresAt || 0) > Date.now() + minValidityMs) {
+  /** Background status can reuse a ticket; an explicit pairing surface must
+   * refresh because an unexpired single-use ticket may already be consumed.
+   * Enrollment retains the existing identity and owner (except revoked keys).
+   */
+  async ensurePairingTicket(minValidityMs = 60_000, options: { readonly refresh?: boolean } = {}): Promise<AgentStatus> {
+    if (!options.refresh && this.status.pairingTicket && (this.status.pairingExpiresAt || 0) > Date.now() + minValidityMs) {
       return this.snapshot()
     }
     const body = await this.enrollWithIdentityRecovery()
@@ -573,15 +576,27 @@ function normalizeRemoteAccess(value: unknown): RemoteAccessStatus | undefined {
   }
 }
 
-export function publicPairingPayload(status: AgentStatus): string | null {
+/** Additive QR v1 compatibility. `relay` is the original wire field;
+ * released clients also inspect `relayOrigin` before deciding whether to
+ * claim or recover a LAN route. Both must always come from the same identity
+ * status, never independent configuration or user-supplied aliases.
+ */
+export function publicPairingPayload(status: AgentStatus, lan?: {
+  readonly host: string
+  readonly port: number
+  readonly code?: string
+}): string | null {
   if (!status.nodeId || !status.identityPublicKey || !status.pairingTicket || !status.pairingExpiresAt || !status.relayOrigin) return null
   return JSON.stringify({
     v: 1,
     mode: 'public-relay',
     relay: status.relayOrigin,
+    relayOrigin: status.relayOrigin,
     nodeId: status.nodeId,
     identityPublicKey: status.identityPublicKey,
     ticket: status.pairingTicket,
     expiresAt: status.pairingExpiresAt,
+    ...(lan ? { lan: { host: lan.host, port: lan.port,
+      ...(lan.code === undefined ? {} : { code: lan.code }) } } : {}),
   })
 }

@@ -10,6 +10,7 @@ import { resolveTypertGateway, invokeLegacyRpc } from './dsh-protocol-compat.js'
 import { currentHostManager, startUpdateWorker } from './install-lifecycle.js'
 import { writePrivateJsonAtomic } from './secure-file.js'
 import { homedir } from 'node:os'
+import { assertNativeUpdateCapabilities } from './install-capabilities.js'
 
 export interface InstallControlConfig { directory: string; token: string; pnpm: string }
 export async function quiesceNativeHost(ctx: Context, read: (method: string) => Promise<any>, disposing: () => void): Promise<void> {
@@ -24,6 +25,9 @@ export async function quiesceNativeHost(ctx: Context, read: (method: string) => 
 }
 export async function createInstallControl(context: Context, config: InstallControlConfig): Promise<{ origin: string; close(): void }> {
   const ctx = context.root
+  // The independent installer and WebUI updater enforce the same host
+  // contract. Never stop an unknown/incomplete host just to try an upgrade.
+  assertNativeUpdateCapabilities(ctx)
   const home = adapterDshHome(), id = path.basename(config.directory)
   if (!/^[a-f0-9]{32}$/.test(id) || !/^[a-f0-9]{48}$/.test(config.token)
     || path.dirname(config.directory) !== path.join(home, 'harness-remote-updates')

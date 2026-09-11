@@ -214,7 +214,7 @@ export class PublicRelayGateway {
   }
 
   async ensurePairingStatus(): Promise<AgentStatus> {
-    return this.agent.ensurePairingTicket()
+    return this.agent.ensurePairingTicket(60_000, { refresh: true })
   }
 
   private async receive(frame: RelayClientFrame): Promise<void> {

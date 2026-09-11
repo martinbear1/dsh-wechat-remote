@@ -10,13 +10,13 @@ import { assessUpdate, validateCatalog, trustedReleaseAsset, type RuntimeVersion
 import { boundedFetch, downloadRelease } from './update-download.js'
 import { validateJob, releaseOwnedUpdateLock, control, type UpdateJob } from './update-worker.js'
 import { createInstallControl } from './install-control.js'
+import { assertNativeUpdateCapabilities } from './install-capabilities.js'
 import { currentHostManager } from './install-lifecycle.js'
 import { tightenPrivateFile, writePrivateJsonAtomic } from './secure-file.js'
 import { resolveInstallRuntime, verifyInstallRuntime } from './install-runtime.js'
 
 const ownRoot = fileURLToPath(new URL('../', import.meta.url))
 const ownVersion = () => JSON.parse(fs.readFileSync(path.join(ownRoot, 'package.json'), 'utf8')).version as string
-const supportedDsh = ['0.1.1-rc.1', '0.1.1-rc.2', '0.1.2-rc.1']
 // Two operator-only switches. Phone requests and release metadata cannot opt in.
 export function previewUpdatesEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return env.HARNESS_REMOTE_UPDATE_CHANNEL === 'preview' && Boolean(env.HARNESS_REMOTE_UPDATE_CATALOG)
@@ -173,8 +173,9 @@ export class PluginUpdateService {
   }
   private eligibility(): { eligible: boolean; reason: string; profile?: string; pnpm?: string; cli?: string } {
     try {
-      const current = this.current()
-      if (!supportedDsh.includes(current.agentVersion) || process.arch !== 'x64') throw new Error('此 DSH / 架构的自动重启尚未验证，请手工更新')
+      // Target compatibility belongs to the refreshable release catalog.
+      // A newer host version alone must never disable this old updater.
+      if (process.arch !== 'x64') throw new Error('此架构的自动重启尚未验证，请手工更新')
       if (process.versions.electron) throw new Error('此启动方式尚不支持自动重启')
       currentHostManager()
       if (!process.argv.includes('web') || process.argv.some(a => /(?:api.?key|password|secret|token)[= ]/i.test(a))
@@ -185,9 +186,7 @@ export class PluginUpdateService {
       if (fs.realpathSync(profile) !== profile || !fs.realpathSync(ownRoot).startsWith(profile + path.sep)) throw new Error('插件不在可安全更新的独立 profile 中')
       const manifest = JSON.parse(fs.readFileSync(path.join(profile, 'package.json'), 'utf8'))
       if (manifest.packageManager && !/^pnpm@\d+\.\d+\.\d+(?:\+.*)?$/.test(manifest.packageManager)) throw new Error('此 profile 使用其他包管理器，未修改安装')
-      const web = this.ctx.get('webServer') as any
-      const sessions = this.ctx.get('sessions') as any
-      if (!web?.server?.listeners || !sessions?.get || !sessions?.flush) throw new Error('此宿主缺少可验证的重启与保存能力，请手工更新')
+      assertNativeUpdateCapabilities(this.ctx)
       fs.accessSync(profile, fs.constants.W_OK)
       return { eligible: true, reason: '', profile, pnpm: resolveInstallRuntime(ownRoot).cli, cli }
     } catch (error) { return { eligible: false, reason: error instanceof Error ? error.message : '安装环境暂不支持自动更新' } }

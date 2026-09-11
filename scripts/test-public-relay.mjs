@@ -93,6 +93,8 @@ try {
   })
   const decoded = JSON.parse(payload)
   assert.equal(decoded.mode, 'public-relay')
+  assert.equal(decoded.relay, 'https://relay.example.test')
+  assert.equal(decoded.relayOrigin, decoded.relay, 'released clients read both QR origin names; they must share one source')
   assert.equal(decoded.nodeId, first.nodeId)
   assert.match(decoded.identityPublicKey, /BEGIN PUBLIC KEY/)
   assert.equal(decoded.ticket, 'single-use-ticket')
@@ -120,7 +122,20 @@ try {
   assert.equal(compactPairingPayload.capabilities, undefined)
   assert.ok(JSON.stringify(compactPairingPayload).length < 500, 'public pairing payload must remain easy to scan')
 
+  const combined = JSON.parse(publicPairingPayload({
+    enabled: true, state: 'online', nodeId: first.nodeId,
+    identityPublicKey: first.publicKeyPem, relayOrigin: 'https://relay.example.test',
+    pairingTicket: 'a'.repeat(64), pairingExpiresAt: Date.now() + 60000,
+  }, { host: '192.168.1.2', port: 3092, code: 'ABCDEFGH' }))
+  assert.deepEqual(combined.lan, { host: '192.168.1.2', port: 3092, code: 'ABCDEFGH' })
+  assert.equal(combined.relayOrigin, combined.relay)
+  assert.equal(combined.nodeId, first.nodeId)
+  assert.ok(JSON.stringify(combined).length < 600, 'combined QR stays compact with a real-length ticket and LAN locator')
+  assert.equal(publicPairingPayload({ enabled: true, state: 'offline' }), null,
+    'the compatibility field must not turn an offline locator into a grant')
+
   let enrollmentBody = null
+  let metadataEnrollments = 0
   const metadataAgent = new PublicRelayAgent(
     { enabled: true, relayOrigin: 'https://relay.example.test' },
     {
@@ -135,10 +150,11 @@ try {
       identityPath: path.join(root, 'metadata-identity.json'),
       onFrame() {},
       async fetchImpl(_url, options) {
+        metadataEnrollments++
         enrollmentBody = JSON.parse(options.body)
         return new Response(JSON.stringify({
-          ticket: 'ticket',
-          expiresAt: Date.now() + 60000,
+          ticket: 'ticket-' + metadataEnrollments,
+          expiresAt: Date.now() + 600000,
           remoteAccess: { status: 'active', validUntil: Date.now() + 30 * 86400000 },
         }), {
           status: 200,
@@ -155,6 +171,18 @@ try {
   assert.deepEqual(enrollmentBody.capabilities, [{ id: 'dsh.rpc', version: 1 }])
   assert.equal(enrollmentStatus.remoteAccess.status, 'active')
   assert.equal(typeof enrollmentStatus.remoteAccess.validUntil, 'number')
+  const cachedStatus = await metadataAgent.ensurePairingTicket()
+  assert.equal(metadataEnrollments, 1, 'background status keeps the unexpired ticket')
+  assert.equal(cachedStatus.pairingTicket, enrollmentStatus.pairingTicket)
+  const [freshStatus, concurrentStatus] = await Promise.all([
+    PublicRelayGateway.prototype.ensurePairingStatus.call({ agent: metadataAgent }),
+    PublicRelayGateway.prototype.ensurePairingStatus.call({ agent: metadataAgent }),
+  ])
+  assert.equal(metadataEnrollments, 2, 'concurrent explicit QR generation shares one fresh enrollment')
+  assert.notEqual(freshStatus.pairingTicket, cachedStatus.pairingTicket)
+  assert.equal(freshStatus.pairingTicket, concurrentStatus.pairingTicket)
+  assert.equal(freshStatus.nodeId, cachedStatus.nodeId)
+  assert.equal(freshStatus.identityPublicKey, cachedStatus.identityPublicKey)
 
   const rotatedIdentityPath = path.join(root, 'revoked-identity.json')
   const revokedIdentity = loadOrCreateAgentIdentity(rotatedIdentityPath)

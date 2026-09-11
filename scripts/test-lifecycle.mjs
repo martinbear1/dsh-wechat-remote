@@ -77,6 +77,16 @@ const childSource = `
   )
   assert.equal(existsSync(stateFile), true, 'credentials are created only when the plugin is applied')
 
+  const pairingPage = await fetch('http://127.0.0.1:' + localPort + '/pair')
+  assert.equal(pairingPage.status, 200)
+  assert.equal(pairingPage.headers.get('cache-control'), 'no-store')
+  const pairingHtml = await pairingPage.text()
+  assert.ok(!pairingHtml.includes('http-equiv="refresh"'), 'pairing page must not silently replace a ticket being scanned')
+  assert.ok(pairingHtml.includes('重新生成二维码'), 'single-use QR has an explicit refresh action')
+  const pairingCode = await fetch('http://127.0.0.1:' + localPort + '/pair/code')
+  assert.equal(pairingCode.status, 200)
+  assert.equal(pairingCode.headers.get('cache-control'), 'no-store')
+
   await fiber.dispose()
   let closed = false
   for (let attempt = 0; attempt < 30 && !closed; attempt += 1) {

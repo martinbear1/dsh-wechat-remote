@@ -1,6 +1,8 @@
 # Agent resources v1 — research contract
 
-Status: implemented on `research/agent-resources-20260910`, not published. Based on plugin 1.7.1 (`a9cc40b`), mini-program 1.7.0 (`2a196f7`), relay 1.2.10 (`3dd12d9`). Version numbers in the manifests still identify the base, **not a new released artifact**.
+Release boundary: the plugin implementation described here is included in **1.7.2**. See [the release handoff](RELEASE-1.7.2-HANDOFF.md) before implementing the mini-program consumer. A plugin release does not publish the companion mini-program UI or certify every DSH/platform combination.
+
+Historical starting point: implemented on `research/agent-resources-20260910`, based on plugin 1.7.1 (`a9cc40b`), mini-program 1.7.0 (`2a196f7`), relay 1.2.10 (`3dd12d9`). Statements below about no publication or host installation describe that research stage, not the later 1.7.2 publication.
 
 ## Boundary
 

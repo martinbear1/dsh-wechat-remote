@@ -39,6 +39,7 @@ try {
     'install-runtime.ts',
     'install-profile.ts',
     'install-lifecycle.ts',
+    'install-capabilities.ts',
     'install-control.ts',
     'directory-service.ts',
     'directory-worker.ts',

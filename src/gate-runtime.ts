@@ -567,13 +567,13 @@ export function mountWechatGate(ctx: Context): () => void {
       payload = locatorPayload()
       try {
         publicRelayStatus = await gateway.ensurePairingStatus()
-        const raw = publicPairingPayload(publicRelayStatus)
+        const raw = publicPairingPayload(publicRelayStatus, payloadObj)
         if (raw) {
           const publicPayload = JSON.parse(raw)
           // A single scan can bind the public identity and, when the phone is on
           // the same LAN, also obtain the direct path for LAN-first routing.
-          publicPayload.lan = payloadObj
-          payload = JSON.stringify(publicPayload)
+          // The shared serializer owns the complete QR v1 wire contract.
+          payload = raw
           publicMode = true
           expiresAt = Number(publicPayload.expiresAt) || expiresAt
         }
@@ -596,8 +596,10 @@ export function mountWechatGate(ctx: Context): () => void {
     res: ServerResponse,
   ): Promise<void> {
     const entry = await makePairEntry()
+    // Issuing a QR replaces the single-use cloud ticket. A background refresh
+    // here would invalidate a code being scanned (including one in WebUI).
+    const validMinutes = Math.max(1, Math.ceil((entry.expiresAt - Date.now()) / 60_000))
     const html = `<!doctype html><html lang="zh"><head><meta charset="utf-8">
-<meta http-equiv="refresh" content="25">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>鲸常在配对</title>
 <style>
@@ -606,16 +608,19 @@ h1{font-size:20px;font-weight:600;margin:0}
 p{color:#9aa4b8;font-size:13px;margin:0;max-width:480px}
 img{background:#fff;border-radius:14px;padding:12px}
 code{color:#7aa2ff;font-size:15px;letter-spacing:3px}
+button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:#273b83;color:#fff;font:inherit;cursor:pointer}
 </style></head>
 <body>
 <h1>添加到鲸常在</h1>
 <p>${agentDescriptor.agentName} · ${agentDescriptor.hostName}</p>
 <p>打开微信小程序，进入「添加节点」扫描二维码</p>
 <img src="${entry.qrDataUrl}" alt="pairing QR">
-<p>配对码：<code>${entry.code}</code> · 15 分钟内有效</p>
-<p>${entry.publicMode ? '自动选择更快连接；远程内容端到端加密' : '当前仅支持同一网络连接'}</p>
+<p>配对码：<code>${entry.code}</code> · 生成后约 ${validMinutes} 分钟内有效</p>
+<p>${entry.publicMode ? '自动选择更快连接；远程内容端到端加密' : publicRelayGateway ? '当前仅供已配对手机更新同一网络连接；新手机配对需要电脑连接公网服务' : '当前仅支持同一网络连接'}</p>
+<p>已使用或已过期时，请重新生成二维码。刷新后旧二维码失效。</p>
+<button type="button" onclick="location.reload()">重新生成二维码</button>
 </body></html>`
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
     res.end(html)
   }
 
@@ -625,7 +630,7 @@ code{color:#7aa2ff;font-size:15px;letter-spacing:3px}
   ): Promise<void> {
     setCors(req, res)
     const entry = await makePairEntry()
-    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
     res.end(
       JSON.stringify({
         code: entry.code,

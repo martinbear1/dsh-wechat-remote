@@ -77,7 +77,7 @@ export async function install({ profileName = 'web', cli = findDsh(), assetsRoot
     // Initialize missing profiles through DSH itself, never synthesize a bundle list.
     if (!fs.existsSync(path.join(profile, 'package.json'))) {
       const log = fs.openSync(path.join(directory, 'startup.log'), 'a', 0o600)
-      launched = spawn(process.execPath, [cli, 'web', '--profile', profileName, '--no-open'], {
+      launched = spawn(process.execPath, [cli, '--profile', profileName, '--no-open'], {
         cwd: process.cwd(), env: process.env, detached: true, windowsHide: true, stdio: ['ignore', log, log] })
       fs.closeSync(log); launched.on('error', () => {}); launched.unref()
       for (let i = 0; i < 100 && !fs.existsSync(path.join(profile, 'package.json')); i++) await sleep(100)
@@ -97,7 +97,7 @@ export async function install({ profileName = 'web', cli = findDsh(), assetsRoot
         ensureRunning: async () => {
           if (launched || await portBusy(Number(process.env.DSH_PORT || 3080))) return
           const log = fs.openSync(path.join(directory, 'startup.log'), 'a', 0o600)
-          launched = spawn(process.execPath, [cli, 'web', '--profile', profileName, '--no-open'], {
+          launched = spawn(process.execPath, [cli, '--profile', profileName, '--no-open'], {
             cwd: process.cwd(), env: process.env, detached: true, windowsHide: true, stdio: ['ignore', log, log] })
           fs.closeSync(log); launched.on('error', () => {}); launched.unref()
         },

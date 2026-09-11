@@ -56,8 +56,15 @@
 
 ## 发布与备份状态
 
-用户已追加授权将宿主能力与目标兼容策略解耦纳入本版。修复已实施，正在完成发布验证；此阶段 npm/GitHub Latest 仍是 1.7.1，生产清单未改变。实际发布完成后补充下面的渠道回读记录。
+2026-09-11 22:01（北京时间）已发布并回读确认：
 
-发布准备已获用户授权，目标：GitHub 正式 `v1.7.2` 并设 Latest、npm `dsh-wechat-remote@1.7.2` 的 latest、生产兼容清单新增本版。实际完成情况在发布后补记，不以计划冒充上线成功。
+- GitHub 正式 `v1.7.2` 为 Latest，源码 `2c618dee00e8133dd26a6ad5fb8d2da628056e9d`；main/research 已快进同步，正式前版 v1.7.1 不移动。
+- npm `dsh-wechat-remote@1.7.2` 的 latest 已生效。npm 包重新下载、GitHub 两个资产重新下载，长度与 SHA-256 均与最终打包一致；安装器内嵌插件与 GitHub 插件包逐字节一致。
+- 插件资产 9,539,789 字节，SHA-256 `0eb296a3a0c84f080148280f9b9419516a9dc640c9e13aa8cf014120aea591ee`；npm 安装器 18,489,979 字节，SHA-256 `88a9709e522483d547ce708c38d81fbcc0c736b6237c1e412bb63a5792c03c3a`。最终包与三端已测试候选的 lib/node_modules 内容完全一致。
+- 生产 `/v1/update-policy` 修订 `stable-plugin-1.7.2-20260911` 已生效；三系统 × 三个已验证 DSH 版本均推荐 1.7.1 → 1.7.2，已装 1.7.2 返回 compatible。云端运行仍为 1.2.10 / bec6a19，无重启、无数据库改动。
+- 生产目录备份 `/opt/harness-remote-relay/backups/plugin-1.7.2-20260911/update-catalog.before.json`。旧发布条目和 blocked/retired/manual 规则逐项保留；只追加新目标。
+- 插件标签 `baseline/plugin-1.7.2-20260911`、分支 `backup/plugin-1.7.2-20260911` 已推送。完整 `plugin-v1.7.2.bundle` 已镜像恢复并 fsck；配套云端 `catalog/plugin-v1.7.2` 指向 `719027d`。发布后文档收尾会另有提交，不改发布资产/正式标签。
+
+真实三节点未升级或重启；小程序当前 1.7.1-trial.3 的未提交粒子首页研究改动完整保留，没有替用户提交或发布。后续仍需用户在真实微信网络完成扫码验收；旧 1.7.1 / DSH 0.1.5 组合需独立命令一次过渡到本版。
 
 工作区证据目录 `E:/agent remote/compat-artifacts/plugin-release-1.7.2-20260911/`。发布前完整 Git bundle + 工作区 patch，发布后保存正式标签/备份标签、完整 bundle 与镜像恢复核验。代码备份不包含在线身份私钥、配对凭据、云端数据库或业务历史；旧标签和已发布 1.7.1 资产不移动/覆盖。

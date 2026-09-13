@@ -65,10 +65,35 @@
 
 `npm run bundle`、`npm run test:updates`、完整 `npm test` 均通过；新增正常慢退出、退出等待有界、已退出句柄不发信号的回归检查。
 
-## 当前状态与未覆盖边界
+## 候选验收时的状态与未覆盖边界
 
 - 真实 ARM64 插件本地接口、工作区创建、会话创建、历史读取、自动重启、身份保存及公网在线已验证。
 - 用户要求暂缓配对，尚未在小程序认领此节点，也未发起模型调用；不把接口可用等同于模型对话实测。
 - 安装器修复尚未 npm / GitHub 发布；插件内的 WebUI 非 x64 自动更新限制未在本轮移除或验收。
 - 家庭电视浏览器 `summer2026-kiosk.service` 按用户授权暂停以腾出内存；`summer2026.service`、`kindle.service`、`mosquitto.service`、`docker.service` 验收时保持 active。未删除家庭服务数据、未改系统 npm/代理/登录配置。
 - 测试节点保留运行以便下一步配对；不是新增开机自启动服务，主机重启后需重新启动该隔离测试实例。
+
+## 1.7.4 正式发布与公网复测
+
+2026-09-14 发布安装器 `1.7.4`，npm `latest` 已指向此版本，GitHub `installer-v1.7.4` 已公开。GitHub 仓库的 Latest 保持插件 `v1.7.2`，避免插件更新入口误将安装器版本当作插件版本。
+
+- 发布代码提交：`969a94aab5fb8818d0200d0b1c3896f066e625d3`，已推送 `main`。
+- 发布标签：`installer-v1.7.4`；发布前备份：`backup/installer-1.7.3-before-arm64-20260914`。
+- 另有本地 Git bundle 和发布前候选、正式包、从 npm 下载回来的正式包，均存放于私有验收目录。
+- 正式包 SHA256：`74d50cd22b209d9398ba6b4cceaac7278117f83fd10faff0db508e274c05d05a`。npm 回读文件与 GitHub 附件摘要一致。
+- 与公网 `1.7.3` 归档逐文件比较：除 README、package.json 版本之外，仅 `bin/native-control.mjs`、`bin/setup.mjs`、`lib/update-worker.js` 存在实质变化，内容就是上述有界慢启动等待、提前退出判断和回退诊断。与实测候选相比执行代码不变（忽略 CRLF/LF）。内置插件仍为逐字节相同的 `1.7.2`，未夹带插件新功能或依赖变更。
+
+在同一真实 ARM64 盒子上停止前一候选测试实例（保留数据），用全新隔离 home、没有 profile、没有预先运行 DSH 的条件，实际执行公网 **`npx -y dsh-wechat-remote@latest`**，不是指定本地 tarball，也不是手动启动后再安装。
+
+结果：
+
+- npx 缓存锁文件确认实际取得 npm 官方源 `1.7.4`，完整性与发布包一致；事务实际使用的 worker 文件摘要与正式包一致。
+- 完成首次配置、安装插件、自动重启、健康检查，命令退出 `0`，事务 `terminal=true / ok=true`。
+- 原进程 `3346521` 自动替换为 `3347334`；真实重启验证耗时约 **63.62 秒**（04:42:00.988 → 04:43:04.612），再次超过旧版 60 秒边界而正常完成。
+- 本地状态 HTTP `200`；认证 RPC 返回 DSH `0.1.5-rc.1`、插件 `1.7.2`；工作区与会话列表可读，公网中继 `online`。
+- 再次执行公网 `@latest` 返回“无需更新”，退出 `0`，没有新增实际更新事务、不重启，身份、令牌和会话集合均不变。
+- CPU 无限额节流，内存保护 max / oom / oom_kill 均为 `0`。其他家庭服务仍 active。
+
+复测脚本最初把仅用于安装握手诊断的新目录误计为更新事务，导致一次“无新事务”断言失败；检查源码和目录后确认没有 `job.json`、没有安装重启。将统计口径修正为具有 `job.json` 的实际事务后重跑并通过。没有改发布包或伪造事务结果。
+
+证据：`public-174-cold-proof.json`、`public-174-verification.json`、`release-1.7.4/artifact-audit.json`、`release-1.7.4/published-173-diff-audit.json`。当前保留运行的测试 home 为 `case-installer-1.7.4-public-latest-cold/dsh-home`。正式包本轮覆盖首次安装与重复执行；`--repair` 保留候选相同执行代码的完整验收结果，不把它写成公网包重装复测。仍未认领节点或调用模型，未改变插件 WebUI 非 x64 自动更新边界。

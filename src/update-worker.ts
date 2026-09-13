@@ -130,7 +130,9 @@ async function describe(job: UpdateJob, deadline?: AbortSignal): Promise<any> {
   if (!value?.ok || value.value.agentVersion !== job.dshVersion) throw new Error('DSH 版本或描述服务不匹配')
   return value.value
 }
-export async function healthy(job: UpdateJob, version: string, timeoutMs = 60000): Promise<void> {
+// Cold native startup on small ARM hosts can legitimately exceed one minute.
+// This is a maximum, not a sleep: healthy hosts finish immediately on readiness.
+export async function healthy(job: UpdateJob, version: string, timeoutMs = 180000): Promise<void> {
   // A retry count alone is not a time bound: an unresponsive HTTP peer can
   // consume the full per-request timeout on every attempt.
   const deadline = AbortSignal.timeout(timeoutMs)
@@ -180,15 +182,17 @@ async function stopOriginal(job: UpdateJob): Promise<void> {
   }
   throw new Error('原 DSH 尚未结束，未替换插件')
 }
-async function stopRestarted(child: ChildProcess): Promise<void> {
+export async function stopRestarted(child: ChildProcess, timeoutMs = 30000): Promise<void> {
   // Retain the process handle and exit state. A failed launch may already have
   // exited during health polling; never kill a newly reused numeric PID.
   if (child.exitCode !== null || child.signalCode !== null) return
   child.kill('SIGTERM')
-  for (let i = 0; i < 100; i++) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
     if (child.exitCode !== null || child.signalCode !== null) return
-    await wait(100)
+    await wait(Math.min(100, Math.max(1, deadline - Date.now())))
   }
+  if (child.exitCode !== null || child.signalCode !== null) return
   throw new Error('更新后的 DSH 未按时停止')
 }
 async function stopChild(pid: number): Promise<void> {
@@ -276,7 +280,15 @@ export async function executeUpdate(job: UpdateJob, progress: (p: UpdateProgress
         start(job); await healthy(job, job.previousVersion)
         assertPreserved(before, durableSnapshot(job)); rollback = true
         writePrivateJsonAtomic(path.join(job.directory, 'verification-complete.json'), { id: job.id })
-      } catch { return { phase: 'attention', progress: 100, message: '自动恢复未完成。备份已保留，请按主机更新记录恢复；不要删除节点或数据。', terminal: true, ok: false, rollback: false } }
+      } catch (rollbackError) {
+        // Keep the second failure as well; otherwise a slow stop is
+        // indistinguishable from a failed profile restore or failed restart.
+        try { writePrivateJsonAtomic(path.join(job.directory, 'rollback-failure.json'), {
+          message: rollbackError instanceof Error ? rollbackError.message : 'unknown',
+          stack: rollbackError instanceof Error ? rollbackError.stack : undefined,
+        }) } catch { /* diagnostics must not hide the transaction outcome */ }
+        return { phase: 'attention', progress: 100, message: '自动恢复未完成。备份已保留，请按主机更新记录恢复；不要删除节点或数据。', terminal: true, ok: false, rollback: false }
+      }
     }
     return { phase: 'failed', progress: 100, message: (error instanceof Error ? error.message : '更新失败') + (rollback ? '；已恢复原插件。' : '；当前插件未替换。'), terminal: true, ok: false, rollback }
   }

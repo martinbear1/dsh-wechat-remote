@@ -354,7 +354,7 @@ async function describe(job, deadline) {
   if (!value?.ok || value.value.agentVersion !== job.dshVersion) throw new Error("DSH \u7248\u672C\u6216\u63CF\u8FF0\u670D\u52A1\u4E0D\u5339\u914D");
   return value.value;
 }
-async function healthy(job, version, timeoutMs = 6e4) {
+async function healthy(job, version, timeoutMs = 18e4) {
   const deadline = AbortSignal.timeout(timeoutMs);
   while (!deadline.aborted) {
     try {
@@ -416,13 +416,15 @@ async function stopOriginal(job) {
   }
   throw new Error("\u539F DSH \u5C1A\u672A\u7ED3\u675F\uFF0C\u672A\u66FF\u6362\u63D2\u4EF6");
 }
-async function stopRestarted(child) {
+async function stopRestarted(child, timeoutMs = 3e4) {
   if (child.exitCode !== null || child.signalCode !== null) return;
   child.kill("SIGTERM");
-  for (let i = 0; i < 100; i++) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
     if (child.exitCode !== null || child.signalCode !== null) return;
-    await wait(100);
+    await wait(Math.min(100, Math.max(1, deadline - Date.now())));
   }
+  if (child.exitCode !== null || child.signalCode !== null) return;
   throw new Error("\u66F4\u65B0\u540E\u7684 DSH \u672A\u6309\u65F6\u505C\u6B62");
 }
 async function stopChild(pid) {
@@ -533,7 +535,14 @@ async function executeUpdate(job, progress, quiesce) {
         assertPreserved(before, durableSnapshot(job));
         rollback = true;
         writePrivateJsonAtomic(path3.join(job.directory, "verification-complete.json"), { id: job.id });
-      } catch {
+      } catch (rollbackError) {
+        try {
+          writePrivateJsonAtomic(path3.join(job.directory, "rollback-failure.json"), {
+            message: rollbackError instanceof Error ? rollbackError.message : "unknown",
+            stack: rollbackError instanceof Error ? rollbackError.stack : void 0
+          });
+        } catch {
+        }
         return { phase: "attention", progress: 100, message: "\u81EA\u52A8\u6062\u590D\u672A\u5B8C\u6210\u3002\u5907\u4EFD\u5DF2\u4FDD\u7559\uFF0C\u8BF7\u6309\u4E3B\u673A\u66F4\u65B0\u8BB0\u5F55\u6062\u590D\uFF1B\u4E0D\u8981\u5220\u9664\u8282\u70B9\u6216\u6570\u636E\u3002", terminal: true, ok: false, rollback: false };
       }
     }
@@ -675,5 +684,6 @@ export {
   healthy,
   migrateLegacyGrantOwner,
   releaseOwnedUpdateLock,
+  stopRestarted,
   validateJob
 };

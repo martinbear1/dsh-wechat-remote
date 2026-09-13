@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url'
 import { EventEmitter } from 'node:events'
 import { spawn } from 'node:child_process'
 import { quiesceNativeHost } from '../lib/install-control.js'
-import { validateJob, healthy, releaseOwnedUpdateLock, migrateLegacyGrantOwner } from '../lib/update-worker.js'
+import { validateJob, healthy, stopRestarted, releaseOwnedUpdateLock, migrateLegacyGrantOwner } from '../lib/update-worker.js'
 const files = [ ['package/package.json', JSON.stringify({ name: '@harness-remote/dsh-wechat-remote', version: '1.7.0' })], ['package/lib/index.js', ''], ['package/lib/client.js', ''] ]
 function pack(entries) {
   const chunks = []
@@ -100,6 +100,25 @@ await test('old job cannot remove a newer owned lock', () => {
     assert.equal(fs.readFileSync(lock, 'utf8'), 'next')
     releaseOwnedUpdateLock(lock, 'next'); assert(!fs.existsSync(lock))
   } finally { fs.rmSync(root, { recursive: true }) }
+})
+await test('restart stop waits for a slow owned child without forced termination', async () => {
+  const signals = []
+  const child = { exitCode: null, signalCode: null, kill: signal => { signals.push(signal); return true } }
+  const timer = setTimeout(() => { child.exitCode = 0 }, 240)
+  try {
+    await stopRestarted(child, 1000)
+    assert.deepEqual(signals, ['SIGTERM'])
+  } finally { clearTimeout(timer) }
+})
+await test('restart stop is bounded and never kills a reused or already exited PID', async () => {
+  const signals = []
+  const child = { exitCode: null, signalCode: null, kill: signal => { signals.push(signal); return true } }
+  const started = Date.now()
+  await assert.rejects(stopRestarted(child, 80), /未按时停止/)
+  assert(Date.now() - started < 1000)
+  assert.deepEqual(signals, ['SIGTERM'])
+  await stopRestarted({ exitCode: 0, signalCode: null, kill: () => { throw Error('exited handle must not be killed') } })
+  await stopRestarted({ exitCode: null, signalCode: 'SIGTERM', kill: () => { throw Error('signalled handle must not be killed') } })
 })
 await test('ready helper does not mutate without explicit initiating-parent start authorization', async () => {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'harness-update-handshake-test-')))

@@ -76,7 +76,11 @@ export async function install({ profileName = 'web', cli = findDsh(), assetsRoot
       launched = spawn(process.execPath, [cli, '--profile', profileName, '--no-open'], {
         cwd: process.cwd(), env: process.env, detached: true, windowsHide: true, stdio: ['ignore', log, log] })
       fs.closeSync(log); launched.on('error', () => {}); launched.unref()
-      for (let i = 0; i < 100 && !fs.existsSync(path.join(profile, 'package.json')); i++) await sleep(100)
+      const initializedBy = Date.now() + 180000
+      while (!fs.existsSync(path.join(profile, 'package.json')) && Date.now() < initializedBy) {
+        if (launched.exitCode !== null || launched.signalCode !== null) break
+        await sleep(100)
+      }
       if (!fs.existsSync(path.join(profile, 'package.json'))) throw new Error('DSH 未能初始化 profile；详情见本机安装记录。')
       await sleep(2000)
     }

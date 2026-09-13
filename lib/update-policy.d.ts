@@ -1,7 +1,8 @@
 /** Shared host/cloud policy evaluator. Never shipped to the mini-program.
  * TARGET compatibility is refreshable positive evidence (explicit versions), not guessed semver
  * intervals: prereleases between two tested RCs are NOT implicitly supported.
- * It must not become a hardcoded host-version gate in the installed updater.
+ * It must not become a hardcoded host-version gate in the installed updater,
+ * or an admission list for explicit CLI installation (installer/bin/release-selection.mjs).
  */
 export declare const UPDATE_SCHEMA = 1;
 export declare const RELEASE_REPOSITORY = "https://github.com/martinbear1/dsh-wechat-remote";

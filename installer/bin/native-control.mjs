@@ -58,7 +58,7 @@ export async function waitForJson(filename, accept, timeout = 20000) {
  * A listening WebUI is not proof that the asynchronous profile reload finished.
  * Keep the same control entry/token while waiting; never restart a live host. */
 export async function waitForInstallControl(filename, {
-  accept, ensureRunning, onWaiting = () => {}, timeoutMs = 60000, initialWaitMs = 5000,
+  accept, ensureRunning, onWaiting = () => {}, timeoutMs = 180000, initialWaitMs = 5000,
 }) {
   const deadline = Date.now() + timeoutMs
   try { return await waitForJson(filename, accept, Math.min(initialWaitMs, timeoutMs)) }

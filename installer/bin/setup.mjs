@@ -8,7 +8,8 @@ import { randomBytes, createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { attachControl, waitForJson, waitForInstallControl } from './native-control.mjs'
 import { resolveInstallRuntime, verifyInstallRuntime } from '../lib/install-runtime.js'
-import { validateCatalog, releaseMatches, compareVersions } from '../lib/update-policy.js'
+import { compareVersions } from '../lib/update-policy.js'
+import { selectInstallTarget } from './release-selection.mjs'
 import { boundedFetch, downloadRelease, auditArchive } from '../lib/update-download.js'
 import { writePrivateJsonAtomic } from '../lib/secure-file.js'
 import { control, validateJob, releaseOwnedUpdateLock } from '../lib/update-worker.js'
@@ -38,21 +39,16 @@ function portBusy(port) {
     socket.setTimeout(500, () => end(false)); socket.once('connect', () => end(true)); socket.once('error', () => end(false))
   })
 }
-async function selectRelease(host, assetsRoot = path.join(root, 'assets'), repair = false) {
+export async function selectRelease(host, assetsRoot = path.join(root, 'assets'), repair = false,
+  fetchCatalog = () => boundedFetch('https://relay.xyxfood.xyz/v1/update-policy', 256 * 1024)) {
   const current = { agentKind: 'dsh', agentVersion: host.dshVersion, pluginVersion: host.pluginVersion,
     platform: { win32: 'windows', darwin: 'macos', linux: 'linux' }[host.platform], arch: host.arch }
   const pinned = JSON.parse(fs.readFileSync(path.join(assetsRoot, 'release.json'), 'utf8'))
-  const catalog = validateCatalog(pinned.catalog)
-  let releases = catalog.releases
+  let remote
   try {
-    const remote = validateCatalog(JSON.parse((await boundedFetch('https://relay.xyxfood.xyz/v1/update-policy', 256 * 1024)).toString('utf8')))
-    if (remote.issuedAt <= Date.now() + 300000 && remote.expiresAt > Date.now()) {
-      releases = [...releases, ...remote.releases].filter(r => !remote.blocked.some(b => b.pluginVersion === r.version && (!b.dsh || b.dsh.includes(current.agentVersion)) && (!b.platforms || b.platforms.includes(current.platform))))
-    }
-  } catch { /* Authenticated npm package retains its explicitly tested release. */ }
-  const release = releases.filter(r => r.channel === 'stable' && releaseMatches(r, current))
-    .sort((a, b) => compareVersions(b.version, a.version))[0]
-  if (!release) throw new Error('当前 DSH 版本或系统尚无已验证的插件版本；没有修改现有安装。')
+    remote = JSON.parse((await fetchCatalog()).toString('utf8'))
+  } catch { /* Authenticated npm package retains its bundled release. */ }
+  const release = selectInstallTarget(pinned, remote, current)
   if (host.pluginVersion !== '0.0.0' && (compareVersions(host.pluginVersion, release.version) > 0
     || (compareVersions(host.pluginVersion, release.version) === 0 && !repair))) return { release, archive: null }
   let archive

@@ -97,7 +97,7 @@
     "test": "npm run test:lifecycle && npm run test:client && npm run test:attachment && npm run test:directory && npm run test:host-platform && npm run test:history && npm run test:gate-ports && npm run test:dsh-runtime && npm run test:dsh-protocol-compat && npm run test:dsh-realtime-compat && npm run test:dsh-compatibility-api && npm run test:public-relay && npm run test:updates",
     "test:lifecycle": "node scripts/test-lifecycle.mjs",
     "test:client": "node scripts/test-client-bundle.mjs",
-    "test:updates": "node scripts/test-update-policy.mjs && node scripts/test-update-safety.mjs && node scripts/test-install-capabilities.mjs && node scripts/test-install-runtime.mjs && node scripts/test-install-profile.mjs && node scripts/test-update-action.mjs && node scripts/test-installer-patch.mjs && node scripts/test-installer-handshake.mjs",
+    "test:updates": "node scripts/test-update-policy.mjs && node scripts/test-update-safety.mjs && node scripts/test-install-capabilities.mjs && node scripts/test-install-runtime.mjs && node scripts/test-install-profile.mjs && node scripts/test-update-action.mjs && node scripts/test-installer-patch.mjs && node scripts/test-installer-handshake.mjs && node scripts/test-installer-selection.mjs",
     "test:directory": "node scripts/test-directory.mjs",
     "test:host-platform": "node scripts/test-host-platform.mjs",
     "test:history": "node scripts/test-history.mjs && node scripts/test-turn-presentation.mjs && node scripts/test-turn-activity.mjs",

@@ -39,7 +39,7 @@ test('legacy 1.5.5 without updater or architecture still receives an actionable 
 test('no downgrade from preview', () => assert.equal(assessUpdate(catalog, { ...current, pluginVersion: '1.9.0-rc.1' }, now).code, 'compatible'))
 test('unknown current version with known target not automatically required', () => assert.equal(assessUpdate(catalog, { ...current, pluginVersion: '1.4.0' }, now).severity, 'recommended'))
 test('absence of positive compatibility evidence alone is not a known failure', () => assert.equal(assessUpdate({ ...catalog, blocked: [] }, current, now).severity, 'recommended'))
-test('unsupported architecture not installable', () => assert.equal(assessUpdate({ ...catalog, blocked: [] }, { ...current, arch: 'riscv64' }, now).code, 'unverified'))
+test('unverified architecture receives no automatic update recommendation', () => assert.equal(assessUpdate({ ...catalog, blocked: [] }, { ...current, arch: 'riscv64' }, now).code, 'unverified'))
 test('missing architecture never claims verified compatibility or a mandatory matching install', () => {
   const advice = assessUpdate(catalog, { ...current, arch: '' }, now)
   assert.equal(advice.code, 'plugin-check-host'); assert.equal(advice.severity, 'recommended')

@@ -19,6 +19,7 @@ export declare class DshRealtimeCompatibility {
     private readonly sockets;
     private readonly knownSessions;
     private readonly pending;
+    private readonly responding;
     private remoteOwner?;
     private disposed;
     constructor(ctx: Context);
@@ -41,7 +42,7 @@ export declare class DshRealtimeCompatibility {
     private startSession;
     private followRemoteEvents;
     private pendingWaterfall;
-    private cancelPending;
+    private settlePending;
     private dispatchRemoteEventResult;
 }
 export {};

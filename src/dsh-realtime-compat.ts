@@ -87,6 +87,7 @@ export class DshRealtimeCompatibility {
   private readonly sockets = new Set<SocketState>()
   private readonly knownSessions = new Map<string, number>()
   private readonly pending = new Map<string, PendingInteraction[]>()
+  private readonly responding = new Set<PendingInteraction>()
   private remoteOwner?: SocketState
   private disposed = false
 
@@ -152,6 +153,7 @@ export class DshRealtimeCompatibility {
     const target = candidates?.find(candidate =>
       [...this.sockets].some(state => state.clientId === candidate.clientId))
     if (!target) return { accepted: false, reason: 'request is no longer pending' }
+    if (this.responding.has(target)) return { accepted: false, reason: 'response is already being delivered' }
     const result = recordOf(body.result)
     let outcome: JsonRecord
     if (result?.ok === true) {
@@ -174,6 +176,7 @@ export class DshRealtimeCompatibility {
         },
       }
     }
+    this.responding.add(target)
     try {
       const reply = await this.dispatchRemoteEventResult({
         clientId: target.clientId,
@@ -181,12 +184,21 @@ export class DshRealtimeCompatibility {
         outcome,
       })
       if (!reply.ok) return { accepted: false, reason: reply.message }
+      // Gateway removes the responding delivery BEFORE broadcasting cancel to
+      // the other clients. It will never echo cancel to this upstream owner.
+      // A successful result receipt therefore completes our delivery too; it
+      // says nothing about subsequent tool execution or the approval verdict.
+      // Identity guarding keeps an old in-flight receipt from settling a new
+      // delivery established after the owner disconnected.
+      if (this.pending.get(rpcId)?.includes(target)) this.settlePending(rpcId)
       return { accepted: true }
     } catch (error: unknown) {
       return {
         accepted: false,
         reason: error instanceof Error ? error.message : String(error),
       }
+    } finally {
+      this.responding.delete(target)
     }
   }
 
@@ -400,7 +412,7 @@ export class DshRealtimeCompatibility {
         continue
       }
       if (frame.type === 'waterfall') this.pendingWaterfall(state, frame)
-      else if (frame.type === 'cancel') this.cancelPending(stringOf(frame.eventId))
+      else if (frame.type === 'cancel') this.settlePending(stringOf(frame.eventId))
     }
   }
 
@@ -427,6 +439,7 @@ export class DshRealtimeCompatibility {
       ...(approvalId ? { approvalId } : {}),
     }
     const values = this.pending.get(eventId) ?? []
+    if (values.some(value => value.clientId === clientId)) return
     values.push(pending)
     this.pending.set(eventId, values)
     for (const target of this.sockets) {
@@ -434,7 +447,7 @@ export class DshRealtimeCompatibility {
     }
   }
 
-  private cancelPending(eventId: string): void {
+  private settlePending(eventId: string): void {
     const values = this.pending.get(eventId)
     if (!values) return
     this.pending.delete(eventId)
@@ -446,7 +459,7 @@ export class DshRealtimeCompatibility {
       for (const state of this.sockets) {
         if (state.kind !== 'mux') continue
         this.send(state, pending.event === 'approval/request'
-          ? { type: 'approval/resolved', sessionId: pending.sessionId, approvalId: pending.approvalId }
+          ? { type: 'approval/resolved', sessionId: pending.sessionId, approvalId: pending.approvalId, approvalRpcId: eventId }
           : { type: 'question/resolved', sessionId: pending.sessionId, questionRpcId: eventId }, eventId)
       }
     }

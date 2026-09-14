@@ -53,12 +53,13 @@ const gateway = {
   } },
 }
 const responses = []
+let handleResponse = async () => Response.json({ result: { ok: true } })
 const adapter = new DshRealtimeCompatibility({ get(key) {
   if (key === 'typertGateway') return gateway
   if (key === 'connection') return { createSharedFetchHandler() { return {
     async fetch(request) {
       responses.push((await request.json()).payload.args)
-      return Response.json({ result: { ok: true } })
+      return handleResponse()
     },
   } } }
 } })
@@ -98,14 +99,72 @@ const pending = { type: 'waterfall', event: 'approval/request', eventId: 'approv
 remoteSources[0].stream.push(pending)
 await until(() => secondMux.messages.some(frame => frame.rpcId === 'approval-1'))
 assert.equal(firstMux.messages.filter(frame => frame.rpcId === 'approval-1').length, 1)
-assert.equal((await adapter.respond({ type: 'client-response', rpcId: 'approval-1', result: { ok: true, value: { outcome: 'allow-once' } } })).accepted, true)
-assert.deepEqual(responses[0].outcome, { kind: 'result', value: 'allow-once' })
-remoteSources[0].stream.push({ type: 'cancel', eventId: 'approval-1' })
+assert.equal((await adapter.respond({ type: 'client-response', rpcId: 'approval-1', result: { ok: true, value: { outcome: 'allowed-once' } } })).accepted, true)
+assert.deepEqual(responses[0].outcome, { kind: 'result', value: 'allowed-once' })
+// Real Gateway does NOT send cancel back to the responding client.
 await until(() => secondMux.messages.some(frame => frame.payload.type === 'approval/resolved'))
+assert(firstMux.messages.some(frame => frame.payload.type === 'approval/resolved'))
 assert.equal((await adapter.respond({ type: 'client-response', rpcId: 'approval-1', result: { ok: true } })).accepted, false)
+
+const questions = [{ id: 'q', question: 'Choose?', options: [{ label: 'A' }] }]
+const questionFrame = id => ({ type: 'waterfall', event: 'user-questions/request', eventId: id,
+  agentId: 'session-64', request: { questions } })
+const answer = id => ({ type: 'client-response', rpcId: id,
+  result: { ok: true, value: { sessionId: 'session-64', answer: { answers: [{ id: 'q', selected: ['A'] }] } } } })
+remoteSources[0].stream.push(questionFrame('question-1'))
+await until(() => firstMux.messages.some(f => f.rpcId === 'question-1'))
+handleResponse = async () => Response.json({ result: { ok: false, error: { message: 'retryable' } } })
+assert.equal((await adapter.respond(answer('question-1'))).accepted, false)
+assert(!firstMux.messages.some(f => f.rpcId === 'question-1' && f.payload.type === 'question/resolved'))
+let finishResponse
+handleResponse = () => new Promise(resolve => { finishResponse = resolve })
+const responding = adapter.respond(answer('question-1'))
+await until(() => !!finishResponse)
+const sentBeforeDuplicate = responses.length
+assert.equal((await adapter.respond(answer('question-1'))).accepted, false)
+assert.equal(responses.length, sentBeforeDuplicate, 'never deliver two competing answers')
+finishResponse(Response.json({ result: { ok: true } }))
+assert.equal((await responding).accepted, true)
+assert(firstMux.messages.some(f => f.payload.questionRpcId === 'question-1' && f.payload.type === 'question/resolved'))
+assert(secondMux.messages.some(f => f.payload.questionRpcId === 'question-1' && f.payload.type === 'question/resolved'))
+assert.deepEqual(responses.at(-1).outcome, { kind: 'result', value: { answers: [{ id: 'q', selected: ['A'] }] } })
+
+handleResponse = async () => Response.json({ result: { ok: true } })
+remoteSources[0].stream.push(questionFrame('question-cancel'))
+await until(() => firstMux.messages.some(f => f.rpcId === 'question-cancel'))
+assert.equal((await adapter.respond({ type: 'client-response', rpcId: 'question-cancel',
+  result: { ok: false, error: { code: 'ASK_CANCELLED', message: 'cancelled by user' } } })).accepted, true)
+assert.equal(responses.at(-1).outcome.kind, 'rejected')
+assert(firstMux.messages.some(f => f.payload.questionRpcId === 'question-cancel' && f.payload.type === 'question/resolved'))
+
+remoteSources[0].stream.push(questionFrame('question-other-client'))
+await until(() => firstMux.messages.some(f => f.rpcId === 'question-other-client'))
+remoteSources[0].stream.push({ type: 'cancel', eventId: 'question-other-client' })
+await until(() => firstMux.messages.some(f => f.payload.questionRpcId === 'question-other-client'))
+assert.equal((await adapter.respond(answer('question-other-client'))).accepted, false)
+const probe = peer()
+const detachProbe = adapter.connect('/api/events.mux', probe)
+assert(!probe.messages.some(f => /^(question|approval)\/requested$/.test(f.payload.type)),
+  'settled deliveries must not be replayed on reconnect')
+detachProbe()
+
+remoteSources[0].stream.push(questionFrame('question-owner-change'))
+await until(() => firstMux.messages.some(f => f.rpcId === 'question-owner-change'))
+finishResponse = null
+handleResponse = () => new Promise(resolve => { finishResponse = resolve })
+const oldOwnerResponse = adapter.respond(answer('question-owner-change'))
+await until(() => !!finishResponse)
 
 detachFirst()
 assert.equal(remoteSources.length, 2, 'another client takes over when the upstream owner disconnects')
+remoteSources[1].stream.push(questionFrame('question-owner-change'))
+await until(() => secondMux.messages.filter(f => f.rpcId === 'question-owner-change' && f.payload.type === 'question/requested').length === 2)
+finishResponse(Response.json({ result: { ok: true } }))
+await oldOwnerResponse
+assert(!secondMux.messages.some(f => f.rpcId === 'question-owner-change' && f.payload.type === 'question/resolved'),
+  'a receipt from a detached delivery cannot settle a replacement delivery')
+handleResponse = async () => Response.json({ result: { ok: true } })
+assert.equal((await adapter.respond(answer('question-owner-change'))).accepted, true)
 remoteSources[1].stream.push({ type: 'emit', event: 'api-session/status', args: ['session-1', false] })
 await until(() => host.messages.filter(frame => frame.payload.type === 'host/session-status').length === 2)
 assert.deepEqual(secondMux.closes, [])

@@ -23,6 +23,8 @@ export declare class DshCompatibilityApi implements DshCompatibilityTransport {
     private readonly ctx;
     private readonly dshPort?;
     private readonly maintaining;
+    /** Absent unless the isolated research feature was explicitly enabled. */
+    taskNotificationRequest?: (args: unknown) => Promise<unknown>;
     readonly realtime: DshRealtimeCompatibility;
     private inFlight;
     hasInFlightRequests(): boolean;

@@ -96,6 +96,7 @@
     "verify": "node scripts/verify.mjs",
     "test": "npm run test:lifecycle && npm run test:client && npm run test:attachment && npm run test:directory && npm run test:host-platform && npm run test:history && npm run test:gate-ports && npm run test:dsh-runtime && npm run test:dsh-protocol-compat && npm run test:dsh-realtime-compat && npm run test:dsh-compatibility-api && npm run test:public-relay && npm run test:updates",
     "test:lifecycle": "node scripts/test-lifecycle.mjs",
+    "test:notifications": "node --test scripts/test-task-notifications.mjs",
     "test:client": "node scripts/test-client-bundle.mjs",
     "test:updates": "node scripts/test-update-policy.mjs && node scripts/test-update-safety.mjs && node scripts/test-install-capabilities.mjs && node scripts/test-install-runtime.mjs && node scripts/test-install-profile.mjs && node scripts/test-update-action.mjs && node scripts/test-installer-patch.mjs && node scripts/test-installer-handshake.mjs && node scripts/test-installer-selection.mjs",
     "test:directory": "node scripts/test-directory.mjs",
@@ -178,6 +179,8 @@
     "typescript": "^5.8.3"
   },
   "files": [
+    "lib/task-notifications.js",
+    "lib/task-notifications.d.ts",
     "lib/install-*.js",
     "lib/install-*.d.ts",
     "lib/secure-lan.js",

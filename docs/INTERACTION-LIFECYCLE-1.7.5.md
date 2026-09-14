@@ -17,4 +17,4 @@ DSH 0.1.5-rc.1 Gateway 的 receiveRemoteEventResult 先移除 responding deliver
 
 插件构建、verify、全套 npm test；新增测试不再人为补发 responder cancel，覆盖双端通知、重连不重放、失败重试、并发、用户取消、他端完成、源切换竞态。小程序跨端测试串联运行适配器与客户端生命周期。只读核对 Mac 0.1.5-rc.1 上已完成问答/审批的持久历史顺序。
 
-发布后继续记录包内版本一致、嵌套插件逐字节一致、GitHub/npm 摘要回读、更新清单及 Mac 升级/身份历史保留核验；不将模拟测试当作手机真实点击验收。发布证据：`compat-artifacts/plugin-release-1.7.5-20260914/`。
+包内版本、嵌套插件逐字节一致、GitHub/npm 实际下载摘要回读、更新清单已核验。Mac 只读检查可从 1.7.2 自动更新到 1.7.5；用户要求亲自点击更新，因此本轮未执行升级/重启，不将模拟测试或检测成功当作真机升级和手机点击验收。发布证据：`compat-artifacts/plugin-release-1.7.5-20260914/`。

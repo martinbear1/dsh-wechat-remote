@@ -1,6 +1,7 @@
-param([switch]$Rollback)
+param([switch]$Rollback, [ValidateSet('unified','session-title')][string]$Revision='unified')
 $ErrorActionPreference='Stop'
 $notifyBackup='C:\Users\Martin\.harness-remote\backups\task-notifications-unified-20260915'
+if ($Revision -eq 'session-title') { $notifyBackup='C:\Users\Martin\.harness-remote\backups\task-notifications-title-20260915' }
 $notifyInstall='C:\Users\Martin\.dsh\profiles\web\node_modules\@harness-remote\dsh-wechat-remote'
 $notifySource='E:\agent remote\notifications-dsh-wechat-remote'
 $notifyCli='C:\Users\Martin\AppData\Local\npm\node_modules\@deepseek-ai\dsh\lib\bin.js'
@@ -46,6 +47,8 @@ if(!$Rollback){
   if($record.newPid -ne $notifyPid[0]){throw 'Rollback owner changed; inspect first'}
 }
 $null=Notify-Sessions
+$notifyCurrent=Get-CimInstance Win32_Process -Filter ('ProcessId='+$notifyPid[0])
+if (!$notifyCurrent -or $notifyCurrent.CreationDate -ne $notifyProcess.CreationDate -or $notifyCurrent.ExecutablePath -ne $notifyNode) { throw 'Process identity changed before restart' }
 Stop-Process -Id $notifyPid[0]
 Wait-Process -Id $notifyPid[0] -Timeout 10 -ErrorAction SilentlyContinue
 try {
@@ -61,6 +64,10 @@ try {
   }
   if(Compare-Object $notifySessions $after){throw 'Session identity changed'}
   foreach($file in $notifyBefore.Keys){if((Get-FileHash -LiteralPath $file).Hash -ne $notifyBefore[$file]){throw 'DSH core or pairing changed'}}
+  foreach($file in $notifyFiles){
+    $expected=if($Rollback){Join-Path $notifyBackup $file}else{Join-Path $notifySource $file}
+    if((Get-FileHash -LiteralPath (Join-Path $notifyInstall $file)).Hash -ne (Get-FileHash -LiteralPath $expected).Hash){throw 'Installed notification module differs from the selected source'}
+  }
   $report=@{updated=(!$Rollback);newPid=$child.Id;cwd=$notifyCwd;coreAndPairingUnchanged=$true;sessions=$after.Count;changedPluginFiles=$notifyFiles.Count;backup=$notifyBackup}
   $report|ConvertTo-Json -Depth 6|Set-Content -LiteralPath (Join-Path $notifyBackup 'activation.json') -Encoding utf8
   $report|ConvertTo-Json -Compress

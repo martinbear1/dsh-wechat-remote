@@ -28,6 +28,15 @@ if (process.argv[2]) {
     platforms: ['windows', 'macos', 'linux'], architectures: ['x64'], asset: {
       url: `https://github.com/martinbear1/dsh-wechat-remote/releases/download/v${version}/harness-remote-dsh-wechat-remote-${version}.tgz`,
       sha256: createHash('sha256').update(archive).digest('hex'), bytes: archive.length } }
+  // Evidence only: this flag records a completed hardware test, never grants
+  // permission to install/update/restart. Untested CPUs follow the same flow.
+  if (process.argv.includes('--linux-arm64-rc1')) {
+    release.architectures.push('arm64')
+    release.targets = [
+      ...release.platforms.map(platform => ({ platform, arch: 'x64', dsh: release.dsh })),
+      { platform: 'linux', arch: 'arm64', dsh: ['0.1.5-rc.1'] },
+    ]
+  }
   fs.writeFileSync(path.join(assets, 'release.json'), JSON.stringify({ version, catalog: {
     schemaVersion: 1, revision: `installer-${version}`, issuedAt: Date.now(), expiresAt: Date.now() + 28 * 86400000,
     releases: [release], blocked: [], retiredDsh: [] } }, null, 2) + '\n')

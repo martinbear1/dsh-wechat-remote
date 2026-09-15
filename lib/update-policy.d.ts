@@ -1,8 +1,8 @@
 /** Shared host/cloud policy evaluator. Never shipped to the mini-program.
- * TARGET compatibility is refreshable positive evidence (explicit versions), not guessed semver
- * intervals: prereleases between two tested RCs are NOT implicitly supported.
- * It must not become a hardcoded host-version gate in the installed updater,
- * or an admission list for explicit CLI installation (installer/bin/release-selection.mjs).
+ * Tested DSH/OS/CPU combinations are evidence, NOT installation admission rules.
+ * Offer newer releases independently of that evidence; the host checks actual
+ * save/install/restart capabilities before mutation. Only explicit known failures
+ * or withdrawn releases exclude a target. Never guess failures from missing tests.
  */
 export declare const UPDATE_SCHEMA = 1;
 export declare const RELEASE_REPOSITORY = "https://github.com/martinbear1/dsh-wechat-remote";
@@ -20,6 +20,11 @@ export interface Release {
     dsh: string[];
     platforms: string[];
     architectures: string[];
+    targets?: {
+        platform: string;
+        arch: string;
+        dsh: string[];
+    }[];
     asset?: {
         url: string;
         sha256: string;

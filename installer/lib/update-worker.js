@@ -416,13 +416,20 @@ async function stopOriginal(job) {
   }
   throw new Error("\u539F DSH \u5C1A\u672A\u7ED3\u675F\uFF0C\u672A\u66FF\u6362\u63D2\u4EF6");
 }
-async function stopRestarted(child, timeoutMs = 3e4) {
+async function stopRestarted(child, timeoutMs = 3e4, forceTimeoutMs = 5e3) {
   if (child.exitCode !== null || child.signalCode !== null) return;
   child.kill("SIGTERM");
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (child.exitCode !== null || child.signalCode !== null) return;
     await wait(Math.min(100, Math.max(1, deadline - Date.now())));
+  }
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  child.kill("SIGKILL");
+  const forcedDeadline = Date.now() + forceTimeoutMs;
+  while (Date.now() < forcedDeadline) {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    await wait(Math.min(100, Math.max(1, forcedDeadline - Date.now())));
   }
   if (child.exitCode !== null || child.signalCode !== null) return;
   throw new Error("\u66F4\u65B0\u540E\u7684 DSH \u672A\u6309\u65F6\u505C\u6B62");

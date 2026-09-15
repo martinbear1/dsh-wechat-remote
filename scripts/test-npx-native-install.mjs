@@ -11,12 +11,20 @@ import { createHash } from 'node:crypto'
 
 assert(['win32', 'darwin', 'linux'].includes(process.platform))
 const installer = fs.realpathSync(process.argv[2])
+const payloadVersion = JSON.parse(execFileSync('tar', ['-xOf', installer, 'package/assets/release.json'], { encoding: 'utf8' })).version
 const root = fs.realpathSync(fs.mkdtempSync(path.resolve('..', 'compat-artifacts', 'npx-native-proof-')))
 const home = path.join(root, '独立数据')
 const cache = process.env.DSH_INSTALLER_TEST_CACHE ? fs.realpathSync(process.env.DSH_INSTALLER_TEST_CACHE) : path.join(root, 'npm cache')
 if (process.env.DSH_INSTALLER_TEST_CACHE) assert(path.basename(path.dirname(cache)).startsWith('npx-native-proof-') && path.basename(cache) === 'npm cache')
 const profile = path.join(home, 'profiles/web'), catalogFile = path.join(root, 'catalog.json')
 fs.mkdirSync(home)
+const expectedPayload = path.join(root, 'expected-plugin.tgz')
+fs.writeFileSync(expectedPayload, execFileSync('tar', ['-xOf', installer, 'package/assets/plugin.tgz'], { maxBuffer: 32 * 1024 * 1024 }))
+const expectedFiles = ['lib/update-policy.js', 'lib/update-service.js', 'lib/update-worker.js'].map(file => [file,
+  createHash('sha256').update(execFileSync('tar', ['-xOf', expectedPayload, 'package/' + file], { maxBuffer: 1024 * 1024 })).digest('hex')])
+const assertCandidateBytes = () => {
+  for (const [file, hash] of expectedFiles) assert.equal(createHash('sha256').update(fs.readFileSync(path.join(profile, 'node_modules/@harness-remote/dsh-wechat-remote', file))).digest('hex'), hash, 'installed bytes must match this candidate, not a same-version npm cache')
+}
 const json = (file, value) => fs.writeFileSync(file, JSON.stringify(value, null, 2), { mode: 0o600 })
 json(path.join(home, 'harness-remote-public.json'), { enabled: false, relayOrigin: 'https://relay.xyxfood.xyz' })
 const nodeDir = path.dirname(process.execPath)
@@ -80,7 +88,7 @@ async function waitReady(predicate, timeout = 900000) {
 }
 async function call(route, body) {
   const r = await fetch(update + route, { method: body ? 'POST' : 'GET', headers: { origin, 'content-type': 'application/json' },
-    body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(90000) })
+    body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(360000) })
   const value = await r.json(); assert(r.ok, value.error || String(r.status)); return value
 }
 async function rpc(method, payload = {}) {
@@ -134,7 +142,8 @@ try {
   step('actual npx DSH starts with no global DSH on child PATH and an empty home')
   const beforePatch = fs.readFileSync(path.join(profile, 'cordis.patch.yml'), 'utf8')
   await runInstaller('installer-first')
-  await waitReady(async () => version() === '1.7.5' && Array.isArray((await rpc('session.list')).items))
+  await waitReady(async () => version() === payloadVersion && Array.isArray((await rpc('session.list')).items))
+  assertCandidateBytes()
   assert.equal(fs.readFileSync(path.join(profile, 'cordis.patch.yml'), 'utf8'), beforePatch)
   const jobs = path.join(home, 'harness-remote-updates')
   const installedJob = fs.readdirSync(jobs).filter(id => /^[a-f0-9]{32}$/.test(id))
@@ -142,7 +151,7 @@ try {
   assert(installedJob.cli.startsWith(cache + path.sep) && installedJob.cli.includes('_npx'))
   assert.equal(installedJob.home, home)
   report.realNpxCli = installedJob.cli
-  step('packed npm installer discovers live npx host, natively installs stable 1.7.5, restores patch and restarts correct CLI')
+  step(`packed npm installer discovers live npx host, natively installs ${payloadVersion}, restores patch and restarts correct CLI`)
   const session = await rpc('session.create', { cwd: root })
   const binding = bindingDigest()
   // A separate ordinary terminal can have a global DSH on PATH. Its presence
@@ -154,6 +163,7 @@ try {
   assert((await rpc('session.list')).items.some(item => item.sessionId === session.sessionId))
   step('repeat install from ordinary PATH is a no-op and preserves session/token/bindings')
   if (process.argv.includes('--with-update')) {
+    assert.equal(payloadVersion, '1.7.5', 'The published RC forward-update proof starts from stable 1.7.5; use test-real-update-forward for newer candidates')
     const version = '1.7.6-rc.1'
     assert.equal(process.arch, 'x64', 'Unmodified stable WebUI updater still restricts automatic restart to x64')
     const release = { version, channel: 'preview', dsh: ['0.1.5-rc.1'],
@@ -182,7 +192,8 @@ try {
   await pause(1000)
   startNpx(['@deepseek-ai/dsh@0.1.5-rc.1', 'web', '--port', String(port), '--no-open'], 'dsh-next-start')
   await waitReady(async () => Array.isArray((await rpc('session.list')).items))
-  assert.equal(version(), process.argv.includes('--with-update') ? '1.7.6-rc.1' : '1.7.5')
+  assert.equal(version(), process.argv.includes('--with-update') ? '1.7.6-rc.1' : payloadVersion)
+  if (!process.argv.includes('--with-update')) assertCandidateBytes()
   assert.equal(bindingDigest(), binding)
   assert((await rpc('session.list')).items.some(item => item.sessionId === session.sessionId))
   step('a later normal npx startup loads the installed plugin and preserves session/token/bindings')

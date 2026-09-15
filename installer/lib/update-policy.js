@@ -41,8 +41,17 @@ function validateCatalog(value) {
   if (!c || c.schemaVersion !== 1 || typeof c.revision !== "string" || !/^[\w.-]{1,80}$/.test(c.revision) || !Number.isSafeInteger(c.issuedAt) || !Number.isSafeInteger(c.expiresAt) || c.expiresAt <= c.issuedAt || c.expiresAt - c.issuedAt > 32 * 864e5 || !Array.isArray(c.releases) || c.releases.length > 100 || !Array.isArray(c.blocked) || c.blocked.length > 100 || !strings(c.retiredDsh)) throw new Error("Invalid update catalog");
   const versions = /* @__PURE__ */ new Set();
   for (const r of c.releases) {
-    if (!r || !validVersion(r.version) || versions.has(r.version) || !["stable", "preview"].includes(r.channel) || r.channel === "stable" && versionPattern.exec(r.version)[4] || !strings(r.dsh) || !r.dsh.length || !r.dsh.every(validVersion) || !strings(r.platforms, 3) || !r.platforms.length || !r.platforms.every((p) => ["windows", "macos", "linux"].includes(p)) || !strings(r.architectures, 4) || !r.architectures.length || !r.architectures.every((a) => ["x64", "arm64"].includes(a)) || r.asset && !trustedReleaseAsset(r.asset, r.version)) throw new Error("Invalid release entry");
+    if (!r || !validVersion(r.version) || versions.has(r.version) || !["stable", "preview"].includes(r.channel) || r.channel === "stable" && versionPattern.exec(r.version)[4] || !strings(r.dsh) || !r.dsh.length || !r.dsh.every(validVersion) || !strings(r.platforms, 3) || !r.platforms.length || !r.platforms.every((p) => ["windows", "macos", "linux"].includes(p)) || !strings(r.architectures, 32) || !r.architectures.length || !r.architectures.every((a) => /^[a-z0-9_-]{1,32}$/.test(a)) || r.asset && !trustedReleaseAsset(r.asset, r.version)) throw new Error("Invalid release entry");
     versions.add(r.version);
+    if (r.targets !== void 0) {
+      if (!Array.isArray(r.targets) || !r.targets.length || r.targets.length > 12) throw new Error("Invalid release targets");
+      const seen = /* @__PURE__ */ new Set();
+      for (const target of r.targets) {
+        const key = `${target?.platform}:${target?.arch}`;
+        if (!target || !r.platforms.includes(target.platform) || !r.architectures.includes(target.arch) || !strings(target.dsh) || !target.dsh.length || !target.dsh.every((v) => r.dsh.includes(v)) || seen.has(key)) throw new Error("Invalid release target");
+        seen.add(key);
+      }
+    }
   }
   for (const b of c.blocked) if (!b || !validVersion(b.pluginVersion) || typeof b.reason !== "string" || !b.reason || b.reason.length > 240 || b.dsh && !strings(b.dsh) || b.platforms && !strings(b.platforms, 3)) throw new Error("Invalid blocked entry");
   if (!c.retiredDsh.every(validVersion)) throw new Error("Invalid retired DSH");
@@ -50,7 +59,7 @@ function validateCatalog(value) {
   return c;
 }
 function releaseMatches(r, current) {
-  return r.dsh.includes(current.agentVersion) && r.platforms.includes(current.platform) && (!current.arch || r.architectures.includes(current.arch));
+  return r.dsh.includes(current.agentVersion) && r.platforms.includes(current.platform) && Boolean(current.arch && r.architectures.includes(current.arch)) && (!r.targets || r.targets.some((t) => t.platform === current.platform && (!current.arch || t.arch === current.arch) && t.dsh.includes(current.agentVersion)));
 }
 function assessUpdate(raw, current, now = Date.now(), preview = false) {
   const base = {
@@ -79,23 +88,21 @@ function assessUpdate(raw, current, now = Date.now(), preview = false) {
   const blocked = (version) => c.blocked.find((b) => b.pluginVersion === version && (!b.dsh || b.dsh.includes(current.agentVersion)) && (!b.platforms || b.platforms.includes(current.platform)));
   const own = c.releases.find((r) => r.version === current.pluginVersion);
   const compatible = Boolean(current.arch && own && releaseMatches(own, current) && !blocked(own.version));
-  const target = c.releases.filter((r) => (r.channel === "stable" || preview) && releaseMatches(r, current) && !blocked(r.version) && compareVersions(r.version, current.pluginVersion) > 0).sort((a, b) => compareVersions(b.version, a.version))[0];
+  if (c.retiredDsh.includes(current.agentVersion)) return {
+    ...base,
+    severity: "required",
+    component: "agent",
+    code: "agent-retired",
+    label: "\u9700\u8981\u66F4\u65B0 DSH",
+    message: "\u6B64 DSH \u7248\u672C\u5DF2\u505C\u6B62\u652F\u6301\u3002\u8BF7\u5728\u4E3B\u673A\u4E0A\u6309\u53D1\u5E03\u8BF4\u660E\u5347\u7EA7 DSH\uFF1B\u4E0D\u4F1A\u81EA\u52A8\u4FEE\u6539 DSH\u3002",
+    releaseUrl: `${RELEASE_REPOSITORY}/releases`
+  };
+  const target = c.releases.filter((r) => (r.channel === "stable" || preview) && !blocked(r.version) && compareVersions(r.version, current.pluginVersion) > 0).sort((a, b) => compareVersions(b.version, a.version))[0];
   const issue = blocked(current.pluginVersion);
   if (target) {
     const manual = c.manualUpgradePlugins?.includes(current.pluginVersion) ? {
       manualUpdate: `\u6B64\u65E7\u63D2\u4EF6\u6CA1\u6709\u68C0\u67E5\u66F4\u65B0\u548C\u4E00\u952E\u66F4\u65B0\u529F\u80FD\u3002\u9996\u6B21\u9700\u5728\u8282\u70B9\u6240\u5728\u7535\u8111\uFF0C\u6309\u76EE\u6807\u7248\u672C ${target.version} \u7684\u53D1\u5E03\u8BF4\u660E\u624B\u5DE5\u5347\u7EA7\u63D2\u4EF6\uFF0C\u5E76\u4F7F\u7528\u539F\u6765\u7684 DSH_HOME \u548C profile \u91CD\u542F\u3002\u4E0D\u8981\u5220\u9664\u8282\u70B9\u6216\u91CD\u65B0\u914D\u5BF9\uFF1B\u5347\u7EA7\u540E\u624D\u53EF\u4F7F\u7528\u4E00\u952E\u66F4\u65B0\u3002`
     } : {};
-    if (!current.arch) return {
-      ...base,
-      ...manual,
-      severity: "recommended",
-      component: "plugin",
-      code: "plugin-check-host",
-      label: "\u63D2\u4EF6\u53EF\u66F4\u65B0",
-      message: `\u63D2\u4EF6 ${target.version} \u7684\u7248\u672C\u6761\u4EF6\u4E0E\u5F53\u524D DSH \u5339\u914D\uFF0C\u4F46\u65E7\u8282\u70B9\u672A\u4E0A\u62A5\u4E3B\u673A\u67B6\u6784\u3002\u8BF7\u5230\u6B64\u4E3B\u673A WebUI \u68C0\u67E5\u786E\u8BA4\u540E\u66F4\u65B0\u63D2\u4EF6\uFF1B\u65E0\u9700\u5148\u66F4\u65B0 DSH\u3002`,
-      targetVersion: target.version,
-      releaseUrl: `${RELEASE_REPOSITORY}/releases/tag/v${target.version}`
-    };
     const required = Boolean(issue);
     return {
       ...base,
@@ -104,7 +111,7 @@ function assessUpdate(raw, current, now = Date.now(), preview = false) {
       component: "plugin",
       code: required ? "plugin-required" : "plugin-available",
       label: required ? "\u5FC5\u987B\u66F4\u65B0\u63D2\u4EF6" : "\u63D2\u4EF6\u53EF\u66F4\u65B0",
-      message: (issue?.reason || (required ? "\u5F53\u524D\u63D2\u4EF6\u4E0D\u5728\u6B64 DSH / \u4E3B\u673A\u7EC4\u5408\u7684\u652F\u6301\u8303\u56F4\u5185\u3002" : compatible ? "\u5F53\u524D\u7EC4\u5408\u53D7\u652F\u6301\u3002" : "\u5F53\u524D\u63D2\u4EF6\u7EC4\u5408\u5C1A\u672A\u9A8C\u8BC1\u3002")) + `\u63D2\u4EF6 ${target.version} \u5DF2\u652F\u6301\u5F53\u524D DSH\uFF1B\u4EC5\u66F4\u65B0\u63D2\u4EF6\uFF0C\u65E0\u9700\u66F4\u65B0 DSH\u3002`,
+      message: (issue ? issue.reason + "\u3002" : "") + `\u53EF\u66F4\u65B0\u81F3\u63D2\u4EF6 ${target.version}\uFF1B\u66F4\u65B0\u524D\u4F1A\u68C0\u67E5\u5F53\u524D\u4E3B\u673A\u7684\u5B89\u88C5\u4E0E\u91CD\u542F\u6761\u4EF6\uFF0C\u4E0D\u4F1A\u66F4\u6362 DSH \u672C\u4F53\u3002`,
       targetVersion: target.version,
       releaseUrl: `${RELEASE_REPOSITORY}/releases/tag/v${target.version}`
     };
@@ -119,20 +126,12 @@ function assessUpdate(raw, current, now = Date.now(), preview = false) {
     releaseUrl: `${RELEASE_REPOSITORY}/releases`
   };
   if (compatible) return { ...base, severity: "none", code: "compatible", label: "\u6682\u65E0\u53EF\u7528\u66F4\u65B0", message: "\u5F53\u524D\u7EC4\u5408\u5DF2\u9A8C\u8BC1\uFF0C\u6682\u672A\u53D1\u73B0\u9002\u7528\u4E8E\u6B64 DSH \u548C\u4E3B\u673A\u7684\u66F4\u65B0\u3002" };
-  if (c.retiredDsh.includes(current.agentVersion)) return {
-    ...base,
-    severity: "required",
-    component: "agent",
-    code: "agent-retired",
-    label: "\u9700\u8981\u66F4\u65B0 DSH",
-    message: "\u6B64 DSH \u7248\u672C\u5DF2\u505C\u6B62\u652F\u6301\u3002\u8BF7\u5728\u4E3B\u673A\u4E0A\u6309\u517C\u5BB9\u53D1\u5E03\u8BF4\u660E\u5347\u7EA7 DSH \u548C\u8FDE\u63A5\u63D2\u4EF6\uFF1B\u4E0D\u4F1A\u81EA\u52A8\u4FEE\u6539 DSH\u3002",
-    releaseUrl: `${RELEASE_REPOSITORY}/releases`
-  };
   return {
     ...base,
-    code: "unverified",
-    label: "\u517C\u5BB9\u6027\u5F85\u786E\u8BA4",
-    message: "\u6CA1\u6709\u8DB3\u591F\u7684\u517C\u5BB9\u8BC1\u636E\u6216\u5339\u914D\u7684\u6B63\u5F0F\u66F4\u65B0\u3002\u8FD9\u4E0D\u7B49\u4E8E\u8282\u70B9\u79BB\u7EBF\uFF0C\u4E5F\u4E0D\u8868\u793A\u5FC5\u987B\u5347\u7EA7\u6216\u964D\u7EA7 DSH\u3002",
+    severity: "none",
+    code: "no-update",
+    label: "\u6682\u65E0\u53EF\u7528\u66F4\u65B0",
+    message: "\u5F53\u524D\u901A\u9053\u6682\u65E0\u66F4\u9AD8\u7248\u672C\uFF0C\u4E0D\u5F71\u54CD\u7EE7\u7EED\u4F7F\u7528\u3002",
     releaseUrl: `${RELEASE_REPOSITORY}/releases`
   };
 }

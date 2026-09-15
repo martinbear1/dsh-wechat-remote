@@ -1,14 +1,14 @@
 {
-  "version": "1.7.6-rc.1",
+  "version": "1.7.6",
   "catalog": {
     "schemaVersion": 1,
-    "revision": "installer-1.7.6-rc.1",
-    "issuedAt": 1789457016994,
-    "expiresAt": 1791876216994,
+    "revision": "installer-1.7.6",
+    "issuedAt": 1789479663953,
+    "expiresAt": 1791898863953,
     "releases": [
       {
-        "version": "1.7.6-rc.1",
-        "channel": "preview",
+        "version": "1.7.6",
+        "channel": "stable",
         "dsh": [
           "0.1.1-rc.2",
           "0.1.2-rc.1",
@@ -20,13 +20,50 @@
           "linux"
         ],
         "architectures": [
-          "x64"
+          "x64",
+          "arm64"
         ],
         "asset": {
-          "url": "https://github.com/martinbear1/dsh-wechat-remote/releases/download/v1.7.6-rc.1/harness-remote-dsh-wechat-remote-1.7.6-rc.1.tgz",
-          "sha256": "15f7a085bca98068d25c7fe2a1a139d69dbc2a56c090644f938131a28777d97b",
-          "bytes": 9547344
-        }
+          "url": "https://github.com/martinbear1/dsh-wechat-remote/releases/download/v1.7.6/harness-remote-dsh-wechat-remote-1.7.6.tgz",
+          "sha256": "e4c9d393aef7b304f26efc89f87f83c1ebfa1a775d27cad3a3fc8d7fd8d312ad",
+          "bytes": 9548268
+        },
+        "targets": [
+          {
+            "platform": "windows",
+            "arch": "x64",
+            "dsh": [
+              "0.1.1-rc.2",
+              "0.1.2-rc.1",
+              "0.1.5-rc.1"
+            ]
+          },
+          {
+            "platform": "macos",
+            "arch": "x64",
+            "dsh": [
+              "0.1.1-rc.2",
+              "0.1.2-rc.1",
+              "0.1.5-rc.1"
+            ]
+          },
+          {
+            "platform": "linux",
+            "arch": "x64",
+            "dsh": [
+              "0.1.1-rc.2",
+              "0.1.2-rc.1",
+              "0.1.5-rc.1"
+            ]
+          },
+          {
+            "platform": "linux",
+            "arch": "arm64",
+            "dsh": [
+              "0.1.5-rc.1"
+            ]
+          }
+        ]
       }
     ],
     "blocked": [],

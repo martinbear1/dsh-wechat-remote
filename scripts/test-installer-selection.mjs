@@ -21,14 +21,16 @@ let cases = 0
 const test = async (name, fn) => { await fn(); cases++; console.log('PASS ' + name) }
 
 await test('explicit installation accepts unlisted RC, alpha, old and future hosts on x64/ARM64', () => {
-  for (const platform of ['windows', 'macos', 'linux']) for (const arch of ['x64', 'arm64']) {
+  for (const platform of ['windows', 'macos', 'linux']) for (const arch of ['x64', 'arm64', 'riscv64', 'arm', 'futurecpu']) {
     for (const agentVersion of ['0.1.5-rc.1', '0.1.5-rc.2', '0.1.5-alpha.2', '0.1.0', '0.2.0-rc.1', '1.0.0-dev.1']) {
       assert.equal(selectInstallTarget(pinned, undefined, { ...current, platform, arch, agentVersion }, now).version, '1.7.2')
     }
   }
 })
-await test('automatic update advice still requires actual compatibility evidence', () => {
-  assert.equal(assessUpdate(pinned.catalog, { ...current, pluginVersion: '1.7.1' }, now).code, 'unverified')
+await test('automatic updates also allow untested hosts without claiming verified compatibility', () => {
+  const advice = assessUpdate(pinned.catalog, { ...current, pluginVersion: '1.7.1' }, now)
+  assert.equal(advice.targetVersion, '1.7.2')
+  assert.doesNotMatch(advice.message, /已验证|已支持当前/)
 })
 await test('latest trusted stable target selected without host-version filtering', () => {
   const remote = catalog([release('1.7.1'), release('1.7.3'), release('1.7.4-beta.1', { channel: 'preview' })])

@@ -114,11 +114,21 @@ await test('restart stop is bounded and never kills a reused or already exited P
   const signals = []
   const child = { exitCode: null, signalCode: null, kill: signal => { signals.push(signal); return true } }
   const started = Date.now()
-  await assert.rejects(stopRestarted(child, 80), /未按时停止/)
+  await assert.rejects(stopRestarted(child, 80, 80), /未按时停止/)
   assert(Date.now() - started < 1000)
-  assert.deepEqual(signals, ['SIGTERM'])
+  assert.deepEqual(signals, ['SIGTERM', 'SIGKILL'])
   await stopRestarted({ exitCode: 0, signalCode: null, kill: () => { throw Error('exited handle must not be killed') } })
   await stopRestarted({ exitCode: null, signalCode: 'SIGTERM', kill: () => { throw Error('signalled handle must not be killed') } })
+})
+await test('hung candidate can be stopped through its owned handle to permit rollback', async () => {
+  const signals = []
+  const child = { exitCode: null, signalCode: null, kill(signal) {
+    signals.push(signal)
+    if (signal === 'SIGKILL') this.signalCode = signal
+    return true
+  } }
+  await stopRestarted(child, 30, 30)
+  assert.deepEqual(signals, ['SIGTERM', 'SIGKILL'])
 })
 await test('ready helper does not mutate without explicit initiating-parent start authorization', async () => {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'harness-update-handshake-test-')))

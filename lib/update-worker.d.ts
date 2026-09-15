@@ -40,6 +40,6 @@ export declare function control(job: UpdateJob, operation: string, input?: unkno
  */
 export declare function migrateLegacyGrantOwner(job: UpdateJob): void;
 export declare function healthy(job: UpdateJob, version: string, timeoutMs?: number): Promise<void>;
-export declare function stopRestarted(child: ChildProcess, timeoutMs?: number): Promise<void>;
+export declare function stopRestarted(child: ChildProcess, timeoutMs?: number, forceTimeoutMs?: number): Promise<void>;
 /** Actual cross-platform transaction; archive must have already passed audit. */
 export declare function executeUpdate(job: UpdateJob, progress: (p: UpdateProgress) => void, quiesce: () => Promise<void>): Promise<UpdateProgress>;

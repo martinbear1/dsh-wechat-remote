@@ -182,7 +182,7 @@ async function stopOriginal(job: UpdateJob): Promise<void> {
   }
   throw new Error('原 DSH 尚未结束，未替换插件')
 }
-export async function stopRestarted(child: ChildProcess, timeoutMs = 30000): Promise<void> {
+export async function stopRestarted(child: ChildProcess, timeoutMs = 30000, forceTimeoutMs = 5000): Promise<void> {
   // Retain the process handle and exit state. A failed launch may already have
   // exited during health polling; never kill a newly reused numeric PID.
   if (child.exitCode !== null || child.signalCode !== null) return
@@ -191,6 +191,18 @@ export async function stopRestarted(child: ChildProcess, timeoutMs = 30000): Pro
   while (Date.now() < deadline) {
     if (child.exitCode !== null || child.signalCode !== null) return
     await wait(Math.min(100, Math.max(1, deadline - Date.now())))
+  }
+  if (child.exitCode !== null || child.signalCode !== null) return
+  // Only this transaction's freshly spawned candidate is eligible for a hard
+  // stop, after graceful shutdown failed. Never use a discovered numeric PID or
+  // escalate against the user's original host. Keep its retained process handle
+  // so Node can recognize exit/PID reuse before signalling. A broken plugin can
+  // hang native disposal; leaving that child alive prevents restoring the backup.
+  child.kill('SIGKILL')
+  const forcedDeadline = Date.now() + forceTimeoutMs
+  while (Date.now() < forcedDeadline) {
+    if (child.exitCode !== null || child.signalCode !== null) return
+    await wait(Math.min(100, Math.max(1, forcedDeadline - Date.now())))
   }
   if (child.exitCode !== null || child.signalCode !== null) return
   throw new Error('更新后的 DSH 未按时停止')

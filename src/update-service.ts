@@ -173,11 +173,9 @@ export class PluginUpdateService {
   }
   private eligibility(): { eligible: boolean; reason: string; profile?: string; pnpm?: string; cli?: string } {
     try {
-      // Target compatibility belongs to the refreshable release catalog.
-      // A newer host version or CPU architecture alone must never disable this
-      // updater. The selected release must still match its verified platform /
-      // architecture catalog entry; native capabilities and restart ownership
-      // below remain mandatory on ARM64 just as they are on x64.
+      // Missing OS/CPU/DSH test evidence must never disable this updater.
+      // The catalog excludes known broken releases, not untested combinations.
+      // Check actual native capabilities and restart ownership on every host.
       if (process.versions.electron) throw new Error('此启动方式尚不支持自动重启')
       currentHostManager()
       if (!process.argv.includes('web') || process.argv.some(a => /(?:api.?key|password|secret|token)[= ]/i.test(a))

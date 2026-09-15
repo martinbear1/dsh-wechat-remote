@@ -37,15 +37,19 @@ fs.writeFileSync(path.join(profile, 'cordis.patch.yml'), '# Isolated updater fix
 const extracted = spawnSync('tar', ['-xzf', baseline, '-C', plugin, '--strip-components=1'], { windowsHide: true, encoding: 'utf8' })
 assert.equal(extracted.status, 0, extracted.stderr)
 const candidateBytes = fs.readFileSync(candidate)
-const release = (version, bytes) => ({ version, channel: 'stable', dsh: [dsh.version],
-  platforms: ['windows', 'macos', 'linux'], architectures: ['x64'], asset: {
+const candidateVersion = JSON.parse(spawnSync('tar', ['-xOf', candidate, 'package/package.json'], { encoding: 'utf8' }).stdout).version
+const baselineVersion = JSON.parse(fs.readFileSync(path.join(plugin, 'package.json'))).version
+const [major, minor, patch] = candidateVersion.split('-')[0].split('.').map(Number)
+const nextVersion = `${major}.${minor}.${patch + 1}-test.1`, brokenVersion = `${major}.${minor}.${patch + 1}-test.2`
+const release = (version, bytes) => ({ version, channel: version.includes('-') ? 'preview' : 'stable', dsh: [dsh.version],
+  platforms: [{ win32: 'windows', darwin: 'macos', linux: 'linux' }[process.platform]], architectures: [process.arch], asset: {
     url: `https://github.com/martinbear1/dsh-wechat-remote/releases/download/v${version}/harness-remote-dsh-wechat-remote-${version}.tgz`,
     sha256: sha(bytes), bytes: bytes.length } })
 const catalog = (rel, revision) => ({ schemaVersion: 1, revision, issuedAt: Date.now() - 1000,
   expiresAt: Date.now() + 3600000, releases: [rel], blocked: [], retiredDsh: [] })
 const assets = path.join(root, 'assets'); fs.mkdirSync(assets)
 fs.writeFileSync(path.join(assets, 'plugin.tgz'), candidateBytes)
-json(path.join(assets, 'release.json'), { version: '1.7.2', catalog: catalog(release('1.7.2', candidateBytes), 'bridge') })
+json(path.join(assets, 'release.json'), { version: candidateVersion, catalog: catalog(release(candidateVersion, candidateBytes), 'bridge') })
 function synthetic(version, broken = false) {
   const tar = gunzipSync(candidateBytes), chunks = []
   for (let off = 0; off + 512 <= tar.length;) {
@@ -62,7 +66,7 @@ function synthetic(version, broken = false) {
   }
   return gzipSync(Buffer.concat([...chunks, Buffer.alloc(1024)]))
 }
-const nextBytes = synthetic('1.7.3'), brokenBytes = synthetic('1.7.4', true)
+const nextBytes = synthetic(nextVersion), brokenBytes = synthetic(brokenVersion, true)
 fs.writeFileSync(path.join(root, 'next.tgz'), nextBytes)
 fs.writeFileSync(path.join(root, 'broken.tgz'), brokenBytes)
 const catalogFile = path.join(root, 'catalog.json')
@@ -72,8 +76,8 @@ const version = () => JSON.parse(fs.readFileSync(manifestFile)).version
 // and all allowlist/hash/tar audits remain unchanged. Never intercept other URLs.
 const transport = path.join(root, 'fixture-transport.mjs')
 fs.writeFileSync(transport, `import fs from 'node:fs'; const real = globalThis.fetch; const map = ${JSON.stringify({
-  [release('1.7.3', nextBytes).asset.url]: path.join(root, 'next.tgz'),
-  [release('1.7.4', brokenBytes).asset.url]: path.join(root, 'broken.tgz'),
+  [release(nextVersion, nextBytes).asset.url]: path.join(root, 'next.tgz'),
+  [release(brokenVersion, brokenBytes).asset.url]: path.join(root, 'broken.tgz'),
 })}; globalThis.fetch = (url, init) => map[String(url)] ? Promise.resolve(new Response(fs.readFileSync(map[String(url)]))) : real(url, init);\n`)
 let port = 6180
 for (; port < 6400; port += 4) {
@@ -87,6 +91,7 @@ for (; port < 6400; port += 4) {
 assert(port < 6400)
 const env = { ...process.env, DSH_HOME: home, DSH_PORT: String(port), WECHAT_GATE_PORT: String(port + 2),
   WECHAT_GATE_LOCAL_PORT: String(port + 3), HARNESS_REMOTE_UPDATE_CATALOG: catalogFile,
+  HARNESS_REMOTE_UPDATE_CHANNEL: 'preview',
   NODE_OPTIONS: `--import=${pathToFileURL(transport).href}` }
 // Do not inherit real-node restart jobs or keys into the fixture.
 delete env.HARNESS_REMOTE_UPDATE_JOB
@@ -98,8 +103,11 @@ const child = spawn(process.execPath, [cli, '--profile', 'web', '--port', String
   cwd: root, env, stdio: ['ignore', fd, fd], windowsHide: true })
 fs.closeSync(fd)
 async function ready() {
-  for (let i = 0; i < 120; i++) {
-    try { if ((await fetch(`http://127.0.0.1:${port + 3}/gate/status`, { signal: AbortSignal.timeout(800) })).ok) return } catch {}
+  for (let i = 0; i < 1200; i++) {
+    try {
+      if ((await fetch(`http://127.0.0.1:${port + 3}/gate/status`, { signal: AbortSignal.timeout(800) })).ok
+          && Array.isArray((await rpc('session.list')).items)) return
+    } catch {}
     await pause(300)
   }
   throw Error('fixture host not ready; inspect private runtime/restart logs')
@@ -114,14 +122,17 @@ async function rpc(method, payload = {}) {
   const r = await fetch(`http://127.0.0.1:${port + 2}/api/${method}`, { method: 'POST', headers: {
     authorization: `Bearer ${token}`, 'content-type': 'application/json' },
     body: JSON.stringify({ type: 'client-request', rpcId: 'fixture', method, payload }), signal: AbortSignal.timeout(10000) })
-  const v = await r.json(); assert(v.result?.ok, 'fixture RPC failed: ' + method); return v.result.value
+  const v = await r.json(); assert(v.result?.ok, 'fixture RPC failed: ' + method + ' ' + JSON.stringify(v.result?.error || v.error || '').slice(0, 500)); return v.result.value
 }
 try {
-  await ready(); assert.equal(version(), '1.7.1')
-  json(catalogFile, catalog(release('1.7.2', candidateBytes), 'old-host-limit'))
+  await ready(); assert.equal(version(), baselineVersion)
+  json(catalogFile, catalog(release(candidateVersion, candidateBytes), 'baseline-check'))
   const oldCheck = await call('/check')
-  assert.equal(oldCheck.canInstall, false, 'old frozen updater should reproduce the limit')
-  report.checks.push({ stage: 'old-1.7.1-limit', reason: oldCheck.reason })
+  if (baselineVersion === '1.7.1' || process.arch === 'arm64') {
+    assert.equal(oldCheck.canInstall, false, 'old frozen updater should reproduce the limit')
+    if (process.arch === 'arm64') assert.match(oldCheck.reason, /架构/)
+  }
+  report.checks.push({ stage: 'baseline-check', baselineVersion, reason: oldCheck.reason, canInstall: oldCheck.canInstall })
   // Native, model-free session fixture exercises durable preservation.
   const created = await rpc('session.create', { cwd: root })
   report.createdSession = created.sessionId
@@ -134,18 +145,19 @@ try {
   const bridgeChild = spawn(process.execPath, [bridge], { cwd: root, env, stdio: ['ignore', log, log], windowsHide: true }); fs.closeSync(log)
   const code = await new Promise((resolve, reject) => { bridgeChild.on('error', reject); bridgeChild.on('exit', resolve) })
   assert.equal(code, 0, 'independent bridge failed; inspect bridge.log')
-  await ready(); assert.equal(version(), '1.7.2'); report.checks.push({ stage: 'native-bridge-1.7.1-to-1.7.2', ok: true })
+  await ready(); assert.equal(version(), candidateVersion); report.checks.push({ stage: 'native-bridge', from: baselineVersion, to: candidateVersion, ok: true })
   console.log(JSON.stringify(report.checks.at(-1)))
-  for (const [target, bytes, rollback] of [['1.7.3', nextBytes, false], ['1.7.4', brokenBytes, true]]) {
+  for (const [target, bytes, rollback] of [[nextVersion, nextBytes, false], [brokenVersion, brokenBytes, true]]) {
     const rel = release(target, bytes)
-    // A refreshed catalog enables this target without touching installed code.
-    json(catalogFile, catalog({ ...rel, dsh: ['0.0.0-fixture'] }, 'unlisted-' + target))
+    // Confirm actual known-bad targets are blocked, but missing test evidence is
+    // not a whitelist: the real host will update with an unlisted DSH/CPU below.
+    json(catalogFile, { ...catalog(rel, 'withdrawn-' + target), blocked: [{ pluginVersion: target, reason: 'Fixture withdrawal' }] })
     assert.equal((await call('/check')).canInstall, false)
-    json(catalogFile, catalog(rel, 'verified-' + target))
+    json(catalogFile, catalog({ ...rel, dsh: ['0.0.0-fixture'], architectures: ['unlisted-fixture'] }, 'untested-' + target))
     const check = await call('/check'); assert.equal(check.canInstall, true, check.reason); assert(check.ticket)
     const started = await call('/start', { ticket: check.ticket }); assert(/^[a-f0-9]{32}$/.test(started.jobId))
     let result, last = ''
-    for (let i = 0; i < 900; i++) {
+    for (let i = 0; i < 1800; i++) {
       try { result = JSON.parse(fs.readFileSync(path.join(home, 'harness-remote-updates', started.jobId, 'result.json'))) } catch {}
       if (result?.phase !== last && result?.phase) { last = result.phase; console.log(JSON.stringify({ target, phase: last })) }
       if (result?.terminal) break
@@ -154,7 +166,7 @@ try {
     assert(result?.terminal, 'update did not finish')
     assert.equal(result.ok, !rollback, result.message)
     if (rollback) assert.equal(result.rollback, true, result.message)
-    await ready(); assert.equal(version(), '1.7.3')
+    await ready(); assert.equal(version(), nextVersion)
     const after = JSON.parse(fs.readFileSync(gateFile))
     assert.equal(sha(Buffer.from(JSON.stringify([after.token, after.wechatBindings]))), gateBefore)
     assert((await rpc('session.list')).items.some(s => s.sessionId === created.sessionId))

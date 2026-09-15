@@ -32,6 +32,7 @@ try {
   const hostSources = [
     'index.ts',
     'gate-runtime.ts',
+    'task-notifications.ts',
     'update-policy.ts',
     'update-download.ts',
     'update-worker.ts',

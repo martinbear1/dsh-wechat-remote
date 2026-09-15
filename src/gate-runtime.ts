@@ -35,6 +35,7 @@ import os from 'node:os'
 import crypto from 'node:crypto'
 import zlib from 'node:zlib'
 import type { Socket } from 'node:net'
+import { TaskNotifications, NotificationRelayClient } from './task-notifications.js'
 import httpProxy from 'http-proxy'
 import QRCode from 'qrcode'
 import { WebSocketServer } from 'ws'
@@ -425,6 +426,7 @@ export function mountWechatGate(ctx: Context): () => void {
   const proxy = httpProxy.createProxyServer({})
   const updater = new PluginUpdateService(ctx, { web: UPSTREAM_PORT, gate: PUBLIC_PORT, local: LOCAL_PORT })
   const compatibilityApi = new DshCompatibilityApi(ctx, UPSTREAM_PORT, () => updater.isMaintaining())
+  let taskNotifications: TaskNotifications | undefined
   updater.trackPublicRequests(() => compatibilityApi.hasInFlightRequests())
   const compatibilityWebSockets = new WebSocketServer({
     noServer: true,
@@ -998,6 +1000,7 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
     updater.dispose()
     secureLan.close()
     compatibilityApi.dispose()
+    taskNotifications?.dispose()
     doorRuntime.localDoor.state = 'stopped'
     doorRuntime.publicDoor.state = 'stopped'
     try {
@@ -1167,6 +1170,18 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
         },
       })
       synchronizeLanIdentity(publicRelayGateway.agent.identity.nodeId)
+      // Opt-in observer only. No native provider replacement and no update of the host configuration.
+      if (process.env.HR_TASK_NOTIFICATIONS_ENABLED !== '0') {
+        try {
+          taskNotifications = new TaskNotifications(ctx, new NotificationRelayClient(relayConfig.relayOrigin,
+            () => { if (!publicRelayGateway) throw new Error('Node unavailable'); return publicRelayGateway.agent.identity }))
+          taskNotifications.start()
+          compatibilityApi.taskNotificationRequest = args => taskNotifications!.request(args)
+        } catch {
+          taskNotifications?.dispose(); taskNotifications = undefined
+          console.warn('[wechat-gate] optional task notifications unavailable')
+        }
+      }
       void publicRelayGateway.start()
       void Promise.resolve(
         bindHistorySnapshotPrewarmer(ctx, {

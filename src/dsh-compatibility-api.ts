@@ -34,6 +34,8 @@ function response(statusCode: number, value: unknown): CompatibilityHttpResponse
 
 /** One in-process protocol boundary shared by both authenticated transports. */
 export class DshCompatibilityApi implements DshCompatibilityTransport {
+  /** Optional observer owned by the authenticated gate; no native host API replacement. */
+  taskNotificationRequest?: (args: unknown) => Promise<unknown>
   readonly realtime: DshRealtimeCompatibility
   private inFlight = 0
   hasInFlightRequests(): boolean { return this.inFlight > 0 }
@@ -43,6 +45,7 @@ export class DshCompatibilityApi implements DshCompatibilityTransport {
   }
 
   handlesPath(path: string): boolean {
+    if (this.taskNotificationRequest && path === '/api/wechatTaskNotifications') return true
     if (this.maintaining()) return true
     if (resolveTypertGateway(this.ctx)) return true
     const invoker = this.ctx.get('typertGateway') as Partial<TypertGatewayLike> | undefined
@@ -98,6 +101,10 @@ export class DshCompatibilityApi implements DshCompatibilityTransport {
         return response(404, { error: 'Unknown DSH API path' })
       }
       const body = JSON.parse(Buffer.from(request.body).toString('utf8'))
+      if (url.pathname === '/api/wechatTaskNotifications' && this.taskNotificationRequest) {
+        return response(200, { type: 'server-response', rpcId: body.rpcId,
+          result: { ok: true, value: await this.taskNotificationRequest(body.payload) } })
+      }
       if (url.pathname === '/api/respond') {
         return response(200, await this.realtime.respond(body))
       }

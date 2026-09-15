@@ -34,6 +34,13 @@ await test('latest trusted stable target selected without host-version filtering
   const remote = catalog([release('1.7.1'), release('1.7.3'), release('1.7.4-beta.1', { channel: 'preview' })])
   assert.equal(selectInstallTarget(pinned, remote, current, now).version, '1.7.3')
 })
+await test('explicit RC installer uses its own preview; stable installer never opts into remote previews', () => {
+  const rc = release('1.7.6-rc.1', { channel: 'preview' })
+  const preview = { version: rc.version, catalog: catalog([rc]) }
+  assert.equal(selectInstallTarget(preview, catalog([release('1.7.5')]), current, now).version, rc.version)
+  assert.equal(selectInstallTarget(pinned, catalog([rc]), current, now).version, pinned.version)
+  assert.equal(selectInstallTarget(preview, catalog([release('1.7.6')]), current, now).version, '1.7.6')
+})
 await test('installer never falls back below its bundled version', () => {
   assert.equal(selectInstallTarget(pinned, catalog([release('1.7.1')]), current, now).version, '1.7.2')
   assert.throws(() => selectInstallTarget(pinned, catalog([release('1.7.1')], {

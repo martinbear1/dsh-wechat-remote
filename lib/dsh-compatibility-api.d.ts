@@ -23,6 +23,8 @@ export declare class DshCompatibilityApi implements DshCompatibilityTransport {
     private readonly ctx;
     private readonly dshPort?;
     private readonly maintaining;
+    /** Optional observer owned by the authenticated gate; no native host API replacement. */
+    taskNotificationRequest?: (args: unknown) => Promise<unknown>;
     readonly realtime: DshRealtimeCompatibility;
     private inFlight;
     hasInFlightRequests(): boolean;

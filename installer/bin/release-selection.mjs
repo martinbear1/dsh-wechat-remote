@@ -6,7 +6,10 @@ import { validateCatalog, compareVersions, trustedReleaseAsset } from '../lib/up
  */
 export function selectInstallTarget(pinned, remote, current, now = Date.now()) {
   const local = validateCatalog(pinned.catalog)
-  const bundled = local.releases.find(r => r.version === pinned.version && r.channel === 'stable')
+  // Choosing an explicit prerelease installer authorizes its exact embedded
+  // preview, not arbitrary remote previews or a change to stable recommendations.
+  const channel = pinned.version.includes('-') ? 'preview' : 'stable'
+  const bundled = local.releases.find(r => r.version === pinned.version && r.channel === channel)
   if (!bundled || !trustedReleaseAsset(bundled.asset, bundled.version)) {
     throw new Error('安装包信息不完整，请重新获取官方安装器。')
   }

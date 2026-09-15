@@ -1,5 +1,14 @@
 # 插件与安装器当前基线
 
+## 2026-09-15：GitHub 已发布 1.7.6-rc.1 预览版
+
+- 通知研究分支完成审阅、清理并合并 main；发布源码 `e03113ebfe7b3fcb2729348b2a77a41aa0ca64fd`，标签 `v1.7.6-rc.1`。GitHub Release 标题同为 `v1.7.6-rc.1`，`prerelease=true`；main、标签及前后备份分支已推送。
+- **仅 GitHub 预览发布，未发布 npm，未改任何 npm dist-tag**。实际回读 npm latest 与 GitHub Latest 均为 `1.7.5`；正式安装器和线上更新清单不自动选择本 RC。后续正式 GitHub/npm 同步更新须另获用户授权。
+- 插件、安装器清单及内嵌插件统一 `1.7.6-rc.1`。插件包 9547344 字节，SHA256 `15f7a085bca98068d25c7fe2a1a139d69dbc2a56c090644f938131a28777d97b`；安装器包 18507755 字节，SHA256 `f641e09f2221bfc0679b925ec14015ae8a672c3680b08fbcbd6f040b80dbd219`。内嵌插件逐字节一致；内嵌目录是 preview，显式 RC 安装不受稳定目录排除预览的规则误拦。
+- 完整构建、全量既有测试及 12 项通知、12 项安装器选择测试通过；配套小程序 `1.7.6-trial.1` 已上传并由用户确认设为体验版，云端 `1.2.12` 已生产部署。本次没有代替用户升级已有 Windows/Mac/Ubuntu 节点或触发一键更新。
+- 三通道已提前准备：按订阅时小程序原生环境保存 developer/trial/formal，正式审核发布后自动使用 formal，不再手工切服务器配置；既有消息不改通道。恢复兼容及审阅结果见下方记录。
+- 发布制品、GitHub 回读、npm 标签核验、全量 Git bundle 与独立恢复校验保存在 `E:/agent remote/compat-artifacts/notifications-release-20260915/`。本段为文档收尾提交，发布标签继续固定构建源码。
+
 ## 2026-09-15：统一 1.7.6-rc.1 任务提醒整合候选
 
 - 从正式 main 1.7.5 整合通知研究分支，插件与内嵌安装器统一 1.7.6-rc.1；计划发布 GitHub 预览版，保留 GitHub/npm latest=1.7.5。此次未要求 npm RC 上架，不变更 npm 标签。

@@ -1,5 +1,13 @@
 # 插件与安装器当前基线
 
+## 2026-09-15：1.7.6 已正式发布 GitHub 与 npm
+
+- 发布源码 `a6ebbc26e6736c15babece11438d1a529e30aed5`，固定标签 `v1.7.6`；GitHub Latest、npm `dsh-wechat-remote@latest` 和内嵌插件均为 `1.7.6`。本版本继承 RC 的任务通知，不使用早先被取消的稳定版旁支；旧 RC 标签与附件保持不变。
+- GitHub 两个归档及 npm 注册表安装器均重新下载核验：插件 9549941 字节、SHA256 `ddd14140e93eaf1704dcca7380b1f99d8243089c2be337eaf94d2e87de4a0ff5`；安装器 18505422 字节、SHA256 `9d8e5a509ba39dee880a52af07fd8e9f7f1cf36f5b8073c245d123602eeb1f87`。内嵌插件与 GitHub 独立包逐字节一致。
+- 三系统真实 npx 首装、重复安装及再次启动通过；Windows x64、macOS Intel、Linux x64、Linux ARM64 原生升级、WebUI 更新/重启及故障回退通过，配对与会话保持不变。TV 浏览器已恢复，原 ARM 节点 PID 未变；未替用户升级已有 Windows/Mac/Ubuntu 节点。完整记录见 [安装与升级审阅](INSTALLER-1.7.6-AUDIT.md)。
+- 源码 main、发布标签、前后备份分支已推送；全量 bundle 经独立 bare 仓库恢复及 fsck 检查。发布回读、安装/回退报告和 bundle 保存于 `E:/agent remote/compat-artifacts/plugin-release-1.7.6-20260915/`。本节为发布回执，不移动构建源码标签。
+- **云端尚未切换**：1.2.13 源码/标签/备份已推送，首次部署因现有通知服务 `PartOf` 联动重启触发过严的 PID 不变断言，已自动回退中继代码及目录至 1.2.12 / 稳定插件 1.7.5；数据库未回滚。待用户补充确认允许通知服务正常联动重启，再完成云端更新目录与判断切换。一行命令已直接提供新版；WebUI 的新版提示须待云端目录切换。
+
 ## 2026-09-15：1.7.6 正式发布准备
 
 - 最终发布路线由用户明确改为从 `v1.7.6-rc.1` 继续，保留任务通知，合入三系统 npm/npx 宿主发现、POSIX 入口规范化、架构/DSH 测试记录与更新准入解耦及候选异常退出回退修复。插件、npm、GitHub 统一 `1.7.6` 正式 latest。

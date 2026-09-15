@@ -1,6 +1,6 @@
 {
   "name": "@harness-remote/dsh-wechat-remote",
-  "version": "1.7.5",
+  "version": "1.7.6-rc.1",
   "description": "Agent远程管理助手：支持 Windows、macOS 与 Linux 上的 DeepSeek Harness，提供微信配对、安全局域网直连及端到端加密公网连接",
   "private": true,
   "license": "MIT",
@@ -94,7 +94,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "bundle": "tsc -p tsconfig.json && node scripts/clean-client-types.mjs && tsc -p tsconfig.client.json && node scripts/build-client.mjs && node scripts/generate-typert.mjs",
     "verify": "node scripts/verify.mjs",
-    "test": "npm run test:lifecycle && npm run test:client && npm run test:attachment && npm run test:directory && npm run test:host-platform && npm run test:history && npm run test:gate-ports && npm run test:dsh-runtime && npm run test:dsh-protocol-compat && npm run test:dsh-realtime-compat && npm run test:dsh-compatibility-api && npm run test:public-relay && npm run test:updates",
+    "test": "npm run test:notifications && npm run test:lifecycle && npm run test:client && npm run test:attachment && npm run test:directory && npm run test:host-platform && npm run test:history && npm run test:gate-ports && npm run test:dsh-runtime && npm run test:dsh-protocol-compat && npm run test:dsh-realtime-compat && npm run test:dsh-compatibility-api && npm run test:public-relay && npm run test:updates",
     "test:lifecycle": "node scripts/test-lifecycle.mjs",
     "test:notifications": "node --test scripts/test-task-notifications.mjs",
     "test:client": "node scripts/test-client-bundle.mjs",

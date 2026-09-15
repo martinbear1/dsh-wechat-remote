@@ -34,7 +34,7 @@ function response(statusCode: number, value: unknown): CompatibilityHttpResponse
 
 /** One in-process protocol boundary shared by both authenticated transports. */
 export class DshCompatibilityApi implements DshCompatibilityTransport {
-  /** Absent unless the isolated research feature was explicitly enabled. */
+  /** Optional observer owned by the authenticated gate; no native host API replacement. */
   taskNotificationRequest?: (args: unknown) => Promise<unknown>
   readonly realtime: DshRealtimeCompatibility
   private inFlight = 0

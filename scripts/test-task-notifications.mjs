@@ -116,3 +116,23 @@ test('pending resolved before observation becomes completion, not a stale questi
   await f.feature.tick();assert.equal(f.sent.at(-1).state,'complete')
  }finally{f.feature.dispose()}
 });
+
+test('idle observer has no polling timer; last terminal watch stops it; dispose is idempotent',async()=>{
+ const f=fixture();try {
+  assert.equal(f.feature.timer,undefined);
+  await f.feature.request({action:'prepare',kind:'next',sessionId:'s1'});
+  assert.ok(f.feature.timer);
+  f.relay.call=async()=>({status:'accepted'});await f.feature.tick();
+  assert.equal(f.feature.timer,undefined);
+  f.feature.start();assert.equal(Object.keys(f.listeners).length,1);
+ } finally {f.feature.dispose();f.feature.dispose()}
+});
+
+test('permanent cloud rejection removes watch; malformed input never breaks the host',async()=>{
+ const f=fixture();try {
+  await assert.rejects(f.feature.request(null),/请求无效/);
+  await f.feature.request({action:'prepare',kind:'next',sessionId:'s1'});
+  f.relay.call=async()=>{throw Object.assign(Error('revoked'),{status:404})};
+  await f.feature.tick();assert.equal(f.feature.watches.size,0);assert.equal(f.feature.timer,undefined);
+ }finally{f.feature.dispose()}
+});

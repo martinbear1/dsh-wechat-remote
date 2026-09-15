@@ -48,6 +48,7 @@ export declare class TaskNotifications {
     private cursor;
     constructor(ctx: Context, relay: Pick<NotificationRelayClient, 'call' | 'origin'>, now?: () => number);
     start(): void;
+    private schedule;
     private session;
     request(args: any): Promise<any>;
     private prepareWatch;

@@ -59,7 +59,7 @@ export class NotificationRelayClient {
       headers: { 'content-type': 'application/json', 'x-hr-node-id': identity.nodeId, 'x-hr-timestamp': String(time),
         'x-hr-nonce': nonce, 'x-hr-signature': sign(null, notificationProof(path, identity.nodeId, time, nonce, body), identity.privateKeyPem).toString('base64url') },
       body, signal: AbortSignal.timeout(8000) })
-    if (!response.ok) throw new Error('提醒服务暂不可用，未改变任务状态')
+    if (!response.ok) throw Object.assign(new Error('提醒服务暂不可用，未改变任务状态'), { status: response.status })
     return response.json()
   }
 }
@@ -79,6 +79,7 @@ export class TaskNotifications {
     private now = () => Date.now()) {}
 
   start(): void {
+    if (this.disposed || this.disposers.length) return
     // Native around-dispatch metric seam: next is invoked EXACTLY once; result,
     // exception and signal are preserved. No network/IO is awaited by the tool.
     this.disposers.push(this.ctx.on('tools/execute', (exec: any, next: () => Promise<any>) => {
@@ -100,8 +101,15 @@ export class TaskNotifications {
       if (!key) return result
       return result.finally(() => { this.questions.delete(key) })
     }))
-    this.timer = setInterval(() => { void this.tick() }, 3000)
-    this.timer.unref?.()
+  }
+
+  private schedule(): void {
+    if (this.watches.size && !this.timer && !this.disposed) {
+      this.timer = setInterval(() => { void this.tick() }, 3000)
+      this.timer.unref?.()
+    } else if (!this.watches.size && this.timer) {
+      clearInterval(this.timer); this.timer = undefined
+    }
   }
 
   private session(id: unknown): Session {
@@ -116,6 +124,7 @@ export class TaskNotifications {
 
   async request(args: any): Promise<any> {
     if (this.disposed) throw new Error('提醒服务已停止')
+    if (!args || typeof args !== 'object') throw new Error('提醒请求无效')
     const session = this.session(args.sessionId)
     if (args.action === 'presence') {
       for (const [id, expires] of this.presence) if (expires <= this.now()) this.presence.delete(id)
@@ -124,7 +133,7 @@ export class TaskNotifications {
       else this.presence.delete(session.id)
       return { ok: true }
     }
-    if (args.action !== 'prepare' || args.kind !== 'next') throw new Error('请更新通知研发版后重试')
+    if (args.action !== 'prepare' || args.kind !== 'next') throw new Error('请更新小程序后重试')
     const turn = currentTurn(session)
     if (turn === null) throw new Error('请先开始任务，再订阅本轮提醒')
     if (args.turn !== undefined && args.turn !== turn) throw new Error('任务已切换，请重新确认提醒')
@@ -137,6 +146,7 @@ export class TaskNotifications {
       baseline: events(session).at(-1)?.seq ?? -1,
       expiresAt: this.now() + 86400000 }
     this.watches.set(watch.id, watch) // Capture completion even during the consent round trip.
+    this.schedule()
     return this.prepareWatch(watch)
   }
 
@@ -151,7 +161,10 @@ export class TaskNotifications {
       }
       if (terminal.has(prepared.status)) this.watches.delete(watch.id)
       return { ...prepared, relayOrigin: this.relay.origin }
-    }).finally(() => { watch.preparing = undefined })
+    }).catch(error => {
+      if ([400,403,404,410].includes(error?.status)) this.watches.delete(watch.id)
+      throw error
+    }).finally(() => { watch.preparing = undefined; this.schedule() })
     // On an ambiguous HTTP result retain this SAME reservation and observer for retry.
     return watch.preparing
   }
@@ -209,15 +222,21 @@ export class TaskNotifications {
               ? { sessionTitle: notificationSessionTitle(watch.session) } : {}),
             visible: (this.presence.get(watch.session.id) || 0) > this.now() })
           if (terminal.has(result.status)) this.watches.delete(watch.id)
-        } catch { /* No host failure and no optimistic 'sent'. Retry observation, not the WeChat send. */ }
+        } catch (error: any) {
+          // Deleted/revoked/expired reservations are terminal, not 24 hours of polling.
+          if ([400,403,404,410].includes(error?.status)) this.watches.delete(watch.id)
+          // Transient failure retries observation, never the WeChat send itself.
+        }
       }))
-    } finally { this.pumping = false }
+    } finally { this.pumping = false; this.schedule() }
   }
 
   dispose(): void {
+    if (this.disposed) return
     this.disposed = true
     if (this.timer) clearInterval(this.timer)
     for (const off of this.disposers) off()
+    this.disposers = []
     this.watches.clear(); this.questions.clear(); this.presence.clear()
   }
 }

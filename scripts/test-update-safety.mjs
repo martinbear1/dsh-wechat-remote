@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url'
 import { EventEmitter } from 'node:events'
 import { spawn } from 'node:child_process'
 import { quiesceNativeHost } from '../lib/install-control.js'
-import { validateJob, healthy, stopRestarted, releaseOwnedUpdateLock, migrateLegacyGrantOwner } from '../lib/update-worker.js'
+import { validateJob, healthy, stopRestarted, captureCandidateLock, retireCandidateLock, releaseOwnedUpdateLock, migrateLegacyGrantOwner } from '../lib/update-worker.js'
 const files = [ ['package/package.json', JSON.stringify({ name: '@harness-remote/dsh-wechat-remote', version: '1.7.0' })], ['package/lib/index.js', ''], ['package/lib/client.js', ''] ]
 function pack(entries) {
   const chunks = []
@@ -129,6 +129,33 @@ await test('hung candidate can be stopped through its owned handle to permit rol
   } }
   await stopRestarted(child, 30, 30)
   assert.deepEqual(signals, ['SIGTERM', 'SIGKILL'])
+})
+await test('native lock recovery requires exact candidate ownership and confirmed exit', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-native-lock-test-'))
+  const lockPath = path.join(root, '.credentials.yaml.lock')
+  const child = { pid: process.pid, exitCode: null, signalCode: null }
+  const saved = path.join(root, 'candidate-credentials-lock.before-rollback')
+  try {
+    fs.writeFileSync(lockPath, `${process.pid}\n`)
+    const owned = captureCandidateLock(root, child)
+    assert(owned)
+    retireCandidateLock(owned, child, root)
+    assert(fs.existsSync(lockPath), 'a live writer must never lose its lock')
+    retireCandidateLock(owned, { ...child, exitCode: 0 }, root)
+    assert(!fs.existsSync(lockPath)); assert.equal(fs.readFileSync(saved, 'utf8'), `${process.pid}\n`)
+    fs.writeFileSync(lockPath, '99999999\n')
+    assert.equal(captureCandidateLock(root, child), undefined)
+    retireCandidateLock(owned, { ...child, exitCode: 0 }, root)
+    assert.equal(fs.readFileSync(lockPath, 'utf8'), '99999999\n')
+    fs.writeFileSync(lockPath, '')
+    assert.equal(captureCandidateLock(root, child), undefined, 'an empty lock without owner descriptor is not proof')
+    if (process.platform === 'linux') {
+      const fd = fs.openSync(lockPath, 'r+')
+      try { assert(captureCandidateLock(root, child), 'open candidate FD proves ownership even before PID write') }
+      finally { fs.closeSync(fd) }
+    }
+    assert.equal(captureCandidateLock(root, { ...child, exitCode: 0 }), undefined)
+  } finally { fs.rmSync(root, { recursive: true }) }
 })
 await test('ready helper does not mutate without explicit initiating-parent start authorization', async () => {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'harness-update-handshake-test-')))

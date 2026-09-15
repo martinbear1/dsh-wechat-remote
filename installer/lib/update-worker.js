@@ -434,6 +434,45 @@ async function stopRestarted(child, timeoutMs = 3e4, forceTimeoutMs = 5e3) {
   if (child.exitCode !== null || child.signalCode !== null) return;
   throw new Error("\u66F4\u65B0\u540E\u7684 DSH \u672A\u6309\u65F6\u505C\u6B62");
 }
+function captureCandidateLock(home, child) {
+  if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
+  const filename = path3.join(home, ".credentials.yaml.lock");
+  try {
+    const info = fs3.lstatSync(filename);
+    if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.size > 32) return;
+    const value = fs3.readFileSync(filename, "utf8");
+    let owned = value === `${child.pid}
+`;
+    if (!owned && value === "" && process.platform === "linux") {
+      const directory = `/proc/${child.pid}/fd`;
+      owned = fs3.readdirSync(directory).some((fd) => {
+        try {
+          const file = path3.join(directory, fd);
+          if (fs3.readlinkSync(file) !== filename) return false;
+          const opened = fs3.statSync(file);
+          return opened.dev === info.dev && opened.ino === info.ino;
+        } catch {
+          return false;
+        }
+      });
+    }
+    if (owned) return { filename, dev: info.dev, ino: info.ino, pid: child.pid };
+  } catch {
+  }
+}
+function retireCandidateLock(lock, child, directory) {
+  if (!lock || child.pid !== lock.pid || child.exitCode === null && child.signalCode === null) return;
+  try {
+    const info = fs3.lstatSync(lock.filename);
+    if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.dev !== lock.dev || info.ino !== lock.ino || info.size > 32) return;
+    const value = fs3.readFileSync(lock.filename, "utf8");
+    if (value !== "" && value !== `${lock.pid}
+`) return;
+    const saved = path3.join(directory, "candidate-credentials-lock.before-rollback");
+    if (!fs3.existsSync(saved)) fs3.renameSync(lock.filename, saved);
+  } catch {
+  }
+}
 async function stopChild(pid) {
   process.kill(pid, "SIGTERM");
   for (let i = 0; i < 100; i++) {
@@ -531,8 +570,11 @@ async function executeUpdate(job, progress, quiesce) {
           await stopOriginal(job);
           stopped = true;
         }
-        if (newChild) await stopRestarted(newChild);
-        else if (swapped && job.manager && job.manager.kind !== "process") stopManagedHost(job.manager);
+        if (newChild) {
+          const ownedLock = captureCandidateLock(job.home, newChild);
+          await stopRestarted(newChild);
+          retireCandidateLock(ownedLock, newChild, job.directory);
+        } else if (swapped && job.manager && job.manager.kind !== "process") stopManagedHost(job.manager);
         if (swapped) {
           fs3.renameSync(job.profile, path3.join(job.directory, "profile-failed"));
           fs3.renameSync(previous, job.profile);
@@ -686,11 +728,13 @@ if (process.argv[1] && path3.resolve(process.argv[1]) === fileURLToPath(import.m
   });
 }
 export {
+  captureCandidateLock,
   control,
   executeUpdate,
   healthy,
   migrateLegacyGrantOwner,
   releaseOwnedUpdateLock,
+  retireCandidateLock,
   stopRestarted,
   validateJob
 };

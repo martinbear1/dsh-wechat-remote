@@ -41,5 +41,19 @@ export declare function control(job: UpdateJob, operation: string, input?: unkno
 export declare function migrateLegacyGrantOwner(job: UpdateJob): void;
 export declare function healthy(job: UpdateJob, version: string, timeoutMs?: number): Promise<void>;
 export declare function stopRestarted(child: ChildProcess, timeoutMs?: number, forceTimeoutMs?: number): Promise<void>;
+interface OwnedNativeLock {
+    filename: string;
+    dev: number;
+    ino: number;
+    pid: number;
+}
+/** DSH atomic-write uses a sibling wx file containing its writer PID. Capture
+ * proof BEFORE stopping our candidate, never infer ownership from lock age.
+ * Linux may be interrupted between exclusive create and writing the PID: only
+ * an open descriptor in this exact child proves ownership of that empty file.
+ */
+export declare function captureCandidateLock(home: string, child: Pick<ChildProcess, 'pid' | 'exitCode' | 'signalCode'>): OwnedNativeLock | undefined;
+export declare function retireCandidateLock(lock: OwnedNativeLock | undefined, child: Pick<ChildProcess, 'pid' | 'exitCode' | 'signalCode'>, directory: string): void;
 /** Actual cross-platform transaction; archive must have already passed audit. */
 export declare function executeUpdate(job: UpdateJob, progress: (p: UpdateProgress) => void, quiesce: () => Promise<void>): Promise<UpdateProgress>;
+export {};

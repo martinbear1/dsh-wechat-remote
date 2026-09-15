@@ -207,6 +207,47 @@ export async function stopRestarted(child: ChildProcess, timeoutMs = 30000, forc
   if (child.exitCode !== null || child.signalCode !== null) return
   throw new Error('更新后的 DSH 未按时停止')
 }
+interface OwnedNativeLock { filename: string; dev: number; ino: number; pid: number }
+/** DSH atomic-write uses a sibling wx file containing its writer PID. Capture
+ * proof BEFORE stopping our candidate, never infer ownership from lock age.
+ * Linux may be interrupted between exclusive create and writing the PID: only
+ * an open descriptor in this exact child proves ownership of that empty file.
+ */
+export function captureCandidateLock(home: string, child: Pick<ChildProcess, 'pid' | 'exitCode' | 'signalCode'>): OwnedNativeLock | undefined {
+  if (!child.pid || child.exitCode !== null || child.signalCode !== null) return
+  const filename = path.join(home, '.credentials.yaml.lock')
+  try {
+    const info = fs.lstatSync(filename)
+    if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.size > 32) return
+    const value = fs.readFileSync(filename, 'utf8')
+    let owned = value === `${child.pid}\n`
+    if (!owned && value === '' && process.platform === 'linux') {
+      const directory = `/proc/${child.pid}/fd`
+      owned = fs.readdirSync(directory).some(fd => {
+        try {
+          const file = path.join(directory, fd)
+          if (fs.readlinkSync(file) !== filename) return false
+          const opened = fs.statSync(file)
+          return opened.dev === info.dev && opened.ino === info.ino
+        } catch { return false }
+      })
+    }
+    if (owned) return { filename, dev: info.dev, ino: info.ino, pid: child.pid }
+  } catch { /* No verifiable owned lock: do not touch any lock. */ }
+}
+export function retireCandidateLock(lock: OwnedNativeLock | undefined, child: Pick<ChildProcess, 'pid' | 'exitCode' | 'signalCode'>, directory: string): void {
+  if (!lock || child.pid !== lock.pid || (child.exitCode === null && child.signalCode === null)) return
+  try {
+    const info = fs.lstatSync(lock.filename)
+    if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.dev !== lock.dev || info.ino !== lock.ino || info.size > 32) return
+    const value = fs.readFileSync(lock.filename, 'utf8')
+    if (value !== '' && value !== `${lock.pid}\n`) return
+    // Keep the proven orphan for audit; never overwrite credentials or restore
+    // an older credential file. An unknown/new writer's lock is left untouched.
+    const saved = path.join(directory, 'candidate-credentials-lock.before-rollback')
+    if (!fs.existsSync(saved)) fs.renameSync(lock.filename, saved)
+  } catch { /* Native startup will report any remaining contention safely. */ }
+}
 async function stopChild(pid: number): Promise<void> {
   process.kill(pid, 'SIGTERM')
   for (let i = 0; i < 100; i++) {
@@ -283,7 +324,11 @@ export async function executeUpdate(job: UpdateJob, progress: (p: UpdateProgress
       emit('rolling-back', 90, '更新未通过验证，正在恢复原插件')
       try {
         if (!stopped) { await stopOriginal(job); stopped = true }
-        if (newChild) await stopRestarted(newChild)
+        if (newChild) {
+          const ownedLock = captureCandidateLock(job.home, newChild)
+          await stopRestarted(newChild)
+          retireCandidateLock(ownedLock, newChild, job.directory)
+        }
         else if (swapped && job.manager && job.manager.kind !== 'process') stopManagedHost(job.manager)
         if (swapped) {
           fs.renameSync(job.profile, path.join(job.directory, 'profile-failed'))

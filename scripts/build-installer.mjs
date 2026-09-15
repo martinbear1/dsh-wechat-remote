@@ -3,6 +3,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { build } from 'esbuild'
 import { createHash } from 'node:crypto'
+import { execFileSync } from 'node:child_process'
 const root = fileURLToPath(new URL('../', import.meta.url))
 const target = path.join(root, 'installer', 'lib')
 fs.mkdirSync(target, { recursive: true })
@@ -14,7 +15,13 @@ for (const name of ['install-control', 'update-worker', 'install-profile', 'inst
 fs.writeFileSync(path.join(target, 'package.json'), '{"type":"module"}\n')
 fs.copyFileSync(path.join(root, 'LICENSE'), path.join(root, 'installer', 'LICENSE'))
 if (process.argv[2]) {
-  const version = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version
+  // Installer and payload may intentionally differ (installer-only hotfix).
+  // Metadata must describe the actual embedded artifact, never the checkout.
+  const payload = JSON.parse(execFileSync('tar', ['-xOf', process.argv[2], 'package/package.json'], {
+    encoding: 'utf8', windowsHide: true, timeout: 10000, maxBuffer: 1024 * 1024,
+  }))
+  if (payload.name !== '@harness-remote/dsh-wechat-remote' || !/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(payload.version)) throw new Error('Invalid plugin payload')
+  const version = payload.version
   const archive = fs.readFileSync(process.argv[2]), assets = path.join(root, 'installer/assets')
   fs.mkdirSync(assets, { recursive: true })
   const release = { version, channel: version.includes('-') ? 'preview' : 'stable', dsh: ['0.1.1-rc.2', '0.1.2-rc.1', '0.1.5-rc.1'],

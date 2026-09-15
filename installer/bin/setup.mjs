@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 import fs from 'node:fs'
 import path from 'node:path'
-import os from 'node:os'
 import net from 'node:net'
 import { spawn } from 'node:child_process'
 import { randomBytes, createHash } from 'node:crypto'
@@ -13,25 +12,11 @@ import { selectInstallTarget } from './release-selection.mjs'
 import { boundedFetch, downloadRelease, auditArchive } from '../lib/update-download.js'
 import { writePrivateJsonAtomic } from '../lib/secure-file.js'
 import { control, validateJob, releaseOwnedUpdateLock } from '../lib/update-worker.js'
+import { chooseDsh, validateDshCli, resolveHome, mayHaveRunningDsh, assertInstallTarget, installHostArgv } from './dsh-discovery.mjs'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
 const packageName = '@harness-remote/dsh-wechat-remote'
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
-export function findDsh() {
-  const candidates = []
-  for (const dir of (process.env.PATH || '').split(path.delimiter).filter(Boolean)) {
-    candidates.push(path.join(dir, 'node_modules/@deepseek-ai/dsh/lib/bin.js'), path.join(dir, '../lib/node_modules/@deepseek-ai/dsh/lib/bin.js'))
-    try { candidates.push(fs.realpathSync(path.join(dir, 'dsh'))) } catch {}
-  }
-  for (const candidate of candidates) {
-    try {
-      const cli = fs.realpathSync(candidate)
-      const manifest = JSON.parse(fs.readFileSync(path.resolve(cli, '../../package.json'), 'utf8'))
-      if (manifest.name === '@deepseek-ai/dsh' && path.basename(cli) === 'bin.js') return cli
-    } catch {}
-  }
-  throw new Error('未找到已安装的 DSH。请先安装并启动 DeepSeek Harness。')
-}
 function portBusy(port) {
   return new Promise(resolve => {
     const socket = net.connect({ host: '127.0.0.1', port })
@@ -57,10 +42,11 @@ export async function selectRelease(host, assetsRoot = path.join(root, 'assets')
   auditArchive(archive, release)
   return { release, archive }
 }
-export async function install({ profileName = 'web', cli = findDsh(), assetsRoot, open = true, repair = false } = {}) {
+export async function install({ profileName = 'web', cli, home: configuredHome, assetsRoot, open = true, repair = false } = {}) {
   if (!/^[A-Za-z0-9_-]{1,80}$/.test(profileName)) throw new Error('无效的 profile 名称。')
+  if (cli) cli = validateDshCli(cli).cli
   const runtime = resolveInstallRuntime(root); await verifyInstallRuntime(runtime)
-  const home = path.resolve(process.env.DSH_HOME || path.join(os.homedir(), '.dsh'))
+  const home = resolveHome(configuredHome || process.env.DSH_HOME)
   fs.mkdirSync(home, { recursive: true, mode: 0o700 })
   if (fs.realpathSync(home) !== home) throw new Error('DSH 数据目录是链接，暂不自动替换安装。')
   const profile = path.join(home, 'profiles', profileName), id = randomBytes(16).toString('hex')
@@ -72,9 +58,11 @@ export async function install({ profileName = 'web', cli = findDsh(), assetsRoot
   try {
     // Initialize missing profiles through DSH itself, never synthesize a bundle list.
     if (!fs.existsSync(path.join(profile, 'package.json'))) {
+      if (await mayHaveRunningDsh()) throw new Error('当前目录下没有此 DSH 配置，但检测到 DSH 正在运行。请使用相同的 DSH_HOME／--home 和 --profile，未修改正在运行的实例。')
+      cli ||= await chooseDsh()
       const log = fs.openSync(path.join(directory, 'startup.log'), 'a', 0o600)
       launched = spawn(process.execPath, [cli, '--profile', profileName, '--no-open'], {
-        cwd: process.cwd(), env: process.env, detached: true, windowsHide: true, stdio: ['ignore', log, log] })
+        cwd: process.cwd(), env: { ...process.env, DSH_HOME: home }, detached: true, windowsHide: true, stdio: ['ignore', log, log] })
       fs.closeSync(log); launched.on('error', () => {}); launched.unref()
       const initializedBy = Date.now() + 180000
       while (!fs.existsSync(path.join(profile, 'package.json')) && Date.now() < initializedBy) {
@@ -95,17 +83,23 @@ export async function install({ profileName = 'web', cli = findDsh(), assetsRoot
         accept: v => Number.isInteger(v.pid) && v.pid > 0 && (!launched || v.pid === launched.pid),
         onWaiting: () => console.log('正在等待 DSH 完成安装准备，请勿重复执行命令…'),
         ensureRunning: async () => {
-          if (launched || await portBusy(Number(process.env.DSH_PORT || 3080))) return
+          if (launched || await portBusy(Number(process.env.DSH_PORT || 3080)) || await mayHaveRunningDsh()) return
+          cli ||= await chooseDsh()
           const log = fs.openSync(path.join(directory, 'startup.log'), 'a', 0o600)
           launched = spawn(process.execPath, [cli, '--profile', profileName, '--no-open'], {
-            cwd: process.cwd(), env: process.env, detached: true, windowsHide: true, stdio: ['ignore', log, log] })
+            cwd: process.cwd(), env: { ...process.env, DSH_HOME: home }, detached: true, windowsHide: true, stdio: ['ignore', log, log] })
           fs.closeSync(log); launched.on('error', () => {}); launched.unref()
         },
       })
+      if (!/^http:\/\/127\.0\.0\.1:[1-9]\d{0,4}$/.test(ref.origin) || Number(new URL(ref.origin).port) > 65535) {
+        ref = undefined
+        throw new Error('DSH 安装握手地址无效，未修改插件。')
+      }
       writePrivateJsonAtomic(path.join(directory, 'handshake.json'), {
         state: 'ready', elapsedMs: Date.now() - handshakeStarted, startedHost: Boolean(launched),
       })
-    } catch {
+    } catch (error) {
+      if (error.code !== 'DSH_HANDSHAKE_TIMEOUT') throw error
       writePrivateJsonAtomic(path.join(directory, 'handshake.json'), {
         state: 'timeout', elapsedMs: Date.now() - handshakeStarted, startedHost: Boolean(launched),
       })
@@ -113,13 +107,16 @@ export async function install({ profileName = 'web', cli = findDsh(), assetsRoot
     }
     job = { controlOrigin: ref.origin, statusToken: token }
     const host = await control(job, 'describe')
-    if (host.home !== home || host.profile !== profile || host.cli !== fs.realpathSync(cli) || (launched && host.pid !== launched.pid)) throw new Error('当前 DSH 身份与安装目标不一致，未修改安装。')
+    // The authenticated live host is authoritative. A global install or cached
+    // version found on PATH must not override the actual npx/local/source host.
+    // Explicit choices and installer-started hosts still require an exact match.
+    assertInstallTarget(host, { home, profile, cli, pid: launched?.pid || ref.pid })
     remove(); remove = undefined
     await sleep(600)
     const selected = await selectRelease(host, assetsRoot, repair)
     if (!selected.archive) { console.log(`插件 ${host.pluginVersion} 无需更新。`); return { version: host.pluginVersion, changed: false } }
     console.log(`正在安装插件 ${selected.release.version}，保留原配对与会话…`)
-    job = { ...host, id, directory, parentPid: host.pid, pnpm: runtime.cli, targetVersion: selected.release.version,
+    job = { ...host, argv: installHostArgv(host), id, directory, parentPid: host.pid, pnpm: runtime.cli, targetVersion: selected.release.version,
       previousVersion: host.pluginVersion, statusToken: token, controlOrigin: ref.origin }
     validateJob(job)
     fs.writeFileSync(path.join(directory, 'release.tgz'), selected.archive, { mode: 0o600, flag: 'wx' })
@@ -156,10 +153,21 @@ export async function install({ profileName = 'web', cli = findDsh(), assetsRoot
     if (locked && !authorized) releaseOwnedUpdateLock(lockFile, id)
   }
 }
+export function parseArguments(args) {
+  const options = {}, seen = new Set()
+  const names = { '--profile': 'profileName', '--dsh-cli': 'cli', '--home': 'home' }
+  for (let i = 0; i < args.length; i++) {
+    const flag = args[i]
+    if (seen.has(flag)) throw new Error('参数重复。使用 --help 查看用法。')
+    seen.add(flag)
+    if (flag === '--repair') options.repair = true
+    else if (names[flag] && args[i + 1] && !args[i + 1].startsWith('--')) options[names[flag]] = args[++i]
+    else throw new Error('不支持的参数。使用 --help 查看用法。')
+  }
+  return options
+}
 if (process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const args = process.argv.slice(2), repair = args.includes('--repair')
-  if (repair) args.splice(args.indexOf('--repair'), 1)
-  if (args.includes('--help') || args.includes('-h')) console.log('安装或升级 DSH 微信连接插件：npx -y dsh-wechat-remote@latest\n可选：--profile <名称>（默认 web）；--repair（重新安装当前兼容版本，不降级）')
-  else if (args.length && !(args.length === 2 && args[0] === '--profile')) { console.error('不支持的参数。使用 --help 查看用法。'); process.exitCode = 1 }
-  else install({ profileName: args[1] || 'web', repair }).catch(error => { console.error(error.message); process.exitCode = 1 })
+  const args = process.argv.slice(2)
+  if (args.includes('--help') || args.includes('-h')) console.log('安装或升级 DSH 微信连接插件：npx -y dsh-wechat-remote@latest\n请先按原来的方式启动 DSH WebUI，支持全局安装与 npx 启动。\n可选：--profile <名称>（默认 web）；--home <DSH 数据目录>；--dsh-cli <DSH 的 lib/bin.js>；--repair（重新安装，不降级）')
+  else Promise.resolve().then(() => install(parseArguments(args))).catch(error => { console.error(error.message); process.exitCode = 1 })
 }

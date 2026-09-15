@@ -51,7 +51,9 @@ export async function waitForJson(filename, accept, timeout = 20000) {
     try { const value = JSON.parse(fs.readFileSync(filename, 'utf8')); if (accept(value)) return value } catch {}
     await new Promise(resolve => setTimeout(resolve, 100))
   }
-  throw new Error('DSH 没有完成安装握手；原插件未替换。请确认 DSH WebUI 正在运行且允许原生插件热加载。')
+  const error = new Error('DSH 没有完成安装握手；原插件未替换。请确认 DSH WebUI 正在运行且允许原生插件热加载。')
+  error.code = 'DSH_HANDSHAKE_TIMEOUT'
+  throw error
 }
 
 /** One bounded native handshake, including a possible offline host start.

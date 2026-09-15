@@ -16,6 +16,24 @@ function events(session: Session, fromSeq = 0): readonly Event[] {
   return fromSeq && !session.snapshotEvents ? value.filter(e => e.seq >= fromSeq) : value
 }
 
+// Read only the native logged title, never a prompt or tool/approval body.
+// A bounded value is sent with observations, not retained in the relay database.
+export function notificationSessionTitle(session: Session): string | undefined {
+  const snapshot = events(session)
+  for (let i = snapshot.length - 1; i >= 0; i--) {
+    if (snapshot[i].type !== 'session/title') continue
+    const value = snapshot[i].data?.title
+    if (typeof value !== 'string') return undefined
+    const clean = value.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').replace(/\s+/g, ' ').trim()
+    if (!clean) return undefined
+    if (clean.length <= 20) return clean
+    let prefix = ''
+    for (const char of clean) { if (prefix.length + char.length > 19) break; prefix += char }
+    return prefix + '…'
+  }
+  return undefined
+}
+
 export function currentTurn(session: Session): number | null {
   const snapshot = events(session)
   for (let i = snapshot.length - 1; i >= 0; i--) {
@@ -185,8 +203,11 @@ export class TaskNotifications {
       await Promise.all(batch.map(async watch => {
         if (this.disposed || watch.preparing) return
         try {
+          const observation = this.snapshot(watch)
           const result = await this.relay.call('observe', { id: watch.id, epoch: this.clientEpoch,
-            ...this.snapshot(watch), visible: (this.presence.get(watch.session.id) || 0) > this.now() })
+            ...observation, ...(observation.state === 'complete' || observation.state === 'pending'
+              ? { sessionTitle: notificationSessionTitle(watch.session) } : {}),
+            visible: (this.presence.get(watch.session.id) || 0) > this.now() })
           if (terminal.has(result.status)) this.watches.delete(watch.id)
         } catch { /* No host failure and no optimistic 'sent'. Retry observation, not the WeChat send. */ }
       }))

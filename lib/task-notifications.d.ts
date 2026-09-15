@@ -22,6 +22,7 @@ type Context = {
     get(name: string): any;
     on(name: any, callback: any): () => void;
 };
+export declare function notificationSessionTitle(session: Session): string | undefined;
 export declare function currentTurn(session: Session): number | null;
 /** Body-bound proof, distinct domain from the legacy object API. */
 export declare function notificationProof(path: string, node: string, time: number, nonce: string, body: string): Buffer;

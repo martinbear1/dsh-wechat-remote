@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import {TaskNotifications,currentTurn} from '../lib/task-notifications.js'
+import {TaskNotifications,currentTurn,notificationSessionTitle} from '../lib/task-notifications.js'
 
 function fixture(){
   const session={id:'s1',firstLiveSeq:0,events:[{seq:0,type:'turn/start',data:{turn:1}}]},listeners={},sent=[],rows=new Map();
@@ -12,6 +12,29 @@ function fixture(){
   const append=(type,data)=>session.events.push({seq:session.events.length,type,data});
   return {feature,session,agent,listeners,sent,relay,append,replace:()=>{live={...session}}};
 }
+
+test('notification reads current native title, not another session or message body',async()=>{
+ const f=fixture();try{
+  f.append('message/user',{content:'private prompt, not a title'})
+  assert.equal(notificationSessionTitle(f.session),undefined)
+  f.append('session/title',{title:'最初标题'})
+  await f.feature.request({action:'prepare',kind:'next',sessionId:'s1'})
+  f.append('session/title',{title:'杭州城市介绍八百字（2）'})
+  f.append('approval/asked',{id:'a'})
+  await f.feature.tick();assert.equal(f.sent.at(-1).sessionTitle,'杭州城市介绍八百字（2）')
+  f.append('approval/decided',{id:'a'});f.append('session/title',{title:'更名后的标题'})
+  f.append('turn/end',{turn:1,reason:{kind:'completed'}})
+  await f.feature.tick();assert.equal(f.sent.at(-1).sessionTitle,'更名后的标题')
+ }finally{f.feature.dispose()}
+})
+
+test('title observation is bounded, Unicode-safe and contains no transcript fallback',()=>{
+ const title=value=>notificationSessionTitle({events:[{type:'session/title',data:{title:value}}]})
+ assert.equal(title(' a\n b\t c '),'a b c')
+ assert.equal(title('长'.repeat(30)),'长'.repeat(19)+'…')
+ const emoji=title('🐳'.repeat(20));assert.ok(emoji.length<=20);assert.ok(!/[\uD800-\uDBFF]…$/.test(emoji))
+ for(const value of [undefined,{},'', '\n\t'])assert.equal(title(value),undefined)
+})
 test('completion is explicit and independent of peer connectivity or later turns',async()=>{
   const f=fixture();try{
     await f.feature.request({action:'prepare',kind:'next',sessionId:'s1'});

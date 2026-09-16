@@ -15,10 +15,11 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     upload: (request: { scope: string; name: string; data?: string; descriptorJson?: string; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
   }
   interface TypertRemoteNamespace$6167656e745265736f7572636573 {
-    capabilities: (request: { scope: string; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
+    capabilities: (request: { scope: string; purpose?: 'sessionArchive'; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
     chunk: (request: { scope: string; transferId: string; offset: number; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
     list: (request: { scope: string; directoryId?: string; cursor?: number; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
     prepare: (request: { scope: string; id: string; delivery: 'chunks' | 'object'; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
+    prepareArchive: (request: { scope: string; delivery: 'chunks' | 'object'; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
     release: (request: { scope: string; transferId: string; }) => Promise<RemoteResult<ResourceResult>>
     resolve: (request: { scope: string; reference: string; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
   }
@@ -39,10 +40,11 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
   interface TypertRemoteMap {
     'agentInputs/capabilities': (request: { scope: string; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
     'agentInputs/upload': (request: { scope: string; name: string; data?: string; descriptorJson?: string; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
-    'agentResources/capabilities': (request: { scope: string; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
+    'agentResources/capabilities': (request: { scope: string; purpose?: 'sessionArchive'; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
     'agentResources/chunk': (request: { scope: string; transferId: string; offset: number; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
     'agentResources/list': (request: { scope: string; directoryId?: string; cursor?: number; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
     'agentResources/prepare': (request: { scope: string; id: string; delivery: 'chunks' | 'object'; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
+    'agentResources/prepareArchive': (request: { scope: string; delivery: 'chunks' | 'object'; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
     'agentResources/release': (request: { scope: string; transferId: string; }) => Promise<RemoteResult<ResourceResult>>
     'agentResources/resolve': (request: { scope: string; reference: string; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
     'wechatAttachment/prepareBatch': (request: WechatAttachmentBatchRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatAttachmentBatchResult>>

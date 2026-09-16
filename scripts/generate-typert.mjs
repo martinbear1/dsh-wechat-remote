@@ -51,6 +51,7 @@ try {
     'history-snapshot-cache.ts',
     'attachment-service.ts',
     'agent-resources.ts',
+    'dsh-session-export.ts',
     'agent-inputs.ts',
     'turn-activity.ts',
     'assistant-stream-compat.ts',

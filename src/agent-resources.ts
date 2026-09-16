@@ -3,6 +3,7 @@ import path from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { resolveTypertGateway } from './dsh-protocol-compat.js'
+import { exportSessionArchive, sessionExportAvailable } from './dsh-session-export.js'
 
 type Row = Record<string, any>
 export interface ResourceResult {
@@ -65,8 +66,12 @@ export class AgentResourcesService extends TypertRemoteService {
     catch (error) { return {ok:false, error:{code:'resource-unavailable', message:error instanceof Error ? error.message : '文件不可用'}} }
   }
   @Remote('capabilities')
-  async capabilities(request: {scope: string}, signal: AbortSignal): Promise<ResourceResult> {
+  async capabilities(request: {scope: string; purpose?: 'sessionArchive'}, signal: AbortSignal): Promise<ResourceResult> {
     return this.guarded(async () => {
+      signal.throwIfAborted()
+      // Export does not depend on a workspace still being browsable. Older
+      // clients keep their existing browse capability and unchanged response.
+      if (request.purpose === 'sessionArchive') return {schema:'agent.resources.v1', sessionArchive:sessionExportAvailable(this.host)}
       await this.native('list', request.scope, {path:'.'}, signal)
       return {schema:'agent.resources.v1', browse:true, resolve:true, download:true,
         delivery:['chunks', ...(this.config.store ? ['object'] : [])], maxBytes:MAX_BYTES, chunkBytes:CHUNK_BYTES}
@@ -113,11 +118,46 @@ export class AgentResourcesService extends TypertRemoteService {
   private prune(): void {
     for (const [key,value] of this.snapshots) if (value.expires <= Date.now()) this.snapshots.delete(key)
   }
+  private checkPreparation(delivery: string, signal: AbortSignal): void {
+    signal.throwIfAborted()
+    if (delivery !== 'chunks' && delivery !== 'object') throw new Error('文件传输方式无效')
+    if (delivery === 'object' && !this.config.store) throw new Error('公网文件下载暂不可用')
+    if (this.active >= 2) throw new Error('有文件正在准备，请稍后重试')
+  }
+  /** Workspace files and native archives share one bounded transfer lifecycle. */
+  private async deliver(scope: string, data: Buffer, metadata: Row, delivery: string, signal: AbortSignal): Promise<Row> {
+    signal.throwIfAborted()
+    const value = {...metadata, bytes:data.length,
+      sha512:createHash('sha512').update(data).digest('hex'),
+      sha256:createHash('sha256').update(data).digest('hex')}
+    if (delivery === 'object' && data.length) {
+      const descriptor = await this.config.store!(data,signal)
+      signal.throwIfAborted()
+      return {...value, delivery:'object', descriptor}
+    }
+    this.prune()
+    const used = [...this.snapshots.values()].reduce((total,item)=>total+item.data.length,0)
+    if (this.snapshots.size >= 16 || used + data.length > 48 * 1024 * 1024) throw new Error('文件下载较多，请稍后再试')
+    const transferId = randomBytes(24).toString('base64url')
+    const expiresAt = Date.now()+TTL
+    this.snapshots.set(transferId,{scope,data,expires:expiresAt})
+    return {...value,delivery:'chunks',transferId,expiresAt,chunkBytes:CHUNK_BYTES}
+  }
+  @Remote('prepareArchive')
+  async prepareArchive(request: {scope: string; delivery: 'chunks'|'object'}, signal: AbortSignal): Promise<ResourceResult> {
+    return this.guarded(async () => {
+      this.checkPreparation(request.delivery, signal)
+      this.active++
+      try {
+        const archive = await exportSessionArchive(this.host, request.scope, signal, MAX_BYTES)
+        return await this.deliver(request.scope, archive.data, {name:archive.name}, request.delivery, signal)
+      } finally { this.active-- }
+    })
+  }
   @Remote('prepare')
   async prepare(request: {scope: string; id: string; delivery: 'chunks'|'object'}, signal: AbortSignal): Promise<ResourceResult> {
     return this.guarded(async () => {
-      if (request.delivery !== 'chunks' && request.delivery !== 'object') throw new Error('文件传输方式无效')
-      if (this.active >= 2) throw new Error('有文件正在准备，请稍后重试')
+      this.checkPreparation(request.delivery, signal)
       const file = this.target(request.scope,request.id,'file')
       this.active++
       try {
@@ -139,21 +179,7 @@ export class AgentResourcesService extends TypertRemoteService {
         }
         const after = await this.native('stat',request.scope,{path:file.location},signal)
         if (after.absolutePath !== before.absolutePath || after.version !== before.version || after.bytes !== before.bytes) throw new Error('文件正在变化，请重试')
-        const metadata = {name:path.posix.basename(file.location), bytes:data.length, version:before.version,
-          sha512:createHash('sha512').update(data).digest('hex'),
-          sha256:createHash('sha256').update(data).digest('hex')}
-        if (request.delivery === 'object' && data.length) {
-          if (!this.config.store) throw new Error('公网文件下载暂不可用')
-          const descriptor = await this.config.store(data,signal)
-          return {...metadata, delivery:'object', descriptor}
-        }
-        this.prune()
-        const used = [...this.snapshots.values()].reduce((total,item)=>total+item.data.length,0)
-        if (this.snapshots.size >= 16 || used + data.length > 48 * 1024 * 1024) throw new Error('文件下载较多，请稍后再试')
-        const transferId = randomBytes(24).toString('base64url')
-        const expiresAt = Date.now()+TTL
-        this.snapshots.set(transferId,{scope:request.scope,data,expires:expiresAt})
-        return {...metadata,delivery:'chunks',transferId,expiresAt,chunkBytes:CHUNK_BYTES}
+        return await this.deliver(request.scope, data, {name:path.posix.basename(file.location), version:before.version}, request.delivery, signal)
       } finally { this.active-- }
     })
   }

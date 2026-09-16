@@ -29,6 +29,7 @@ export declare class AgentResourcesService extends TypertRemoteService {
     private guarded;
     capabilities(request: {
         scope: string;
+        purpose?: 'sessionArchive';
     }, signal: AbortSignal): Promise<ResourceResult>;
     list(request: {
         scope: string;
@@ -40,6 +41,13 @@ export declare class AgentResourcesService extends TypertRemoteService {
         reference: string;
     }, signal: AbortSignal): Promise<ResourceResult>;
     private prune;
+    private checkPreparation;
+    /** Workspace files and native archives share one bounded transfer lifecycle. */
+    private deliver;
+    prepareArchive(request: {
+        scope: string;
+        delivery: 'chunks' | 'object';
+    }, signal: AbortSignal): Promise<ResourceResult>;
     prepare(request: {
         scope: string;
         id: string;

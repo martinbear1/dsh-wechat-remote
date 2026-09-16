@@ -106,7 +106,7 @@
     "test:gate-ports": "node scripts/test-gate-ports.mjs",
     "test:dsh-runtime": "node scripts/test-dsh-runtime.mjs",
     "test:dsh-protocol-compat": "node scripts/test-dsh-protocol-compat.mjs && node scripts/test-dsh-session-address.mjs && node scripts/test-session-presentation.mjs",
-    "test:dsh-realtime-compat": "node scripts/test-dsh-realtime-compat.mjs && node scripts/test-assistant-stream.mjs && node scripts/test-agent-resources.mjs",
+    "test:dsh-realtime-compat": "node scripts/test-dsh-realtime-compat.mjs && node scripts/test-assistant-stream.mjs && node scripts/test-agent-resources.mjs && node --test scripts/test-session-export.mjs",
     "test:dsh-compatibility-api": "node scripts/test-dsh-compatibility-api.mjs",
     "test:public-relay": "node scripts/test-public-relay.mjs && node scripts/test-relay-liveness.mjs",
     "test:pairing-clients": "node scripts/test-pairing-clients.mjs"
@@ -233,6 +233,8 @@
     "lib/attachment-service.js",
     "lib/agent-resources.js",
     "lib/agent-resources.d.ts",
+    "lib/dsh-session-export.js",
+    "lib/dsh-session-export.d.ts",
     "lib/agent-inputs.js",
     "lib/agent-inputs.d.ts",
     "lib/assistant-stream-compat.js",

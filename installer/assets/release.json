@@ -3,8 +3,8 @@
   "catalog": {
     "schemaVersion": 1,
     "revision": "installer-1.7.7",
-    "issuedAt": 1789540933564,
-    "expiresAt": 1791960133564,
+    "issuedAt": 1789542344011,
+    "expiresAt": 1791961544011,
     "releases": [
       {
         "version": "1.7.7",
@@ -24,8 +24,8 @@
         ],
         "asset": {
           "url": "https://github.com/martinbear1/dsh-wechat-remote/releases/download/v1.7.7/harness-remote-dsh-wechat-remote-1.7.7.tgz",
-          "sha256": "46d2f5acaae7509dcdbc62bc84958b0d290d62239d77585d0e78beb7f2efbfdb",
-          "bytes": 9550792
+          "sha256": "425e09e573417a63961c0a77f6bb381722464d8e26f2978294608fabb43813b2",
+          "bytes": 9551767
         }
       }
     ],

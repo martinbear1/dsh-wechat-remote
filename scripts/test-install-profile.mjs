@@ -57,6 +57,23 @@ try {
   assert(!fs.existsSync(path.join(job, 'staging-home')))
   console.log('PASS native add uses original home/profile and receives untouched mixed-source manifest')
 
+  const repairJob = path.join(root, 'repair-job'); fs.mkdirSync(repairJob)
+  fs.writeFileSync(path.join(repairJob, 'release.tgz'), 'test archive')
+  const repaired = path.join(root, 'repaired'), calls = path.join(root, 'calls')
+  fs.writeFileSync(cli, `const fs=require('fs'),path=require('path');
+    const operation=process.argv[5];fs.appendFileSync(${JSON.stringify(calls)},operation+'\\n');
+    if(operation==='install'){fs.writeFileSync(${JSON.stringify(repaired)},'yes');process.exit(0)}
+    if(!fs.existsSync(${JSON.stringify(repaired)})){console.error('[ERR_PNPM_UNEXPECTED_VIRTUAL_STORE] Unexpected virtual store location');process.exit(1)}
+    if(process.argv.includes('--force'))throw Error('No force install');`)
+  await installProfile({ profile: active, directory: repairJob, cli, runtime, targetVersion: '1.7.7' })
+  assert.equal(fs.readFileSync(calls, 'utf8'), 'add\ninstall\nadd\n')
+  const ordinaryJob = path.join(root, 'ordinary-job'); fs.mkdirSync(ordinaryJob)
+  fs.writeFileSync(path.join(ordinaryJob, 'release.tgz'), 'test archive')
+  fs.writeFileSync(cli, `require('fs').appendFileSync(${JSON.stringify(calls)},'failure\\n');console.error('ERR_PNPM_FETCH_404');process.exit(1)`)
+  await assert.rejects(installProfile({ profile: active, directory: ordinaryJob, cli, runtime, targetVersion: '1.7.7' }), /退出码 1/)
+  assert.equal(fs.readFileSync(calls, 'utf8'), 'add\ninstall\nadd\nfailure\n')
+  console.log('PASS stale layout uses official install once; unrelated failures do not loop or use force')
+
   const failCli = path.join(root, 'failure.cjs'); fs.writeFileSync(failCli, 'process.exit(23)')
   await assert.rejects(runNativePlugin(failCli, 'custom', home, job, runtime, path.join(job, 'failure.log'), 'harness-remote-1.7.7.tgz'), error => {
     assert.match(error.message, /退出码 23/); assert(error.message.includes(path.join(job, 'failure.log')))

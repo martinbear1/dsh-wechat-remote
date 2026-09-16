@@ -16,6 +16,6 @@ export declare class NativeInstallError extends Error {
     readonly mayStillBeRunning: boolean;
     constructor(message: string, mayStillBeRunning?: boolean);
 }
-export declare function runNativePlugin(cli: string, profile: string, home: string, toolPath: string, runtime: InstallRuntime, logFile: string, archiveName: string, timeoutMs?: number): Promise<void>;
+export declare function runNativePlugin(cli: string, profile: string, home: string, toolPath: string, runtime: InstallRuntime, logFile: string, archiveName: string, timeoutMs?: number, operation?: 'add' | 'install'): Promise<void>;
 /** The caller must stop the owning host and complete its backup first. */
 export declare function installProfile(job: ProfileInstall): Promise<void>;

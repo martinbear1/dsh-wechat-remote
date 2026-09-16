@@ -11,6 +11,7 @@ import { createInterface } from 'node:readline/promises'
 const execute = promisify(execFile)
 const PACKAGE = '@deepseek-ai/dsh'
 const clean = value => String(value).replace(/[\x00-\x1f\x7f-\x9f]/g, '')
+const environmentPath = env => env[Object.keys(env).find(key => key.toLowerCase() === 'path')] || ''
 
 export function validateDshCli(filename) {
   const cli = fs.realpathSync(path.resolve(filename))
@@ -36,7 +37,7 @@ export function resolveHome(value, fallback = os.homedir()) {
 async function npmLocation(key, env, cwd) {
   let npm = env.npm_execpath
   if (!npm || !fs.existsSync(npm)) {
-    const roots = [path.dirname(process.execPath), ...(env.PATH || '').split(path.delimiter)]
+    const roots = [path.dirname(process.execPath), ...environmentPath(env).split(path.delimiter)]
     npm = roots.flatMap(dir => [path.join(dir, 'node_modules/npm/bin/npm-cli.js'),
       path.join(dir, '../lib/node_modules/npm/bin/npm-cli.js')]).find(file => fs.existsSync(file))
   }
@@ -58,7 +59,7 @@ export async function discoverDsh({ env = process.env, cwd = process.cwd(), cach
       if (!found.has(item.cli)) found.set(item.cli, { ...item, source })
     } catch { /* A missing/broken cache entry is not a usable DSH. */ }
   }
-  for (const dir of (env.PATH || '').split(path.delimiter).filter(Boolean)) {
+  for (const dir of environmentPath(env).split(path.delimiter).filter(Boolean)) {
     add(path.join(dir, 'dsh'), 'PATH') // POSIX symlink, never execute a Windows shim.
     add(path.join(dir, 'node_modules/@deepseek-ai/dsh/lib/bin.js'), 'PATH')
     add(path.join(dir, '../lib/node_modules/@deepseek-ai/dsh/lib/bin.js'), 'PATH')
@@ -80,7 +81,9 @@ export async function discoverDsh({ env = process.env, cwd = process.cwd(), cach
     add(path.join(locations[1], 'lib/node_modules/@deepseek-ai/dsh/lib/bin.js'), 'npm-global')
   }
   const cacheRoot = locations[0]
-  if (cacheRoot) {
+  // Cached NPX versions cannot supersede a normal default executable. Avoid
+  // probing a large/unreadable cache when the terminal already has that default.
+  if (cacheRoot && found.size === 0) {
     try {
       const entries = fs.readdirSync(path.join(cacheRoot, '_npx'), { withFileTypes: true })
       if (entries.length > 512) throw new Error('npx 缓存较多，请先启动要使用的 DSH，再运行安装命令。')

@@ -7,6 +7,7 @@ import { randomBytes, createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { attachControl, waitForJson, waitForInstallControl } from './native-control.mjs'
 import { resolveInstallRuntime, verifyInstallRuntime } from '../lib/install-runtime.js'
+import { installProfile, backupProfile, NativeInstallError } from '../lib/install-profile.js'
 import { compareVersions } from '../lib/update-policy.js'
 import { selectInstallTarget } from './release-selection.mjs'
 import { boundedFetch, downloadRelease, auditArchive } from '../lib/update-download.js'
@@ -42,6 +43,54 @@ export async function selectRelease(host, assetsRoot = path.join(root, 'assets')
   auditArchive(archive, release)
   return { release, archive }
 }
+
+/** With no running host, native plugin add needs neither HMR nor healthy third-
+ * party plugins. Reuse the same installation core; only live hosts need disposal. */
+async function installStopped({ cli, home, profile, profileName, directory, id, runtime, assetsRoot, repair, open }) {
+  const dsh = validateDshCli(cli)
+  let version = '0.0.0'
+  try { version = JSON.parse(fs.readFileSync(path.join(profile, 'node_modules', packageName, 'package.json'), 'utf8')).version } catch {}
+  const selected = await selectRelease({ dshVersion: dsh.version, pluginVersion: version, platform: process.platform, arch: process.arch }, assetsRoot, repair)
+  fs.mkdirSync(profile, { recursive: true, mode: 0o700 })
+  if (fs.realpathSync(profile) !== profile) throw new Error('无法确认 DSH 配置目录的实际位置。')
+  const lock = path.join(profile, '.harness-remote-update.lock')
+  const fd = fs.openSync(lock, 'wx', 0o600); fs.writeFileSync(fd, id); fs.closeSync(fd)
+  let modified = false, keepLock = false
+  try {
+    // Recheck immediately before writing: a host may have started during npm
+    // discovery/download. Never mutate its dependencies underneath that process.
+    if (await mayHaveRunningDsh()) throw new Error('DSH 已开始运行，请重新执行安装命令以连接该实例。')
+    if (selected.archive) {
+      fs.writeFileSync(path.join(directory, 'release.tgz'), selected.archive, { mode: 0o600, flag: 'wx' })
+      backupProfile(profile, path.join(directory, 'profile-before'))
+      console.log(`正在通过 DSH 原生方式安装插件 ${selected.release.version}…`)
+      modified = true
+      await installProfile({ profile, directory, cli: dsh.cli, targetVersion: selected.release.version, runtime })
+    }
+  } catch (error) {
+    keepLock = error instanceof NativeInstallError && error.mayStillBeRunning
+    if (modified && !keepLock) {
+      fs.renameSync(profile, path.join(directory, 'profile-failed'))
+      fs.renameSync(path.join(directory, 'profile-before'), profile)
+    }
+    throw error
+  } finally { if (!keepLock) releaseOwnedUpdateLock(lock, id) }
+  // Use DSH's own browser opening behavior. Startup failure does not undo an
+  // otherwise successful native add; an unrelated plugin can fail to boot.
+  const logFile = path.join(directory, 'startup.log'), log = fs.openSync(logFile, 'a', 0o600)
+  const env = { ...process.env, DSH_HOME: home }
+  delete env.HARNESS_REMOTE_UPDATE_JOB
+  const child = spawn(process.execPath, [dsh.cli, '--profile', profileName, ...(open ? [] : ['--no-open'])],
+    { cwd: process.cwd(), env, detached: true, windowsHide: true, stdio: ['ignore', log, log] })
+  fs.closeSync(log)
+  let launchError
+  child.on('error', error => { launchError = error }); child.unref()
+  await sleep(1200)
+  const starting = !launchError && child.pid && child.exitCode === null && child.signalCode === null
+  const installedVersion = selected.archive ? selected.release.version : version
+  console.log(`插件 ${installedVersion} 已安装。${starting ? '已启动 DSH，请等待 WebUI 就绪。' : `DSH 未能启动，请查看：${logFile}`}`)
+  return { version: installedVersion, changed: Boolean(selected.archive), starting: Boolean(starting) }
+}
 export async function install({ profileName = 'web', cli, home: configuredHome, assetsRoot, open = true, repair = false } = {}) {
   if (!/^[A-Za-z0-9_-]{1,80}$/.test(profileName)) throw new Error('无效的 profile 名称。')
   if (cli) cli = validateDshCli(cli).cli
@@ -56,21 +105,14 @@ export async function install({ profileName = 'web', cli, home: configuredHome, 
   const lockFile = path.join(profile, '.harness-remote-update.lock')
   console.log('正在检查 DSH 与插件…')
   try {
-    // Initialize missing profiles through DSH itself, never synthesize a bundle list.
-    if (!fs.existsSync(path.join(profile, 'package.json'))) {
-      if (await mayHaveRunningDsh()) throw new Error('当前目录下没有此 DSH 配置，但检测到 DSH 正在运行。请使用相同的 DSH_HOME／--home 和 --profile，未修改正在运行的实例。')
+    if (!await mayHaveRunningDsh()) {
       cli ||= await chooseDsh()
-      const log = fs.openSync(path.join(directory, 'startup.log'), 'a', 0o600)
-      launched = spawn(process.execPath, [cli, '--profile', profileName, '--no-open'], {
-        cwd: process.cwd(), env: { ...process.env, DSH_HOME: home }, detached: true, windowsHide: true, stdio: ['ignore', log, log] })
-      fs.closeSync(log); launched.on('error', () => {}); launched.unref()
-      const initializedBy = Date.now() + 180000
-      while (!fs.existsSync(path.join(profile, 'package.json')) && Date.now() < initializedBy) {
-        if (launched.exitCode !== null || launched.signalCode !== null) break
-        await sleep(100)
-      }
-      if (!fs.existsSync(path.join(profile, 'package.json'))) throw new Error('DSH 未能初始化 profile；详情见本机安装记录。')
-      await sleep(2000)
+      return await installStopped({ cli, home, profile, profileName, directory, id, runtime, assetsRoot, repair, open })
+    }
+    // A live host must identify the same home/profile; never synthesize a second
+    // profile just because this terminal inherited different environment values.
+    if (!fs.existsSync(path.join(profile, 'package.json'))) {
+      throw new Error('当前目录下没有此 DSH 配置，但检测到 DSH 正在运行。请使用相同的 DSH_HOME／--home 和 --profile，未修改正在运行的实例。')
     }
     const fd = fs.openSync(lockFile, 'wx', 0o600); fs.writeFileSync(fd, id); fs.closeSync(fd); locked = true
     const helper = path.join(directory, 'install-control.js')
@@ -113,7 +155,20 @@ export async function install({ profileName = 'web', cli, home: configuredHome, 
     assertInstallTarget(host, { home, profile, cli, pid: launched?.pid || ref.pid })
     remove(); remove = undefined
     await sleep(600)
-    const selected = await selectRelease(host, assetsRoot, repair)
+    let selected = await selectRelease(host, assetsRoot, repair)
+    if (!selected.archive && host.pluginVersion === selected.release.version) {
+      // A version string on disk is not proof that a prior restart completed.
+      // Re-running the normal command must also repair a stuck installed copy.
+      let ready = false
+      try {
+        const response = await fetch(`http://127.0.0.1:${host.localPort}/gate/status`, { signal: AbortSignal.timeout(5000), redirect: 'error' })
+        await response.arrayBuffer(); ready = response.ok
+      } catch {}
+      if (!ready) {
+        console.log('检测到已安装插件尚未就绪，正在重新安装修复…')
+        selected = await selectRelease(host, assetsRoot, true)
+      }
+    }
     if (!selected.archive) { console.log(`插件 ${host.pluginVersion} 无需更新。`); return { version: host.pluginVersion, changed: false } }
     console.log(`正在安装插件 ${selected.release.version}，保留原配对与会话…`)
     job = { ...host, argv: installHostArgv(host), id, directory, parentPid: host.pid, pnpm: runtime.cli, targetVersion: selected.release.version,
@@ -121,6 +176,7 @@ export async function install({ profileName = 'web', cli, home: configuredHome, 
     validateJob(job)
     fs.writeFileSync(path.join(directory, 'release.tgz'), selected.archive, { mode: 0o600, flag: 'wx' })
     fs.copyFileSync(path.join(root, 'lib/update-worker.js'), path.join(directory, 'update-worker.js'))
+    if (host.pluginVersion === '0.0.0') fs.copyFileSync(path.join(root, 'lib/native-recovery.js'), path.join(directory, 'native-recovery.js'))
     writePrivateJsonAtomic(path.join(directory, 'job.json'), job)
     await control(job, 'launch')
     const ready = await waitForJson(path.join(directory, 'worker-ready.json'), v => v.id === id)
@@ -150,9 +206,11 @@ export async function install({ profileName = 'web', cli, home: configuredHome, 
     }
     return { version: selected.release.version, changed: true }
   } finally {
-    remove?.()
-    if (ref && !authorized) { try { await control({ controlOrigin: ref.origin, statusToken: token }, 'close') } catch {} }
-    if (locked && !authorized) releaseOwnedUpdateLock(lockFile, id)
+    try { remove?.() }
+    finally {
+      if (ref && !authorized) { try { await control({ controlOrigin: ref.origin, statusToken: token }, 'close') } catch {} }
+      if (locked && !authorized) releaseOwnedUpdateLock(lockFile, id)
+    }
   }
 }
 export function parseArguments(args) {

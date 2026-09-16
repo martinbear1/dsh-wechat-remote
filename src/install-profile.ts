@@ -46,7 +46,8 @@ export class NativeInstallError extends Error {
 }
 
 export function runNativePlugin(cli: string, profile: string, home: string, toolPath: string,
-  runtime: InstallRuntime, logFile: string, archiveName: string, timeoutMs = 600000): Promise<void> {
+  runtime: InstallRuntime, logFile: string, archiveName: string, timeoutMs = 600000,
+  operation: 'add' | 'install' = 'add'): Promise<void> {
   if (!safeProfileName(profile) || !/^harness-remote-[\w.+-]+\.tgz$/.test(archiveName)) throw new Error('无效的安装目标。')
   return new Promise((resolve, reject) => {
     const log = fs.openSync(logFile, 'a', 0o600)
@@ -58,8 +59,9 @@ export function runNativePlugin(cli: string, profile: string, home: string, tool
     Object.assign(env, { DSH_HOME: home, PATH: toolPath + path.delimiter + (inheritedPath || ''),
       HARNESS_INSTALL_NODE: runtime.executable, HARNESS_INSTALL_PNPM: runtime.cli,
       CI: 'true', COREPACK_ENABLE_AUTO_PIN: '0', npm_config_manage_package_manager_versions: 'false' })
-    const child = spawn(runtime.executable, [cli, 'plugin', '--profile', profile, 'add',
-      `file:${archiveName}`, '--ignore-scripts', '--config.frozen-lockfile=false', '--prefer-offline',
+    const child = spawn(runtime.executable, [cli, 'plugin', '--profile', profile,
+      ... (operation === 'install' ? ['install'] : ['add', `file:${archiveName}`]),
+      '--ignore-scripts', '--config.frozen-lockfile=false', '--prefer-offline',
       '--config.manage-package-manager-versions=false', '--reporter=append-only'], {
       cwd: home, shell: false, windowsHide: true, detached: process.platform !== 'win32',
       stdio: ['ignore', log, log], env,
@@ -114,7 +116,21 @@ export async function installProfile(job: ProfileInstall): Promise<void> {
   const tools = installToolPath(job.directory, job.runtime)
   // DSH/pnpm own dependency resolution and bundle registration. Do not rewrite
   // the manifest, packageManager, lockfile, or other plugin sources beforehand.
-  await runNativePlugin(job.cli, scope, home, tools, job.runtime, path.join(job.directory, 'install.log'), archiveName)
+  const logFile = path.join(job.directory, 'install.log')
+  const deadline = Date.now() + 600000
+  const run = (operation: 'add' | 'install' = 'add') => runNativePlugin(job.cli, scope, home, tools, job.runtime, logFile, archiveName, Math.max(1, deadline - Date.now()), operation)
+  try { await run() }
+  catch (error) {
+    // Older installers moved a pnpm tree after creating it. pnpm add correctly
+    // rejects its stale layout. Let the official install command rebuild that
+    // layout from the existing manifest/lock, then retry add ONCE. No --force,
+    // lock deletion, source rewriting, script authorization or network retry.
+    const layoutError = /^\s*(?:\[ERR_PNPM_|ERR_PNPM_)(?:UNEXPECTED_VIRTUAL_STORE|UNEXPECTED_STORE|MODULES_BREAKING_CHANGE|VIRTUAL_STORE_DIR_MAX_LENGTH_DIFF|PUBLIC_HOIST_PATTERN_DIFF|HOIST_PATTERN_DIFF)(?:\]|\s)/m
+    if (!(error instanceof NativeInstallError) || error.mayStillBeRunning || !layoutError.test(fs.readFileSync(logFile, 'utf8'))) throw error
+    fs.appendFileSync(logFile, '\nRestoring native pnpm layout with dsh plugin install.\n')
+    await run('install')
+    await run()
+  }
   const installed = path.join(job.profile, 'node_modules', PLUGIN_PACKAGE)
   if (JSON.parse(fs.readFileSync(path.join(installed, 'package.json'), 'utf8')).version !== job.targetVersion) throw new Error('安装后插件版本不匹配。')
   const after = JSON.parse(fs.readFileSync(path.join(job.profile, 'package.json'), 'utf8'))

@@ -13,6 +13,8 @@ for (const name of ['install-control', 'update-worker', 'install-profile', 'inst
     banner: { js: '/* Generated from the shared plugin installation sources. */' } })
 }
 fs.writeFileSync(path.join(target, 'package.json'), '{"type":"module"}\n')
+await build({ entryPoints: [path.join(root, 'installer/bin/native-recovery.mjs')], bundle: true,
+  platform: 'node', target: 'node22', format: 'esm', outfile: path.join(target, 'native-recovery.js') })
 fs.copyFileSync(path.join(root, 'LICENSE'), path.join(root, 'installer', 'LICENSE'))
 if (process.argv[2]) {
   // Installer and payload may intentionally differ (installer-only hotfix).

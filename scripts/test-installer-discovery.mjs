@@ -40,6 +40,8 @@ test('stopped host defaults to terminal/global DSH without asking about old npx 
   const prompt = async () => { throw new Error('ordinary default must not ask') }
   assert.equal(await chooseDsh({ ...o, env: { PATH: prefix }, cache, prompt }), cli)
   assert.equal(await chooseDsh({ ...o, prefix, cache, prompt }), cli)
+  for (let n = 0; n < 515; n++) fs.mkdirSync(path.join(cache, '_npx', (n + 10000).toString(16)))
+  assert.equal(await chooseDsh({ ...o, env: { Path: prefix }, cache, prompt }), cli)
 })
 test('Windows .bin text shims resolve the adjacent package, not arbitrary script content', async () => {
   const o = options('shims'), modules = fixture('shims/node_modules'), bin = fixture('shims/node_modules/.bin')

@@ -6,7 +6,7 @@ import path4 from "node:path";
 import http from "node:http";
 import { spawn as spawn4 } from "node:child_process";
 import { createHash, createPublicKey } from "node:crypto";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 // src/secure-file.ts
 import { execFileSync } from "node:child_process";
@@ -114,7 +114,7 @@ var NativeInstallError = class extends Error {
     this.name = "NativeInstallError";
   }
 };
-function runNativePlugin(cli, profile, home, toolPath, runtime, logFile, archiveName, timeoutMs = 6e5) {
+function runNativePlugin(cli, profile, home, toolPath, runtime, logFile, archiveName, timeoutMs = 6e5, operation = "add") {
   if (!safeProfileName(profile) || !/^harness-remote-[\w.+-]+\.tgz$/.test(archiveName)) throw new Error("\u65E0\u6548\u7684\u5B89\u88C5\u76EE\u6807\u3002");
   return new Promise((resolve, reject) => {
     const log = fs.openSync(logFile, "a", 384);
@@ -138,8 +138,7 @@ function runNativePlugin(cli, profile, home, toolPath, runtime, logFile, archive
       "plugin",
       "--profile",
       profile,
-      "add",
-      `file:${archiveName}`,
+      ...operation === "install" ? ["install"] : ["add", `file:${archiveName}`],
       "--ignore-scripts",
       "--config.frozen-lockfile=false",
       "--prefer-offline",
@@ -205,7 +204,18 @@ async function installProfile(job) {
   const archiveName = `harness-remote-${job.targetVersion}.tgz`;
   fs.copyFileSync(path.join(job.directory, "release.tgz"), path.join(job.profile, archiveName));
   const tools = installToolPath(job.directory, job.runtime);
-  await runNativePlugin(job.cli, scope, home, tools, job.runtime, path.join(job.directory, "install.log"), archiveName);
+  const logFile = path.join(job.directory, "install.log");
+  const deadline = Date.now() + 6e5;
+  const run2 = (operation = "add") => runNativePlugin(job.cli, scope, home, tools, job.runtime, logFile, archiveName, Math.max(1, deadline - Date.now()), operation);
+  try {
+    await run2();
+  } catch (error) {
+    const layoutError = /^\s*(?:\[ERR_PNPM_|ERR_PNPM_)(?:UNEXPECTED_VIRTUAL_STORE|UNEXPECTED_STORE|MODULES_BREAKING_CHANGE|VIRTUAL_STORE_DIR_MAX_LENGTH_DIFF|PUBLIC_HOIST_PATTERN_DIFF|HOIST_PATTERN_DIFF)(?:\]|\s)/m;
+    if (!(error instanceof NativeInstallError) || error.mayStillBeRunning || !layoutError.test(fs.readFileSync(logFile, "utf8"))) throw error;
+    fs.appendFileSync(logFile, "\nRestoring native pnpm layout with dsh plugin install.\n");
+    await run2("install");
+    await run2();
+  }
   const installed = path.join(job.profile, "node_modules", PLUGIN_PACKAGE);
   if (JSON.parse(fs.readFileSync(path.join(installed, "package.json"), "utf8")).version !== job.targetVersion) throw new Error("\u5B89\u88C5\u540E\u63D2\u4EF6\u7248\u672C\u4E0D\u5339\u914D\u3002");
   const after = JSON.parse(fs.readFileSync(path.join(job.profile, "package.json"), "utf8"));
@@ -627,8 +637,13 @@ async function executeUpdate(job, progress, quiesce) {
           fs4.renameSync(job.profile, path4.join(job.directory, "profile-failed"));
           fs4.renameSync(previous, job.profile);
         }
-        start(job);
-        await healthy(job, job.previousVersion);
+        if (job.previousVersion === "0.0.0") {
+          const recovery = await import(pathToFileURL(path4.join(job.directory, "native-recovery.js")).href);
+          await recovery.verifyNativeRestore(job, () => start(job), sessionIds, readableIds);
+        } else {
+          start(job);
+          await healthy(job, job.previousVersion);
+        }
         assertPreserved(before, durableSnapshot(job));
         rollback = true;
         writePrivateJsonAtomic(path4.join(job.directory, "verification-complete.json"), { id: job.id });
@@ -754,7 +769,7 @@ async function workerMain(filename) {
     });
   }
   const lock = path4.join(job.profile, ".harness-remote-update.lock");
-  releaseOwnedUpdateLock(lock, job.id);
+  if (status.phase !== "attention") releaseOwnedUpdateLock(lock, job.id);
   if (job.controlOrigin) {
     try {
       await control(job, "close");

@@ -5,7 +5,7 @@ import fs4 from "node:fs";
 import path4 from "node:path";
 import http from "node:http";
 import { spawn as spawn4 } from "node:child_process";
-import { createHash, createPublicKey } from "node:crypto";
+import { createHash as createHash2, createPublicKey } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 // src/secure-file.ts
@@ -76,6 +76,7 @@ function writePrivateJsonAtomic(file, value) {
 // src/install-profile.ts
 import fs from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { spawn, execFile } from "node:child_process";
 var PLUGIN_PACKAGE = "@harness-remote/dsh-wechat-remote";
 function safeProfileName(value) {
@@ -201,8 +202,10 @@ async function installProfile(job) {
   const scope = path.basename(job.profile), home = path.dirname(path.dirname(job.profile));
   if (!safeProfileName(scope) || path.dirname(job.profile) !== path.join(home, "profiles") || !/^[\w.+-]{1,80}$/.test(job.targetVersion)) throw new Error("\u5B89\u88C5\u76EE\u6807\u4E0D\u660E\u786E\u3002");
   fs.mkdirSync(job.profile, { recursive: true, mode: 448 });
-  const archiveName = `harness-remote-${job.targetVersion}.tgz`;
-  fs.copyFileSync(path.join(job.directory, "release.tgz"), path.join(job.profile, archiveName));
+  const archive = path.join(job.directory, "release.tgz");
+  const digest = createHash("sha256").update(fs.readFileSync(archive)).digest("hex");
+  const archiveName = `harness-remote-${job.targetVersion}-${digest}.tgz`;
+  fs.copyFileSync(archive, path.join(job.profile, archiveName));
   const tools = installToolPath(job.directory, job.runtime);
   const logFile = path.join(job.directory, "install.log");
   const deadline = Date.now() + 6e5;
@@ -319,7 +322,7 @@ function releaseOwnedUpdateLock(lock, id) {
   }
 }
 var wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-var hashFile = (f) => createHash("sha256").update(fs4.readFileSync(f)).digest("hex");
+var hashFile = (f) => createHash2("sha256").update(fs4.readFileSync(f)).digest("hex");
 function within(parent, child) {
   const relative = path4.relative(parent, child);
   return Boolean(relative) && !relative.startsWith("..") && !path4.isAbsolute(relative);
@@ -381,7 +384,7 @@ function durableSnapshot(job) {
     if (!fs4.existsSync(dir)) return;
     for (const e of fs4.readdirSync(dir, { withFileTypes: true })) {
       const file = path4.join(dir, e.name);
-      if (e.isSymbolicLink()) result[path4.relative(job.home, file)] = createHash("sha256").update(fs4.readlinkSync(file)).digest("hex");
+      if (e.isSymbolicLink()) result[path4.relative(job.home, file)] = createHash2("sha256").update(fs4.readlinkSync(file)).digest("hex");
       else if (e.isDirectory()) walk(file);
       else if (e.isFile()) result[path4.relative(job.home, file)] = hashFile(file);
     }
@@ -398,7 +401,7 @@ function durableSnapshot(job) {
   }
   if (fs4.existsSync(job.stateFile)) {
     const state = JSON.parse(fs4.readFileSync(job.stateFile, "utf8"));
-    result["$binding"] = createHash("sha256").update(JSON.stringify([state.token, state.wechatBindings])).digest("hex");
+    result["$binding"] = createHash2("sha256").update(JSON.stringify([state.token, state.wechatBindings])).digest("hex");
   }
   return result;
 }
@@ -412,7 +415,7 @@ function migrateLegacyGrantOwner(job) {
   const identity = JSON.parse(fs4.readFileSync(job.identityFile, "utf8"));
   const publicKey = createPublicKey(identity.privateKeyPem).export({ format: "der", type: "spki" });
   const savedKey = createPublicKey(identity.publicKeyPem).export({ format: "der", type: "spki" });
-  const nodeId = createHash("sha256").update(publicKey).digest().subarray(0, 18).toString("base64url");
+  const nodeId = createHash2("sha256").update(publicKey).digest().subarray(0, 18).toString("base64url");
   if (!publicKey.equals(savedKey) || identity.nodeId !== nodeId) throw new Error("\u65E7\u8282\u70B9\u8EAB\u4EFD\u6821\u9A8C\u672A\u901A\u8FC7\uFF0C\u672A\u8FC1\u79FB\u914D\u5BF9");
   writePrivateJsonAtomic(job.stateFile, { ...state, publicIdentityNodeId: nodeId });
 }

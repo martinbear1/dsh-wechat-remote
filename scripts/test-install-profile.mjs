@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { createHash } from 'node:crypto'
 import { backupProfile, installProfile, runNativePlugin, safeProfileName } from '../lib/install-profile.js'
 
 for (const name of ['web', 'test-2', 'custom_profile']) assert(safeProfileName(name))
@@ -40,14 +41,15 @@ try {
     packageManager: 'pnpm@10.0.0', dsh: { profile: { bundles: ['a', 'b'] } } }
   fs.writeFileSync(path.join(active, 'package.json'), JSON.stringify(original))
   fs.writeFileSync(path.join(job, 'release.tgz'), 'test archive')
+  const archiveName = 'harness-remote-1.7.7-' + createHash('sha256').update('test archive').digest('hex') + '.tgz'
   const cli = path.join(root, 'native-fixture.cjs')
   fs.writeFileSync(cli, `const fs=require('fs'),path=require('path'),assert=require('assert/strict');
     const dir=path.join(process.env.DSH_HOME,'profiles',process.argv[4]);
     const file=path.join(dir,'package.json'),before=JSON.parse(fs.readFileSync(file));
     assert.deepEqual(before,${JSON.stringify(original)});
     assert.equal(process.cwd(),${JSON.stringify(home)});
-    assert.equal(process.argv[5],'add');assert.equal(process.argv[6],'file:harness-remote-1.7.7.tgz');
-    assert(fs.existsSync(path.join(dir,'harness-remote-1.7.7.tgz')));
+    assert.equal(process.argv[5],'add');assert.equal(process.argv[6],${JSON.stringify('file:' + archiveName)});
+    assert(fs.existsSync(path.join(dir,${JSON.stringify(archiveName)})));
     const pkg=path.join(dir,'node_modules/@harness-remote/dsh-wechat-remote');fs.mkdirSync(pkg,{recursive:true});
     fs.writeFileSync(path.join(pkg,'package.json'),JSON.stringify({version:'1.7.7'}));
     before.dsh.profile.bundles.push('@harness-remote/dsh-wechat-remote');fs.writeFileSync(file,JSON.stringify(before));`)
@@ -56,6 +58,16 @@ try {
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(active, 'package.json'))).dependencies, original.dependencies)
   assert(!fs.existsSync(path.join(job, 'staging-home')))
   console.log('PASS native add uses original home/profile and receives untouched mixed-source manifest')
+
+  const refreshedJob = path.join(root, 'refreshed-job'); fs.mkdirSync(refreshedJob)
+  fs.writeFileSync(path.join(refreshedJob, 'release.tgz'), 'changed candidate bytes')
+  const refreshedName = 'harness-remote-1.7.7-' + createHash('sha256').update('changed candidate bytes').digest('hex') + '.tgz'
+  fs.writeFileSync(cli, `require('assert/strict').equal(process.argv[6],${JSON.stringify('file:' + refreshedName)})`)
+  await installProfile({ profile: active, directory: refreshedJob, cli, runtime, targetVersion: '1.7.7' })
+  assert.notEqual(refreshedName, archiveName)
+  assert.equal(fs.readFileSync(path.join(active, archiveName), 'utf8'), 'test archive')
+  assert.equal(fs.readFileSync(path.join(active, refreshedName), 'utf8'), 'changed candidate bytes')
+  console.log('PASS changed same-version archives use distinct native sources without overwriting prior bytes')
 
   const repairJob = path.join(root, 'repair-job'); fs.mkdirSync(repairJob)
   fs.writeFileSync(path.join(repairJob, 'release.tgz'), 'test archive')

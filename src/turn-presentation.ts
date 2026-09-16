@@ -1,4 +1,5 @@
 import { createRequire } from 'node:module'
+import { realpathSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 import { firstCompactTokenTime } from './assistant-stream-compat.js'
 
@@ -14,7 +15,10 @@ let nativeUsage: Promise<UsageFold | undefined> | undefined
 export function nativeTurnUsage(): Promise<UsageFold | undefined> {
   return nativeUsage ??= (async () => {
     try {
-      const require = createRequire(process.argv[1])
+      // npm's POSIX dsh command (and npx .bin entry) may be a symlink.
+      // Resolve from the actual host entry, not the shim's directory, cwd,
+      // another global installation, or the adapter's own dependencies.
+      const require = createRequire(realpathSync(process.argv[1]))
       const module = await import(pathToFileURL(require.resolve('@deepseek-ai/dsh-token-meter/client')).href)
       return typeof module.deriveTurnTokenUsage === 'function' ? module.deriveTurnTokenUsage : undefined
     } catch { return undefined }

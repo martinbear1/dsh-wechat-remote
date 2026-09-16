@@ -101,7 +101,7 @@
     "test:updates": "node scripts/test-update-policy.mjs && node scripts/test-update-safety.mjs && node scripts/test-install-capabilities.mjs && node scripts/test-install-runtime.mjs && node scripts/test-install-tool-path.mjs && node scripts/test-install-profile.mjs && node scripts/test-update-action.mjs && node scripts/test-update-architecture.mjs && node scripts/test-installer-patch.mjs && node scripts/test-installer-handshake.mjs && node scripts/test-installer-selection.mjs && node --test scripts/test-installer-discovery.mjs",
     "test:directory": "node scripts/test-directory.mjs",
     "test:host-platform": "node scripts/test-host-platform.mjs",
-    "test:history": "node scripts/test-history.mjs && node scripts/test-turn-presentation.mjs && node scripts/test-turn-activity.mjs",
+    "test:history": "node scripts/test-history.mjs && node scripts/test-turn-presentation.mjs && node scripts/test-native-turn-usage.mjs && node scripts/test-turn-activity.mjs",
     "test:attachment": "node scripts/test-attachment.mjs && node scripts/test-agent-inputs.mjs",
     "test:gate-ports": "node scripts/test-gate-ports.mjs",
     "test:dsh-runtime": "node scripts/test-dsh-runtime.mjs",

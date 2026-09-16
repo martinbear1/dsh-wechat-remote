@@ -17,6 +17,18 @@ const name = pkg.name
 const fails = []
 const check = (ok, msg) => { if (!ok) fails.push(msg) }
 
+// A preview must not advertise itself as a stable payload or a different
+// installer version. Historical tags keep their original manifests.
+for (const file of ['package-lock.json', 'installer/package.json', 'installer/package-lock.json']) {
+  const metadata = JSON.parse(readFileSync(path.join(root, file), 'utf8'))
+  check(metadata.version === pkg.version, `${file} 版本与插件不一致`)
+  if (metadata.packages?.['']) check(metadata.packages[''].version === pkg.version, `${file} 根包版本不一致`)
+}
+const releaseMetadata = JSON.parse(readFileSync(path.join(root, 'installer/assets/release.json'), 'utf8'))
+check(releaseMetadata.version === pkg.version, '安装器内嵌版本与插件不一致；请重新构建安装器')
+const ownRelease = releaseMetadata.catalog?.releases?.find(release => release.version === pkg.version)
+check(ownRelease?.channel === (pkg.version.includes('-') ? 'preview' : 'stable'), '安装器发布通道与版本不一致')
+
 // 1. 客户端 bundle：注册 id 必须等于包名，且不含任何遗留/异包 id。
 const client = readFileSync(path.join(root, 'lib/client.js'), 'utf8')
 check(client.includes('window.__ModuleLoader__.load'), 'lib/client.js 不是 __ModuleLoader__ bundle')

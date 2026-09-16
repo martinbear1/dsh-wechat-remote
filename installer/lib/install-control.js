@@ -1151,7 +1151,7 @@ async function createInstallControl(context, config) {
   const scope = resolveAgentProfileScope("", process.argv, home), profile = path5.join(home, "profiles", scope);
   const cli = fs2.realpathSync(process.argv[1]);
   const manifest = JSON.parse(fs2.readFileSync(path5.resolve(cli, "../../package.json"), "utf8"));
-  if (manifest.name !== "@deepseek-ai/dsh" || process.execArgv.length || !process.argv.includes("web")) throw new Error("\u6B64 DSH \u542F\u52A8\u65B9\u5F0F\u5C1A\u4E0D\u652F\u6301\u81EA\u52A8\u66F4\u65B0\u3002");
+  if (manifest.name !== "@deepseek-ai/dsh" || process.execArgv.length) throw new Error("\u6B64 DSH \u542F\u52A8\u65B9\u5F0F\u5C1A\u4E0D\u652F\u6301\u81EA\u52A8\u66F4\u65B0\u3002");
   const manager = currentHostManager(), webPort = resolveDshWebRuntime(ctx, process.env).port;
   const ports = deriveGatePorts(scope, loadAgentDescriptor().agentInstanceId);
   const nativeExit = ctx.get("appExit");

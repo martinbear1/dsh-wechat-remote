@@ -5,7 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
-import { stageProfile, PLUGIN_PACKAGE } from '../lib/install-profile.js'
+import { installProfile, backupProfile, PLUGIN_PACKAGE } from '../lib/install-profile.js'
 import { resolveInstallRuntime, verifyInstallRuntime } from '../lib/install-runtime.js'
 
 const [cli, archive, version, previousArchive, previousVersion] = process.argv.slice(2)
@@ -23,31 +23,25 @@ try {
     assert(previousVersion)
     const oldJob = path.join(root, 'old-install'); fs.mkdirSync(oldJob)
     fs.copyFileSync(previousArchive, path.join(oldJob, 'release.tgz'))
-    const old = await stageProfile({ profile, directory: oldJob, cli, targetVersion: previousVersion, runtime })
-    fs.mkdirSync(path.dirname(profile), { recursive: true })
-    fs.renameSync(old, profile)
+    await installProfile({ profile, directory: oldJob, cli, targetVersion: previousVersion, runtime })
     fs.writeFileSync(path.join(profile, 'user-settings.json'), '{"preserve":"existing user setting"}\n')
   }
-  const staged = await stageProfile({ profile, directory, cli, targetVersion: version, runtime })
   if (previousArchive) {
-    assert.equal(JSON.parse(fs.readFileSync(path.join(profile, 'node_modules', PLUGIN_PACKAGE, 'package.json'), 'utf8')).version, previousVersion)
-    assert.equal(fs.readFileSync(path.join(profile, 'user-settings.json'), 'utf8'), fs.readFileSync(path.join(staged, 'user-settings.json'), 'utf8'))
-    fs.renameSync(profile, path.join(root, 'profile-backup'))
-  } else assert(!fs.existsSync(profile), 'staging must not touch the active profile')
-  fs.mkdirSync(path.dirname(profile), { recursive: true })
-  fs.renameSync(staged, profile)
+    backupProfile(profile, path.join(root, 'profile-backup'))
+  }
+  await installProfile({ profile, directory, cli, targetVersion: version, runtime })
+  if (previousArchive) assert.equal(fs.readFileSync(path.join(profile, 'user-settings.json'), 'utf8'), '{"preserve":"existing user setting"}\n')
   const require = createRequire(path.join(profile, 'package.json'))
   const entry = require.resolve(PLUGIN_PACKAGE)
-  assert(fs.existsSync(entry), 'installed package must resolve after relocating the staged profile')
-  assert(fs.realpathSync(entry).startsWith(profile + path.sep), 'moved profile must be self-contained')
+  assert(fs.existsSync(entry), 'installed package must resolve from the original profile')
   const manifest = JSON.parse(fs.readFileSync(path.join(profile, 'package.json'), 'utf8'))
   assert(manifest.dsh.profile.bundles.includes(PLUGIN_PACKAGE), 'DSH must register its native bundle layer')
   const installedRoot = path.dirname(require.resolve(PLUGIN_PACKAGE + '/package.json'))
   const installedManifest = JSON.parse(fs.readFileSync(path.join(installedRoot, 'package.json'), 'utf8'))
   assert.equal(installedManifest.version, version)
   if (installedManifest.dependencies?.pnpm) await verifyInstallRuntime(resolveInstallRuntime(installedRoot))
-  console.log('PASS native DSH init, package install, bundle activation, profile relocation')
-  if (previousArchive) console.log('PASS legacy profile upgrade, previous version untouched while staging, user settings preserved')
+  console.log('PASS native DSH init, original-profile install, bundle activation')
+  if (previousArchive) console.log('PASS legacy profile upgrade, user settings preserved, backup available')
 } catch (error) {
   console.error('Integration evidence retained at:', directory)
   throw error

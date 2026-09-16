@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { resolveInstallRuntime, verifyInstallRuntime, INSTALL_PNPM_VERSION } from '../lib/install-runtime.js'
+import { resolveInstallRuntime, verifyInstallRuntime, pinInstallRuntime, INSTALL_PNPM_VERSION } from '../lib/install-runtime.js'
 const owner = fileURLToPath(new URL('../', import.meta.url))
 const runtime = resolveInstallRuntime(owner)
 assert.equal(runtime.version, INSTALL_PNPM_VERSION)
@@ -22,8 +22,10 @@ try {
   manifest(INSTALL_PNPM_VERSION, { pnpm: '../../outside.cjs' }); assert.throws(() => resolveInstallRuntime(root))
   manifest(INSTALL_PNPM_VERSION, { pnpm: 'cli.cjs' }); fs.writeFileSync(path.join(pkg, 'cli.cjs'), `console.log('${INSTALL_PNPM_VERSION}')`)
   await verifyInstallRuntime(resolveInstallRuntime(root))
+  const pinned = await pinInstallRuntime(resolveInstallRuntime(root), root)
   fs.writeFileSync(path.join(pkg, 'cli.cjs'), `console.log('10.0.0')`)
   await assert.rejects(verifyInstallRuntime(resolveInstallRuntime(root)))
+  await verifyInstallRuntime(pinned)
 } finally {
   assert(path.basename(root).startsWith('dsh-runtime-test-') && path.dirname(root) === fs.realpathSync(os.tmpdir()))
   fs.rmSync(root, { recursive: true })

@@ -96,8 +96,15 @@ export async function chooseDsh(options = {}) {
   if (options.cli) return validateDshCli(options.cli).cli
   const candidates = await discoverDsh(options)
   if (!candidates.length) throw new Error('未找到 DSH。请先按原来的方式启动 DSH WebUI，再运行本命令。')
+  // A stopped host has no handshake yet. Follow the terminal's ordinary DSH
+  // resolution before consulting old NPX cache entries; no version sorting or
+  // downloading. This fallback never overrides an already running host.
+  const normal = candidates.find(item => item.source === 'PATH')
+    || candidates.find(item => item.source === 'npm-global')
+    || candidates.find(item => item.source === 'project' || item.source === 'source')
+  if (normal) return normal.cli
   if (candidates.length === 1) return candidates[0].cli
-  // Multiple installed/cache versions are not evidence of the user's choice.
+  // Multiple cache-only versions are not evidence of the user's choice.
   // A live host normally bypasses this fallback via its native handshake.
   const prompt = options.prompt || (process.stdin.isTTY && process.stdout.isTTY ? async message => {
     const rl = createInterface({ input: process.stdin, output: process.stdout })

@@ -6,8 +6,8 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { createHash, createPublicKey, randomBytes } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { writePrivateJsonAtomic } from './secure-file.js'
-import { stageProfile } from './install-profile.js'
-import { INSTALL_PNPM_VERSION } from './install-runtime.js'
+import { installProfile, backupProfile, NativeInstallError } from './install-profile.js'
+import { INSTALL_PNPM_VERSION, pinInstallRuntime } from './install-runtime.js'
 import { validateManager, startManagedHost, stopManagedHost, finishUpdateWorker, type HostManager } from './install-lifecycle.js'
 
 export interface UpdateJob {
@@ -39,7 +39,7 @@ export function validateJob(job: UpdateJob): void {
       || path.dirname(job.profile) !== path.join(job.home, 'profiles')
       || !within(job.home, job.stateFile) || !Number.isInteger(job.parentPid) || job.parentPid < 1
       || ![job.webPort, job.gatePort, job.localPort].every(p => Number.isInteger(p) && p > 0 && p <= 65535)
-      || !job.argv.includes(job.cli) || !job.argv.includes('web') || !/^[\w.+-]{1,80}$/.test(job.targetVersion)) throw new Error('更新任务范围校验失败')
+      || job.argv[0] !== job.cli || !/^[\w.+-]{1,80}$/.test(job.targetVersion)) throw new Error('更新任务范围校验失败')
   safePlainDirectory(job.profile); safePlainDirectory(job.directory)
   if (job.identityFile && !within(job.home, job.identityFile)) throw new Error('节点身份文件不属于当前 DSH')
   if (job.controlOrigin) {
@@ -87,8 +87,8 @@ function durableSnapshot(job: UpdateJob): Record<string, string> {
     if (!fs.existsSync(dir)) return
     for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
       const file = path.join(dir, e.name)
-      if (e.isSymbolicLink()) throw new Error('受保护的数据目录含链接，需手工更新')
-      if (e.isDirectory()) walk(file)
+      if (e.isSymbolicLink()) result[path.relative(job.home, file)] = createHash('sha256').update(fs.readlinkSync(file)).digest('hex')
+      else if (e.isDirectory()) walk(file)
       else if (e.isFile()) result[path.relative(job.home, file)] = hashFile(file)
     }
   }
@@ -261,15 +261,17 @@ async function stopChild(pid: number): Promise<void> {
 export async function executeUpdate(job: UpdateJob, progress: (p: UpdateProgress) => void,
   quiesce: () => Promise<void>): Promise<UpdateProgress> {
   validateJob(job)
-  let staged = ''
   const previous = path.join(job.directory, 'profile-before')
   const emit = (phase: string, n: number, message: string) => progress({ phase, progress: n, message, terminal: false })
-  let stopped = false, disposed = false, swapped = false, newChild: ChildProcess | undefined
+  let stopped = false, disposed = false, modified = false, newChild: ChildProcess | undefined
   let before: Record<string, string> = {}, sessionIds: string[] = [], readableIds: string[] = []
   try {
-    emit('staging', 25, '暂存更新与依赖，当前节点仍可使用')
-    staged = await stageProfile({ profile: job.profile, directory: job.directory, cli: job.cli,
-      targetVersion: job.targetVersion, runtime: { executable: job.executable, cli: job.pnpm, version: INSTALL_PNPM_VERSION } })
+    emit('preparing', 25, '准备安装工具，当前节点仍可使用')
+    const runtime = await pinInstallRuntime({ executable: job.executable, cli: job.pnpm, version: INSTALL_PNPM_VERSION }, job.directory)
+    // The next host validates this job after the old package was replaced.
+    // Its runtime reference must not point into that now-obsolete package.
+    job.pnpm = runtime.cli
+    writePrivateJsonAtomic(path.join(job.directory, 'job.json'), job)
     emit('checking', 50, '确认会话空闲并保存状态')
     const old = job.controlOrigin ? await control(job, 'describe') : await describe(job)
     if (old.pluginVersion !== job.previousVersion) throw new Error('当前插件在检查后发生变化')
@@ -284,25 +286,19 @@ export async function executeUpdate(job: UpdateJob, progress: (p: UpdateProgress
     disposed = Boolean(job.controlOrigin)
     before = durableSnapshot(job)
     writePrivateJsonAtomic(path.join(job.directory, 'before-hashes.json'), before)
-    emit('backup', 60, '备份配置与数据')
-    const backup = path.join(job.directory, 'home-before')
-    fs.mkdirSync(backup, { mode: 0o700 })
-    // Copy named children; fs.cp correctly rejects copying a parent directly
-    // into its own descendant even when a recursive filter excludes that path.
-    for (const entry of fs.readdirSync(job.home, { withFileTypes: true })) {
-      if (['harness-remote-updates', 'profiles'].includes(entry.name)) continue
-      if (entry.isSymbolicLink()) throw new Error('数据目录包含外部链接，请手工备份后更新')
-      fs.cpSync(path.join(job.home, entry.name), path.join(backup, entry.name), { recursive: true })
-    }
-    emit('restarting', 70, '正在重启当前 DSH，连接会暂时断开')
+    emit('installing', 60, '正在安装插件，当前 DSH 连接会暂时断开')
     // Only our still-attached IPC parent is stopped; do not resolve an arbitrary
     // listener and kill it. PID reuse is excluded while that parent is alive.
     await stopOriginal(job); stopped = true
     assertPreserved(before, durableSnapshot(job))
+    // Only the profile is changed by native plugin add. Keep a rollback copy
+    // with verbatim links; sessions, credentials and pairing stay in place.
+    backupProfile(job.profile, previous)
     migrateLegacyGrantOwner(job)
     safePlainDirectory(job.profile)
-    fs.renameSync(job.profile, previous)
-    try { fs.renameSync(staged, job.profile); swapped = true } catch (error) { fs.renameSync(previous, job.profile); throw error }
+    modified = true
+    await installProfile({ profile: job.profile, directory: job.directory, cli: job.cli, targetVersion: job.targetVersion, runtime })
+    emit('restarting', 75, '安装完成，正在恢复当前 DSH')
     newChild = start(job)
     emit('verifying', 85, '检查插件版本、节点身份和会话')
     await healthy(job, job.targetVersion)
@@ -317,6 +313,10 @@ export async function executeUpdate(job: UpdateJob, progress: (p: UpdateProgress
     let rollback = false
     writePrivateJsonAtomic(path.join(job.directory, 'failure.json'), { message: error instanceof Error ? error.message : 'unknown',
       stack: error instanceof Error ? error.stack : undefined, cause: error instanceof Error && error.cause instanceof Error ? error.cause.message : undefined })
+    // Never restore files underneath a package manager that may still write.
+    if (error instanceof NativeInstallError && error.mayStillBeRunning) return {
+      phase: 'attention', progress: 100, message: error.message, terminal: true, ok: false, rollback: false,
+    }
     if (job.controlOrigin && !disposed) {
       try { disposed = (await control(job, 'describe')).quiesced === true } catch {}
     }
@@ -329,8 +329,8 @@ export async function executeUpdate(job: UpdateJob, progress: (p: UpdateProgress
           await stopRestarted(newChild)
           retireCandidateLock(ownedLock, newChild, job.directory)
         }
-        else if (swapped && job.manager && job.manager.kind !== 'process') stopManagedHost(job.manager)
-        if (swapped) {
+        else if (modified && job.manager && job.manager.kind !== 'process') stopManagedHost(job.manager)
+        if (modified) {
           fs.renameSync(job.profile, path.join(job.directory, 'profile-failed'))
           fs.renameSync(previous, job.profile)
         }

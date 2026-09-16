@@ -35,7 +35,7 @@ export async function createInstallControl(context: Context, config: InstallCont
   const scope = resolveAgentProfileScope('', process.argv, home), profile = path.join(home, 'profiles', scope)
   const cli = fs.realpathSync(process.argv[1])
   const manifest = JSON.parse(fs.readFileSync(path.resolve(cli, '../../package.json'), 'utf8'))
-  if (manifest.name !== '@deepseek-ai/dsh' || process.execArgv.length || !process.argv.includes('web')) throw new Error('此 DSH 启动方式尚不支持自动更新。')
+  if (manifest.name !== '@deepseek-ai/dsh' || process.execArgv.length) throw new Error('此 DSH 启动方式尚不支持自动更新。')
   const manager = currentHostManager(), webPort = resolveDshWebRuntime(ctx, process.env).port
   const ports = deriveGatePorts(scope, loadAgentDescriptor().agentInstanceId)
   const nativeExit = ctx.get('appExit') as ((code: number) => void) | undefined

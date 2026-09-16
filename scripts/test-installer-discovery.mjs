@@ -31,6 +31,16 @@ test('npx-only cache with spaces/Chinese path resolves from a fresh terminal', a
   const cli = makeDsh(path.join(cache, '_npx/a1234/node_modules/@deepseek-ai/dsh'))
   assert.equal(await chooseDsh({ ...o, cache }), cli)
 })
+
+test('stopped host defaults to terminal/global DSH without asking about old npx caches', async () => {
+  const o = options('default-global'), prefix = fixture('default-global/prefix'), cache = fixture('default-global/cache')
+  const cli = makeDsh(path.join(prefix, 'node_modules/@deepseek-ai/dsh'))
+  makeDsh(path.join(cache, '_npx/aaaa/node_modules/@deepseek-ai/dsh'), '0.1.2-rc.1')
+  makeDsh(path.join(cache, '_npx/bbbb/node_modules/@deepseek-ai/dsh'), '0.1.5-rc.2')
+  const prompt = async () => { throw new Error('ordinary default must not ask') }
+  assert.equal(await chooseDsh({ ...o, env: { PATH: prefix }, cache, prompt }), cli)
+  assert.equal(await chooseDsh({ ...o, prefix, cache, prompt }), cli)
+})
 test('Windows .bin text shims resolve the adjacent package, not arbitrary script content', async () => {
   const o = options('shims'), modules = fixture('shims/node_modules'), bin = fixture('shims/node_modules/.bin')
   const cli = makeDsh(path.join(modules, '@deepseek-ai/dsh'))

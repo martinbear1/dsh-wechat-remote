@@ -6,6 +6,22 @@ import path from "node:path";
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
 var INSTALL_PNPM_VERSION = "11.22.0";
+async function pinInstallRuntime(runtime, directory) {
+  let root = path.dirname(runtime.cli);
+  while (!fs.existsSync(path.join(root, "package.json"))) {
+    const parent = path.dirname(root);
+    if (parent === root) throw new Error("\u65E0\u6CD5\u5B9A\u4F4D\u5B89\u88C5\u5DE5\u5177\u5305\u3002");
+    root = parent;
+  }
+  const manifest = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
+  if (manifest.name !== "pnpm" || manifest.version !== runtime.version) throw new Error("\u5B89\u88C5\u5DE5\u5177\u7248\u672C\u4E0D\u4E00\u81F4\u3002");
+  const target = path.join(directory, "install-runtime");
+  if (fs.existsSync(target)) throw new Error("\u672C\u6B21\u5B89\u88C5\u5DE5\u5177\u76EE\u5F55\u5DF2\u5B58\u5728\u3002");
+  fs.cpSync(root, target, { recursive: true, dereference: false, verbatimSymlinks: true, mode: fs.constants.COPYFILE_FICLONE });
+  const pinned = { ...runtime, cli: path.join(target, path.relative(root, runtime.cli)) };
+  await verifyInstallRuntime(pinned);
+  return pinned;
+}
 function resolveInstallRuntime(owner, executable = process.execPath, nodeVersion = process.versions.node) {
   const [major, minor] = nodeVersion.split(".").map(Number);
   if (!(major > 22 || major === 22 && minor >= 13)) throw new Error("\u5F53\u524D Node.js \u7248\u672C\u4E0D\u6EE1\u8DB3\u5B89\u88C5\u8981\u6C42\uFF0822.13 \u6216\u66F4\u9AD8\uFF09\uFF0C\u672A\u4FEE\u6539\u63D2\u4EF6\u3002");
@@ -59,6 +75,7 @@ function verifyInstallRuntime(runtime) {
 }
 export {
   INSTALL_PNPM_VERSION,
+  pinInstallRuntime,
   resolveInstallRuntime,
   verifyInstallRuntime
 };

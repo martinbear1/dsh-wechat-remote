@@ -128,7 +128,9 @@ export async function install({ profileName = 'web', cli, home: configuredHome, 
     writePrivateJsonAtomic(path.join(home, 'harness-remote-updates', `profile-${scope}.json`), { jobId: id, statusOrigin: ready.origin, statusToken: token })
     writePrivateJsonAtomic(path.join(directory, 'authorized.json'), { id }); authorized = true
     let previous = '', result
-    const until = Date.now() + 600000
+    // Native download/install has its own bounded deadline; allow its restart
+    // and possible rollback to finish before reporting an unknown outcome.
+    const until = Date.now() + 1200000
     while (Date.now() < until) {
       try { result = JSON.parse(fs.readFileSync(path.join(directory, 'result.json'), 'utf8')) } catch {}
       if (result?.phase !== previous && result?.phase) { console.log(`${result.progress}% ${result.message}`); previous = result.phase }

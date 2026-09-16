@@ -5,7 +5,7 @@ import path from 'node:path'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { stageProfile } from '../lib/install-profile.js'
+import { installProfile } from '../lib/install-profile.js'
 import { resolveInstallRuntime } from '../lib/install-runtime.js'
 import { attachControl, waitForJson } from '../installer/bin/native-control.mjs'
 const [cli, archive, nextArchive] = process.argv.slice(2)
@@ -15,8 +15,7 @@ const home = path.join(userDirectory, '.dsh'), profile = path.join(home, 'profil
 const repo = fs.realpathSync('.'), runtime = resolveInstallRuntime(repo)
 const prep = path.join(root, 'prepare'); fs.mkdirSync(prep)
 fs.copyFileSync(archive, path.join(prep, 'release.tgz'))
-const staged = await stageProfile({ profile, directory: prep, cli, targetVersion: '1.5.5', runtime })
-fs.mkdirSync(path.dirname(profile), { recursive: true }); fs.renameSync(staged, profile)
+await installProfile({ profile, directory: prep, cli, targetVersion: '1.5.5', runtime })
 const log = fs.openSync(path.join(root, 'host.log'), 'a')
 const child = spawn(process.execPath, [cli, 'web', '--port', '7380', '--no-open'], { cwd: root,
   env: { ...process.env, HOME: userDirectory, USERPROFILE: userDirectory, DSH_HOME: home, DSH_PORT: '7380', WECHAT_GATE_PORT: '7392', WECHAT_GATE_LOCAL_PORT: '7393' },

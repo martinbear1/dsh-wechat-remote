@@ -1,11 +1,11 @@
 /* Generated from the shared plugin installation sources. */
 
 // src/update-worker.ts
-import fs3 from "node:fs";
-import path3 from "node:path";
+import fs4 from "node:fs";
+import path4 from "node:path";
 import http from "node:http";
-import { spawn as spawn3 } from "node:child_process";
-import { createHash as createHash2, createPublicKey } from "node:crypto";
+import { spawn as spawn4 } from "node:child_process";
+import { createHash, createPublicKey } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 // src/secure-file.ts
@@ -76,62 +76,70 @@ function writePrivateJsonAtomic(file, value) {
 // src/install-profile.ts
 import fs from "node:fs";
 import path from "node:path";
-import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
-
-// src/install-runtime.ts
-var INSTALL_PNPM_VERSION = "11.22.0";
-
-// src/install-profile.ts
+import { spawn, execFile } from "node:child_process";
 var PLUGIN_PACKAGE = "@harness-remote/dsh-wechat-remote";
 function safeProfileName(value) {
   return /^[A-Za-z0-9_-]{1,80}$/.test(value);
 }
-var hash = (file) => createHash("sha256").update(fs.readFileSync(file)).digest("hex");
-function assertRelocatableProfile(root) {
-  const walk = (directory) => {
-    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-      const file = path.join(directory, entry.name);
-      if (entry.isSymbolicLink()) {
-        const relative = path.relative(root, fs.realpathSync(file));
-        if (path.isAbsolute(fs.readlinkSync(file)) || !relative || relative.startsWith("..") || path.isAbsolute(relative)) {
-          throw new Error("\u63D2\u4EF6\u4F9D\u8D56\u5305\u542B\u4E0D\u53EF\u8FC1\u79FB\u7684\u94FE\u63A5\uFF0C\u672A\u4FEE\u6539\u5F53\u524D\u5B89\u88C5\u3002");
-        }
-      } else if (entry.isDirectory()) walk(file);
+function backupProfile(profile, backup) {
+  if (fs.existsSync(backup)) throw new Error("\u672C\u6B21\u5B89\u88C5\u5907\u4EFD\u5DF2\u5B58\u5728\uFF0C\u672A\u8986\u76D6\u3002");
+  fs.cpSync(profile, backup, {
+    recursive: true,
+    dereference: false,
+    verbatimSymlinks: true,
+    mode: fs.constants.COPYFILE_FICLONE,
+    filter(source, target) {
+      if (!fs.lstatSync(source).isSymbolicLink()) return true;
+      const type = process.platform === "win32" ? fs.statSync(source, { throwIfNoEntry: false })?.isDirectory() ? "junction" : "file" : void 0;
+      fs.symlinkSync(fs.readlinkSync(source), target, type);
+      return false;
     }
-  };
-  walk(root);
+  });
 }
 function installToolPath(directory, runtime) {
   const bin = path.join(directory, "tool-bin");
   fs.mkdirSync(bin, { mode: 448 });
-  const runner = path.join(bin, "pnpm-run.cjs");
-  fs.writeFileSync(runner, `require('node:child_process').spawnSync(${JSON.stringify(runtime.executable)},[${JSON.stringify(runtime.cli)},...process.argv.slice(2)],{stdio:'inherit',shell:false,windowsHide:true}).status===0?process.exit(0):process.exit(1)
-`, { mode: 384 });
   if (process.platform === "win32") {
-    if (/["\r\n]/.test(runtime.executable)) throw new Error("Node \u5B89\u88C5\u8DEF\u5F84\u4E0D\u53D7\u652F\u6301\u3002");
-    fs.writeFileSync(path.join(bin, "pnpm.cmd"), `@echo off\r
-"${runtime.executable.replace(/%/g, "%%")}" "%~dp0pnpm-run.cjs" %*\r
-`, { mode: 448 });
+    if (/["\r\n]/.test(runtime.executable + runtime.cli)) throw new Error("\u5B89\u88C5\u5DE5\u5177\u8DEF\u5F84\u5305\u542B\u65E0\u6548\u5B57\u7B26\u3002");
+    fs.writeFileSync(path.join(bin, "pnpm.cmd"), '@echo off\r\nsetlocal DisableDelayedExpansion\r\n"%HARNESS_INSTALL_NODE%" "%HARNESS_INSTALL_PNPM%" %*\r\n', { mode: 448 });
   } else {
-    const quote = (s) => "'" + s.replace(/'/g, `'"'"'`) + "'";
-    fs.writeFileSync(path.join(bin, "pnpm"), `#!/bin/sh
-exec ${quote(runtime.executable)} ${quote(runner)} "$@"
-`, { mode: 448 });
+    fs.writeFileSync(path.join(bin, "pnpm"), '#!/bin/sh\nexec "$HARNESS_INSTALL_NODE" "$HARNESS_INSTALL_PNPM" "$@"\n', { mode: 448 });
   }
   return bin;
 }
-function runNativePlugin(cli, profile, home, toolPath, runtime, logFile) {
-  if (!safeProfileName(profile)) throw new Error("\u65E0\u6548\u7684 DSH profile \u540D\u79F0\u3002");
+var NativeInstallError = class extends Error {
+  constructor(message, mayStillBeRunning = false) {
+    super(message);
+    this.mayStillBeRunning = mayStillBeRunning;
+    this.name = "NativeInstallError";
+  }
+};
+function runNativePlugin(cli, profile, home, toolPath, runtime, logFile, archiveName, timeoutMs = 6e5) {
+  if (!safeProfileName(profile) || !/^harness-remote-[\w.+-]+\.tgz$/.test(archiveName)) throw new Error("\u65E0\u6548\u7684\u5B89\u88C5\u76EE\u6807\u3002");
   return new Promise((resolve, reject) => {
     const log = fs.openSync(logFile, "a", 384);
+    const env = { ...process.env };
+    const pathKey = Object.keys(env).find((key) => key.toLowerCase() === "path");
+    const inheritedPath = pathKey ? env[pathKey] : "";
+    if (process.platform === "win32") {
+      for (const key of Object.keys(env)) if (key.toLowerCase() === "path") delete env[key];
+    }
+    Object.assign(env, {
+      DSH_HOME: home,
+      PATH: toolPath + path.delimiter + (inheritedPath || ""),
+      HARNESS_INSTALL_NODE: runtime.executable,
+      HARNESS_INSTALL_PNPM: runtime.cli,
+      CI: "true",
+      COREPACK_ENABLE_AUTO_PIN: "0",
+      npm_config_manage_package_manager_versions: "false"
+    });
     const child = spawn(runtime.executable, [
       cli,
       "plugin",
       "--profile",
       profile,
       "add",
-      "file:harness-remote-update.tgz",
+      `file:${archiveName}`,
       "--ignore-scripts",
       "--config.frozen-lockfile=false",
       "--prefer-offline",
@@ -141,78 +149,127 @@ function runNativePlugin(cli, profile, home, toolPath, runtime, logFile) {
       cwd: home,
       shell: false,
       windowsHide: true,
+      detached: process.platform !== "win32",
       stdio: ["ignore", log, log],
-      env: {
-        ...process.env,
-        DSH_HOME: home,
-        PATH: toolPath + path.delimiter + (process.env.PATH || ""),
-        CI: "true",
-        COREPACK_ENABLE_AUTO_PIN: "0",
-        npm_config_manage_package_manager_versions: "false"
-      }
+      env
     });
     fs.closeSync(log);
+    let finished = false, terminating = false, closed = false, terminationTimer;
+    const fail = (message, uncertain = false) => finish(new NativeInstallError(`${message} \u5B89\u88C5\u65E5\u5FD7\uFF1A${logFile}`, uncertain));
+    const finish = (error) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      clearTimeout(terminationTimer);
+      error ? reject(error) : resolve();
+    };
     const timer = setTimeout(() => {
-      child.kill();
-      reject(new Error("\u4E0B\u8F7D\u6216\u5B89\u88C5\u8D85\u65F6\uFF0C\u539F\u63D2\u4EF6\u672A\u66FF\u6362\u3002"));
-    }, 24e4);
-    child.once("error", () => {
-      clearTimeout(timer);
-      reject(new Error("\u65E0\u6CD5\u542F\u52A8 DSH \u539F\u751F\u5B89\u88C5\u7A0B\u5E8F\u3002"));
-    });
-    child.once("close", (code) => {
-      clearTimeout(timer);
-      code === 0 ? resolve() : reject(new Error("\u5B89\u88C5\u672A\u5B8C\u6210\uFF0C\u539F\u63D2\u4EF6\u672A\u66FF\u6362\uFF1B\u8BE6\u60C5\u5DF2\u4FDD\u7559\u5728\u672C\u673A\u5B89\u88C5\u65E5\u5FD7\u3002"));
+      if (closed) return;
+      terminating = true;
+      terminationTimer = setTimeout(() => fail("\u5B89\u88C5\u8D85\u65F6\uFF0C\u5C1A\u4E0D\u80FD\u786E\u8BA4\u5B89\u88C5\u8FDB\u7A0B\u5DF2\u9000\u51FA\uFF1B\u672A\u81EA\u52A8\u56DE\u9000\uFF0C\u8BF7\u52FF\u91CD\u590D\u5B89\u88C5\u3002", true), 15e3);
+      if (process.platform === "win32") {
+        if (!child.pid) return fail("\u5B89\u88C5\u7A0B\u5E8F\u672A\u542F\u52A8\u3002");
+        execFile(
+          path.join(process.env.SystemRoot || "C:\\Windows", "System32", "taskkill.exe"),
+          ["/PID", String(child.pid), "/T", "/F"],
+          { windowsHide: true, timeout: 1e4 },
+          (error) => {
+            if (error) fail("\u5B89\u88C5\u8D85\u65F6\uFF0C\u65E0\u6CD5\u786E\u8BA4\u5B89\u88C5\u8FDB\u7A0B\u6811\u5DF2\u9000\u51FA\uFF1B\u672A\u81EA\u52A8\u56DE\u9000\uFF0C\u8BF7\u52FF\u91CD\u590D\u5B89\u88C5\u3002", true);
+            else if (closed) fail("\u4E0B\u8F7D\u6216\u5B89\u88C5\u8D85\u65F6\uFF0C\u5B89\u88C5\u8FDB\u7A0B\u5DF2\u505C\u6B62\u3002");
+            else child.once("close", () => fail("\u4E0B\u8F7D\u6216\u5B89\u88C5\u8D85\u65F6\uFF0C\u5B89\u88C5\u8FDB\u7A0B\u5DF2\u505C\u6B62\u3002"));
+          }
+        );
+      } else {
+        try {
+          if (child.pid) process.kill(-child.pid, "SIGKILL");
+        } catch (error) {
+          if (error.code !== "ESRCH") return fail("\u65E0\u6CD5\u505C\u6B62\u8D85\u65F6\u7684\u5B89\u88C5\u8FDB\u7A0B\uFF1B\u672A\u81EA\u52A8\u56DE\u9000\u3002", true);
+        }
+        if (closed) fail("\u4E0B\u8F7D\u6216\u5B89\u88C5\u8D85\u65F6\uFF0C\u5B89\u88C5\u8FDB\u7A0B\u5DF2\u505C\u6B62\u3002");
+        else child.once("close", () => fail("\u4E0B\u8F7D\u6216\u5B89\u88C5\u8D85\u65F6\uFF0C\u5B89\u88C5\u8FDB\u7A0B\u5DF2\u505C\u6B62\u3002"));
+      }
+    }, timeoutMs);
+    child.once("error", (error) => fail(`\u65E0\u6CD5\u542F\u52A8 DSH \u539F\u751F\u5B89\u88C5\u7A0B\u5E8F\uFF08${error.code || error.name}\uFF09\u3002`));
+    child.once("close", (code, signal) => {
+      closed = true;
+      if (terminating) return;
+      if (code === 0) finish();
+      else fail(`DSH \u539F\u751F\u5B89\u88C5\u672A\u5B8C\u6210\uFF08${signal ? `\u4FE1\u53F7 ${signal}` : `\u9000\u51FA\u7801 ${code}`}\uFF09\u3002`);
     });
   });
 }
-async function stageProfile(job) {
-  const scope = path.basename(job.profile);
-  if (!safeProfileName(scope) || !fs.statSync(job.directory).isDirectory()) throw new Error("\u5B89\u88C5\u76EE\u6807\u4E0D\u660E\u786E\u3002");
-  const stagingHome = path.join(job.directory, "staging-home"), staged = path.join(stagingHome, "profiles", scope);
-  fs.mkdirSync(staged, { recursive: true, mode: 448 });
-  if (fs.existsSync(job.profile)) {
-    if (fs.lstatSync(job.profile).isSymbolicLink() || fs.realpathSync(job.profile) !== path.resolve(job.profile)) throw new Error("\u4E0D\u652F\u6301\u81EA\u52A8\u66FF\u6362\u94FE\u63A5\u5F62\u5F0F\u7684 profile\u3002");
-    fs.cpSync(job.profile, staged, {
-      recursive: true,
-      dereference: false,
-      filter: (p) => !["node_modules", ".harness-remote-update.lock"].includes(path.basename(p))
-    });
-  }
-  let before = null;
-  const filename = path.join(staged, "package.json");
-  if (fs.existsSync(filename)) {
-    before = JSON.parse(fs.readFileSync(filename, "utf8"));
-    for (const [name, spec] of Object.entries(before.dependencies || {})) {
-      if (name !== PLUGIN_PACKAGE && !/^[~^]?\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(String(spec))) throw new Error("\u5176\u4ED6\u63D2\u4EF6\u4F7F\u7528\u4E86\u672C\u5730\u94FE\u63A5\u6216\u7279\u6B8A\u6765\u6E90\uFF0C\u672A\u4FEE\u6539\u5F53\u524D\u5B89\u88C5\u3002");
-    }
-    for (const e of fs.readdirSync(staged, { withFileTypes: true })) if (e.isSymbolicLink()) throw new Error("profile \u914D\u7F6E\u5305\u542B\u94FE\u63A5\uFF0C\u672A\u4FEE\u6539\u5F53\u524D\u5B89\u88C5\u3002");
-    if (before.packageManager && !/^pnpm@\d+\.\d+\.\d+(?:\+.*)?$/.test(before.packageManager)) throw new Error("\u5F53\u524D profile \u4F7F\u7528\u4E86\u5176\u4ED6\u5305\u7BA1\u7406\u5668\uFF0C\u672A\u4FEE\u6539\u5B89\u88C5\u3002");
-    writePrivateJsonAtomic(filename, { ...before, dependencies: {
-      ...before.dependencies,
-      [PLUGIN_PACKAGE]: "file:harness-remote-update.tgz"
-    }, packageManager: `pnpm@${INSTALL_PNPM_VERSION}` });
-  }
-  fs.copyFileSync(path.join(job.directory, "release.tgz"), path.join(staged, "harness-remote-update.tgz"));
+async function installProfile(job) {
+  const scope = path.basename(job.profile), home = path.dirname(path.dirname(job.profile));
+  if (!safeProfileName(scope) || path.dirname(job.profile) !== path.join(home, "profiles") || !/^[\w.+-]{1,80}$/.test(job.targetVersion)) throw new Error("\u5B89\u88C5\u76EE\u6807\u4E0D\u660E\u786E\u3002");
+  fs.mkdirSync(job.profile, { recursive: true, mode: 448 });
+  const archiveName = `harness-remote-${job.targetVersion}.tgz`;
+  fs.copyFileSync(path.join(job.directory, "release.tgz"), path.join(job.profile, archiveName));
   const tools = installToolPath(job.directory, job.runtime);
-  await runNativePlugin(job.cli, scope, stagingHome, tools, job.runtime, path.join(job.directory, "install.log"));
-  const installed = fs.realpathSync(path.join(staged, "node_modules", PLUGIN_PACKAGE));
-  const relative = path.relative(staged, installed);
-  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("\u6682\u5B58\u63D2\u4EF6\u4E0D\u5728\u5B89\u88C5\u76EE\u5F55\u5185\u3002");
+  await runNativePlugin(job.cli, scope, home, tools, job.runtime, path.join(job.directory, "install.log"), archiveName);
+  const installed = path.join(job.profile, "node_modules", PLUGIN_PACKAGE);
   if (JSON.parse(fs.readFileSync(path.join(installed, "package.json"), "utf8")).version !== job.targetVersion) throw new Error("\u5B89\u88C5\u540E\u63D2\u4EF6\u7248\u672C\u4E0D\u5339\u914D\u3002");
-  const after = JSON.parse(fs.readFileSync(filename, "utf8"));
+  const after = JSON.parse(fs.readFileSync(path.join(job.profile, "package.json"), "utf8"));
   if (!after.dsh?.profile?.bundles?.includes(PLUGIN_PACKAGE)) throw new Error("DSH \u5C1A\u672A\u5C06\u63D2\u4EF6\u6CE8\u518C\u4E3A\u539F\u751F profile \u5C42\u3002");
-  for (const name of Object.keys(before?.dependencies || {})) if (name !== PLUGIN_PACKAGE) {
-    if (hash(path.join(job.profile, "node_modules", name, "package.json")) !== hash(path.join(staged, "node_modules", name, "package.json"))) throw new Error("\u5B89\u88C5\u8BD5\u56FE\u6539\u53D8\u5176\u4ED6\u63D2\u4EF6\uFF0C\u539F\u5B89\u88C5\u4FDD\u6301\u4E0D\u53D8\u3002");
+}
+
+// src/install-runtime.ts
+import fs2 from "node:fs";
+import path2 from "node:path";
+import { spawn as spawn2 } from "node:child_process";
+var INSTALL_PNPM_VERSION = "11.22.0";
+async function pinInstallRuntime(runtime, directory) {
+  let root = path2.dirname(runtime.cli);
+  while (!fs2.existsSync(path2.join(root, "package.json"))) {
+    const parent = path2.dirname(root);
+    if (parent === root) throw new Error("\u65E0\u6CD5\u5B9A\u4F4D\u5B89\u88C5\u5DE5\u5177\u5305\u3002");
+    root = parent;
   }
-  assertRelocatableProfile(staged);
-  return staged;
+  const manifest = JSON.parse(fs2.readFileSync(path2.join(root, "package.json"), "utf8"));
+  if (manifest.name !== "pnpm" || manifest.version !== runtime.version) throw new Error("\u5B89\u88C5\u5DE5\u5177\u7248\u672C\u4E0D\u4E00\u81F4\u3002");
+  const target = path2.join(directory, "install-runtime");
+  if (fs2.existsSync(target)) throw new Error("\u672C\u6B21\u5B89\u88C5\u5DE5\u5177\u76EE\u5F55\u5DF2\u5B58\u5728\u3002");
+  fs2.cpSync(root, target, { recursive: true, dereference: false, verbatimSymlinks: true, mode: fs2.constants.COPYFILE_FICLONE });
+  const pinned = { ...runtime, cli: path2.join(target, path2.relative(root, runtime.cli)) };
+  await verifyInstallRuntime(pinned);
+  return pinned;
+}
+function verifyInstallRuntime(runtime) {
+  return new Promise((resolve, reject) => {
+    const child = spawn2(runtime.executable, [runtime.cli, "--version"], {
+      windowsHide: true,
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, COREPACK_ENABLE_AUTO_PIN: "0", npm_config_manage_package_manager_versions: "false" }
+    });
+    let stdout = "", size = 0, settled = false;
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      error ? reject(error) : resolve();
+    };
+    const timer = setTimeout(() => {
+      child.kill();
+      finish(new Error("\u5B89\u88C5\u5DE5\u5177\u542F\u52A8\u8D85\u65F6\uFF0C\u672A\u4FEE\u6539\u63D2\u4EF6\u3002"));
+    }, 15e3);
+    child.stdout.on("data", (b) => {
+      size += b.length;
+      if (size > 16384) {
+        child.kill();
+        finish(new Error("\u5B89\u88C5\u5DE5\u5177\u54CD\u5E94\u5F02\u5E38\u3002"));
+      } else stdout += b.toString();
+    });
+    child.stderr.on("data", () => {
+    });
+    child.once("error", () => finish(new Error("\u65E0\u6CD5\u542F\u52A8\u5B89\u88C5\u5DE5\u5177\uFF0C\u672A\u4FEE\u6539\u63D2\u4EF6\u3002")));
+    child.once("close", (code) => finish(code === 0 && stdout.trim() === runtime.version ? void 0 : new Error("\u5B89\u88C5\u5DE5\u5177\u8FD0\u884C\u9A8C\u8BC1\u5931\u8D25\uFF0C\u672A\u4FEE\u6539\u63D2\u4EF6\u3002")));
+  });
 }
 
 // src/install-lifecycle.ts
-import fs2 from "node:fs";
-import path2 from "node:path";
-import { execFileSync as execFileSync2, spawn as spawn2 } from "node:child_process";
+import fs3 from "node:fs";
+import path3 from "node:path";
+import { execFileSync as execFileSync2, spawn as spawn3 } from "node:child_process";
 var serviceName = (s) => /^[A-Za-z0-9_.@-]{1,180}$/.test(s);
 function run(command, args) {
   return execFileSync2(command, args, { encoding: "utf8", windowsHide: true, timeout: 15e3, maxBuffer: 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] }).trim();
@@ -220,7 +277,7 @@ function run(command, args) {
 function validateManager(value) {
   if (value.kind === "process") return;
   if (value.kind === "systemd" && process.platform === "linux" && serviceName(value.unit) && value.unit.endsWith(".service")) return;
-  if (value.kind === "launchd" && process.platform === "darwin" && serviceName(value.label) && /^gui\/\d+$/.test(value.domain) && value.domain === `gui/${process.getuid?.()}` && path2.isAbsolute(value.plist) && fs2.statSync(value.plist).isFile()) return;
+  if (value.kind === "launchd" && process.platform === "darwin" && serviceName(value.label) && /^gui\/\d+$/.test(value.domain) && value.domain === `gui/${process.getuid?.()}` && path3.isAbsolute(value.plist) && fs3.statSync(value.plist).isFile()) return;
   throw new Error("\u65E0\u6CD5\u786E\u8BA4\u539F\u540E\u53F0\u670D\u52A1\uFF0C\u672A\u505C\u6B62 DSH\u3002");
 }
 function stopManagedHost(manager) {
@@ -236,7 +293,7 @@ function startManagedHost(manager) {
   else throw new Error("\u666E\u901A DSH \u8FDB\u7A0B\u5FC5\u987B\u7531\u539F\u73AF\u5883\u542F\u52A8\u3002");
 }
 function finishUpdateWorker(manager, directory) {
-  const id = path2.basename(directory);
+  const id = path3.basename(directory);
   if (manager?.kind !== "launchd" || !/^[a-f0-9]{32}$/.test(id)) return;
   try {
     run("/bin/launchctl", ["remove", `dsh.wechat.update.${id}`]);
@@ -247,21 +304,21 @@ function finishUpdateWorker(manager, directory) {
 // src/update-worker.ts
 function releaseOwnedUpdateLock(lock, id) {
   try {
-    if (fs3.readFileSync(lock, "utf8") === id) fs3.unlinkSync(lock);
+    if (fs4.readFileSync(lock, "utf8") === id) fs4.unlinkSync(lock);
   } catch {
   }
 }
 var wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-var hashFile = (f) => createHash2("sha256").update(fs3.readFileSync(f)).digest("hex");
+var hashFile = (f) => createHash("sha256").update(fs4.readFileSync(f)).digest("hex");
 function within(parent, child) {
-  const relative = path3.relative(parent, child);
-  return Boolean(relative) && !relative.startsWith("..") && !path3.isAbsolute(relative);
+  const relative = path4.relative(parent, child);
+  return Boolean(relative) && !relative.startsWith("..") && !path4.isAbsolute(relative);
 }
 function safePlainDirectory(p) {
-  if (!fs3.statSync(p).isDirectory() || fs3.lstatSync(p).isSymbolicLink() || fs3.realpathSync(p) !== path3.resolve(p)) throw new Error("\u5B89\u88C5\u76EE\u5F55\u4E0D\u662F\u53EF\u5B89\u5168\u66FF\u6362\u7684\u72EC\u7ACB\u76EE\u5F55");
+  if (!fs4.statSync(p).isDirectory() || fs4.lstatSync(p).isSymbolicLink() || fs4.realpathSync(p) !== path4.resolve(p)) throw new Error("\u5B89\u88C5\u76EE\u5F55\u4E0D\u662F\u53EF\u5B89\u5168\u66FF\u6362\u7684\u72EC\u7ACB\u76EE\u5F55");
 }
 function validateJob(job) {
-  if (!/^[a-f0-9]{32}$/.test(job.id) || path3.basename(job.directory) !== job.id || !within(path3.join(job.home, "harness-remote-updates"), job.directory) || !within(path3.join(job.home, "profiles"), job.profile) || path3.dirname(job.profile) !== path3.join(job.home, "profiles") || !within(job.home, job.stateFile) || !Number.isInteger(job.parentPid) || job.parentPid < 1 || ![job.webPort, job.gatePort, job.localPort].every((p) => Number.isInteger(p) && p > 0 && p <= 65535) || !job.argv.includes(job.cli) || !job.argv.includes("web") || !/^[\w.+-]{1,80}$/.test(job.targetVersion)) throw new Error("\u66F4\u65B0\u4EFB\u52A1\u8303\u56F4\u6821\u9A8C\u5931\u8D25");
+  if (!/^[a-f0-9]{32}$/.test(job.id) || path4.basename(job.directory) !== job.id || !within(path4.join(job.home, "harness-remote-updates"), job.directory) || !within(path4.join(job.home, "profiles"), job.profile) || path4.dirname(job.profile) !== path4.join(job.home, "profiles") || !within(job.home, job.stateFile) || !Number.isInteger(job.parentPid) || job.parentPid < 1 || ![job.webPort, job.gatePort, job.localPort].every((p) => Number.isInteger(p) && p > 0 && p <= 65535) || job.argv[0] !== job.cli || !/^[\w.+-]{1,80}$/.test(job.targetVersion)) throw new Error("\u66F4\u65B0\u4EFB\u52A1\u8303\u56F4\u6821\u9A8C\u5931\u8D25");
   safePlainDirectory(job.profile);
   safePlainDirectory(job.directory);
   if (job.identityFile && !within(job.home, job.identityFile)) throw new Error("\u8282\u70B9\u8EAB\u4EFD\u6587\u4EF6\u4E0D\u5C5E\u4E8E\u5F53\u524D DSH");
@@ -270,7 +327,7 @@ function validateJob(job) {
     if (u.protocol !== "http:" || u.hostname !== "127.0.0.1" || !u.port || u.username || u.password || u.pathname !== "/" || u.search || u.hash) throw new Error("\u5B89\u88C5\u63A7\u5236\u5730\u5740\u65E0\u6548");
     validateManager(job.manager);
   }
-  for (const f of [job.executable, job.cli, job.pnpm, ...job.previousVersion === "0.0.0" ? [] : [job.stateFile]]) if (!fs3.statSync(f).isFile()) throw new Error("\u5B89\u88C5\u8FD0\u884C\u65F6\u5DF2\u53D8\u5316");
+  for (const f of [job.executable, job.cli, job.pnpm, ...job.previousVersion === "0.0.0" ? [] : [job.stateFile]]) if (!fs4.statSync(f).isFile()) throw new Error("\u5B89\u88C5\u8FD0\u884C\u65F6\u5DF2\u53D8\u5316");
 }
 async function control(job, operation, input = {}) {
   let res;
@@ -296,7 +353,7 @@ async function beforeRpc(job, method, payload = {}) {
   return job.controlOrigin ? control(job, "read", { method, payload }) : rpc(job, method, payload);
 }
 async function rpc(job, method, payload = {}, deadline) {
-  const state = JSON.parse(fs3.readFileSync(job.stateFile, "utf8"));
+  const state = JSON.parse(fs4.readFileSync(job.stateFile, "utf8"));
   const res = await fetch(`http://127.0.0.1:${job.gatePort}/api/${method}`, {
     method: "POST",
     headers: { authorization: `Bearer ${state.token}`, "content-type": "application/json", "x-harness-update-probe": job.statusToken },
@@ -311,41 +368,41 @@ async function rpc(job, method, payload = {}, deadline) {
 function durableSnapshot(job) {
   const result = {};
   const walk = (dir) => {
-    if (!fs3.existsSync(dir)) return;
-    for (const e of fs3.readdirSync(dir, { withFileTypes: true })) {
-      const file = path3.join(dir, e.name);
-      if (e.isSymbolicLink()) throw new Error("\u53D7\u4FDD\u62A4\u7684\u6570\u636E\u76EE\u5F55\u542B\u94FE\u63A5\uFF0C\u9700\u624B\u5DE5\u66F4\u65B0");
-      if (e.isDirectory()) walk(file);
-      else if (e.isFile()) result[path3.relative(job.home, file)] = hashFile(file);
+    if (!fs4.existsSync(dir)) return;
+    for (const e of fs4.readdirSync(dir, { withFileTypes: true })) {
+      const file = path4.join(dir, e.name);
+      if (e.isSymbolicLink()) result[path4.relative(job.home, file)] = createHash("sha256").update(fs4.readlinkSync(file)).digest("hex");
+      else if (e.isDirectory()) walk(file);
+      else if (e.isFile()) result[path4.relative(job.home, file)] = hashFile(file);
     }
   };
-  walk(path3.join(job.home, "sessions"));
-  walk(path3.join(job.home, "attachments"));
-  walk(path3.join(job.home, "harness-remote"));
-  for (const e of fs3.readdirSync(job.home, { withFileTypes: true })) {
+  walk(path4.join(job.home, "sessions"));
+  walk(path4.join(job.home, "attachments"));
+  walk(path4.join(job.home, "harness-remote"));
+  for (const e of fs4.readdirSync(job.home, { withFileTypes: true })) {
     if (e.isFile() && /(?:identity|settings|credentials|public|gate-wechat)/i.test(e.name) && !e.name.endsWith(".log")) {
-      const f = path3.join(job.home, e.name);
+      const f = path4.join(job.home, e.name);
       if (f === job.stateFile) continue;
       result[e.name] = hashFile(f);
     }
   }
-  if (fs3.existsSync(job.stateFile)) {
-    const state = JSON.parse(fs3.readFileSync(job.stateFile, "utf8"));
-    result["$binding"] = createHash2("sha256").update(JSON.stringify([state.token, state.wechatBindings])).digest("hex");
+  if (fs4.existsSync(job.stateFile)) {
+    const state = JSON.parse(fs4.readFileSync(job.stateFile, "utf8"));
+    result["$binding"] = createHash("sha256").update(JSON.stringify([state.token, state.wechatBindings])).digest("hex");
   }
   return result;
 }
 function assertPreserved(before, after) {
-  for (const [key, hash2] of Object.entries(before)) if (after[key] !== hash2) throw new Error("\u5347\u7EA7\u540E\u6570\u636E\u6821\u9A8C\u4E0D\u4E00\u81F4\uFF1B\u505C\u6B62\u81EA\u52A8\u64CD\u4F5C\u5E76\u4FDD\u7559\u5907\u4EFD");
+  for (const [key, hash] of Object.entries(before)) if (after[key] !== hash) throw new Error("\u5347\u7EA7\u540E\u6570\u636E\u6821\u9A8C\u4E0D\u4E00\u81F4\uFF1B\u505C\u6B62\u81EA\u52A8\u64CD\u4F5C\u5E76\u4FDD\u7559\u5907\u4EFD");
 }
 function migrateLegacyGrantOwner(job) {
-  if (job.previousVersion !== "1.5.5" || !job.identityFile || !fs3.existsSync(job.identityFile)) return;
-  const state = JSON.parse(fs3.readFileSync(job.stateFile, "utf8"));
+  if (job.previousVersion !== "1.5.5" || !job.identityFile || !fs4.existsSync(job.identityFile)) return;
+  const state = JSON.parse(fs4.readFileSync(job.stateFile, "utf8"));
   if (state.publicIdentityNodeId) return;
-  const identity = JSON.parse(fs3.readFileSync(job.identityFile, "utf8"));
+  const identity = JSON.parse(fs4.readFileSync(job.identityFile, "utf8"));
   const publicKey = createPublicKey(identity.privateKeyPem).export({ format: "der", type: "spki" });
   const savedKey = createPublicKey(identity.publicKeyPem).export({ format: "der", type: "spki" });
-  const nodeId = createHash2("sha256").update(publicKey).digest().subarray(0, 18).toString("base64url");
+  const nodeId = createHash("sha256").update(publicKey).digest().subarray(0, 18).toString("base64url");
   if (!publicKey.equals(savedKey) || identity.nodeId !== nodeId) throw new Error("\u65E7\u8282\u70B9\u8EAB\u4EFD\u6821\u9A8C\u672A\u901A\u8FC7\uFF0C\u672A\u8FC1\u79FB\u914D\u5BF9");
   writePrivateJsonAtomic(job.stateFile, { ...state, publicIdentityNodeId: nodeId });
 }
@@ -380,20 +437,20 @@ function start(job) {
     startManagedHost(job.manager);
     return;
   }
-  const log = fs3.openSync(path3.join(job.directory, "restart.log"), "a", 384);
-  const child = spawn3(job.executable, [...job.execArgv, ...job.argv], {
+  const log = fs4.openSync(path4.join(job.directory, "restart.log"), "a", 384);
+  const child = spawn4(job.executable, [...job.execArgv, ...job.argv], {
     cwd: job.cwd,
     env: { ...process.env, HARNESS_REMOTE_UPDATE_JOB: job.directory },
     stdio: ["ignore", log, log],
     detached: true,
     windowsHide: true
   });
-  fs3.closeSync(log);
+  fs4.closeSync(log);
   child.on("error", () => {
   });
   child.unref();
   if (!child.pid) throw new Error("\u65E0\u6CD5\u542F\u52A8\u539F DSH \u547D\u4EE4");
-  writePrivateJsonAtomic(path3.join(job.directory, "restarted-process.json"), { pid: child.pid, cli: job.cli, home: job.home, webPort: job.webPort });
+  writePrivateJsonAtomic(path4.join(job.directory, "restarted-process.json"), { pid: child.pid, cli: job.cli, home: job.home, webPort: job.webPort });
   return child;
 }
 async function stopOriginal(job) {
@@ -436,20 +493,20 @@ async function stopRestarted(child, timeoutMs = 3e4, forceTimeoutMs = 5e3) {
 }
 function captureCandidateLock(home, child) {
   if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
-  const filename = path3.join(home, ".credentials.yaml.lock");
+  const filename = path4.join(home, ".credentials.yaml.lock");
   try {
-    const info = fs3.lstatSync(filename);
+    const info = fs4.lstatSync(filename);
     if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.size > 32) return;
-    const value = fs3.readFileSync(filename, "utf8");
+    const value = fs4.readFileSync(filename, "utf8");
     let owned = value === `${child.pid}
 `;
     if (!owned && value === "" && process.platform === "linux") {
       const directory = `/proc/${child.pid}/fd`;
-      owned = fs3.readdirSync(directory).some((fd) => {
+      owned = fs4.readdirSync(directory).some((fd) => {
         try {
-          const file = path3.join(directory, fd);
-          if (fs3.readlinkSync(file) !== filename) return false;
-          const opened = fs3.statSync(file);
+          const file = path4.join(directory, fd);
+          if (fs4.readlinkSync(file) !== filename) return false;
+          const opened = fs4.statSync(file);
           return opened.dev === info.dev && opened.ino === info.ino;
         } catch {
           return false;
@@ -463,13 +520,13 @@ function captureCandidateLock(home, child) {
 function retireCandidateLock(lock, child, directory) {
   if (!lock || child.pid !== lock.pid || child.exitCode === null && child.signalCode === null) return;
   try {
-    const info = fs3.lstatSync(lock.filename);
+    const info = fs4.lstatSync(lock.filename);
     if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.dev !== lock.dev || info.ino !== lock.ino || info.size > 32) return;
-    const value = fs3.readFileSync(lock.filename, "utf8");
+    const value = fs4.readFileSync(lock.filename, "utf8");
     if (value !== "" && value !== `${lock.pid}
 `) return;
-    const saved = path3.join(directory, "candidate-credentials-lock.before-rollback");
-    if (!fs3.existsSync(saved)) fs3.renameSync(lock.filename, saved);
+    const saved = path4.join(directory, "candidate-credentials-lock.before-rollback");
+    if (!fs4.existsSync(saved)) fs4.renameSync(lock.filename, saved);
   } catch {
   }
 }
@@ -487,20 +544,15 @@ async function stopChild(pid) {
 }
 async function executeUpdate(job, progress, quiesce) {
   validateJob(job);
-  let staged = "";
-  const previous = path3.join(job.directory, "profile-before");
+  const previous = path4.join(job.directory, "profile-before");
   const emit = (phase, n, message) => progress({ phase, progress: n, message, terminal: false });
-  let stopped = false, disposed = false, swapped = false, newChild;
+  let stopped = false, disposed = false, modified = false, newChild;
   let before = {}, sessionIds = [], readableIds = [];
   try {
-    emit("staging", 25, "\u6682\u5B58\u66F4\u65B0\u4E0E\u4F9D\u8D56\uFF0C\u5F53\u524D\u8282\u70B9\u4ECD\u53EF\u4F7F\u7528");
-    staged = await stageProfile({
-      profile: job.profile,
-      directory: job.directory,
-      cli: job.cli,
-      targetVersion: job.targetVersion,
-      runtime: { executable: job.executable, cli: job.pnpm, version: INSTALL_PNPM_VERSION }
-    });
+    emit("preparing", 25, "\u51C6\u5907\u5B89\u88C5\u5DE5\u5177\uFF0C\u5F53\u524D\u8282\u70B9\u4ECD\u53EF\u4F7F\u7528");
+    const runtime = await pinInstallRuntime({ executable: job.executable, cli: job.pnpm, version: INSTALL_PNPM_VERSION }, job.directory);
+    job.pnpm = runtime.cli;
+    writePrivateJsonAtomic(path4.join(job.directory, "job.json"), job);
     emit("checking", 50, "\u786E\u8BA4\u4F1A\u8BDD\u7A7A\u95F2\u5E76\u4FDD\u5B58\u72B6\u6001");
     const old = job.controlOrigin ? await control(job, "describe") : await describe(job);
     if (old.pluginVersion !== job.previousVersion) throw new Error("\u5F53\u524D\u63D2\u4EF6\u5728\u68C0\u67E5\u540E\u53D1\u751F\u53D8\u5316");
@@ -517,29 +569,17 @@ async function executeUpdate(job, progress, quiesce) {
     await quiesce();
     disposed = Boolean(job.controlOrigin);
     before = durableSnapshot(job);
-    writePrivateJsonAtomic(path3.join(job.directory, "before-hashes.json"), before);
-    emit("backup", 60, "\u5907\u4EFD\u914D\u7F6E\u4E0E\u6570\u636E");
-    const backup = path3.join(job.directory, "home-before");
-    fs3.mkdirSync(backup, { mode: 448 });
-    for (const entry of fs3.readdirSync(job.home, { withFileTypes: true })) {
-      if (["harness-remote-updates", "profiles"].includes(entry.name)) continue;
-      if (entry.isSymbolicLink()) throw new Error("\u6570\u636E\u76EE\u5F55\u5305\u542B\u5916\u90E8\u94FE\u63A5\uFF0C\u8BF7\u624B\u5DE5\u5907\u4EFD\u540E\u66F4\u65B0");
-      fs3.cpSync(path3.join(job.home, entry.name), path3.join(backup, entry.name), { recursive: true });
-    }
-    emit("restarting", 70, "\u6B63\u5728\u91CD\u542F\u5F53\u524D DSH\uFF0C\u8FDE\u63A5\u4F1A\u6682\u65F6\u65AD\u5F00");
+    writePrivateJsonAtomic(path4.join(job.directory, "before-hashes.json"), before);
+    emit("installing", 60, "\u6B63\u5728\u5B89\u88C5\u63D2\u4EF6\uFF0C\u5F53\u524D DSH \u8FDE\u63A5\u4F1A\u6682\u65F6\u65AD\u5F00");
     await stopOriginal(job);
     stopped = true;
     assertPreserved(before, durableSnapshot(job));
+    backupProfile(job.profile, previous);
     migrateLegacyGrantOwner(job);
     safePlainDirectory(job.profile);
-    fs3.renameSync(job.profile, previous);
-    try {
-      fs3.renameSync(staged, job.profile);
-      swapped = true;
-    } catch (error) {
-      fs3.renameSync(previous, job.profile);
-      throw error;
-    }
+    modified = true;
+    await installProfile({ profile: job.profile, directory: job.directory, cli: job.cli, targetVersion: job.targetVersion, runtime });
+    emit("restarting", 75, "\u5B89\u88C5\u5B8C\u6210\uFF0C\u6B63\u5728\u6062\u590D\u5F53\u524D DSH");
     newChild = start(job);
     emit("verifying", 85, "\u68C0\u67E5\u63D2\u4EF6\u7248\u672C\u3001\u8282\u70B9\u8EAB\u4EFD\u548C\u4F1A\u8BDD");
     await healthy(job, job.targetVersion);
@@ -548,15 +588,23 @@ async function executeUpdate(job, progress, quiesce) {
     const after = (await rpc(job, "session.list")).items.map((s) => s.sessionId).sort();
     if (JSON.stringify(after) !== JSON.stringify(sessionIds)) throw new Error("\u91CD\u542F\u540E\u4F1A\u8BDD\u5217\u8868\u4E0D\u4E00\u81F4");
     for (const id of readableIds) await rpc(job, "session.history", { sessionId: id, maxMessages: 1 });
-    writePrivateJsonAtomic(path3.join(job.directory, "verification-complete.json"), { id: job.id });
+    writePrivateJsonAtomic(path4.join(job.directory, "verification-complete.json"), { id: job.id });
     return { phase: "complete", progress: 100, message: "\u63D2\u4EF6\u66F4\u65B0\u5B8C\u6210\uFF0CDSH \u5DF2\u6062\u590D\uFF1B\u539F\u8282\u70B9\u65E0\u9700\u91CD\u65B0\u914D\u5BF9\u3002", terminal: true, ok: true };
   } catch (error) {
     let rollback = false;
-    writePrivateJsonAtomic(path3.join(job.directory, "failure.json"), {
+    writePrivateJsonAtomic(path4.join(job.directory, "failure.json"), {
       message: error instanceof Error ? error.message : "unknown",
       stack: error instanceof Error ? error.stack : void 0,
       cause: error instanceof Error && error.cause instanceof Error ? error.cause.message : void 0
     });
+    if (error instanceof NativeInstallError && error.mayStillBeRunning) return {
+      phase: "attention",
+      progress: 100,
+      message: error.message,
+      terminal: true,
+      ok: false,
+      rollback: false
+    };
     if (job.controlOrigin && !disposed) {
       try {
         disposed = (await control(job, "describe")).quiesced === true;
@@ -574,19 +622,19 @@ async function executeUpdate(job, progress, quiesce) {
           const ownedLock = captureCandidateLock(job.home, newChild);
           await stopRestarted(newChild);
           retireCandidateLock(ownedLock, newChild, job.directory);
-        } else if (swapped && job.manager && job.manager.kind !== "process") stopManagedHost(job.manager);
-        if (swapped) {
-          fs3.renameSync(job.profile, path3.join(job.directory, "profile-failed"));
-          fs3.renameSync(previous, job.profile);
+        } else if (modified && job.manager && job.manager.kind !== "process") stopManagedHost(job.manager);
+        if (modified) {
+          fs4.renameSync(job.profile, path4.join(job.directory, "profile-failed"));
+          fs4.renameSync(previous, job.profile);
         }
         start(job);
         await healthy(job, job.previousVersion);
         assertPreserved(before, durableSnapshot(job));
         rollback = true;
-        writePrivateJsonAtomic(path3.join(job.directory, "verification-complete.json"), { id: job.id });
+        writePrivateJsonAtomic(path4.join(job.directory, "verification-complete.json"), { id: job.id });
       } catch (rollbackError) {
         try {
-          writePrivateJsonAtomic(path3.join(job.directory, "rollback-failure.json"), {
+          writePrivateJsonAtomic(path4.join(job.directory, "rollback-failure.json"), {
             message: rollbackError instanceof Error ? rollbackError.message : "unknown",
             stack: rollbackError instanceof Error ? rollbackError.stack : void 0
           });
@@ -599,14 +647,14 @@ async function executeUpdate(job, progress, quiesce) {
   }
 }
 async function workerMain(filename) {
-  const job = JSON.parse(fs3.readFileSync(filename, "utf8"));
+  const job = JSON.parse(fs4.readFileSync(filename, "utf8"));
   validateJob(job);
   if (!job.controlOrigin && (process.ppid !== job.parentPid || !process.connected)) throw new Error("Updater requires its initiating parent");
   let status = { phase: "starting", progress: 20, message: "\u6B63\u5728\u51C6\u5907\u66F4\u65B0", terminal: false };
   const record = (value) => {
     status = value;
     try {
-      writePrivateJsonAtomic(path3.join(job.directory, "result.json"), value);
+      writePrivateJsonAtomic(path4.join(job.directory, "result.json"), value);
     } catch (error) {
       console.error("Update progress journal unavailable:", error.code || "write-failed");
     }
@@ -639,11 +687,11 @@ async function workerMain(filename) {
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   try {
     if (job.controlOrigin) {
-      writePrivateJsonAtomic(path3.join(job.directory, "worker-ready.json"), { id: job.id, origin: `http://127.0.0.1:${server.address().port}` });
+      writePrivateJsonAtomic(path4.join(job.directory, "worker-ready.json"), { id: job.id, origin: `http://127.0.0.1:${server.address().port}` });
       let authorized = false;
       for (let i = 0; i < 150; i++) {
         try {
-          authorized = JSON.parse(fs3.readFileSync(path3.join(job.directory, "authorized.json"), "utf8")).id === job.id;
+          authorized = JSON.parse(fs4.readFileSync(path4.join(job.directory, "authorized.json"), "utf8")).id === job.id;
         } catch {
         }
         if (authorized) break;
@@ -705,7 +753,7 @@ async function workerMain(filename) {
       message: "\u66F4\u65B0\u88AB\u5F02\u5E38\u4E2D\u65AD\uFF0C\u65E0\u6CD5\u786E\u8BA4\u6062\u590D\u7ED3\u679C\u3002\u8BF7\u4FDD\u7559\u4E3B\u673A\u66F4\u65B0\u76EE\u5F55\u5E76\u68C0\u67E5\u539F\u63D2\u4EF6\u5907\u4EFD\uFF0C\u4E0D\u8981\u5220\u9664\u8282\u70B9\u6216\u91CD\u590D\u5B89\u88C5\u3002"
     });
   }
-  const lock = path3.join(job.profile, ".harness-remote-update.lock");
+  const lock = path4.join(job.profile, ".harness-remote-update.lock");
   releaseOwnedUpdateLock(lock, job.id);
   if (job.controlOrigin) {
     try {
@@ -721,7 +769,7 @@ async function workerMain(filename) {
   }, 12e4);
   timer.unref();
 }
-if (process.argv[1] && path3.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (process.argv[1] && path4.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   void workerMain(process.argv[2]).catch(() => {
     process.exitCode = 1;
     if (process.connected) process.disconnect();

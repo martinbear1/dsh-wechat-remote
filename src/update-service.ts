@@ -178,14 +178,12 @@ export class PluginUpdateService {
       // Check actual native capabilities and restart ownership on every host.
       if (process.versions.electron) throw new Error('此启动方式尚不支持自动重启')
       currentHostManager()
-      if (!process.argv.includes('web') || process.argv.some(a => /(?:api.?key|password|secret|token)[= ]/i.test(a))
+      if (process.argv.some(a => /(?:api.?key|password|secret|token)[= ]/i.test(a))
           || process.execArgv.length) throw new Error('此启动方式不能安全自动重启，请手工更新')
       const cli = fs.realpathSync(process.argv[1])
       if (JSON.parse(fs.readFileSync(path.resolve(cli, '../../package.json'), 'utf8')).name !== '@deepseek-ai/dsh') throw new Error('无法确认 DSH 启动程序')
       const profile = path.join(adapterDshHome(), 'profiles', agentProfileScope())
       if (fs.realpathSync(profile) !== profile || !fs.realpathSync(ownRoot).startsWith(profile + path.sep)) throw new Error('插件不在可安全更新的独立 profile 中')
-      const manifest = JSON.parse(fs.readFileSync(path.join(profile, 'package.json'), 'utf8'))
-      if (manifest.packageManager && !/^pnpm@\d+\.\d+\.\d+(?:\+.*)?$/.test(manifest.packageManager)) throw new Error('此 profile 使用其他包管理器，未修改安装')
       assertNativeUpdateCapabilities(this.ctx)
       fs.accessSync(profile, fs.constants.W_OK)
       return { eligible: true, reason: '', profile, pnpm: resolveInstallRuntime(ownRoot).cli, cli }
@@ -231,7 +229,7 @@ export class PluginUpdateService {
       writePrivateJsonAtomic(path.join(directory, 'job.json'), job)
       writePrivateJsonAtomic(path.join(directory, 'package.json'), { type: 'module' })
       // Keep the worker's complete built-in-only module closure outside the
-      // profile that will be renamed. No model credentials serialized to disk.
+      // profile being updated. No model credentials serialized to disk.
       for (const name of ['update-worker.js', 'secure-file.js', 'install-profile.js', 'install-runtime.js', 'install-lifecycle.js']) fs.copyFileSync(path.join(ownRoot, 'lib', name), path.join(directory, name))
       await control(job, 'launch')
       let statusOrigin = ''

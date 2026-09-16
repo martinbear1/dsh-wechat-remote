@@ -10,7 +10,15 @@
 npx -y dsh-wechat-remote@latest
 ```
 
-首次安装、从 1.5.5 升级，均使用这条命令。无需另装 pnpm 或 Git；不会升级 DSH 本体。请先结束运行中的任务，安装器会备份配置、更新插件、重启 DSH 并尝试打开 WebUI，保留原节点配对与会话。
+首次安装和升级均使用这条命令。无需另装 pnpm 或 Git，不会升级 DSH 本体。请先结束运行中的任务；正常升级保留原节点配对和会话，并恢复 DSH 运行。
+
+Windows 的 CMD 和 PowerShell 也可以直接使用下面这一条，无需修改 PowerShell 的脚本执行策略：
+
+```powershell
+npx.cmd -y dsh-wechat-remote@latest
+```
+
+使用与 DSH 相同的系统账号。全局安装和 `npx @deepseek-ai/dsh web` 启动的 DSH 都可以使用；DSH 关闭时也可安装，安装器会使用当前终端默认的 DSH。自定义数据目录或配置的说明见 [安装器使用说明](installer/README.md)。
 
 主动安装不会仅因 DSH 版本或主机架构未登记验证而被拦截；安装器仍保留必要运行检查、安装包校验和失败回退。更新推荐与已验证范围单独判断。
 
@@ -20,13 +28,13 @@ npx -y dsh-wechat-remote@latest
 
 ## 兼容范围
 
-- 已验证：DSH `0.1.1-rc.2`、`0.1.2-rc.1`、`0.1.5-rc.1`；Windows x64、macOS Intel x64、Linux x64。
-- 自动恢复启动：普通 Node 进程、独立 macOS launchd 服务、Linux 用户级 systemd 服务。其他服务包装方式、ARM64 和未列出的 DSH 版本尚未验证，不盲目升级。
+- 本版安装与自动重启已验证：DSH `0.1.5-rc.1`，Windows x64、macOS Intel x64、Linux x64 和 Linux ARM64。未登记的 CPU 或 DSH 版本不会仅因缺少测试记录而被禁止安装或更新。
+- 自动恢复启动覆盖普通 Node 进程、独立 macOS launchd 服务和 Linux 用户级 systemd 服务。其他后台管理方式可能需要手动重启；安装器不会擅自停止归属不明的服务。
 - 安全局域网需要相应新版小程序；旧插件配旧小程序的行为以对应版本为准。公共 Wi-Fi 设备隔离、代理或网络封锁可能影响连接。
 - 安装需要能访问 npm；下载或检查失败不会绕过 TLS 校验。更新失败时尝试恢复原插件；无法确认恢复结果会保留本机备份并明确提示。
 
 [本版更新说明](RELEASE-NOTES.md)
 
-从插件 1.7.2 起，更新器不再仅因 DSH 版本较新而禁用升级；发布兼容插件后，可刷新检查并更新。尚未验证的新 DSH 仍不会被盲目当作兼容。若旧插件 1.7.1 在已升级的 DSH 0.1.5 上无法点击更新，先运行上面的安装命令过渡一次，无需降低 DSH 版本或重新配对。
+旧版插件若无法一键更新，先运行上面的安装命令过渡一次，无需降低 DSH 版本或重新配对。成功安装后，新版会接管后续更新；已有旧版更新器不会在安装前自动获得修复。
 
-插件与 npm 安装工具本版统一为 `1.7.5`。开发与验收范围见 [当前基线](docs/CURRENT-BASELINE.md)；小程序后续接入请先查阅 [1.7.2 已纳入功能与协议清单](docs/RELEASE-1.7.2-HANDOFF.md)。
+插件与 npm 安装工具本版统一为 `1.7.7`。需要绕过安装器时，可参考 [DSH 官方原生安装方式](docs/NATIVE-INSTALL.md)。开发与验收记录见 [1.7.7 工作记录](docs/INSTALLER-1.7.7-WORKLOG.md)。

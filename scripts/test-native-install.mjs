@@ -29,12 +29,32 @@ try {
   if (previousArchive) {
     backupProfile(profile, path.join(root, 'profile-backup'))
   }
+  // Real pnpm coexistence check: a local bundle and a relative external link
+  // stay anchored to this ORIGINAL profile, not to an installer staging copy.
+  fs.mkdirSync(profile, { recursive: true })
+  const localBundle = path.join(path.dirname(profile), 'fixture-bundle')
+  const linkedBundle = path.join(path.dirname(profile), 'fixture-linked')
+  for (const [dir, name] of [[localBundle, 'fixture-local-bundle'], [linkedBundle, 'fixture-linked-bundle']]) {
+    fs.mkdirSync(dir)
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name, version: '1.0.0', dsh: { bundle: { patch: './cordis.patch.yml' } } }))
+    fs.writeFileSync(path.join(dir, 'cordis.patch.yml'), '[]\n')
+  }
+  const file = path.join(profile, 'package.json')
+  const before = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file)) : { private: true, dsh: { profile: { bundles: [] } } }
+  before.dependencies = { ...before.dependencies, 'fixture-local-bundle': 'file:../fixture-bundle', 'fixture-linked-bundle': 'link:../fixture-linked' }
+  fs.writeFileSync(file, JSON.stringify(before))
   await installProfile({ profile, directory, cli, targetVersion: version, runtime })
   if (previousArchive) assert.equal(fs.readFileSync(path.join(profile, 'user-settings.json'), 'utf8'), '{"preserve":"existing user setting"}\n')
   const require = createRequire(path.join(profile, 'package.json'))
   const entry = require.resolve(PLUGIN_PACKAGE)
   assert(fs.existsSync(entry), 'installed package must resolve from the original profile')
   const manifest = JSON.parse(fs.readFileSync(path.join(profile, 'package.json'), 'utf8'))
+  assert.equal(manifest.dependencies['fixture-local-bundle'], 'file:../fixture-bundle')
+  assert.equal(manifest.dependencies['fixture-linked-bundle'], 'link:../fixture-linked')
+  assert(manifest.dsh.profile.bundles.includes('fixture-local-bundle'))
+  assert(manifest.dsh.profile.bundles.includes('fixture-linked-bundle'))
+  assert.equal(fs.realpathSync(path.join(profile, 'node_modules/fixture-linked-bundle')), fs.realpathSync(linkedBundle))
+  console.log('PASS real native pnpm preserves file/link sources and registers third-party bundles')
   assert(manifest.dsh.profile.bundles.includes(PLUGIN_PACKAGE), 'DSH must register its native bundle layer')
   const installedRoot = path.dirname(require.resolve(PLUGIN_PACKAGE + '/package.json'))
   const installedManifest = JSON.parse(fs.readFileSync(path.join(installedRoot, 'package.json'), 'utf8'))

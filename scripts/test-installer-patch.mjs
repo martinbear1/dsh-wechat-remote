@@ -3,6 +3,8 @@ import os from 'node:os'
 import path from 'node:path'
 import assert from 'node:assert/strict'
 import { attachControl } from '../installer/bin/native-control.mjs'
+import { verifyNativeRestore } from '../installer/lib/native-recovery.js'
+assert.equal(typeof verifyNativeRestore, 'function', 'standalone recovery bundle must load without external dependencies')
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'installer-patch-proof-'))
 try {
   for (const concurrent of [false, true]) {

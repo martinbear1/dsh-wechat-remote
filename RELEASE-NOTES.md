@@ -1,9 +1,9 @@
-# v1.7.6
+# v1.7.7
 
-- 改善 Windows、macOS 和 Linux 的插件安装，使用 npx 启动 DSH 时无需改为全局安装。
-- 修复 ARM64 设备插件一键更新被误拦截的问题，保留更新前检查和失败恢复保护。
-- 新增可选任务提醒：按需订阅下一次问答、审批或任务完成，并从通知返回对应会话。
+- 修复 Windows 部分中文路径下插件安装失败的问题。
+- 改善首次安装、旧版本升级和安装失败后的恢复，兼容全局安装及 NPX 启动的 DSH。
+- 优化 DSH 未启动时的安装与默认版本选择，并提供更明确的失败提示和日志位置。
 
-可在 WebUI 检查更新，或运行 `npx -y dsh-wechat-remote@latest`。升级前请结束运行中的任务；升级会重启 DSH，保留配对与会话，不改变 DSH 本体版本。旧版 ARM 插件若无法一键更新，请先运行上述命令升级一次。
+请先结束运行中的任务，再运行 `npx -y dsh-wechat-remote@latest`；Windows 推荐使用 `npx.cmd -y dsh-wechat-remote@latest`。正常升级保留配对与会话，不改变 DSH 本体版本。
 
-任务提醒需配合包含此功能的小程序版本，在设置中开启「订阅通知」，并在任务运行时主动订阅。
+旧版一键更新遇到安装错误时，可用上述命令升级。需要绕过自动安装器时，也可使用 [DSH 原生安装方式](https://github.com/martinbear1/dsh-wechat-remote/blob/main/docs/NATIVE-INSTALL.md)。

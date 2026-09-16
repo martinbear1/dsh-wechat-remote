@@ -1,3 +1,4 @@
+import { createRequire as recoveryRequire } from 'node:module'; const require = recoveryRequire(import.meta.url);
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;

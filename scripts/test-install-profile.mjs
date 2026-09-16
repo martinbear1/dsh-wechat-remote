@@ -61,13 +61,55 @@ try {
 
   const refreshedJob = path.join(root, 'refreshed-job'); fs.mkdirSync(refreshedJob)
   fs.writeFileSync(path.join(refreshedJob, 'release.tgz'), 'changed candidate bytes')
-  const refreshedName = 'harness-remote-1.7.7-' + createHash('sha256').update('changed candidate bytes').digest('hex') + '.tgz'
-  fs.writeFileSync(cli, `require('assert/strict').equal(process.argv[6],${JSON.stringify('file:' + refreshedName)})`)
+  const refreshedPrefix = 'harness-remote-1.7.7-' + createHash('sha256').update('changed candidate bytes').digest('hex')
+  const selectedSource = path.join(root, 'selected-source')
+  fs.writeFileSync(cli, `const assert=require('assert/strict'),fs=require('fs');
+    assert.equal(process.argv[6],${JSON.stringify('file:' + refreshedPrefix + '.tgz')});
+    fs.writeFileSync(${JSON.stringify(selectedSource)},process.argv[6].slice(5));`)
   await installProfile({ profile: active, directory: refreshedJob, cli, runtime, targetVersion: '1.7.7' })
+  const refreshedName = fs.readFileSync(selectedSource, 'utf8')
   assert.notEqual(refreshedName, archiveName)
   assert.equal(fs.readFileSync(path.join(active, archiveName), 'utf8'), 'test archive')
   assert.equal(fs.readFileSync(path.join(active, refreshedName), 'utf8'), 'changed candidate bytes')
   console.log('PASS changed same-version archives use distinct native sources without overwriting prior bytes')
+
+  const installedManifest = path.join(active, 'node_modules/@harness-remote/dsh-wechat-remote/package.json')
+  const originalPrefix = archiveName.slice(0, -4)
+  fs.writeFileSync(cli, `const fs=require('fs');
+    fs.writeFileSync(${JSON.stringify(selectedSource)},process.argv[6].slice(5));
+    fs.writeFileSync(${JSON.stringify(installedManifest)},JSON.stringify({version:'1.7.7'}));`)
+  const repeatNames = []
+  for (let i = 0; i < 2; i++) {
+    const repeatedJob = path.join(root, 'same-bytes-' + i); fs.mkdirSync(repeatedJob)
+    fs.writeFileSync(path.join(repeatedJob, 'release.tgz'), 'test archive')
+    await installProfile({ profile: active, directory: repeatedJob, cli, runtime, targetVersion: '1.7.7' })
+    const name = fs.readFileSync(selectedSource, 'utf8'); repeatNames.push(name)
+    assert.match(name, new RegExp('^' + originalPrefix + '-[a-f0-9]{16}\\.tgz$'))
+    assert.equal(fs.readFileSync(path.join(active, name), 'utf8'), 'test archive')
+  }
+  assert.notEqual(repeatNames[0], repeatNames[1], 'every same-version reinstall has a new source')
+  for (const [label, manifest] of [['older-version', '{"version":"1.7.6"}'], ['missing-manifest', null], ['malformed-json', '{invalid'], ['null-json', 'null']]) {
+    const candidateJob = path.join(root, label); fs.mkdirSync(candidateJob)
+    fs.writeFileSync(path.join(candidateJob, 'release.tgz'), 'test archive')
+    if (manifest === null) fs.unlinkSync(installedManifest)
+    else fs.writeFileSync(installedManifest, manifest)
+    await installProfile({ profile: active, directory: candidateJob, cli, runtime, targetVersion: '1.7.7' })
+    assert.match(fs.readFileSync(selectedSource, 'utf8'), new RegExp('^' + originalPrefix + '-[a-f0-9]{16}\\.tgz$'), label + ' cannot reuse an occupied source')
+  }
+  const exists = fs.existsSync
+  const racedJob = path.join(root, 'source-race'); fs.mkdirSync(racedJob)
+  fs.writeFileSync(path.join(racedJob, 'release.tgz'), 'test archive')
+  try {
+    fs.existsSync = function (filename) {
+      // Model another writer creating the default source after the first check.
+      if (filename === path.join(active, archiveName)) return false
+      return exists.call(this, filename)
+    }
+    await assert.rejects(installProfile({ profile: active, directory: racedJob, cli, runtime, targetVersion: '1.7.7' }), error => error.code === 'EEXIST')
+  } finally { fs.existsSync = exists }
+  assert(!fs.existsSync(path.join(racedJob, 'tool-bin')), 'exclusive source collision must stop before native add')
+  assert.equal(fs.readFileSync(path.join(active, archiveName), 'utf8'), 'test archive')
+  console.log('PASS occupied sources stay intact, including source races and missing/malformed installed manifests')
 
   const repairJob = path.join(root, 'repair-job'); fs.mkdirSync(repairJob)
   fs.writeFileSync(path.join(repairJob, 'release.tgz'), 'test archive')

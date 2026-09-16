@@ -1,7 +1,7 @@
 /** Install through DSH in the original profile; backups are never executed. */
 import fs from 'node:fs'
 import path from 'node:path'
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { spawn, execFile } from 'node:child_process'
 import type { InstallRuntime } from './install-runtime.js'
 
@@ -117,8 +117,12 @@ export async function installProfile(job: ProfileInstall): Promise<void> {
   // Do not overwrite a source already recorded in pnpm's lockfile: hoisted
   // installs can retain the old files even after updating that source's hash.
   const digest = createHash('sha256').update(fs.readFileSync(archive)).digest('hex')
-  const archiveName = `harness-remote-${job.targetVersion}-${digest}.tgz`
-  fs.copyFileSync(archive, path.join(job.profile, archiveName))
+  const archiveBase = `harness-remote-${job.targetVersion}-${digest}`
+  // A same-source add can be a no-op even if the installed manifest is missing.
+  // Never reuse an existing archive source; keep its bytes for prior lockfiles.
+  const suffix = fs.existsSync(path.join(job.profile, `${archiveBase}.tgz`)) ? `-${randomBytes(8).toString('hex')}` : ''
+  const archiveName = `${archiveBase}${suffix}.tgz`
+  fs.copyFileSync(archive, path.join(job.profile, archiveName), fs.constants.COPYFILE_EXCL)
   const tools = installToolPath(job.directory, job.runtime)
   // DSH/pnpm own dependency resolution and bundle registration. Do not rewrite
   // the manifest, packageManager, lockfile, or other plugin sources beforehand.

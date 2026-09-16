@@ -76,7 +76,7 @@ function writePrivateJsonAtomic(file, value) {
 // src/install-profile.ts
 import fs from "node:fs";
 import path from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes as randomBytes2 } from "node:crypto";
 import { spawn, execFile } from "node:child_process";
 var PLUGIN_PACKAGE = "@harness-remote/dsh-wechat-remote";
 function safeProfileName(value) {
@@ -204,8 +204,10 @@ async function installProfile(job) {
   fs.mkdirSync(job.profile, { recursive: true, mode: 448 });
   const archive = path.join(job.directory, "release.tgz");
   const digest = createHash("sha256").update(fs.readFileSync(archive)).digest("hex");
-  const archiveName = `harness-remote-${job.targetVersion}-${digest}.tgz`;
-  fs.copyFileSync(archive, path.join(job.profile, archiveName));
+  const archiveBase = `harness-remote-${job.targetVersion}-${digest}`;
+  const suffix = fs.existsSync(path.join(job.profile, `${archiveBase}.tgz`)) ? `-${randomBytes2(8).toString("hex")}` : "";
+  const archiveName = `${archiveBase}${suffix}.tgz`;
+  fs.copyFileSync(archive, path.join(job.profile, archiveName), fs.constants.COPYFILE_EXCL);
   const tools = installToolPath(job.directory, job.runtime);
   const logFile = path.join(job.directory, "install.log");
   const deadline = Date.now() + 6e5;

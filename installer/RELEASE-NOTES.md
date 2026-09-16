@@ -1,5 +1,5 @@
-# v1.7.7-rc.3
+# 1.7.8
 
-内置同版本预览插件，完善会话归档超过 20 MB 时的提示。安装与升级方式不变。
+内嵌同版本正式插件。改善全局与 NPX 使用 DSH 时的安装和升级，修复 Windows 中文 Node.js 路径问题，完善旧安装记录兼容及修复安装。
 
-这是预览检查点，目前仅保存本地安装包，尚未公开发布。`@latest` 仍安装已发布的正式版。
+首次安装和升级仍使用 `npx -y dsh-wechat-remote@latest`；Windows 推荐 `npx.cmd -y dsh-wechat-remote@latest`。请先结束运行中的任务，原有配对和会话保留。

@@ -57,6 +57,22 @@ test('unsupported, wrong response, oversize, abort and broken streams never yiel
   await assert.rejects(exportSessionArchive(host(async()=>new Response(new ReadableStream({start(c){c.error(Error('native read failure'))}}),{headers:{'content-type':'application/zip'}})),'s',signal(),100),/native read failure/)
 })
 
+test('complete ZIP limit is inclusive and oversize never reaches object storage',async()=>{
+  const maxBytes=20*1024*1024
+  for(const bytes of [maxBytes,maxBytes+1]) {
+    let uploads=0
+    const ctx=host(async()=>new Response(new Uint8Array(bytes),{headers:{'content-type':'application/zip'}}))
+    const api=new AgentResourcesService(ctx,{store:async data=>{uploads++;assert.equal(data.length,bytes);return {contentKind:'artifact'}}})
+    const result=await api.prepareArchive({scope:'s',delivery:'object'},signal())
+    if(bytes===maxBytes) {
+      assert.equal(value(result).bytes,bytes);assert.equal(uploads,1)
+    } else {
+      assert.equal(result.ok,false);assert.equal(uploads,0)
+      assert.equal(result.error.message,'完整归档超过本功能的 20 MB 上限，已停止传输，请在电脑端导出')
+    }
+  }
+})
+
 test('archives and files share concurrency limits; cancellation restores capacity',async()=>{
   let started=0
   const ctx=host(async request=>{

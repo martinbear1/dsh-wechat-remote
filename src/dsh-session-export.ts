@@ -38,7 +38,9 @@ export async function exportSessionArchive(ctx: Context, scope: string, signal: 
       signal.throwIfAborted()
       if (chunk.done) break
       bytes += chunk.value.byteLength
-      if (bytes > maxBytes) throw new Error('归档超过手机支持的 20 MB，请在电脑端导出')
+      // Product transfer/storage limit for the complete ZIP, not a WeChat API limit.
+      // Reject before returning bytes to the shared uploader; never publish a partial ZIP.
+      if (bytes > maxBytes) throw new Error('完整归档超过本功能的 20 MB 上限，已停止传输，请在电脑端导出')
       chunks.push(chunk.value)
     }
     const filename = /filename="([^"\r\n]+)"/i.exec(response.headers.get('content-disposition') || '')?.[1]

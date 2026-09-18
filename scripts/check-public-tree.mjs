@@ -19,6 +19,12 @@ const publicText = tracked.filter(file =>
     file === 'package.json' ||
     file === 'installer/package.json'))
 
+// Public documentation is deliberately opt-in. This keeps internal design,
+// verification and release evidence out of main unless a user-facing document
+// is reviewed and added here intentionally.
+const allowedPublicDocs = new Set([
+  'docs/NATIVE-INSTALL.md',
+])
 const internalDocument = /(?:^|\/)(?:CURRENT-BASELINE|.*(?:WORKLOG|HANDOFF|CHECKPOINT|ROLLOUT|RESEARCH|ADMISSION-FIX|PROGRESS)|.*-AUDIT)(?:-[^/]*)?\.md$/i
 const contentRules = [
   { name: 'personal Windows path', pattern: /[A-Za-z]:[\\/](?:Users|Documents and Settings)[\\/][^<>{}\s/\\]+/i },
@@ -32,6 +38,10 @@ const contentRules = [
 const failures = []
 for (const file of publicText) {
   const normalized = file.split(path.sep).join('/')
+  if (normalized.startsWith('docs/') && !allowedPublicDocs.has(normalized)) {
+    failures.push(`${normalized}: public documentation must be explicitly allowlisted`)
+    continue
+  }
   if (internalDocument.test(normalized)) {
     failures.push(`${normalized}: internal work record must stay outside the public repository`)
     continue

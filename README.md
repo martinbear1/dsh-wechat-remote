@@ -39,4 +39,4 @@ npx.cmd -y dsh-wechat-remote@latest
 
 旧版插件若无法一键更新，先运行上面的安装命令过渡一次，无需降低 DSH 版本或重新配对。成功安装后，新版会接管后续更新；已有旧版更新器不会在安装前自动获得修复。
 
-插件与 npm 安装工具本版统一为 `1.7.8`。需要绕过安装器时，可参考 [DSH 官方原生安装方式](docs/NATIVE-INSTALL.md)。开发与验收记录见 [当前基线](docs/CURRENT-BASELINE.md)。
+插件与 npm 安装工具本版统一为 `1.7.8`。需要绕过安装器时，可参考 [DSH 官方原生安装方式](docs/NATIVE-INSTALL.md)。

@@ -14,6 +14,9 @@ const publicText = tracked.filter(file =>
   existsSync(file) && (
     file === 'README.md' ||
     file === 'SECURITY.md' ||
+    file === 'RELEASE-NOTES.md' ||
+    file === 'installer/README.md' ||
+    file === 'installer/RELEASE-NOTES.md' ||
     file.startsWith('docs/') ||
     file.startsWith('.github/') ||
     file === 'package.json' ||

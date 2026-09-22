@@ -35,13 +35,20 @@ function trustedReleaseAsset(asset, version) {
     return false;
   }
 }
+function trustedNpmInstaller(source) {
+  if (!source || !validVersion(source.version) || !/^[a-f0-9]{64}$/.test(source.sha256) || !Number.isSafeInteger(source.bytes) || source.bytes < 1 || source.bytes > 32 * 1024 * 1024) return false;
+  return source.url === `https://registry.npmjs.org/dsh-wechat-remote/-/dsh-wechat-remote-${source.version}.tgz`;
+}
 function validateCatalog(value) {
   const c = value;
   const strings = (v, max = 100) => Array.isArray(v) && v.length <= max && v.every((s) => typeof s === "string" && s.length > 0 && s.length <= 100);
   if (!c || c.schemaVersion !== 1 || typeof c.revision !== "string" || !/^[\w.-]{1,80}$/.test(c.revision) || !Number.isSafeInteger(c.issuedAt) || !Number.isSafeInteger(c.expiresAt) || c.expiresAt <= c.issuedAt || c.expiresAt - c.issuedAt > 32 * 864e5 || !Array.isArray(c.releases) || c.releases.length > 100 || !Array.isArray(c.blocked) || c.blocked.length > 100 || !strings(c.retiredDsh)) throw new Error("Invalid update catalog");
   const versions = /* @__PURE__ */ new Set();
   for (const r of c.releases) {
-    if (!r || !validVersion(r.version) || versions.has(r.version) || !["stable", "preview"].includes(r.channel) || r.channel === "stable" && versionPattern.exec(r.version)[4] || !strings(r.dsh) || !r.dsh.length || !r.dsh.every(validVersion) || !strings(r.platforms, 3) || !r.platforms.length || !r.platforms.every((p) => ["windows", "macos", "linux"].includes(p)) || !strings(r.architectures, 32) || !r.architectures.length || !r.architectures.every((a) => /^[a-z0-9_-]{1,32}$/.test(a)) || r.asset && !trustedReleaseAsset(r.asset, r.version)) throw new Error("Invalid release entry");
+    if (!r || !validVersion(r.version) || versions.has(r.version) || !["stable", "preview"].includes(r.channel) || r.channel === "stable" && versionPattern.exec(r.version)[4] || !strings(r.dsh) || !r.dsh.every(validVersion) || !strings(r.platforms, 3) || !r.platforms.every((p) => ["windows", "macos", "linux"].includes(p)) || !strings(r.architectures, 32) || !r.architectures.every((a) => /^[a-z0-9_-]{1,32}$/.test(a)) || r.asset && !trustedReleaseAsset(r.asset, r.version) || r.npmInstaller !== void 0 && (!r.asset || !trustedNpmInstaller(r.npmInstaller))) throw new Error("Invalid release entry");
+    const hasEvidence = r.dsh.length > 0 && r.platforms.length > 0 && r.architectures.length > 0;
+    const pendingPreview = r.channel === "preview" && Boolean(versionPattern.exec(r.version)[4]) && r.dsh.length === 0 && r.platforms.length === 0 && r.architectures.length === 0;
+    if (!hasEvidence && !pendingPreview) throw new Error("Invalid release evidence");
     versions.add(r.version);
     if (r.targets !== void 0) {
       if (!Array.isArray(r.targets) || !r.targets.length || r.targets.length > 12) throw new Error("Invalid release targets");
@@ -141,6 +148,7 @@ export {
   assessUpdate,
   compareVersions,
   releaseMatches,
+  trustedNpmInstaller,
   trustedReleaseAsset,
   validateCatalog
 };

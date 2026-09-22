@@ -6,5 +6,5 @@ export declare function nativeTurnUsage(): Promise<UsageFold | undefined>;
 /** Optional portable per-turn facet, attached to the final textual reply.
  * Read BEFORE transport compaction: retry usage and token timing need chunks.
  * Partial pages/running turns are intentionally not disclosed as complete. */
-export declare function turnDetails(entries: readonly unknown[], usageFold?: UsageFold): Value[];
+export declare function turnDetails(entries: readonly unknown[], usageFold?: UsageFold, firstTokens?: ReadonlyMap<number, number>): Value[];
 export {};

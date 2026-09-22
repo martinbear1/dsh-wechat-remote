@@ -2,6 +2,8 @@
 import http, { type ClientRequest, type IncomingHttpHeaders, type IncomingMessage } from 'node:http'
 import { WebSocket } from 'ws'
 import type { DshCompatibilityTransport } from './dsh-compatibility-api.js'
+import { TunnelSendQueue } from './tunnel-send-queue.js'
+import { objectRpcBudget } from './object-transfer-budget.js'
 
 const VERSION = 1
 const OPEN = 1
@@ -19,9 +21,9 @@ const HEADER_BYTES = 8
 const MAX_METADATA_BYTES = 16 * 1024
 const MAX_CHUNK_BYTES = 192 * 1024
 const MAX_REQUEST_BYTES = 16 * 1024 * 1024
-const SEND_QUEUE_PAUSE_BYTES = 2 * 1024 * 1024
-const SEND_QUEUE_RESUME_BYTES = 512 * 1024
-const MAX_SEND_QUEUE_BYTES = 4 * 1024 * 1024
+const SEND_QUEUE_PAUSE_BYTES = 256 * 1024
+const SEND_QUEUE_RESUME_BYTES = 64 * 1024
+const SEND_CHUNK_BYTES = 16 * 1024
 const EVENT_BATCH_DELAY_MS = 32
 const EVENT_BATCH_MAX_BYTES = 4 * 1024
 const EVENT_BATCH_HEADER_BYTES = 5
@@ -30,7 +32,7 @@ const LAN_CREDENTIAL_PATH = '/api/wechat-remote/lan-credential'
 const LAN_CREDENTIAL_ROTATE_PATH = '/api/wechat-remote/lan-credential/rotate'
 const REMOTE_PROMPT_PATH = '/api/wechat-remote/session.prompt'
 const MAX_REMOTE_PROMPT_BYTES = 256 * 1024
-const REMOTE_ATTACHMENT_CONCURRENCY = 3
+const REMOTE_ATTACHMENT_CONCURRENCY = 2
 type ByteArray = Uint8Array<ArrayBufferLike>
 
 function concat(...parts: readonly ByteArray[]): Uint8Array {
@@ -122,8 +124,8 @@ function responseHeaders(headers: IncomingHttpHeaders): Record<string, string | 
 function pieces(data: ByteArray): readonly ByteArray[] {
   if (data.length === 0) return [new Uint8Array(0)]
   const out: Uint8Array[] = []
-  for (let offset = 0; offset < data.length; offset += MAX_CHUNK_BYTES) {
-    out.push(data.subarray(offset, Math.min(offset + MAX_CHUNK_BYTES, data.length)))
+  for (let offset = 0; offset < data.length; offset += SEND_CHUNK_BYTES) {
+    out.push(data.subarray(offset, Math.min(offset + SEND_CHUNK_BYTES, data.length)))
   }
   return out
 }
@@ -163,6 +165,7 @@ function isStreamDelta(message: ByteArray, isBinary: boolean): boolean {
 
 interface HttpStream {
   readonly kind: 'http'
+  readonly path: string
   readonly request: ClientRequest
   response?: IncomingMessage
   paused: boolean
@@ -234,8 +237,8 @@ export class DshTunnelAgent {
   private readonly issueLanCredential?: DshTunnelAgentOptions['issueLanCredential']
   private readonly materializeAttachment?: DshTunnelAgentOptions['materializeAttachment']
   private readonly streams = new Map<number, Stream>()
-  private sendChain: Promise<void> = Promise.resolve()
-  private pendingSendBytes = 0
+  private readonly sendQueue: TunnelSendQueue
+  private get pendingSendBytes(): number { return this.sendQueue.bytes }
   private closed = false
 
   constructor(options: DshTunnelAgentOptions) {
@@ -245,6 +248,18 @@ export class DshTunnelAgent {
     this.compatibilityApi = options.compatibilityApi
     this.issueLanCredential = options.issueLanCredential
     this.materializeAttachment = options.materializeAttachment
+    this.sendQueue = new TunnelSendQueue({
+      send: frame => this.sendCallback(frame),
+      onFailure: () => this.close(),
+      onDrain: () => { if (!this.closed && this.pendingSendBytes <= SEND_QUEUE_RESUME_BYTES) this.resumeSources() },
+      onOverflow: id => {
+        const stream = this.streams.get(id)
+        if (stream) this.cancel(stream, id)
+        // Drop only this producer, not unrelated realtime streams. Completion
+        // and error markers share a bounded reserve beyond the data budget.
+        this.sendError(id, new Error('当前数据读取积压过多，请缩小范围后重试'))
+      },
+    })
   }
 
   receive(rawFrame: ByteArray): void {
@@ -253,10 +268,14 @@ export class DshTunnelAgent {
     try {
       if (frame.type === OPEN) return this.open(frame.streamId, parseJson(frame.payload))
       const stream = this.streams.get(frame.streamId)
+      if (frame.type === CANCEL) {
+        this.sendQueue.discard(frame.streamId)
+        if (stream) this.cancel(stream, frame.streamId)
+        return
+      }
       if (!stream) return
       if (frame.type === DATA) return this.data(stream, frame.streamId, frame.flags, frame.payload)
       if (frame.type === END) return this.end(stream, frame.streamId, frame.payload)
-      if (frame.type === CANCEL) return this.cancel(stream, frame.streamId)
       throw new Error('Client tunnel frame type is not allowed')
     } catch (error) {
       this.sendError(frame.streamId, error)
@@ -267,6 +286,7 @@ export class DshTunnelAgent {
 
   close(): void {
     this.closed = true
+    this.sendQueue.close()
     for (const [id, stream] of this.streams) this.cancel(stream, id)
   }
 
@@ -326,16 +346,20 @@ export class DshTunnelAgent {
       path,
       method: safeMethod(value.method),
       headers,
-      timeout: 30_000,
+      timeout: objectRpcBudget(path.split('?')[0].replace(/^\/api\//, '')) ?? 30_000,
     }, response => {
       const active = this.streams.get(streamId)
+      if (active?.kind !== KIND_HTTP || this.closed) { response.destroy(); return }
       if (active?.kind === KIND_HTTP) active.response = response
       this.queue(encode(ACCEPT, streamId, 0, json({
         statusCode: response.statusCode || 502,
         headers: responseHeaders(response.headers),
       })))
       response.on('data', chunk => {
-        for (const part of pieces(Buffer.from(chunk))) this.queue(encode(DATA, streamId, 0, part))
+        for (const part of pieces(Buffer.from(chunk))) {
+          if (this.streams.get(streamId) !== active || this.closed) return
+          this.queue(encode(DATA, streamId, 0, part))
+        }
         const current = this.streams.get(streamId)
         if (this.pendingSendBytes >= SEND_QUEUE_PAUSE_BYTES && current?.kind === KIND_HTTP && !current.paused) {
           current.paused = true
@@ -343,12 +367,13 @@ export class DshTunnelAgent {
         }
       })
       response.on('end', () => {
+        if (this.streams.get(streamId) !== active || this.closed) return
         this.streams.delete(streamId)
         this.queue(encode(END, streamId))
       })
       response.on('error', error => this.fail(streamId, error))
     })
-    const stream: HttpStream = { kind: KIND_HTTP, request, paused: false, bytes: 0 }
+    const stream: HttpStream = { kind: KIND_HTTP, path, request, paused: false, bytes: 0 }
     this.streams.set(streamId, stream)
     request.on('timeout', () => request.destroy(new Error('Local DSH request timed out')))
     request.on('error', error => this.fail(streamId, error))
@@ -396,6 +421,7 @@ export class DshTunnelAgent {
       }
     })
     socket.on('close', (code, reason) => {
+      if (this.streams.get(streamId) !== stream || this.closed) return
       this.flushEventBatch(streamId, stream)
       this.streams.delete(streamId)
       this.queue(encode(END, streamId, 0, json({ code, reason: reason.toString().slice(0, 256) })))
@@ -439,6 +465,7 @@ export class DshTunnelAgent {
   }
 
   private sendWebSocketMessage(streamId: number, stream: EventBatchState, message: ByteArray, isBinary: boolean): void {
+    if (this.streams.get(streamId) !== stream || this.closed) return
     const flags = (isBinary ? FLAG_BINARY : 0) | FLAG_FINAL
     if (stream.batchEnabled && isStreamDelta(message, isBinary)) {
       if (!stream.deltaBurstStarted) {
@@ -462,6 +489,7 @@ export class DshTunnelAgent {
     stream.deltaBurstStarted = false
     const messagePieces = pieces(message)
     messagePieces.forEach((part, index) => {
+      if (this.streams.get(streamId) !== stream || this.closed) return
       const partFlags = (isBinary ? FLAG_BINARY : 0) | (index === messagePieces.length - 1 ? FLAG_FINAL : 0)
       this.queue(encode(DATA, streamId, partFlags, part))
     })
@@ -536,6 +564,7 @@ export class DshTunnelAgent {
   }
 
   private async forwardRemotePrompt(streamId: number, stream: RemotePromptStream): Promise<void> {
+    let owner: Stream = stream
     try {
       const envelope = JSON.parse(new TextDecoder().decode(concat(...stream.chunks))) as Record<string, any>
       const content = envelope?.payload?.content
@@ -551,7 +580,14 @@ export class DshTunnelAgent {
           throw new Error('Encrypted prompt attachment list is invalid')
         }
         remoteIndexes.push(index)
+        materialized[index] = null
       }
+      if (!remoteIndexes.length) throw new Error('Encrypted prompt contains no remote attachment')
+      envelope.payload.content = materialized
+      // Count the exact native JSON envelope, including UTF-8 text and image
+      // metadata, before allocating Base64 or opening a local request. Each
+      // resolved image replaces one four-byte `null` placeholder.
+      let requestBytes = Buffer.byteLength(JSON.stringify(envelope))
       const workers = Array.from(
         { length: Math.min(REMOTE_ATTACHMENT_CONCURRENCY, remoteIndexes.length) },
         async (_unused, workerIndex) => {
@@ -560,34 +596,43 @@ export class DshTunnelAgent {
             const index = remoteIndexes[cursor]
             const part = content[index]
             const resolved = await this.materializeAttachment!(part.remoteAttachment, stream.controller.signal)
-            materialized[index] = {
+            stream.controller.signal.throwIfAborted()
+            const image = {
               type: 'image',
               mediaType: resolved.descriptor.mediaType,
-              data: Buffer.from(resolved.data).toString('base64'),
+              data: '',
               ...(resolved.descriptor.name ? { name: resolved.descriptor.name } : {}),
             }
+            requestBytes += Buffer.byteLength(JSON.stringify(image)) - 4 + 4 * Math.ceil(resolved.data.byteLength / 3)
+            if (requestBytes > MAX_REQUEST_BYTES) throw new Error('DSH request exceeds 16 MiB')
+            image.data = Buffer.from(resolved.data).toString('base64')
+            materialized[index] = image
           }
         },
       )
       await Promise.all(workers)
-      const attachments = remoteIndexes.length
-      if (!attachments) throw new Error('Encrypted prompt contains no remote attachment')
-      envelope.payload.content = materialized
       if (this.streams.get(streamId) !== stream || this.closed) return
-      this.streams.delete(streamId)
+      const body = json(envelope)
+      if (body.length > MAX_REQUEST_BYTES) throw new Error('DSH request exceeds 16 MiB')
+      // Keep the slot owned during the handoff. The wire/native envelope stays
+      // unchanged; cleanup follows the replacement, not only the old adapter.
       this.openHttp(streamId, '/api/session.prompt', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
       })
       const active = this.streams.get(streamId)
+      if (active) owner = active
       if (!active || (active.kind !== KIND_HTTP && active.kind !== 'compat-http')) throw new Error('Local DSH prompt stream did not open')
-      const body = json(envelope)
       this.data(active, streamId, 0, body)
       this.end(active, streamId, new Uint8Array(0))
     } catch (error) {
       stream.controller.abort(error)
-      if (this.streams.get(streamId) === stream) this.streams.delete(streamId)
-      this.sendError(streamId, error)
+      // Cancellation/close may already have retired this operation. A late
+      // result must neither send another terminal frame nor cancel a new owner.
+      if (this.streams.get(streamId) === owner) {
+        this.sendError(streamId, error)
+        this.cancel(owner, streamId)
+      }
     } finally {
       stream.chunks = []
       stream.bytes = 0
@@ -625,23 +670,14 @@ export class DshTunnelAgent {
 
   private queue(frame: ByteArray): void {
     if (this.closed) return
-    const bytes = frame.byteLength
-    if (this.pendingSendBytes + bytes > MAX_SEND_QUEUE_BYTES) {
-      // An authenticated client can request a very large DSH response. Bound
-      // the promise backlog inside the DSH process instead of buffering until
-      // the desktop is out of memory.
-      this.close()
-      return
-    }
-    this.pendingSendBytes += bytes
-    this.sendChain = this.sendChain
-      .then(() => this.closed ? undefined : this.sendCallback(frame))
-      .then(() => undefined)
-      .catch(() => this.close())
-      .finally(() => {
-        this.pendingSendBytes = Math.max(0, this.pendingSendBytes - bytes)
-        if (!this.closed && this.pendingSendBytes <= SEND_QUEUE_RESUME_BYTES) this.resumeSources()
-      })
+    const id = frame.length >= HEADER_BYTES ? readUint32(frame, 2) : 0
+    if (!id) { this.close(); return }
+    const stream = this.streams.get(id)
+    const interactive = stream?.kind === 'compat-events' || stream?.kind === KIND_WEBSOCKET
+      || stream?.kind === 'remote-prompt' || frame[1] === ERROR
+      || (stream?.kind === 'compat-http' || stream?.kind === KIND_HTTP)
+        && /\/(respond|session\.(prompt|cancel|list)|host\.describe|workspace\.list)$/.test(stream.path)
+    this.sendQueue.enqueue(id, interactive ? 'interactive' : 'bulk', frame, frame[1] === ERROR || frame[1] === END)
   }
 
   private resumeSources(): void {
@@ -663,11 +699,16 @@ export class DshTunnelAgent {
       })
       if (signal.aborted || this.closed || this.streams.get(streamId) !== stream) return
       this.queue(encode(ACCEPT, streamId, 0, json({ statusCode: response.statusCode, headers: response.headers })))
-      for (const part of pieces(response.body)) {
+      const parts = pieces(response.body)
+      for (let index = 0; index < parts.length; index++) {
         if (signal.aborted || this.closed) return
-        this.queue(encode(DATA, streamId, 0, part))
-        // Retain native streaming backpressure for large in-process histories.
-        if (this.pendingSendBytes >= SEND_QUEUE_PAUSE_BYTES) await this.sendChain
+        this.queue(encode(DATA, streamId, 0, parts[index]!))
+        // Backpressure bounds further body production, not completion of a
+        // finished response. END must join this stream's FIFO immediately;
+        // otherwise even a tiny control request waits for unrelated bulk data.
+        if (index + 1 < parts.length && this.pendingSendBytes >= SEND_QUEUE_PAUSE_BYTES) {
+          await this.sendQueue.waitForCapacity(signal)
+        }
       }
       if (!signal.aborted && !this.closed) this.queue(encode(END, streamId))
     } catch (error) {

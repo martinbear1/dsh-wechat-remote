@@ -119,7 +119,7 @@ const objects = new PublicObjectClient('https://relay.example', {
   nodeId: 'node-abcdefghijklmnop',
   privateKeyPem: privateKey.export({ type: 'pkcs8', format: 'pem' }),
   publicKeyPem: '',
-}, fetchImpl)
+}, fetchImpl, ['https://oss.example'])
 await objects.upload('attachment', new Uint8Array([1, 2, 3]))
 assert.equal(JSON.parse(calls[0].options.body).purpose, 'attachment')
 assert.equal(calls[1].options.method, 'PUT')

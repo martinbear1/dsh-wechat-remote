@@ -15,11 +15,12 @@ import http from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { resolveTypertGateway } from './dsh-protocol-compat.js'
+import { OBJECT_PREPARE_BUDGET_MS } from './object-transfer-budget.js'
 
 const MAX_BATCH_ATTACHMENTS = 6
 const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
 const MAX_NATIVE_RESPONSE_BYTES = Math.ceil(MAX_ATTACHMENT_BYTES * 4 / 3) + 256 * 1024
-const DEFAULT_TIMEOUT_MS = 60_000
+const DEFAULT_TIMEOUT_MS = OBJECT_PREPARE_BUDGET_MS
 const DESCRIPTOR_REFRESH_MARGIN_MS = 60_000
 const MAX_DESCRIPTOR_CACHE = 128
 const BATCH_CONCURRENCY = 2
@@ -280,7 +281,7 @@ export class WechatAttachmentService extends TypertRemoteService {
           'accept-encoding': 'identity',
           'user-agent': 'HarnessRemote-WechatAttachment/1',
         },
-        timeout: this.timeoutMs,
+        timeout: Math.min(this.timeoutMs, 60_000),
       }, response => {
         const chunks: Buffer[] = []
         let bytes = 0

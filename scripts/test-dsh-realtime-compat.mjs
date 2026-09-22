@@ -95,6 +95,29 @@ assert.deepEqual(firstMux.closes, [], 'evicting a Session must not close the nod
 assert.deepEqual(secondMux.closes, [])
 assert.equal(sources.filter(value => value.method === 'follow' && value.namespace === 'session' && !value.signal.aborted).length, 128)
 
+// Settled and interrupted messages must use the same visible projection as
+// history. Retained samples never duplicate content or occupy the live wire.
+const sessionFeed = sources.find(value => value.method === 'follow' && value.namespace === 'session'
+  && value.args.request.address?.sessionId === 'session-64')
+assert(sessionFeed)
+const reply = { seq: 2, type: 'assistant/message', data: { turn: 1, step: 1,
+  message: { id: 'reply', role: 'assistant', content: [{ type: 'text', text: '短回复' }] },
+  stream: [{ type: 'text-chunks', index: 0, texts: Array(10000).fill('x') }],
+} }
+sessionFeed.stream.push({ type: 'event', event: reply })
+await until(() => firstMux.messages.some(frame => frame.payload.event?.seq === 2))
+const deliveredReply = firstMux.messages.find(frame => frame.payload.event?.seq === 2).payload
+assert.equal(deliveredReply.event.data.stream, undefined)
+assert.deepEqual(deliveredReply.event.data.message, reply.data.message)
+assert.equal(reply.data.stream[0].texts.length, 10000)
+sessionFeed.stream.push({ type: 'event', event: { seq: 3, type: 'assistant/attempt', data: { turn: 1, step: 2,
+  stream: [{ type: 'text-chunks', index: 0, texts: ['未完成的回复'] }],
+} } })
+await until(() => firstMux.messages.some(frame => frame.payload.event?.seq === 3))
+const deliveredAttempt = firstMux.messages.find(frame => frame.payload.event?.seq === 3).payload
+assert.equal(deliveredAttempt.event.data.stream, undefined)
+assert.equal(deliveredAttempt.view.agentTranscript.message.content[0].text, '未完成的回复')
+
 const pending = { type: 'waterfall', event: 'approval/request', eventId: 'approval-1', agentId: 'session-64', request: { callId: 'call-1', toolName: 'write', reason: 'change file' } }
 remoteSources[0].stream.push(pending)
 await until(() => secondMux.messages.some(frame => frame.rpcId === 'approval-1'))

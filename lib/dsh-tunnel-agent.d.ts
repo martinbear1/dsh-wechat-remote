@@ -30,8 +30,8 @@ export declare class DshTunnelAgent {
     private readonly issueLanCredential?;
     private readonly materializeAttachment?;
     private readonly streams;
-    private sendChain;
-    private pendingSendBytes;
+    private readonly sendQueue;
+    private get pendingSendBytes();
     private closed;
     constructor(options: DshTunnelAgentOptions);
     receive(rawFrame: ByteArray): void;

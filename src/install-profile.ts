@@ -11,7 +11,7 @@ export interface ProfileInstall {
   runtime: InstallRuntime
 }
 export function safeProfileName(value: string): boolean { return /^[A-Za-z0-9_-]{1,80}$/.test(value) }
-/** Copy without following or rebasing links. Restore to the SAME original path. */
+/** Copy without following links. Backups are restored to the SAME original path. */
 export function backupProfile(profile: string, backup: string): void {
   if (fs.existsSync(backup)) throw new Error('本次安装备份已存在，未覆盖。')
   fs.cpSync(profile, backup, { recursive: true, dereference: false, verbatimSymlinks: true,
@@ -22,7 +22,12 @@ export function backupProfile(profile: string, backup: string): void {
       if (!fs.lstatSync(source).isSymbolicLink()) return true
       const type = process.platform === 'win32'
         ? (fs.statSync(source, { throwIfNoEntry: false })?.isDirectory() ? 'junction' : 'file') : undefined
-      fs.symlinkSync(fs.readlinkSync(source), target, type)
+      const link = fs.readlinkSync(source)
+      // Windows junction creation resolves relative targets at the NEW link.
+      // Resolve against the original profile instead, so pnpm's relative
+      // directory links still work after rollback. Junctions need no symlink
+      // privilege; absolute/external targets keep their original destination.
+      fs.symlinkSync(type === 'junction' ? path.resolve(path.dirname(source), link) : link, target, type)
       return false
     } })
 }

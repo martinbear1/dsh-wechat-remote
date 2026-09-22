@@ -32,7 +32,7 @@ export function mutationPath(name:string,raw:string):string|null {
 }
 export class TurnActivityCompatibility {
   private state:Row|undefined
-  accept(event:Row):Row|undefined {
+  accept(event:Row, facts?: { readonly mutationPath: string | null }):Row|undefined {
     const d=record(event.data),seq=event.seq
     if(!Number.isSafeInteger(seq))return
     if(event.type==='turn/start')this.state={turn:d.turn,start:seq,calls:new Map(),results:new Set(),changes:[],messages:[],visible:[],contexts:[],humans:[],tools:[],subagents:[],answer:null,reasoning:false,step:null,evidence:false}
@@ -55,7 +55,7 @@ export class TurnActivityCompatibility {
     if(event.type==='step/start'){s.step=d.step;s.answer=null}
     if(event.type==='tool/call') {
       if(!s.calls.has(d.callId))(d.name==='subagent'||d.name?.startsWith('subagent_')?s.subagents:s.tools).push(seq)
-      s.calls.set(d.callId,mutationPath(d.name,d.arguments))
+      s.calls.set(d.callId,facts ? facts.mutationPath : mutationPath(d.name,d.arguments))
     }
     if(event.type==='tool/result'&&(event.surfaceOp===undefined||event.surfaceOp==='append')) {
       const callId=d.message?.source?.callId ?? d.message?.callId

@@ -10,7 +10,7 @@ import { resolveInstallRuntime, verifyInstallRuntime } from '../lib/install-runt
 import { installProfile, backupProfile, NativeInstallError } from '../lib/install-profile.js'
 import { compareVersions } from '../lib/update-policy.js'
 import { selectInstallTarget } from './release-selection.mjs'
-import { boundedFetch, downloadRelease, auditArchive } from '../lib/update-download.js'
+import { boundedFetch, downloadRelease, auditArchive, DownloadUnavailableError } from '../lib/update-download.js'
 import { writePrivateJsonAtomic } from '../lib/secure-file.js'
 import { control, validateJob, releaseOwnedUpdateLock } from '../lib/update-worker.js'
 import { chooseDsh, validateDshCli, resolveHome, mayHaveRunningDsh, assertInstallTarget, installHostArgv } from './dsh-discovery.mjs'
@@ -26,7 +26,7 @@ function portBusy(port) {
   })
 }
 export async function selectRelease(host, assetsRoot = path.join(root, 'assets'), repair = false,
-  fetchCatalog = () => boundedFetch('https://relay.xyxfood.xyz/v1/update-policy', 256 * 1024)) {
+  fetchCatalog = () => boundedFetch('https://relay.xyxfood.xyz/v1/update-policy', 256 * 1024), fetchPackage = fetch) {
   const current = { agentKind: 'dsh', agentVersion: host.dshVersion, pluginVersion: host.pluginVersion,
     platform: { win32: 'windows', darwin: 'macos', linux: 'linux' }[host.platform], arch: host.arch }
   const pinned = JSON.parse(fs.readFileSync(path.join(assetsRoot, 'release.json'), 'utf8'))
@@ -34,12 +34,28 @@ export async function selectRelease(host, assetsRoot = path.join(root, 'assets')
   try {
     remote = JSON.parse((await fetchCatalog()).toString('utf8'))
   } catch { /* Authenticated npm package retains its bundled release. */ }
-  const release = selectInstallTarget(pinned, remote, current)
+  const selectionTime = Date.now()
+  let release = selectInstallTarget(pinned, remote, current, selectionTime)
   if (host.pluginVersion !== '0.0.0' && (compareVersions(host.pluginVersion, release.version) > 0
     || (compareVersions(host.pluginVersion, release.version) === 0 && !repair))) return { release, archive: null }
   let archive
   if (release.version === pinned.version) archive = fs.readFileSync(path.join(assetsRoot, 'plugin.tgz'))
-  else archive = await downloadRelease(release)
+  else {
+    try { archive = await downloadRelease(release, fetchPackage) }
+    catch (error) {
+      if (!(error instanceof DownloadUnavailableError)) throw error
+      // Keep BOTH local and valid online withdrawals when falling back. Dropping
+      // the catalog here would accidentally reinstall a known-broken bundle.
+      // Retain rules accepted at selection even if their catalog expires while
+      // a slow download is in flight; expiry must not erase a known withdrawal.
+      const bundled = selectInstallTarget(pinned, remote, current, selectionTime, true)
+      if (host.pluginVersion !== '0.0.0' && compareVersions(host.pluginVersion, bundled.version) > 0) throw error
+      release = bundled
+      console.log(`较新版本暂时无法下载，使用安装器内置的 ${release.version}；未升级到线上最新版本。`)
+      if (host.pluginVersion === release.version && !repair) return { release, archive: null }
+      archive = fs.readFileSync(path.join(assetsRoot, 'plugin.tgz'))
+    }
+  }
   auditArchive(archive, release)
   return { release, archive }
 }

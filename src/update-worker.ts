@@ -95,8 +95,8 @@ function durableSnapshot(job: UpdateJob): Record<string, string> {
   walk(path.join(job.home, 'sessions')); walk(path.join(job.home, 'attachments')); walk(path.join(job.home, 'harness-remote'))
   for (const e of fs.readdirSync(job.home, { withFileTypes: true })) {
     if (e.isFile() && /(?:identity|settings|credentials|public|gate-wechat)/i.test(e.name) && !e.name.endsWith('.log')) {
-      // Pairing pending tickets may legitimately expire. Protect identity,
-      // bindings and LAN token, not transient pending QR state.
+      // Pairing tickets may legitimately expire. Protect durable identity and
+      // the encrypted-LAN grant, not transient QR state.
       const f = path.join(job.home, e.name)
       if (f === job.stateFile) continue
       result[e.name] = hashFile(f)
@@ -104,7 +104,7 @@ function durableSnapshot(job: UpdateJob): Record<string, string> {
   }
   if (fs.existsSync(job.stateFile)) {
     const state = JSON.parse(fs.readFileSync(job.stateFile, 'utf8'))
-    result['$binding'] = createHash('sha256').update(JSON.stringify([state.token, state.wechatBindings])).digest('hex')
+    result['$binding'] = createHash('sha256').update(JSON.stringify([state.token, state.publicIdentityNodeId])).digest('hex')
   }
   return result
 }

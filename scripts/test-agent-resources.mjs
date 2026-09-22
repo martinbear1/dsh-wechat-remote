@@ -37,6 +37,16 @@ await service.release({scope:'s',transferId:prepared.value.transferId})
 assert.equal((await service.chunk({scope:'s',transferId:prepared.value.transferId,offset:0},signal)).ok,false)
 assert.equal((await service.prepare({scope:'s',id:file.id,delivery:'object'},signal)).value.delivery,'object')
 assert.equal(uploads,1)
+const unavailableService=new AgentResourcesService(new Context(),{async invoke(method,args) {
+  if(method==='list')return {path:'',entries:[{name:'offline.txt',type:'file',size:1}]}
+  if(method==='stat')return {version:'v1',bytes:1,absolutePath:'/work/offline.txt'}
+  if(method==='readBytes')return {absolutePath:'/work/offline.txt',version:'v1',offset:0,data:'YQ=='}
+},async store(){const error=Error('当前电脑网络或 VPN 无法访问文件存储，请调整 VPN 分流或切换网络后重试');error.code='object_backend_unavailable';throw error}})
+const unavailableFile=JSON.parse((await unavailableService.resolve({scope:'s',reference:'offline.txt'},signal)).valueJson)
+const unavailable=await unavailableService.prepare({scope:'s',id:unavailableFile.id,delivery:'object'},signal)
+assert.equal(unavailable.ok,false)
+assert.equal(unavailable.error.code,'object_backend_unavailable')
+assert.match(unavailable.error.message,/VPN/)
 changed=true
 assert.equal((await service.prepare({scope:'s',id:file.id,delivery:'object'},signal)).ok,false)
 assert.equal(uploads,1,'changed file cannot be uploaded')

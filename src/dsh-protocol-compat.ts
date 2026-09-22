@@ -395,41 +395,75 @@ async function historyValue(
   const maxMessages = Number.isSafeInteger(request.maxMessages)
     ? Math.max(1, Math.min(30, Number(request.maxMessages)))
     : 8
-  const address = await resolveDshSessionAddress(gateway, sessionId, signal)
-  const first = recordOf(await firstStreamFrame(
-    gateway,
-    'session',
-    'follow',
-    { request: { address, maxMessages } },
-    signal,
-  ))
-  if (first?.type !== 'snapshot' || !Number.isSafeInteger(first.cursor)) {
-    throw new Error('session/follow returned an invalid opening snapshot')
-  }
-  if (Number.isSafeInteger(request.beforeSeq)) {
+  return createHistoryPageReader(gateway, sessionId, signal)({
+    maxMessages,
+    ...(Number.isSafeInteger(request.beforeSeq) ? { beforeSeq: Number(request.beforeSeq) } : {}),
+  })
+}
+
+/** One read transaction owns one native address. Latest reads pin a follow
+ * snapshot; older-only reads already have an exclusive boundary and use page
+ * directly. No cross-request cache or unrelated latest-tail download. */
+export function createHistoryPageReader(
+  gateway: TypertGatewayLike,
+  sessionId: string,
+  signal: AbortSignal,
+): (request: { readonly maxMessages: number; readonly beforeSeq?: number }) => Promise<JsonRecord> {
+  let address: ReturnType<typeof resolveDshSessionAddress> | undefined
+  let opening: Promise<{ first: JsonRecord; maxMessages: number }> | undefined
+  const readPage = async (request: { readonly maxMessages: number; readonly beforeSeq?: number }, throughSeq: number) => {
+    const resolved = await (address ??= resolveDshSessionAddress(gateway, sessionId, signal))
+    signal.throwIfAborted()
     const page = recordOf(await gateway.invoke({
-      namespace: 'session',
-      method: 'page',
-      args: {
-        request: {
-          address,
-          throughSeq: first.cursor,
-          beforeSeq: request.beforeSeq,
-          maxMessages,
-        },
-      },
+      namespace: 'session', method: 'page',
+      args: { request: { address: resolved, throughSeq, beforeSeq: request.beforeSeq, maxMessages: request.maxMessages } },
       signal,
     })) ?? {}
-    return {
-      events: historyEvents(page.records),
-      hasMore: page.hasMore === true,
-    }
+    signal.throwIfAborted()
+    return { events: historyEvents(page.records), hasMore: page.hasMore === true }
   }
-  return {
-    events: historyEvents(first.records),
-    hasMore: first.hasMore === true,
-    projections: withPresentationProjections(first.projections),
-    historyEndSeq: first.cursor,
+  return async request => {
+    signal.throwIfAborted()
+    if (!opening && request.beforeSeq !== undefined) {
+      // Native page ends at min(throughSeq + 1, beforeSeq). The already
+      // displayed first record proves this earlier cut; later live appends
+      // cannot move it. Even beforeSeq=0 has a valid empty throughSeq=-1.
+      return readPage(request, request.beforeSeq - 1)
+    }
+    if (!opening) {
+      opening = (async () => {
+        const resolved = await (address ??= resolveDshSessionAddress(gateway, sessionId, signal))
+        signal.throwIfAborted()
+        const maxMessages = request.maxMessages
+        const first = recordOf(await firstStreamFrame(gateway, 'session', 'follow', {
+          request: { address: resolved, maxMessages },
+        }, signal))
+        signal.throwIfAborted()
+        if (first?.type !== 'snapshot' || !Number.isSafeInteger(first.cursor) || Number(first.cursor) < -1) {
+          throw new Error('session/follow returned an invalid opening snapshot')
+        }
+        return { first, maxMessages }
+      })()
+    }
+    const { first, maxMessages } = await opening
+    signal.throwIfAborted()
+    const latest = request.beforeSeq === undefined
+    if (latest && request.maxMessages === maxMessages) {
+      return {
+        events: historyEvents(first.records),
+        hasMore: first.hasMore === true,
+        projections: withPresentationProjections(first.projections),
+        historyEndSeq: first.cursor,
+      }
+    }
+    const page = await readPage(request, Number(first.cursor))
+    return {
+      ...page,
+      ...(latest ? {
+        projections: withPresentationProjections(first.projections),
+        historyEndSeq: first.cursor,
+      } : {}),
+    }
   }
 }
 

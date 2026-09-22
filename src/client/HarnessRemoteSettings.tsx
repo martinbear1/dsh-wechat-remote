@@ -5,9 +5,8 @@ import styles from './HarnessRemoteSettings.module.css'
 import { PluginUpdateCard } from './PluginUpdateCard.tsx'
 
 interface PairCodeResp {
-  code: string
   qrDataUrl: string
-  mode: 'lan' | 'public-relay'
+  mode: 'secure-lan-route' | 'public-relay'
   expiresAt: number
 }
 
@@ -34,12 +33,11 @@ interface HarnessRemoteSettingsProps {
 interface GateStatusResp {
   gate?: GateRuntimeInfo
   lan: { ip: string; port: number }
-  wechat: { configured: boolean; bindings: number }
   publicRelay: {
     enabled: boolean
     state: 'disabled' | 'enrolling' | 'connecting' | 'online' | 'offline'
     remoteAccess?: {
-      status: 'active' | 'pending' | 'expired' | 'suspended' | 'not_entitled'
+      status: 'active' | 'expired' | 'suspended' | 'not_entitled'
       validUntil?: number | null
     } | null
   }
@@ -184,7 +182,7 @@ export function HarnessRemoteSettings({
       if (!mountedRef.current) return
       setQr(null)
       setQrState('error')
-      setError('暂时无法生成配对码，请稍后重试。')
+      setError('暂时无法生成配对二维码，请确认电脑联网后重试。')
     }
   }, [describeHost])
 
@@ -211,26 +209,24 @@ export function HarnessRemoteSettings({
   const publicReady = relay?.state === 'online' && remoteAccessState === 'active'
   const publicDetail = remoteAccessState === 'suspended'
     ? '账户公网访问已暂停'
-    : remoteAccessState === 'pending'
-      ? '体验申请审核中'
-      : remoteAccessState === 'expired'
-        ? '公网访问已到期'
-        : remoteAccessState === 'not_entitled'
-          ? '请在小程序中申请体验'
-          : remoteAccessState !== 'active'
-            ? '配对后由小程序账户决定'
-            : publicReady
-              ? '可在外网安全连接'
-              : publicBusy
-                ? '正在准备远程连接'
-                : '暂时离线'
+    : remoteAccessState === 'expired'
+      ? '公网访问已到期'
+      : remoteAccessState === 'not_entitled'
+        ? '请在小程序中使用自助开通方式'
+        : remoteAccessState !== 'active'
+          ? '配对后由小程序账户决定'
+          : publicReady
+            ? '可在外网安全连接'
+            : publicBusy
+              ? '正在准备远程连接'
+              : '暂时离线'
 
   const localDoor = runtime?.localDoor ?? status?.gate?.localDoor
   const lanReady =
     loadState === 'ready' &&
     Boolean(status?.lan.ip) &&
     localDoor?.state === 'listening'
-  const identityReady = publicReady || status?.wechat.configured === true
+  const identityReady = relay?.enabled === true && relay.state !== 'disabled'
   const agentName = status?.agent?.agentName || host?.agentName || 'DeepSeek Harness'
   const hostName = status?.agent?.hostName || host?.computerName || '当前电脑'
 
@@ -274,7 +270,7 @@ export function HarnessRemoteSettings({
           busy={publicBusy || loadState === 'loading'}
         />
         <Capability
-          title="微信账号保护"
+          title="账号连接保护"
           detail={identityReady ? '已启用' : '配对后启用'}
           ok={identityReady}
           busy={loadState === 'loading'}
@@ -294,14 +290,14 @@ export function HarnessRemoteSettings({
         <div className={styles.connectCard}>
           <div>
             <strong>添加到微信</strong>
-            <p>打开「Agent远程管理助手」→ 添加节点，扫描配对码。</p>
+            <p>打开「Agent远程管理助手」→ 添加节点，扫描配对二维码。</p>
           </div>
           <button
             type="button"
             className={styles.primaryButton}
             onClick={() => void generateQr()}
           >
-            生成配对码
+            生成二维码
           </button>
         </div>
       ) : (
@@ -329,11 +325,7 @@ export function HarnessRemoteSettings({
               </div>
             )}
             {qrState === 'ready' && qr !== null ? (
-              <div className={styles.qrMeta}>
-                <span>配对码</span>
-                <code>{qr.code}</code>
-                <small>15 分钟内有效</small>
-              </div>
+              <small className={styles.qrValidity}>二维码约 15 分钟内有效</small>
             ) : null}
           </div>
           <p className={styles.securityNote}>

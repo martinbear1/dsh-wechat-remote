@@ -6,29 +6,24 @@
  *
  * 进程内两个监听器：
  *
- *   1. PUBLIC door（0.0.0.0:3092 — 仅局域网直连）：
- *        - 所有请求都要求 "Authorization: Bearer <token>"（无任何 loopback
- *          豁免），唯一例外是
- *          POST /pair/claim-wechat —— 用一次性配对码 + wx.login jsCode 换取
- *          长期 token，并把 token 与解析出的微信 openid 一对一绑定。
- *        - POST /pair/verify-wechat（需 Bearer）：每次启动用新 jsCode 复核
- *          当前微信身份与绑定一致；配置了真实 appid/secret 时，复核成功即
- *          **轮换 token**（旧凭证立即作废，泄露窗口 = 一次会话）。
- *        - 其余请求反代到 DSH 127.0.0.1:3080（Host 重写走官方栅栏合法通道）。
- *        - 加固：每 IP 限速（429）、常数时间 token 比较、状态文件 0600。
+ *   1. LAN door（0.0.0.0:3092 — 仅加密局域网直连）：
+ *        - 只接受 /wechat-remote/secure-lan WebSocket。
+ *        - 手机先核验 Agent 长期公钥并建立 E2EE，再在密文中提交通过已认证
+ *          公网隧道领取的局域网凭据；握手前不接受 DSH 请求或凭据。
+ *        - 为 1.7.8 及更早安装器升级保留一个严格限定的回环健康检查：仅本机、
+ *          仅候选重启验证期、同时校验旧 LAN token 与一次性更新任务令牌。
+ *        - 不再暴露旧微信配对、身份回退、明文 HTTP 或普通 WebSocket 代理。
  *
  *   2. LOCAL door（127.0.0.1:3093 — 仅本机可访问）：
- *        - GET /pair       电脑端配对页（二维码 + 配对码）
+ *        - GET /pair       电脑端配对页（公网单次票据或已配对地址恢复码）
  *        - GET /pair/code  官方 Web Settings 配对页数据（CORS for :3080）
  *        - GET /gate/status 局域网门与端到端加密公网 Agent 状态
  *
  * web/default 的历史状态路径保持为 ~/.dsh/gate-wechat-state.json；其他
- * profile 按稳定 Agent 实例隔离。微信 appid/secret 配置仍存于
- * ~/.dsh/gate-wechat.json。
+ * profile 按稳定 Agent 实例隔离。旧 gate-wechat.json 不再读取。
  * 随 DSH 同生共死 —— 无独立进程。
  */
 import http, { type IncomingMessage, type ServerResponse } from 'node:http'
-import https from 'node:https'
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
@@ -38,7 +33,6 @@ import type { Socket } from 'node:net'
 import { TaskNotifications, NotificationRelayClient } from './task-notifications.js'
 import httpProxy from 'http-proxy'
 import QRCode from 'qrcode'
-import { WebSocketServer } from 'ws'
 import { SecureLanServer } from './secure-lan.js'
 import type { Context, Plugin } from '@deepseek-ai/cordis'
 import WechatDirectoryService from './directory-service.js'
@@ -46,7 +40,6 @@ import WechatHostInfoService, {
   type WechatGateRuntimeInfo,
 } from './host-info-service.js'
 import WechatHistoryService, {
-  prewarmLatestHistory,
   type WechatHistoryConfig,
 } from './history-service.js'
 import WechatAttachmentService, {
@@ -55,7 +48,6 @@ import WechatAttachmentService, {
 import { AgentResourcesService } from './agent-resources.js'
 import { AgentInputsService } from './agent-inputs.js'
 import PublicRelayGateway from './public-relay-gateway.js'
-import { bindHistorySnapshotPrewarmer } from './history-prewarmer.js'
 import {
   loadPublicRelayConfig,
   publicPairingPayload,
@@ -72,34 +64,15 @@ import { deriveGatePorts, describeGateListenFailure } from './gate-ports.js'
 import { adapterDshHome, isAllowedDshWebOrigin, resolveDshWebRuntime } from './dsh-runtime.js'
 import { resolveTypertGateway } from './dsh-protocol-compat.js'
 import { DshCompatibilityApi } from './dsh-compatibility-api.js'
-import { tightenPrivateFile, writePrivateJsonAtomic } from './secure-file.js'
+import { loadGateState, saveGateState, type GateState } from './gate-state.js'
 import { PluginUpdateService } from './update-service.js'
-
-interface PendingPair {
-  expiresAt: number
-  attempts: number
-}
-
-interface GateState {
-  publicIdentityNodeId?: string
-  token: string
-  pending: Record<string, PendingPair>
-  wechatBindings: Record<string, string>
-}
-
-interface WechatConfig {
-  appid: string
-  secret: string
-}
 
 interface RateBucket {
   windowStart: number
   count: number
-  claimCount: number
 }
 
 interface PairEntry {
-  code: string
   payload: string
   qrDataUrl: string
   publicMode: boolean
@@ -151,16 +124,9 @@ export function mountWechatGate(ctx: Context): () => void {
     target: 'http://127.0.0.1:' + UPSTREAM_PORT,
     changeOrigin: true,
   }
-  const WS_TARGET = {
-    target: 'ws://127.0.0.1:' + UPSTREAM_PORT,
-    changeOrigin: true,
-  }
-  const PAIR_TTL_MS = 15 * 60 * 1000
-  const MAX_ATTEMPTS = 5
-  const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+  const ROUTE_QR_REFRESH_MS = 15 * 60 * 1000
   const RATE_WINDOW_MS = 60 * 1000
-  const RATE_MAX_PER_IP = 120 // general requests per IP per minute on the public door
-  const CLAIM_MAX_PER_IP = 10 // claim attempts per IP per minute (brute-force brake)
+  const RATE_MAX_PER_IP = 120
   let publicRelayGateway: PublicRelayGateway | null = null
   let publicRelayStatus: AgentStatus = { enabled: false, state: 'disabled' }
   let agentDescriptor: AgentDescriptor
@@ -238,99 +204,40 @@ export function mountWechatGate(ctx: Context): () => void {
     }
   }
 
-  /**
-   * 收紧凭据文件权限：POSIX 上 0600；Windows 上 chmod 只映射只读位、
-   * 无安全意义，改用 icacls 去掉继承并把 ACL 收敛为仅当前用户完全控制。
-   * 全部尽力而为 —— 失败不阻断配对流程。
-   */
-  function tightenFilePerms(file: string): void {
-    tightenPrivateFile(file)
+  const loadedState = loadGateState(STATE_FILE)
+  const state = loadedState.state
+  let lanStatePersistent = loadedState.persistent
+  let disableLanDoor = (): void => {
+    doorRuntime.publicDoor.state = 'unavailable'
+    doorRuntime.publicDoor.errorCode = 'GATE_STATE_UNAVAILABLE'
+    doorRuntime.publicDoor.message = '局域网凭据文件无法安全读写，已暂停局域网入口'
   }
+  if (loadedState.warning) console.warn(`[wechat-gate] ${loadedState.warning}`)
 
-  function validPendingPairs(value: unknown): Record<string, PendingPair> {
-    const input = recordOf(value)
-    const output: Record<string, PendingPair> = {}
-    if (!input) return output
-    for (const [code, pairValue] of Object.entries(input)) {
-      const pair = recordOf(pairValue)
-      if (!/^[A-Z2-9]{8}$/.test(code) || !pair) continue
-      if (
-        !Number.isSafeInteger(pair.expiresAt) ||
-        !Number.isSafeInteger(pair.attempts)
-      )
-        continue
-      output[code] = {
-        expiresAt: Number(pair.expiresAt),
-        attempts: Number(pair.attempts),
-      }
-    }
-    return output
-  }
-
-  function validWechatBindings(value: unknown): Record<string, string> {
-    const input = recordOf(value)
-    const output: Record<string, string> = {}
-    if (!input) return output
-    for (const [openId, token] of Object.entries(input)) {
-      if (openId && typeof token === 'string' && token.length >= 32)
-        output[openId] = token
-    }
-    return output
-  }
-
-  function loadState(): GateState {
+  function replaceState(next: GateState): boolean {
+    if (!lanStatePersistent) return false
     try {
-      const raw = recordOf(JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')))
-      // 修复升级前遗留的宽松权限。
-      tightenFilePerms(STATE_FILE)
-      if (raw && typeof raw.token === 'string' && raw.token.length >= 32) {
-        return {
-          token: raw.token,
-          pending: validPendingPairs(raw.pending),
-          wechatBindings: validWechatBindings(raw.wechatBindings),
-          publicIdentityNodeId: typeof raw.publicIdentityNodeId === 'string' ? raw.publicIdentityNodeId : undefined,
-        }
-      }
-    } catch {
-      /* first run */
-    }
-    const fresh: GateState = {
-      token: crypto.randomBytes(32).toString('base64url'),
-      pending: {},
-      wechatBindings: {},
-    }
-    saveState(fresh)
-    return fresh
-  }
-
-  function saveState(state: GateState): void {
-    try {
-      // 文件里同时躺着长期令牌与待配对码。临时文件落盘后同卷原子替换，
-      // 避免断电/进程终止把原有效凭据截断成半份 JSON。
-      writePrivateJsonAtomic(STATE_FILE, state)
+      saveGateState(STATE_FILE, next)
+      state.token = next.token
+      state.publicIdentityNodeId = next.publicIdentityNodeId
+      return true
     } catch (error: unknown) {
-      console.error('[wechat-gate] failed to save state:', messageOf(error))
+      lanStatePersistent = false
+      console.error('[wechat-gate] failed to persist LAN credential state:', messageOf(error))
+      disableLanDoor()
+      return false
     }
   }
-
-  const state = loadState()
 
   function synchronizeLanIdentity(nodeId: string): void {
+    if (!lanStatePersistent) return
     if (state.publicIdentityNodeId === nodeId) return
-    state.token = crypto.randomBytes(32).toString('base64url')
-    state.wechatBindings = {}
-    state.pending = {}
-    state.publicIdentityNodeId = nodeId
     // Persist the grant's owner with its token atomically. On restart, a
     // mismatching identity retires the grant again, including interrupted saves.
-    writePrivateJsonAtomic(STATE_FILE, state)
-  }
-
-  function randomCode(len = 8): string {
-    let out = ''
-    for (let i = 0; i < len; i++)
-      out += ALPHABET[crypto.randomInt(ALPHABET.length)]
-    return out
+    replaceState({
+      token: crypto.randomBytes(32).toString('base64url'),
+      publicIdentityNodeId: nodeId,
+    })
   }
 
   function lanIPv4(): string {
@@ -353,27 +260,9 @@ export function mountWechatGate(ctx: Context): () => void {
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
   }
 
-  /** The public LAN door has no loopback authentication exemption. */
   /**
-   * Append one line to the gate access log so connectivity problems can be
-   * diagnosed from the PC side (~/.dsh/wechat-gate-access.log).
-   */
-  function accessLog(req: IncomingMessage, note: string): void {
-    try {
-      const line = `${new Date().toISOString()} ${req.socket.remoteAddress ?? '?'} ${req.method} ${req.url ?? '?'} ${note}\n`
-      fs.appendFileSync(
-        path.join(adapterDshHome(), 'wechat-gate-access.log'),
-        line,
-      )
-    } catch (e) {
-      /* logging is best-effort */
-    }
-  }
-
-  /**
-   * 公共门的每 IP 请求预算。公共门对任何来源都没有 loopback 豁免，限速是
-   * 敌意局域网邻居 / 互联网扫描器能撞上的第一道闸，也刹住配对码的暴力尝试
-   * （单码已有次数上限，这里再兜一层按来源的节奏限制）。
+   * LAN WebSocket 的每 IP 请求预算。认证仍在身份钉扎的 E2EE 内完成；
+   * 此预算只防止同网段来源用握手洪泛耗尽 DSH 进程。
    *
    * Key 只取 socket 对端地址。PUBLIC door 不再承载反向代理或 Funnel，因而
    * 永不采信客户端自带的 X-Forwarded-For，伪造头不能绕过预算。
@@ -387,15 +276,14 @@ export function mountWechatGate(ctx: Context): () => void {
       'ip:' + (sock.startsWith('::ffff:') ? sock.slice(7) : sock || 'unknown')
     )
   }
-  function allowRequest(req: IncomingMessage, isClaim: boolean): boolean {
+  function allowRequest(req: IncomingMessage): boolean {
     const key = rateKey(req)
     const now = Date.now()
     let bucket = rateBuckets.get(key)
     if (!bucket || bucket.windowStart + RATE_WINDOW_MS < now) {
-      bucket = { windowStart: now, count: 0, claimCount: 0 }
+      bucket = { windowStart: now, count: 0 }
       rateBuckets.set(key, bucket)
     }
-    if (isClaim && ++bucket.claimCount > CLAIM_MAX_PER_IP) return false
     if (++bucket.count > RATE_MAX_PER_IP) return false
     if (rateBuckets.size > 20000) {
       // 惰性清扫：空转的桶不无限堆积
@@ -405,11 +293,6 @@ export function mountWechatGate(ctx: Context): () => void {
     }
     return true
   }
-  function reject429(res: ServerResponse): void {
-    res.writeHead(429, { 'Content-Type': 'text/plain', 'Retry-After': '30' })
-    res.end('too many requests')
-  }
-
   function authorized(req: IncomingMessage): boolean {
     const header = req.headers.authorization
     if (typeof header !== 'string' || !header.startsWith('Bearer '))
@@ -428,10 +311,6 @@ export function mountWechatGate(ctx: Context): () => void {
   const compatibilityApi = new DshCompatibilityApi(ctx, UPSTREAM_PORT, () => updater.isMaintaining())
   let taskNotifications: TaskNotifications | undefined
   updater.trackPublicRequests(() => compatibilityApi.hasInFlightRequests())
-  const compatibilityWebSockets = new WebSocketServer({
-    noServer: true,
-    clientTracking: false,
-  })
   proxy.on('error', (err, req, res) => {
     console.error('[wechat-gate] proxy error:', err.message)
     if (res && 'writeHead' in res && !res.headersSent) {
@@ -504,13 +383,22 @@ export function mountWechatGate(ctx: Context): () => void {
     })
   }
 
-  async function serveCompatibleDshRpc(
+  /** Transitional compatibility boundary for already released update workers.
+   * It is reachable only while the candidate startup fence recognizes the
+   * initiating job, and still requires the preserved LAN token. No phone or LAN
+   * peer can opt into this path.
+   */
+  async function serveUpdateVerificationProbe(
     req: IncomingMessage,
     res: ServerResponse,
   ): Promise<void> {
     const gateway = resolveTypertGateway(ctx)
-    const probe = updater.isVerificationProbe(req)
-    if (!gateway && (probe || !compatibilityApi.handlesPath(req.url || '/'))) {
+    if (!updater.isVerificationProbe(req)) {
+      res.writeHead(404, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store' })
+      res.end('not found')
+      return
+    }
+    if (!gateway) {
       proxy.web(req, res, { ...TARGET, selfHandleResponse: true })
       return
     }
@@ -524,7 +412,7 @@ export function mountWechatGate(ctx: Context): () => void {
         method: req.method || '', path: req.url || '/',
         body: Buffer.from(raw), signal: controller.signal,
       }
-      const response = await (probe ? compatibilityApi.verificationProbe(request) : compatibilityApi.request(request))
+      const response = await compatibilityApi.verificationProbe(request)
       if (res.destroyed) return
       res.writeHead(response.statusCode, {
         ...response.headers,
@@ -545,50 +433,36 @@ export function mountWechatGate(ctx: Context): () => void {
   }
 
   async function makePairEntry(): Promise<PairEntry> {
-    const now = Date.now()
-    for (const [code, entry] of Object.entries(state.pending)) {
-      if (entry.expiresAt < now) delete state.pending[code]
-    }
-    const code = randomCode()
-    state.pending[code] = { expiresAt: now + PAIR_TTL_MS, attempts: 0 }
-    saveState(state)
-    // The LAN route is additive metadata on the identity-pinned public QR.
-    // Internet access always uses the dedicated E2EE relay, never this door.
-    const payloadObj = { code, host: lanIPv4(), port: PUBLIC_PORT }
-    let payload = JSON.stringify(payloadObj)
-    let publicMode = false
-    let expiresAt = state.pending[code].expiresAt
     const gateway = publicRelayGateway
-    if (gateway) {
-      // An already paired phone can refresh a moved host's address even if
-      // the cloud is blocked. This QR is a locator, never an authorization.
-      const locatorPayload = (): string => JSON.stringify({ v: 1, mode: 'secure-lan-route',
-        nodeId: gateway.agent.identity.nodeId,
-        identityPublicKey: gateway.agent.identity.publicKeyPem,
-        relayOrigin: gateway.agent.config.relayOrigin, lan: payloadObj })
-      payload = locatorPayload()
-      try {
-        publicRelayStatus = await gateway.ensurePairingStatus()
-        const raw = publicPairingPayload(publicRelayStatus, payloadObj)
-        if (raw) {
-          const publicPayload = JSON.parse(raw)
-          // A single scan can bind the public identity and, when the phone is on
-          // the same LAN, also obtain the direct path for LAN-first routing.
-          // The shared serializer owns the complete QR v1 wire contract.
-          payload = raw
-          publicMode = true
-          expiresAt = Number(publicPayload.expiresAt) || expiresAt
-        }
-      } catch (error: unknown) {
-        payload = locatorPayload()
-        console.warn(
-          '[wechat-gate] public pairing ticket unavailable; serving identity-pinned route locator:',
-          messageOf(error),
-        )
+    if (!gateway) throw new Error('公网配对服务尚未就绪')
+    // A LAN address is an untrusted locator, never an authorization grant.
+    // New devices must claim the cloud's single-use ticket; already paired
+    // clients match node identity/public key before accepting this address.
+    const payloadObj = { host: lanIPv4(), port: PUBLIC_PORT }
+    const locatorPayload = (): string => JSON.stringify({ v: 1, mode: 'secure-lan-route',
+      nodeId: gateway.agent.identity.nodeId,
+      identityPublicKey: gateway.agent.identity.publicKeyPem,
+      relayOrigin: gateway.agent.config.relayOrigin, lan: payloadObj })
+    let payload = locatorPayload()
+    let publicMode = false
+    let expiresAt = Date.now() + ROUTE_QR_REFRESH_MS
+    try {
+      publicRelayStatus = await gateway.ensurePairingStatus()
+      const raw = publicPairingPayload(publicRelayStatus, payloadObj)
+      if (raw) {
+        const publicPayload = JSON.parse(raw)
+        payload = raw
+        publicMode = true
+        expiresAt = Number(publicPayload.expiresAt) || expiresAt
       }
+    } catch (error: unknown) {
+      console.warn(
+        '[wechat-gate] public pairing ticket unavailable; serving identity-pinned route locator:',
+        messageOf(error),
+      )
     }
     const qrDataUrl = await QRCode.toDataURL(payload, { width: 420, margin: 2 })
-    return { code, payload, qrDataUrl, publicMode, expiresAt }
+    return { payload, qrDataUrl, publicMode, expiresAt }
   }
 
   // ── LOCAL door (127.0.0.1:3093): pairing surface + status ──
@@ -597,7 +471,14 @@ export function mountWechatGate(ctx: Context): () => void {
     _req: IncomingMessage,
     res: ServerResponse,
   ): Promise<void> {
-    const entry = await makePairEntry()
+    let entry: PairEntry
+    try {
+      entry = await makePairEntry()
+    } catch (error: unknown) {
+      res.writeHead(503, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
+      res.end(`<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>配对暂不可用</title></head><body><h1>暂时无法生成配对二维码</h1><p>${messageOf(error)}</p><p>请确认电脑联网后重试。</p></body></html>`)
+      return
+    }
     // Issuing a QR replaces the single-use cloud ticket. A background refresh
     // here would invalidate a code being scanned (including one in WebUI).
     const validMinutes = Math.max(1, Math.ceil((entry.expiresAt - Date.now()) / 60_000))
@@ -617,8 +498,8 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
 <p>${agentDescriptor.agentName} · ${agentDescriptor.hostName}</p>
 <p>打开微信小程序，进入「添加节点」扫描二维码</p>
 <img src="${entry.qrDataUrl}" alt="pairing QR">
-<p>配对码：<code>${entry.code}</code> · 生成后约 ${validMinutes} 分钟内有效</p>
-<p>${entry.publicMode ? '自动选择更快连接；远程内容端到端加密' : publicRelayGateway ? '当前仅供已配对手机更新同一网络连接；新手机配对需要电脑连接公网服务' : '当前仅支持同一网络连接'}</p>
+<p>二维码生成后约 ${validMinutes} 分钟内有效</p>
+<p>${entry.publicMode ? '自动选择更快连接；远程内容端到端加密' : '当前仅供已配对手机更新同一网络连接；新手机配对需要电脑连接公网服务'}</p>
 <p>已使用或已过期时，请重新生成二维码。刷新后旧二维码失效。</p>
 <button type="button" onclick="location.reload()">重新生成二维码</button>
 </body></html>`
@@ -631,18 +512,24 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
     res: ServerResponse,
   ): Promise<void> {
     setCors(req, res)
-    const entry = await makePairEntry()
+    let entry: PairEntry
+    try {
+      entry = await makePairEntry()
+    } catch (error: unknown) {
+      res.writeHead(503, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+      res.end(JSON.stringify({ error: messageOf(error) }))
+      return
+    }
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
     res.end(
       JSON.stringify({
-        code: entry.code,
         host: lanIPv4(),
         port: PUBLIC_PORT,
         localPort: LOCAL_PORT,
         profileScope: selectedGatePorts.profileScope,
         gate: gateRuntimeSnapshot(),
         qrDataUrl: entry.qrDataUrl,
-        mode: entry.publicMode ? 'public-relay' : 'lan',
+        mode: entry.publicMode ? 'public-relay' : 'secure-lan-route',
         payload: entry.payload,
         expiresAt: entry.expiresAt,
       }),
@@ -656,10 +543,6 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
       JSON.stringify({
         gate: gateRuntimeSnapshot(),
         lan: { ip: lanIPv4(), port: PUBLIC_PORT },
-        wechat: {
-          configured: Boolean(loadWechatConfig()),
-          bindings: Object.keys(state.wechatBindings).length,
-        },
         // Status must not echo the active pairing ticket or identity key. The QR
         // endpoint is the sole local surface that releases those screen secrets.
         publicRelay: {
@@ -675,178 +558,7 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
     )
   }
 
-  // ── PUBLIC door (0.0.0.0:3092): token-required proxy + WeChat claim/verify ──
-
-  // ── 微信小程序身份层（本插件的主身份路径）：小程序扫电脑上的二维码，
-  //    认领时带上 wx.login jsCode。网关解析出 openid（配置了真实 appid/secret
-  //    走微信 code2session，否则用确定性开发态哈希），记录 openid↔token 绑定；
-  //    每次启动可经 /pair/verify-wechat 复核，成功即轮换 token。
-
-  const WECHAT_CONFIG_FILE = path.join(adapterDshHome(), 'gate-wechat.json')
-
-  function loadWechatConfig(): WechatConfig | null {
-    try {
-      const raw = recordOf(
-        JSON.parse(fs.readFileSync(WECHAT_CONFIG_FILE, 'utf8')),
-      )
-      // 文件里有 appsecret：尽力收敛为仅属主可读（0600 / icacls）。
-      tightenFilePerms(WECHAT_CONFIG_FILE)
-      if (
-        raw &&
-        typeof raw.appid === 'string' &&
-        typeof raw.secret === 'string'
-      ) {
-        return { appid: raw.appid, secret: raw.secret }
-      }
-    } catch {
-      /* not configured — dev fallback */
-    }
-    return null
-  }
-
-  function resolveOpenId(jsCode: unknown): Promise<string> {
-    return new Promise<string>((resolve, reject) => {
-      const config = loadWechatConfig()
-      if (!config) {
-        const hash = crypto
-          .createHash('sha256')
-          .update(String(jsCode))
-          .digest('hex')
-        return resolve('dev:' + hash.slice(0, 24))
-      }
-      const qs = new URLSearchParams({
-        appid: config.appid,
-        secret: config.secret,
-        js_code: String(jsCode),
-        grant_type: 'authorization_code',
-      })
-      const req = https.get(
-        'https://api.weixin.qq.com/sns/jscode2session?' + qs.toString(),
-        (res) => {
-          let data = ''
-          res.on('data', (chunk) => {
-            data += chunk
-          })
-          res.on('end', () => {
-            try {
-              const parsed = recordOf(JSON.parse(data))
-              if (typeof parsed?.openid === 'string' && parsed.openid)
-                return resolve(parsed.openid)
-              const detail =
-                typeof parsed?.errmsg === 'string'
-                  ? parsed.errmsg
-                  : `errcode ${String(parsed?.errcode ?? 'unknown')}`
-              reject(new Error(`wechat code2session: ${detail}`))
-            } catch (error: unknown) {
-              reject(error)
-            }
-          })
-        },
-      )
-      req.on('error', reject)
-      req.setTimeout(8000, () => req.destroy(new Error('code2session timeout')))
-    })
-  }
-
-  async function serveClaimWechat(
-    req: IncomingMessage,
-    res: ServerResponse,
-  ): Promise<void> {
-    try {
-      const body = recordOf(JSON.parse((await readBody(req)) || '{}')) ?? {}
-      const code = typeof body.code === 'string' ? body.code : ''
-      const entry = state.pending[code]
-      if (
-        !entry ||
-        entry.expiresAt < Date.now() ||
-        entry.attempts >= MAX_ATTEMPTS
-      ) {
-        res.writeHead(401, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'invalid or expired pairing code' }))
-        return
-      }
-      entry.attempts += 1
-      saveState(state)
-      let openId: string
-      try {
-        openId = await resolveOpenId(body.jsCode)
-      } catch (error: unknown) {
-        // 身份解析失败时保留配对码，避免一次性代码被瞬时 code2session 错误烧掉
-        res.writeHead(401, { 'Content-Type': 'application/json' })
-        res.end(
-          JSON.stringify({
-            error: `wechat identity verification failed: ${messageOf(error)}`,
-          }),
-        )
-        return
-      }
-      delete state.pending[code]
-      state.wechatBindings[openId] = state.token
-      saveState(state)
-      console.log(
-        '[wechat-gate] wechat pairing ok, openid=' + openId.slice(0, 12) + '…',
-      )
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(
-        JSON.stringify({
-          token: state.token,
-          openId: openId.slice(0, 8) + '…',
-        }),
-      )
-    } catch (e) {
-      res.writeHead(400, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ error: 'bad request' }))
-    }
-  }
-
-  async function serveVerifyWechat(
-    req: IncomingMessage,
-    res: ServerResponse,
-  ): Promise<void> {
-    try {
-      const body = recordOf(JSON.parse((await readBody(req)) || '{}')) ?? {}
-      const configured = Boolean(loadWechatConfig())
-      if (!configured) {
-        // 开发回退：无真实 appid/secret 时，模拟器的 wx.login 代码跨调用不稳定，
-        // openid 无法一致解析。门上的 token 校验仍证明持有权；配置 gate-wechat.json
-        // 后即启用真实身份绑定校验。
-        res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ valid: true, dev: true }))
-        return
-      }
-      let openId: string
-      try {
-        openId = await resolveOpenId(body.jsCode)
-      } catch (error: unknown) {
-        res.writeHead(401, { 'Content-Type': 'application/json' })
-        res.end(
-          JSON.stringify({
-            error: `wechat identity verification failed: ${messageOf(error)}`,
-          }),
-        )
-        return
-      }
-      const valid = state.wechatBindings[openId] === state.token
-      if (valid) {
-        // 凭证滚动：复核成功即轮换长期 token，旧凭证立即作废。
-        // 泄露窗口被压到「上次复核 → 本次复核」之间；门上的 authorized()
-        // 自本轮起只认新 token。注意：同一 openid 在多设备同时使用时，
-        // 先复核的设备会作废另一台设备持有的旧 token（个人工具可接受）。
-        const rotated = crypto.randomBytes(32).toString('base64url')
-        state.token = rotated
-        state.wechatBindings[openId] = rotated
-        saveState(state)
-        res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ valid: true, token: rotated }))
-        return
-      }
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ valid: false }))
-    } catch {
-      res.writeHead(400, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ error: 'bad request' }))
-    }
-  }
+  // ── LAN door (0.0.0.0:3092): encrypted transport only ──
 
   const localServer = http.createServer((req, res) => {
     // Simple cross-origin GET responses need the same allow-origin header as
@@ -868,49 +580,23 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
   })
 
   const publicServer = http.createServer((req, res) => {
-    if (updater.isMaintaining() && !updater.isVerificationProbe(req)) { res.writeHead(503, { 'retry-after': '5' }); res.end('Plugin update in progress'); return }
-    if ((req.url || '').startsWith('/gate/update/')) { res.writeHead(403); res.end('Local WebUI only'); return }
-    if (req.method === 'OPTIONS') {
-      res.writeHead(204)
-      return res.end()
-    }
-    const url = new URL(req.url ?? '/', 'http://gate.local')
-    if (url.pathname === '/pair/claim-wechat') {
-      if (!allowRequest(req, true)) {
-        accessLog(req, 'DENIED-429')
-        return reject429(res)
-      }
-      accessLog(req, 'claim-wechat')
-      return serveClaimWechat(req, res)
-    }
-    if (!allowRequest(req, false)) {
-      accessLog(req, 'DENIED-429')
-      return reject429(res)
-    }
-    if (url.pathname === '/pair/verify-wechat') {
+    if (updater.isVerificationProbe(req)) {
       if (!authorized(req)) {
-        accessLog(req, 'DENIED-401')
-        res.writeHead(401, { 'Content-Type': 'text/plain' })
-        return res.end('unauthorized')
+        res.writeHead(401, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store' })
+        res.end('unauthorized')
+        return
       }
-      accessLog(req, 'verify-wechat')
-      return serveVerifyWechat(req, res)
+      void serveUpdateVerificationProbe(req, res)
+      return
     }
-    if (!authorized(req)) {
-      accessLog(req, 'DENIED-401')
-      res.writeHead(401, { 'Content-Type': 'text/plain' })
-      return res.end('unauthorized')
-    }
-    // 远程客户端可能带浏览器标记头（开发者工具模拟器发 Origin + Sec-Fetch-*）。
-    // 上游 web 服务器按协议 §3.4 对浏览器直连校验 Origin==Host 与 sec-fetch-site；
-    // 经网关代理的远程客户端以 token 为唯一凭证，剥离这些头避免误伤
-    // （Web UI 直连 3080，不受影响）。
-    stripBrowserMarkers(req)
-    accessLog(req, 'ok')
-    if (req.method === 'POST' && url.pathname.startsWith('/api/')) {
-      return serveCompatibleDshRpc(req, res)
-    }
-    proxy.web(req, res, { ...TARGET, selfHandleResponse: true })
+    // This port is no longer a bearer-authenticated HTTP proxy. Pairing and
+    // WebUI update control stay on the loopback-only local door.
+    res.writeHead(updater.isMaintaining() ? 503 : 404, {
+      'Content-Type': 'text/plain',
+      'Cache-Control': 'no-store',
+      ...(updater.isMaintaining() ? { 'Retry-After': '5' } : {}),
+    })
+    res.end(updater.isMaintaining() ? 'Plugin update in progress' : 'not found')
   })
 
   const secureLan = new SecureLanServer({
@@ -923,6 +609,13 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
       return publicRelayGateway.createAuthenticatedTunnel(send)
     },
   })
+  disableLanDoor = (): void => {
+    doorRuntime.publicDoor.state = 'unavailable'
+    doorRuntime.publicDoor.errorCode = 'GATE_STATE_UNAVAILABLE'
+    doorRuntime.publicDoor.message = '局域网凭据文件无法安全读写，已暂停局域网入口'
+    for (const client of secureLan.sockets.clients) client.terminate()
+    try { publicServer.close() } catch { /* already closed or not listening */ }
+  }
   publicServer.on('upgrade', (req, socket, head) => {
     if (updater.isMaintaining()) { socket.destroy(); return }
     // A remote client can reset a WebSocket while the proxy is connecting to
@@ -935,46 +628,19 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
       )
       if (!socket.destroyed) socket.destroy()
     })
-    if (!allowRequest(req, false)) {
+    if (!allowRequest(req)) {
       socket.write('HTTP/1.1 429 Too Many Requests\r\n\r\n')
       return socket.destroy()
     }
     if (req.url === '/wechat-remote/secure-lan') {
-      if (secureLan.sockets.clients.size >= 8) { socket.destroy(); return }
-      secureLan.sockets.handleUpgrade(req, socket, head, ws => secureLan.attach(ws))
+      secureLan.sockets.handleUpgrade(req, socket, head, ws =>
+        secureLan.attach(ws, req.socket.remoteAddress),
+      )
       return
     }
-    if (!authorized(req)) {
-      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n')
-      return socket.destroy()
-    }
-    stripBrowserMarkers(req)
-    const url = new URL(req.url ?? '/', 'http://gate.local')
-    const gateway = resolveTypertGateway(ctx)
-    if (gateway
-        && (url.pathname === '/api/events.mux' || url.pathname === '/api/events.host')) {
-      const legacyPath = url.pathname === '/api/events.mux'
-        ? '/api/events.mux' as const
-        : '/api/events.host' as const
-      compatibilityWebSockets.handleUpgrade(req, socket, head, (webSocket) => {
-        compatibilityApi.realtime.attach(legacyPath, webSocket)
-      })
-      return
-    }
-    proxy.ws(req, socket, head, WS_TARGET)
+    socket.write('HTTP/1.1 404 Not Found\r\n\r\n')
+    socket.destroy()
   })
-
-  /**
-   * 剥离浏览器标记头（Origin/Referer/Sec-Fetch-*），使上游协议 §3.4 的
-   * 浏览器直连校验只作用于真正从 3080 直连的 Web UI。
-   */
-  function stripBrowserMarkers(req: IncomingMessage): void {
-    delete req.headers.origin
-    delete req.headers.referer
-    for (const key of Object.keys(req.headers)) {
-      if (key.indexOf('sec-fetch-') === 0) delete req.headers[key]
-    }
-  }
 
   publicServer.on('clientError', (err, socket) => {
     console.warn(
@@ -1063,16 +729,16 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
   // 并删除已完成轮次的冗余流式增量。独立 Remote 不修改 WebUI/DSH。
   const historyConfig: WechatHistoryConfig = {
     dshPort: UPSTREAM_PORT,
-    prepareSnapshot: async (payloadJson: string) => {
+    storeSnapshot: async (payloadJson: string, archive: Uint8Array, signal: AbortSignal) => {
       const gateway = publicRelayGateway
       if (!gateway) throw new Error('Public object transport is unavailable')
-      return gateway.prepareHistorySnapshot(payloadJson)
+      return gateway.storeHistorySnapshot(payloadJson, archive, signal)
     },
   }
   mountChild('history', WechatHistoryService, historyConfig)
   // 历史图片仍先通过 DSH 原生 session.attachment 完成会话引用校验；随后
   // 仅将端侧加密密文放入私有对象存储，让小程序公网直取，避免大体积
-  // base64 占用实时中继。对象层故障返回 unavailable，由客户端原生回退。
+  // base64 占用实时中继。对象层故障只让该图片失败，不应触发大响应回退。
   const attachmentConfig: WechatAttachmentConfig = {
     dshPort: UPSTREAM_PORT,
     storeAttachment: async (data, attachment, signal) => {
@@ -1130,6 +796,7 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
         // by WebUI or unauthenticated LAN clients.
         issueLanCredential: (rotate = false) => {
           if (updater.isMaintaining()) throw new Error('插件正在更新，请稍后重连')
+          if (!lanStatePersistent) throw new Error('局域网凭据状态不可用，请先修复凭据文件')
           if (doorRuntime.publicDoor.state !== 'listening') {
             throw new Error(
               doorRuntime.publicDoor.message ||
@@ -1137,14 +804,10 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
             )
           }
           if (rotate) {
-            const previous = state.token
-            const rotated = crypto.randomBytes(32).toString('base64url')
-            state.token = rotated
-            for (const openId of Object.keys(state.wechatBindings)) {
-              if (state.wechatBindings[openId] === previous)
-                state.wechatBindings[openId] = rotated
-            }
-            saveState(state)
+            if (!replaceState({
+              token: crypto.randomBytes(32).toString('base64url'),
+              publicIdentityNodeId: state.publicIdentityNodeId,
+            })) throw new Error('局域网凭据保存失败，请检查凭据文件权限')
             console.log(
               '[wechat-gate] authenticated E2EE client rotated LAN credential',
             )
@@ -1183,30 +846,6 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
         }
       }
       void publicRelayGateway.start()
-      void Promise.resolve(
-        bindHistorySnapshotPrewarmer(ctx, {
-          dshPort: UPSTREAM_PORT,
-          ...(resolveTypertGateway(ctx) ? {
-            hostEventSource: (receive: (raw: unknown) => void, disconnected: () => void) =>
-              compatibilityApi.connectEvents('/api/events.host', {
-                readyState: 1,
-                bufferedAmount: 0,
-                send: receive,
-                close: disconnected,
-              }),
-          } : {}),
-          warm: (service, sessionId, signal) =>
-            prewarmLatestHistory(service, sessionId, signal),
-          onDiagnostic: (level, message) => {
-            if (level === 'warn') console.warn(`[wechat-gate] ${message}`)
-            else console.log(`[wechat-gate] ${message}`)
-          },
-        }),
-      ).catch((error: unknown) => {
-        console.warn(
-          `[wechat-gate] optional history prewarmer unavailable: ${messageOf(error)}`,
-        )
-      })
     }
   } catch (error: unknown) {
     publicRelayStatus = {
@@ -1257,17 +896,23 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
   } catch (e) {
     failDoor('local door', e)
   }
-  try {
-    publicServer.listen(PUBLIC_PORT, '0.0.0.0', () => {
-      doorRuntime.publicDoor.state = 'listening'
-      doorRuntime.publicDoor.errorCode = null
-      doorRuntime.publicDoor.message = null
-      console.log(
-        `[wechat-gate] public door (wechat token required): 0.0.0.0:${PUBLIC_PORT} -> ${TARGET.target}`,
-      )
-    })
-  } catch (error: unknown) {
-    failDoor('public door', error)
+  if (!lanStatePersistent) {
+    doorRuntime.publicDoor.state = 'unavailable'
+    doorRuntime.publicDoor.errorCode = 'GATE_STATE_UNAVAILABLE'
+    doorRuntime.publicDoor.message = '局域网凭据文件无法安全读取，已保留原文件并暂停局域网入口'
+  } else {
+    try {
+      publicServer.listen(PUBLIC_PORT, '0.0.0.0', () => {
+        doorRuntime.publicDoor.state = 'listening'
+        doorRuntime.publicDoor.errorCode = null
+        doorRuntime.publicDoor.message = null
+        console.log(
+          `[wechat-gate] encrypted LAN door: ws://0.0.0.0:${PUBLIC_PORT}/wechat-remote/secure-lan`,
+        )
+      })
+    } catch (error: unknown) {
+      failDoor('public door', error)
+    }
   }
   return dispose
 }

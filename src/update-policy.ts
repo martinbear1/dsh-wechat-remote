@@ -18,8 +18,13 @@ export interface Release {
   architectures: string[]
   // Optional precise evidence for display/auditing ONLY, never an update allowlist.
   // Older records use the Cartesian product above to describe tested combinations.
+  // A preview awaiting hardware tests may leave all three evidence lists empty.
   targets?: { platform: string; arch: string; dsh: string[] }[]
   asset?: { url: string; sha256: string; bytes: number }
+  // COMPAT(updater <= 1.7.8): keep asset as the canonical GitHub plugin.
+  // Old readers ignore this optional source; remove the legacy assumption only
+  // after those updaters are retired. Installer-only releases may differ in version.
+  npmInstaller?: { version: string; url: string; sha256: string; bytes: number }
 }
 export interface UpdateCatalog {
   schemaVersion: 1; revision: string; issuedAt: number; expiresAt: number
@@ -73,6 +78,12 @@ export function trustedReleaseAsset(asset: Release['asset'], version: string): b
       && /^[-A-Za-z0-9_.]+\.tgz$/.test(u.pathname.slice(`/martinbear1/dsh-wechat-remote/releases/download/v${version}/`.length))
   } catch { return false }
 }
+export function trustedNpmInstaller(source: Release['npmInstaller']): boolean {
+  if (!source || !validVersion(source.version) || !/^[a-f0-9]{64}$/.test(source.sha256)
+      || !Number.isSafeInteger(source.bytes) || source.bytes < 1 || source.bytes > 32 * 1024 * 1024) return false
+  // Exact immutable package/version, never a dist-tag, user URL or arbitrary mirror.
+  return source.url === `https://registry.npmjs.org/dsh-wechat-remote/-/dsh-wechat-remote-${source.version}.tgz`
+}
 export function validateCatalog(value: unknown): UpdateCatalog {
   const c = value as UpdateCatalog
   const strings = (v: unknown, max = 100): v is string[] => Array.isArray(v) && v.length <= max
@@ -86,10 +97,15 @@ export function validateCatalog(value: unknown): UpdateCatalog {
   for (const r of c.releases) {
     if (!r || !validVersion(r.version) || versions.has(r.version)
         || !['stable', 'preview'].includes(r.channel) || (r.channel === 'stable' && versionPattern.exec(r.version)![4])
-        || !strings(r.dsh) || !r.dsh.length || !r.dsh.every(validVersion)
-        || !strings(r.platforms, 3) || !r.platforms.length || !r.platforms.every(p => ['windows', 'macos', 'linux'].includes(p))
-        || !strings(r.architectures, 32) || !r.architectures.length || !r.architectures.every(a => /^[a-z0-9_-]{1,32}$/.test(a))
-        || (r.asset && !trustedReleaseAsset(r.asset, r.version))) throw new Error('Invalid release entry')
+        || !strings(r.dsh) || !r.dsh.every(validVersion)
+        || !strings(r.platforms, 3) || !r.platforms.every(p => ['windows', 'macos', 'linux'].includes(p))
+        || !strings(r.architectures, 32) || !r.architectures.every(a => /^[a-z0-9_-]{1,32}$/.test(a))
+        || (r.asset && !trustedReleaseAsset(r.asset, r.version))
+        || (r.npmInstaller !== undefined && (!r.asset || !trustedNpmInstaller(r.npmInstaller)))) throw new Error('Invalid release entry')
+    const hasEvidence = r.dsh.length > 0 && r.platforms.length > 0 && r.architectures.length > 0
+    const pendingPreview = r.channel === 'preview' && Boolean(versionPattern.exec(r.version)![4])
+      && r.dsh.length === 0 && r.platforms.length === 0 && r.architectures.length === 0
+    if (!hasEvidence && !pendingPreview) throw new Error('Invalid release evidence')
     versions.add(r.version)
     if (r.targets !== undefined) {
       if (!Array.isArray(r.targets) || !r.targets.length || r.targets.length > 12) throw new Error('Invalid release targets')

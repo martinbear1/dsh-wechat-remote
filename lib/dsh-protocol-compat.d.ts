@@ -75,6 +75,13 @@ export declare function resolveTypertGateway(ctx: Context): TypertGatewayLike | 
 export declare function commandArguments(gateway: Pick<TypertGatewayLike, 'commandAttachmentField'>, args: Readonly<JsonRecord>): JsonRecord;
 /** Expand 0.1.2 packed history rows back into the stable event vocabulary. */
 export declare function unpackChunkRow(event: JsonRecord): JsonRecord[];
+/** One read transaction owns one native address. Latest reads pin a follow
+ * snapshot; older-only reads already have an exclusive boundary and use page
+ * directly. No cross-request cache or unrelated latest-tail download. */
+export declare function createHistoryPageReader(gateway: TypertGatewayLike, sessionId: string, signal: AbortSignal): (request: {
+    readonly maxMessages: number;
+    readonly beforeSeq?: number;
+}) => Promise<JsonRecord>;
 /** The 0.1.1 Gateway has invoke but no stream; retain its native history API. */
 export declare function invokeLegacyPermissionRpc(gateway: Pick<TypertGatewayLike, 'invoke'>, request: LegacyClientRequest, signal: AbortSignal, readHistory: (sessionId: string, signal: AbortSignal) => Promise<unknown>, flushPermission?: (sessionId: string) => Promise<void>): Promise<LegacyServerResponse | null>;
 /** Execute one stable request and restore the pre-0.1.2 HTTP envelope. */

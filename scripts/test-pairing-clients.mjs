@@ -136,7 +136,7 @@ try {
       })
       agents.push(agent); group.push(agent)
       const status = await pairingStatus(agent)
-      const payload = JSON.parse(publicPairingPayload(status, { host: '192.168.1.2', port: 3092, code: 'ABCDEFGH' }))
+      const payload = JSON.parse(publicPairingPayload(status, { host: '192.168.1.2', port: 3092 }))
       if (generation > 0 && index === 0) {
         const legacyPhone = phone(ref, 'owner-' + generation)
         const { relayOrigin: _alias, ...legacyPayload } = payload

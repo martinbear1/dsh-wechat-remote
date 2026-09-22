@@ -25,7 +25,7 @@ const entryUrl = pathToFileURL(path.join(root, 'lib', 'index.js')).href
 const childSource = `
   import assert from 'node:assert/strict'
   import net from 'node:net'
-  import { existsSync } from 'node:fs'
+  import { existsSync, readFileSync } from 'node:fs'
   import path from 'node:path'
   import { Context } from '@deepseek-ai/cordis'
 
@@ -77,15 +77,26 @@ const childSource = `
   )
   assert.equal(existsSync(stateFile), true, 'credentials are created only when the plugin is applied')
 
+  // With the public identity explicitly disabled, pairing fails closed rather
+  // than falling back to an unauthenticated LAN code.
   const pairingPage = await fetch('http://127.0.0.1:' + localPort + '/pair')
-  assert.equal(pairingPage.status, 200)
+  assert.equal(pairingPage.status, 503)
   assert.equal(pairingPage.headers.get('cache-control'), 'no-store')
   const pairingHtml = await pairingPage.text()
-  assert.ok(!pairingHtml.includes('http-equiv="refresh"'), 'pairing page must not silently replace a ticket being scanned')
-  assert.ok(pairingHtml.includes('重新生成二维码'), 'single-use QR has an explicit refresh action')
+  assert.ok(pairingHtml.includes('暂时无法生成配对二维码'))
   const pairingCode = await fetch('http://127.0.0.1:' + localPort + '/pair/code')
-  assert.equal(pairingCode.status, 200)
+  assert.equal(pairingCode.status, 503)
   assert.equal(pairingCode.headers.get('cache-control'), 'no-store')
+
+  const state = JSON.parse(readFileSync(stateFile, 'utf8'))
+  for (const route of ['/pair/claim-wechat', '/pair/verify-wechat', '/api/session.list']) {
+    const retired = await fetch('http://127.0.0.1:' + publicPort + route, {
+      method: route.startsWith('/pair/') ? 'POST' : 'GET',
+      headers: { authorization: 'Bearer ' + state.token, 'content-type': 'application/json' },
+      body: route.startsWith('/pair/') ? '{}' : undefined,
+    })
+    assert.equal(retired.status, 404, route + ' must stay closed on the LAN door')
+  }
 
   await fiber.dispose()
   let closed = false

@@ -2,8 +2,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { createHash, randomBytes } from 'node:crypto'
-import { inflateRawSync } from 'node:zlib'
+import { createHash, randomBytes, verify } from 'node:crypto'
 import { createServer } from 'node:http'
 import { WebSocketServer } from 'ws'
 import {
@@ -18,6 +17,7 @@ import PublicRelayGateway from '../lib/public-relay-gateway.js'
 import { DshTunnelAgent } from '../lib/dsh-tunnel-agent.js'
 import { writePrivateJsonAtomic } from '../lib/secure-file.js'
 import HistorySnapshotCache from '../lib/history-snapshot-cache.js'
+import { archiveHistoryJson } from '../lib/history-archive.js'
 
 function tunnelFrame(type, streamId, value) {
   const payload = value === undefined
@@ -48,16 +48,6 @@ async function waitFor(predicate, message) {
   throw new Error(message)
 }
 
-function unzipSingleEntry(archive) {
-  const value = Buffer.from(archive)
-  assert.equal(value.readUInt32LE(0), 0x04034b50)
-  const nameBytes = value.readUInt16LE(26)
-  const extraBytes = value.readUInt16LE(28)
-  const compressedBytes = value.readUInt32LE(18)
-  const offset = 30 + nameBytes + extraBytes
-  return inflateRawSync(value.subarray(offset, offset + compressedBytes)).toString('utf8')
-}
-
 const root = mkdtempSync(path.join(tmpdir(), 'harness-public-relay-test-'))
 try {
   const identityPath = path.join(root, 'identity.json')
@@ -79,6 +69,22 @@ try {
     enabled: true,
     relayOrigin: 'https://relay.example.test',
   })
+  writeFileSync(configPath, JSON.stringify({
+    enabled: true,
+    relayOrigin: 'https://relay.example.test/',
+    objectOrigins: ['https://objects.example.test/', 'https://objects.example.test'],
+  }))
+  assert.deepEqual(loadPublicRelayConfig(configPath), {
+    enabled: true,
+    relayOrigin: 'https://relay.example.test',
+    objectOrigins: ['https://objects.example.test'],
+  })
+  writeFileSync(configPath, JSON.stringify({
+    enabled: true,
+    relayOrigin: 'https://relay.example.test/',
+    objectOrigins: ['http://127.0.0.1:9000'],
+  }))
+  assert.throws(() => loadPublicRelayConfig(configPath), /bare HTTPS origin/)
   writeFileSync(configPath, JSON.stringify({ enabled: true, relayOrigin: 'https://relay.example.test:8443/' }))
   assert.throws(() => loadPublicRelayConfig(configPath), /bare HTTPS origin/)
 
@@ -126,8 +132,8 @@ try {
     enabled: true, state: 'online', nodeId: first.nodeId,
     identityPublicKey: first.publicKeyPem, relayOrigin: 'https://relay.example.test',
     pairingTicket: 'a'.repeat(64), pairingExpiresAt: Date.now() + 60000,
-  }, { host: '192.168.1.2', port: 3092, code: 'ABCDEFGH' }))
-  assert.deepEqual(combined.lan, { host: '192.168.1.2', port: 3092, code: 'ABCDEFGH' })
+  }, { host: '192.168.1.2', port: 3092 }))
+  assert.deepEqual(combined.lan, { host: '192.168.1.2', port: 3092 })
   assert.equal(combined.relayOrigin, combined.relay)
   assert.equal(combined.nodeId, first.nodeId)
   assert.ok(JSON.stringify(combined).length < 600, 'combined QR stays compact with a real-length ticket and LAN locator')
@@ -152,6 +158,13 @@ try {
       async fetchImpl(_url, options) {
         metadataEnrollments++
         enrollmentBody = JSON.parse(options.body)
+        const h = options.headers
+        assert.equal(h['x-hr-proof-version'], '2')
+        assert.equal(enrollmentBody.signature, undefined, 'proof is outside signed body')
+        const digest = createHash('sha256').update(options.body, 'utf8').digest('hex')
+        const proof = Buffer.from(['agent-http-v2', 'POST', '/v1/agents/enroll', h['x-hr-node-id'],
+          h['x-hr-timestamp'], h['x-hr-nonce'], digest].join('\n'))
+        assert.equal(verify(null, proof, enrollmentBody.publicKey, Buffer.from(h['x-hr-signature'], 'base64url')), true)
         return new Response(JSON.stringify({
           ticket: 'ticket-' + metadataEnrollments,
           expiresAt: Date.now() + 600000,
@@ -322,14 +335,20 @@ try {
       fetchImpl() { throw new Error('cache hit unexpectedly contacted object service') },
     },
   )
-  assert.deepEqual(await cachedGateway.prepareHistorySnapshot(cachedPayload), encryptedDescriptor)
+  assert.deepEqual(
+    await cachedGateway.storeHistorySnapshot(cachedPayload, archiveHistoryJson(cachedPayload)),
+    encryptedDescriptor,
+  )
   cachedGateway.stop()
   const otherOwnerGateway = new PublicRelayGateway(
     { enabled: true, relayOrigin: 'https://relay.example.test' },
     { agentVersion: 'test', identityPath: path.join(root, 'other-cache-identity.json'), historyCachePath: cachePath,
       fetchImpl() { throw new Error('new identity needs a new object ticket') } },
   )
-  await assert.rejects(otherOwnerGateway.prepareHistorySnapshot(cachedPayload), /new identity needs a new object ticket/)
+  await assert.rejects(
+    otherOwnerGateway.storeHistorySnapshot(cachedPayload, archiveHistoryJson(cachedPayload)),
+    /new identity needs a new object ticket/,
+  )
   otherOwnerGateway.stop()
 
   // Regression: a synchronous gateway error must be isolated to that client.
@@ -505,17 +524,6 @@ try {
     { enabled: true, relayOrigin: 'https://relay.example.test' },
     { agentVersion: 'test', identityPath: path.join(root, 'gateway-identity.json') },
   )
-  const compactPayload = JSON.stringify({
-    events: Array.from({ length: 1200 }, (_, seq) => ({
-      event: { seq, type: 'assistant/message', data: { text: 'repeatable compact history '.repeat(8) } },
-    })),
-  })
-  const compactDescriptor = await gateway.prepareHistorySnapshot(compactPayload)
-  assert.equal(compactDescriptor.contentKind, 'history-json')
-  assert.equal(compactDescriptor.contentEncoding, 'zip')
-  assert.equal(typeof compactDescriptor.archiveBase64, 'string')
-  assert.equal(compactDescriptor.objectId, undefined, 'small ZIP must not pay an OSS cold-upload handshake')
-  assert.equal(unzipSingleEntry(Buffer.from(compactDescriptor.archiveBase64, 'base64')), compactPayload)
   gateway.clients.set('stale-client', {
     e2ee: null,
     tunnel: { close() { staleTunnelClosed = true } },

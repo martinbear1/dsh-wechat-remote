@@ -8,7 +8,7 @@ export interface ProfileInstall {
     runtime: InstallRuntime;
 }
 export declare function safeProfileName(value: string): boolean;
-/** Copy without following or rebasing links. Restore to the SAME original path. */
+/** Copy without following links. Backups are restored to the SAME original path. */
 export declare function backupProfile(profile: string, backup: string): void;
 /** Private, per-operation PATH entry; never edit a global shim or shell profile. */
 export declare function installToolPath(directory: string, runtime: InstallRuntime): string;

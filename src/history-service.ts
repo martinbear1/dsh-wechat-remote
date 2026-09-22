@@ -6,9 +6,9 @@
  * assistant/message 取代的增量完整搬到手机。本服务仍以 DSH 原生历史为
  * 唯一数据源，只在电脑端完成两项确定性变换：
  *
- * 1. 向前补齐窗口中最早一轮的 turn/start，避免旧轮次被分页截断；
- * 2. 仅删除 reason.kind=completed 轮次的 assistant/chunk，保留消息、工具、
- *    view、投影与失败/中断轮次的部分输出。
+ * window 保留旧客户端的完整轮次契约；page 是显式选择的有界分页，
+ * 不补齐整轮、不走 OSS。大正文的只读引用由 detail 按需读取。
+ * 两者都只移除已完成且有持久回复替代的生成增量；原始会话保持不变。
  *
  * 它是微信插件自己的只读 Typert Remote，不修改 DSH 会话、WebUI 或原生
  * session.history 契约，也不新增监听端口。
@@ -16,22 +16,37 @@
 import http from 'node:http'
 import { resourcePresentation } from './agent-resources.js'
 import { TurnActivityCompatibility } from './turn-activity.js'
-import { assistantAttemptPresentation } from './assistant-stream-compat.js'
+import { assistantRecordPresentation } from './assistant-stream-compat.js'
+import { archiveHistoryJsonAsync, HISTORY_ARCHIVE_ENTRY } from './history-archive.js'
 
 import type { Context } from '@deepseek-ai/cordis'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
-import { invokeLegacyRpc, resolveTypertGateway } from './dsh-protocol-compat.js'
+import { createHistoryPageReader, resolveTypertGateway } from './dsh-protocol-compat.js'
 import { nativeTurnUsage, turnDetails } from './turn-presentation.js'
+import { HistoryReadBudget } from './history-read-budget.js'
+import { HistoryRecords } from './history-records.js'
+import { HistoryTurnEvidence, type HistoryTurnFacets } from './history-turn-evidence.js'
+import { resolveDshSessionAddress } from './dsh-session-address.js'
 
 const DEFAULT_PAGE_MESSAGES = 8
 const MAX_PAGE_MESSAGES = 30
 const MAX_PAGES = 64
 const MAX_RESPONSE_BYTES = 32 * 1024 * 1024
 const DEFAULT_TIMEOUT_MS = 60_000
-// Above this clear-text size we prepare a compressed transport.  The gateway
-// keeps small ZIPs inside the existing E2EE response and sends only genuinely
-// large archives through OSS, so transport selection is based on wire size.
+// Above this clear-text size the history service prepares a compressed
+// transport. Small ZIPs stay inside the existing E2EE response; only
+// genuinely large archives are handed to object storage.
 const DEFAULT_SNAPSHOT_THRESHOLD_BYTES = 32 * 1024
+// Compressed history has one transport policy, owned here beside pagination.
+// Small archives stay in the authenticated Remote response. Larger archives
+// use private object storage when it is reachable. The released mini program
+// accepts at most 512 KiB of Base64, hence the 384 KiB binary ceiling.
+const FAST_INLINE_ARCHIVE_MAX_BYTES = 96 * 1024
+const COMPATIBLE_INLINE_ARCHIVE_MAX_BYTES = 384 * 1024
+// Opt-in pages bound presentation work and the first-screen transfer. The
+// legacy complete-turn contract remains unchanged for installed clients.
+const BOUNDED_PAGE_BYTES = 128 * 1024
+const BOUNDED_PAGE_EVENTS = 256
 
 interface HistoryEntry {
   readonly event?: {
@@ -60,6 +75,8 @@ export interface WechatHistoryWindowRequest {
   readonly maxMessages?: number
   /** Force compact JSON inline when the client's object data plane is unavailable. */
   readonly delivery?: 'auto' | 'inline'
+  /** Additive capability: an inline retry may return the existing ZIP descriptor. */
+  readonly acceptInlineArchive?: boolean
 }
 
 export interface WechatHistoryWindowValue extends NativeHistoryValue {
@@ -79,7 +96,7 @@ export interface WechatHistoryRemoteValue {
 }
 
 export interface WechatHistoryWindowError {
-  readonly code: 'invalid-history-request' | 'history-unavailable' | 'history-pagination-invalid'
+  readonly code: 'invalid-history-request' | 'history-unavailable' | 'history-pagination-invalid' | 'history-busy' | 'history-detail-unavailable' | 'invocation-unavailable'
   readonly message: string
 }
 
@@ -95,7 +112,11 @@ export interface WechatHistoryConfig {
   readonly dshPort?: number
   readonly timeoutMs?: number
   readonly snapshotThresholdBytes?: number
-  readonly prepareSnapshot?: (payloadJson: string) => Promise<Readonly<Record<string, unknown>>>
+  readonly storeSnapshot?: (
+    payloadJson: string,
+    archive: Uint8Array,
+    signal: AbortSignal,
+  ) => Promise<Readonly<Record<string, unknown>>>
 }
 
 type FetchPage = (
@@ -110,11 +131,14 @@ declare module '@deepseek-ai/cordis' {
 }
 
 export class WechatHistoryService extends TypertRemoteService {
+  private readonly reads = new HistoryReadBudget()
+  private readonly records = new HistoryRecords()
+  private readonly turnEvidence = new HistoryTurnEvidence()
   private readonly hostContext: Context
   private readonly dshPort: number
   private readonly timeoutMs: number
   private readonly snapshotThresholdBytes: number
-  private readonly prepareSnapshot?: WechatHistoryConfig['prepareSnapshot']
+  private readonly storeSnapshot?: WechatHistoryConfig['storeSnapshot']
 
   constructor(ctx: Context, config: WechatHistoryConfig = {}) {
     super(ctx, 'wechatHistory')
@@ -129,9 +153,73 @@ export class WechatHistoryService extends TypertRemoteService {
       && Number(config.snapshotThresholdBytes) >= 16 * 1024
       ? Number(config.snapshotThresholdBytes)
       : DEFAULT_SNAPSHOT_THRESHOLD_BYTES
-    this.prepareSnapshot = config.prepareSnapshot
+    this.storeSnapshot = config.storeSnapshot
+    ctx.effect(() => () => { this.records.clear(); this.turnEvidence.clear() })
   }
 
+  /** Host-only presentation shared by history and realtime peers.
+   * Not a Remote: identity is issued here, and detail() rechecks access. */
+  presentRecord(sessionId: string, original: HistoryEntry, displayed: HistoryEntry = original, call?: HistoryEntry): HistoryEntry {
+    return this.records.present(sessionId, original, displayed, call)
+  }
+
+  /** New clients explicitly opt into a bounded page contract. This endpoint
+   * never uploads history to OSS or recursively completes a partial turn. */
+  @Remote('page')
+  async page(request: WechatHistoryWindowRequest, signal: AbortSignal): Promise<WechatHistoryWindowResult> {
+    const validation = validateRequest(request)
+    if (validation) return { ok: false, error: validation }
+    if (!resolveTypertGateway(this.hostContext)) return { ok: false, error: {
+      code: 'invocation-unavailable', message: '当前 DSH 使用旧版历史接口',
+    } }
+    signal = AbortSignal.any([signal, AbortSignal.timeout(this.timeoutMs || DEFAULT_TIMEOUT_MS)])
+    let release: (() => void) | undefined
+    try {
+      release = await this.reads.acquire(signal)
+      const usage = await nativeTurnUsage()
+      const built = await buildBoundedHistoryWindow(request, this.createPageReader(request.sessionId, signal), signal,
+        usage, (original, displayed, call) => this.presentRecord(request.sessionId, original, displayed, call),
+        entries => this.turnEvidence.accept(request.sessionId, entries, usage))
+      signal.throwIfAborted()
+      if (!built.ok) return built
+      const payloadJson = JSON.stringify(built.value)
+      return Buffer.byteLength(payloadJson) < this.snapshotThresholdBytes
+        ? { ok: true, value: { payloadJson } }
+        : inlineArchive(payloadJson, await archiveHistoryJsonAsync(payloadJson, signal))
+    } catch (error) {
+      signal.throwIfAborted()
+      return { ok: false, error: { code: (error as { code?: string })?.code === 'history-busy' ? 'history-busy' : 'history-unavailable', message: messageOf(error) } }
+    } finally { release?.() }
+  }
+
+  @Remote('detail')
+  async detail(request: { readonly sessionId: string; readonly reference: string; readonly part?: number; readonly offset?: number }, signal: AbortSignal): Promise<WechatHistoryWindowResult> {
+    const validation = validateRequest(request)
+    if (validation) return { ok: false, error: validation }
+    signal = AbortSignal.any([signal, AbortSignal.timeout(this.timeoutMs || DEFAULT_TIMEOUT_MS)])
+    let release: (() => void) | undefined
+    try {
+      release = await this.reads.acquire(signal)
+      const gateway = resolveTypertGateway(this.hostContext)
+      if (!gateway) throw new Error('此节点尚不支持记录详情读取')
+      await resolveDshSessionAddress(gateway, request.sessionId, signal)
+      const read = this.createPageReader(request.sessionId, signal)
+      const value = await this.records.read(request, async seq => {
+        const result = await read({ sessionId: request.sessionId, beforeSeq: seq + 1, maxMessages: 1 }, signal)
+        if (!result.ok) throw new Error(String(result.error?.message || '原生记录不可读取'))
+        return result.value?.events?.find(entry => eventSeqOf(entry) === seq)
+      }, signal)
+      return { ok: true, value: { payloadJson: JSON.stringify(value) } }
+    } catch (error) {
+      signal.throwIfAborted()
+      return { ok: false, error: { code: (error as { code?: string })?.code === 'history-busy' ? 'history-busy' : 'history-detail-unavailable', message: messageOf(error) } }
+    } finally { release?.() }
+  }
+
+  // COMPAT(history-window-v1): released clients still use the complete-turn
+  // endpoint, including OSS snapshots. Retire only with their support policy;
+  // page()/detail() never need OSS. Coordinate with the mini-program's
+  // docs/COMPATIBILITY-RETIREMENT.md, not the shared image/file object service.
   @Remote('window')
   async window(
     request: WechatHistoryWindowRequest,
@@ -139,57 +227,85 @@ export class WechatHistoryService extends TypertRemoteService {
   ): Promise<WechatHistoryWindowResult> {
     const validation = validateRequest(request)
     if (validation) return { ok: false, error: validation }
+    // One budget covers native pagination, compression and object delivery.
+    // A timeout on each page separately could otherwise occupy the host for minutes.
+    signal = AbortSignal.any([signal, AbortSignal.timeout(this.timeoutMs || DEFAULT_TIMEOUT_MS)])
+    let release: (() => void) | undefined
     try {
-      const built = await buildHistoryWindow(request, (payload, pageSignal) => (
-        this.fetchNativePage(payload, pageSignal)
-      ), signal, await nativeTurnUsage())
-      if (!built.ok) return built
-      const payloadJson = JSON.stringify(built.value)
-      return this.deliver(payloadJson, request)
+      release = await this.reads.acquire(signal)
+      signal.throwIfAborted()
+      const fetchPage = this.createPageReader(request.sessionId, signal)
+      const usageFold = await nativeTurnUsage()
+      signal.throwIfAborted()
+      let maxMessages = request.maxMessages ?? DEFAULT_PAGE_MESSAGES
+      const legacyInline = request.delivery === 'inline' && request.acceptInlineArchive !== true
+      let objectStoreUnavailable = !this.storeSnapshot || request.delivery === 'inline'
+      while (true) {
+        const candidate = { ...request, maxMessages }
+        const built = await buildHistoryWindow(candidate, fetchPage, signal, usageFold)
+        signal.throwIfAborted()
+        if (!built.ok) return built
+        const payloadJson = JSON.stringify(built.value)
+        if (legacyInline
+            || Buffer.byteLength(payloadJson) < this.snapshotThresholdBytes) {
+          return { ok: true, value: { payloadJson } }
+        }
+
+        const archive = await archiveHistoryJsonAsync(payloadJson, signal)
+        if (archive.byteLength <= FAST_INLINE_ARCHIVE_MAX_BYTES) {
+          return inlineArchive(payloadJson, archive)
+        }
+        if (!objectStoreUnavailable && this.storeSnapshot) {
+          try {
+            return { ok: true, value: {
+              snapshotJson: JSON.stringify(await this.storeSnapshot(payloadJson, archive, signal)),
+            } }
+          } catch {
+            signal.throwIfAborted()
+            // Object storage accelerates history; it is not the source of
+            // truth. Mark it unavailable for this request so adaptive paging
+            // never repeats a failing network probe for every smaller window.
+            objectStoreUnavailable = true
+          }
+        }
+        if (archive.byteLength <= COMPATIBLE_INLINE_ARCHIVE_MAX_BYTES) {
+          return inlineArchive(payloadJson, archive)
+        }
+        if (maxMessages <= 1) {
+          return {
+            ok: false,
+            error: {
+              code: 'history-unavailable',
+              message: '当前网络无法传输这一条超大历史记录，请稍后重试或在电脑端查看',
+            },
+          }
+        }
+        maxMessages = nextHistoryWindowSize(maxMessages)
+      }
     } catch (error) {
       signal.throwIfAborted()
       return {
         ok: false,
-        error: { code: 'history-unavailable', message: messageOf(error) },
+        error: { code: error instanceof Error && 'code' in error && error.code === 'history-busy'
+          ? 'history-busy' : 'history-unavailable', message: messageOf(error) },
       }
+    } finally {
+      release?.()
     }
   }
 
-  private async deliver(
-    payloadJson: string,
-    request: WechatHistoryWindowRequest,
-  ): Promise<WechatHistoryWindowResult> {
-    if (request.delivery !== 'inline' && this.prepareSnapshot
-        && Buffer.byteLength(payloadJson) >= this.snapshotThresholdBytes) {
-      try {
-        return { ok: true, value: {
-          snapshotJson: JSON.stringify(await this.prepareSnapshot(payloadJson)),
-        } }
-      } catch {
-        // OSS is an acceleration layer, never the history source of truth.
-        // A role, Bucket, or network outage falls back to the existing E2EE
-        // tunnel response without changing DSH/WebUI behavior.
-      }
-    }
-    return { ok: true, value: { payloadJson } }
+  private createPageReader(sessionId: string, signal: AbortSignal): FetchPage {
+    const gateway = resolveTypertGateway(this.hostContext)
+    if (!gateway) return (payload, pageSignal) => this.fetchNativePage(payload, pageSignal)
+    const read = createHistoryPageReader(gateway, sessionId, signal)
+    return async payload => ({ ok: true, value: await read(payload) as NativeHistoryValue })
   }
 
   private fetchNativePage(
     payload: { readonly sessionId: string; readonly maxMessages: number; readonly beforeSeq?: number },
     signal: AbortSignal,
   ): Promise<NativeHistoryResponse> {
-    const gateway = resolveTypertGateway(this.hostContext)
-    if (gateway) {
-      return invokeLegacyRpc(gateway, {
-        type: 'client-request',
-        rpcId: `wechat-history-${Date.now().toString(36)}`,
-        method: 'session.history',
-        payload,
-      }, {
-        signal,
-        describeHost: () => ({}),
-      }).then(response => response.result as NativeHistoryResponse)
-    }
+    signal.throwIfAborted()
     const body = Buffer.from(JSON.stringify({
       type: 'client-request',
       rpcId: `wechat-history-${Date.now().toString(36)}`,
@@ -246,6 +362,7 @@ export class WechatHistoryService extends TypertRemoteService {
       })
       const abort = (): void => { request.destroy(new Error('History request aborted')) }
       signal.addEventListener('abort', abort, { once: true })
+      if (signal.aborted) abort()
       request.on('timeout', () => request.destroy(new Error('DSH history request timed out')))
       request.on('error', error => finish(() => reject(error)))
       request.end(body)
@@ -253,26 +370,25 @@ export class WechatHistoryService extends TypertRemoteService {
   }
 }
 
-/**
- * Populate the gateway's content-addressed history cache after a native DSH
- * turn finishes. This is deliberately a host helper rather than a Typert
- * Remote, so clients cannot invoke background work or discover a second API.
- */
-export async function prewarmLatestHistory(
-  service: WechatHistoryService,
-  sessionId: string,
-  signal: AbortSignal,
-): Promise<'inline' | 'object'> {
-  const result = await service.window({
-    sessionId,
-    maxMessages: MAX_PAGE_MESSAGES,
-    delivery: 'auto',
-  }, signal)
-  if (!result.ok) throw new Error(result.error.message)
-  if (!result.value.snapshotJson) return 'inline'
-  const descriptor = JSON.parse(result.value.snapshotJson) as { readonly objectId?: unknown }
-  return typeof descriptor.objectId === 'string' ? 'object' : 'inline'
+function inlineArchive(payloadJson: string, archive: Uint8Array): WechatHistoryWindowResult {
+  return {
+    ok: true,
+    value: {
+      snapshotJson: JSON.stringify({
+        contentKind: 'history-json',
+        contentEncoding: 'zip',
+        archiveEntry: HISTORY_ARCHIVE_ENTRY,
+        originalBytes: Buffer.byteLength(payloadJson),
+        archiveBase64: Buffer.from(archive).toString('base64'),
+      }),
+    },
+  }
 }
+
+function nextHistoryWindowSize(current: number): number {
+  return Math.max(1, Math.floor(current / 2))
+}
+
 
 /** Exported pure coordinator for deterministic plugin regression tests. */
 export async function buildHistoryWindow(
@@ -295,6 +411,7 @@ export async function buildHistoryWindow(
   let historyStartSeq: number | undefined
   let historyEndSeq: number | undefined
   let rawEvents = 0
+  let rawBytes = 0
 
   for (let pageIndex = 0; pageIndex < MAX_PAGES; pageIndex += 1) {
     signal.throwIfAborted()
@@ -304,6 +421,7 @@ export async function buildHistoryWindow(
       ...(cursor === undefined ? {} : { beforeSeq: cursor }),
     }
     const response = await fetchPage(payload, signal)
+    signal.throwIfAborted()
     if (!response.ok || !response.value) {
       return {
         ok: false,
@@ -317,6 +435,10 @@ export async function buildHistoryWindow(
     }
     const value = response.value
     const entries = Array.isArray(value.events) ? Array.from(value.events) : []
+    rawBytes += Buffer.byteLength(JSON.stringify(value))
+    if (rawBytes > MAX_RESPONSE_BYTES) {
+      return { ok: false, error: { code: 'history-unavailable', message: '当前历史窗口过大，请缩小范围后重试' } }
+    }
     rawEvents += entries.length
     if (!tailValue) {
       tailValue = value
@@ -341,27 +463,11 @@ export async function buildHistoryWindow(
       const trim = oldestValue?.hasMore === true && targetStart > 0 ? targetStart : 0
       const windowEntries = collected.slice(trim)
       historyStartSeq = eventSeqOf(windowEntries[0])
-      const activity = new TurnActivityCompatibility()
       return {
         ok: true,
         value: {
           ...(tailValue || {}),
-          events: compactEntries(windowEntries, completedTurns, durableMessageTurns).map(entry => {
-            const resources = resourcePresentation((entry.event || {}) as Record<string, unknown>)
-            const attempt = assistantAttemptPresentation((entry.event || {}) as Record<string, unknown>)
-            const turnActivity = activity.accept(entry.event || {})
-            // The phone already has settled text or the normalized partial.
-            // Do not transfer thousands of native token samples a second time.
-            const event=entry.event
-            let projected=entry
-            if((event?.type==='assistant/message' || event?.type==='assistant/attempt') && Array.isArray(event.data?.stream)) {
-              const {stream:_,...data}=event.data
-              projected={...entry,event:{...event,data}}
-            }
-            return resources || attempt || turnActivity ? {...projected, view:{...(entry.view as Record<string, unknown> || {}),
-              ...(turnActivity?{agentActivity:turnActivity}:{}),
-              ...(resources?{agentResources:resources}:{}),...(attempt?{agentTranscript:attempt}:{})}} : projected
-          }),
+          events: projectHistoryEntries(compactEntries(windowEntries, completedTurns, durableMessageTurns)),
           facets: { 'agent.turn-details.v1': turnDetails(windowEntries, usageFold) },
           hasMore: trim > 0 || oldestValue?.hasMore === true,
           historyStartSeq,
@@ -371,7 +477,8 @@ export async function buildHistoryWindow(
         },
       }
     }
-    if (firstSeq === undefined || firstSeq === previousCursor) {
+    if (firstSeq === undefined || (previousCursor !== undefined && firstSeq >= previousCursor)
+      || (cursor !== undefined && firstSeq >= cursor)) {
       return {
         ok: false,
         error: { code: 'history-pagination-invalid', message: 'DSH 历史分页没有继续前进' },
@@ -385,6 +492,119 @@ export async function buildHistoryWindow(
     ok: false,
     error: { code: 'history-pagination-invalid', message: 'DSH 单轮历史超过安全分页上限' },
   }
+}
+
+/** One native read followed by a contiguous, byte-bounded presentation suffix.
+ * Native data stays intact. Large records have explicit readonly detail refs.
+ * Transcript append-source groups are indivisible; model-context replacements
+ * retain their references without pulling older context into a display page. */
+export async function buildBoundedHistoryWindow(
+  request: WechatHistoryWindowRequest,
+  fetchPage: FetchPage,
+  signal: AbortSignal,
+  usageFold?: Parameters<typeof turnDetails>[1],
+  present: (original: HistoryEntry, displayed: HistoryEntry, call?: HistoryEntry) => HistoryEntry = (_original, displayed) => displayed,
+  metadata?: (entries: readonly HistoryEntry[]) => HistoryTurnFacets,
+): Promise<BuildHistoryWindowResult> {
+  const validation = validateRequest(request)
+  if (validation) return { ok: false, error: validation }
+  signal.throwIfAborted()
+  const response = await fetchPage({ sessionId: request.sessionId,
+    maxMessages: request.maxMessages ?? DEFAULT_PAGE_MESSAGES,
+    ...(request.beforeSeq === undefined ? {} : { beforeSeq: request.beforeSeq }),
+  }, signal)
+  signal.throwIfAborted()
+  if (!response.ok || !response.value) return { ok: false, error: {
+    code: 'history-unavailable', message: String(response.error?.message || 'DSH 会话历史不可用'),
+  } }
+  const value = response.value, entries = value.events
+  if (!Array.isArray(entries) || !validPageOrder(entries, request.beforeSeq) || !entries.length && value.hasMore === true) {
+    return { ok: false, error: { code: 'history-pagination-invalid', message: 'DSH 历史分页范围无效' } }
+  }
+  const completed = new Set<string>(), durable = new Set<string>()
+  markCompletedTurns(entries, completed)
+  markDurableMessageTurns(entries, durable)
+  const projected = projectHistoryEntries(compactEntries(entries, completed, durable))
+  const originals = new Map(entries.map(entry => [eventSeqOf(entry), entry]))
+  const calls = new Map(entries.filter(entry => entry.event?.type === 'tool/call').map(entry => [entry.event?.data?.callId, entry]))
+  const rendered = new Map<number, HistoryEntry>()
+  const row = (entry: HistoryEntry) => {
+    const seq = Number(eventSeqOf(entry))
+    const callId = (entry.event?.data?.message as Record<string, any>)?.source?.callId
+    const call = callId === undefined ? undefined : calls.get(callId)
+    if (!rendered.has(seq)) rendered.set(seq, present(originals.get(seq)!, entry, call && Number(eventSeqOf(call)) < seq ? call : undefined))
+    return rendered.get(seq)!
+  }
+  const facets = metadata?.(entries) ?? { details: turnDetails(entries, usageFold), activity: [] }
+  const to = Number.isSafeInteger(value.historyEndSeq) ? Number(value.historyEndSeq) : eventSeqOf(entries.at(-1))
+  let selected: HistoryEntry[] = [], accepted: WechatHistoryWindowValue | undefined
+  // Add one complete transcript source group at a time, newest to oldest. Final JSON
+  // size (including views/projections/facets/references) owns the wire budget.
+  for (let end = projected.length; end > 0;) {
+    let start = end - 1, from = Number(eventSeqOf(projected[start]))
+    for (let i = end - 1; i >= start; i--) {
+      const event = projected[i].event as Record<string, unknown> | undefined
+      // DSH's transcript uses append events, including older logs without a
+      // surface marker. Replacement sources belong to the model context, not
+      // a visible message group; native follow/page may leave them on an older
+      // page. Keep the event/reference intact, but do not expand this page for it.
+      if (event?.surfaceOp !== undefined && event.surfaceOp !== 'append') continue
+      const sources = event?.sourceEventSeqs
+      if (Array.isArray(sources)) for (const source of sources) {
+        if (Number.isSafeInteger(source) && source >= 0 && source < from) {
+          while (start > 0 && Number(eventSeqOf(projected[start])) > source) start--
+          from = Number(eventSeqOf(projected[start]))
+          if (from > source) return { ok: false, error: { code: 'history-pagination-invalid', message: '原生历史来源组不完整' } }
+        }
+      }
+    }
+    const next = projected.slice(start, end).map(row).concat(selected)
+    const coverageFrom = start === 0 ? eventSeqOf(entries[0]) : from
+    const visibleTurns = new Set(next.map(entry => String(entry.event?.data?.turn)))
+    const candidate: WechatHistoryWindowValue = {
+      ...value, events: next,
+      facets: { 'agent.turn-details.v1': facets.details.filter(detail => visibleTurns.has(detail.turnId)),
+        'agent.turn-activity.v1': facets.activity.filter(view => visibleTurns.has(String(view.turn))) },
+      hasMore: start > 0 || value.hasMore === true, historyStartSeq: coverageFrom, historyEndSeq: to,
+      pages: 1, rawEvents: entries.length,
+      coverage: { schema: 'wechat.history-page.v1', fromSeq: coverageFrom, throughSeq: to },
+    }
+    if (next.length > BOUNDED_PAGE_EVENTS || Buffer.byteLength(JSON.stringify(candidate)) > BOUNDED_PAGE_BYTES) break
+    accepted = candidate; selected = next; end = start
+    signal.throwIfAborted()
+  }
+  if (!projected.length) {
+    const empty = { ...value, events: [], hasMore: value.hasMore === true,
+      historyStartSeq: eventSeqOf(entries[0]), historyEndSeq: to, pages: 1, rawEvents: entries.length,
+      coverage: { schema: 'wechat.history-page.v1', fromSeq: eventSeqOf(entries[0]), throughSeq: to } }
+    if (Buffer.byteLength(JSON.stringify(empty)) <= BOUNDED_PAGE_BYTES) return { ok: true, value: empty }
+  }
+  return accepted ? { ok: true, value: accepted } : { ok: false, error: {
+    code: 'history-unavailable', message: '原生历史分组或状态信息超过单页预算，请在电脑端查看',
+  } }
+}
+
+function validPageOrder(entries: readonly HistoryEntry[], beforeSeq?: number): boolean {
+  let previous = -1
+  for (const entry of entries) {
+    const seq = eventSeqOf(entry)
+    if (seq === undefined || seq <= previous || beforeSeq !== undefined && seq >= beforeSeq) return false
+    previous = seq
+  }
+  return true
+}
+
+function projectHistoryEntries(entries: readonly HistoryEntry[]): HistoryEntry[] {
+  const activity = new TurnActivityCompatibility()
+  return entries.map(entry => {
+    const resources = resourcePresentation((entry.event || {}) as Record<string, unknown>)
+    const turnActivity = activity.accept(entry.event || {})
+    const projected = assistantRecordPresentation(entry)
+    return resources || turnActivity ? { ...projected, view: { ...(projected.view as Record<string, unknown> || {}),
+      ...(turnActivity ? { agentActivity: turnActivity } : {}),
+      ...(resources ? { agentResources: resources } : {}),
+    } } : projected
+  })
 }
 
 function validateRequest(request: WechatHistoryWindowRequest): WechatHistoryWindowError | null {
@@ -404,6 +624,9 @@ function validateRequest(request: WechatHistoryWindowRequest): WechatHistoryWind
   }
   if (request.delivery !== undefined && request.delivery !== 'auto' && request.delivery !== 'inline') {
     return { code: 'invalid-history-request', message: '历史传输方式无效' }
+  }
+  if (request.acceptInlineArchive !== undefined && typeof request.acceptInlineArchive !== 'boolean') {
+    return { code: 'invalid-history-request', message: '历史传输能力无效' }
   }
   return null
 }

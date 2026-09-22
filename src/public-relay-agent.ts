@@ -24,6 +24,7 @@ import { defaultAgentIdentityPath, type AgentCapability } from './agent-metadata
 import { adapterDshHome } from './dsh-runtime.js'
 import type { HostPlatformDescriptor } from './host-platform.js'
 import { readPrivateJson, writePrivateJsonAtomic } from './secure-file.js'
+import { createAgentHttpProof } from './agent-http-proof.js'
 
 const CONFIG_PATH = path.join(adapterDshHome(), 'harness-remote-public.json')
 export const DEFAULT_PUBLIC_RELAY_ORIGIN = 'https://relay.xyxfood.xyz'
@@ -31,7 +32,10 @@ const ROUTING_HEADER_BYTES = 18
 const MAX_AGENT_BUFFERED_BYTES = 2 * 1024 * 1024
 const AGENT_BUFFER_DRAIN_TIMEOUT_MS = 15_000
 const RELAY_PING_INTERVAL_MS = 25_000
-const RELAY_PONG_TIMEOUT_MS = 20_000
+// Cellular/VPN handoffs can delay one control frame without breaking the TCP
+// path. The relay also probes every 25 seconds, so a 50-second response window
+// tolerates one transient miss while still bounding a genuinely half-open link.
+const RELAY_PONG_TIMEOUT_MS = 50_000
 const RELAY_HANDSHAKE_TIMEOUT_MS = 15_000
 
 function transportDelay(value: number | undefined, fallback: number): number {
@@ -47,6 +51,8 @@ function wait(ms: number): Promise<void> {
 export interface PublicRelayConfig {
   readonly enabled: boolean
   readonly relayOrigin: string
+  /** Optional exact HTTPS origins for a self-hosted encrypted object store. */
+  readonly objectOrigins?: readonly string[]
 }
 
 export interface AgentIdentity {
@@ -57,7 +63,6 @@ export interface AgentIdentity {
 
 export type RemoteAccessState =
   | 'active'
-  | 'pending'
   | 'expired'
   | 'suspended'
   | 'not_entitled'
@@ -140,7 +145,27 @@ export function loadPublicRelayConfig(configPath = CONFIG_PATH): PublicRelayConf
       url.username || url.password || url.search || url.hash || url.pathname !== '/') {
     throw new Error('Public relay origin must be a bare HTTPS origin')
   }
-  return { enabled: true, relayOrigin: url.origin }
+  let objectOrigins: string[] | undefined
+  if (value.objectOrigins !== undefined) {
+    if (!Array.isArray(value.objectOrigins) || value.objectOrigins.length === 0 || value.objectOrigins.length > 8) {
+      throw new Error('Public object origins must be a non-empty HTTPS origin list')
+    }
+    objectOrigins = value.objectOrigins.map(origin => {
+      if (typeof origin !== 'string') throw new Error('Public object origin must be a bare HTTPS origin')
+      const candidate = new URL(origin)
+      if (candidate.protocol !== 'https:' || (candidate.port && candidate.port !== '443') ||
+          candidate.username || candidate.password || candidate.search || candidate.hash || candidate.pathname !== '/') {
+        throw new Error('Public object origin must be a bare HTTPS origin')
+      }
+      return candidate.origin
+    })
+    objectOrigins = [...new Set(objectOrigins)]
+  }
+  return {
+    enabled: true,
+    relayOrigin: url.origin,
+    ...(objectOrigins ? { objectOrigins } : {}),
+  }
 }
 
 export function loadOrCreateAgentIdentity(identityPath = defaultAgentIdentityPath()): AgentIdentity {
@@ -330,32 +355,25 @@ export class PublicRelayAgent {
   }> {
     if (this.enrollment) return this.enrollment
     const pending = (async () => {
-      const timestamp = Date.now()
-      const nonce = randomBytes(18).toString('base64url')
-      const signature = sign(
-        null,
-        Buffer.from(`enroll\n${this.identity.nodeId}\n${timestamp}\n${nonce}`),
-        this.identity.privateKeyPem,
-      ).toString('base64url')
-      const response = await this.fetchImpl(`${this.config.relayOrigin}/v1/agents/enroll`, {
+      const pathname = '/v1/agents/enroll'
+      const serialized = JSON.stringify({
+        publicKey: this.identity.publicKeyPem,
+        displayName: this.options.displayName || `${this.options.agentName || 'DeepSeek Harness'} · ${this.options.hostName || hostname()}`,
+        agentKind: this.options.agentKind || 'deepseek-harness',
+        agentName: this.options.agentName || 'DeepSeek Harness',
+        agentVersion: this.options.agentVersion,
+        adapterVersion: this.options.adapterVersion,
+        hostId: this.options.hostId,
+        agentInstanceId: this.options.agentInstanceId,
+        hostPlatform: this.options.hostPlatform,
+        capabilities: this.options.capabilities,
+        hostName: this.options.hostName || hostname(),
+      })
+      const response = await this.fetchImpl(`${this.config.relayOrigin}${pathname}`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          publicKey: this.identity.publicKeyPem,
-          timestamp,
-          nonce,
-          signature,
-          displayName: this.options.displayName || `${this.options.agentName || 'DeepSeek Harness'} · ${this.options.hostName || hostname()}`,
-          agentKind: this.options.agentKind || 'deepseek-harness',
-          agentName: this.options.agentName || 'DeepSeek Harness',
-          agentVersion: this.options.agentVersion,
-          adapterVersion: this.options.adapterVersion,
-          hostId: this.options.hostId,
-          agentInstanceId: this.options.agentInstanceId,
-          hostPlatform: this.options.hostPlatform,
-          capabilities: this.options.capabilities,
-          hostName: this.options.hostName || hostname(),
-        }),
+        headers: { 'content-type': 'application/json', ...createAgentHttpProof(this.identity, 'POST', pathname, serialized) },
+        body: serialized,
+        redirect: 'error',
         signal: AbortSignal.timeout(10_000),
       })
       if (!response.ok) {
@@ -563,7 +581,6 @@ function normalizeRemoteAccess(value: unknown): RemoteAccessStatus | undefined {
   const raw = value as { readonly status?: unknown; readonly validUntil?: unknown }
   if (
     raw.status !== 'active' &&
-    raw.status !== 'pending' &&
     raw.status !== 'expired' &&
     raw.status !== 'suspended' &&
     raw.status !== 'not_entitled'
@@ -584,7 +601,6 @@ function normalizeRemoteAccess(value: unknown): RemoteAccessStatus | undefined {
 export function publicPairingPayload(status: AgentStatus, lan?: {
   readonly host: string
   readonly port: number
-  readonly code?: string
 }): string | null {
   if (!status.nodeId || !status.identityPublicKey || !status.pairingTicket || !status.pairingExpiresAt || !status.relayOrigin) return null
   return JSON.stringify({
@@ -596,7 +612,6 @@ export function publicPairingPayload(status: AgentStatus, lan?: {
     identityPublicKey: status.identityPublicKey,
     ticket: status.pairingTicket,
     expiresAt: status.pairingExpiresAt,
-    ...(lan ? { lan: { host: lan.host, port: lan.port,
-      ...(lan.code === undefined ? {} : { code: lan.code }) } } : {}),
+    ...(lan ? { lan: { host: lan.host, port: lan.port } } : {}),
   })
 }

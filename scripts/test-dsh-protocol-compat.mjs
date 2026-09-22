@@ -7,6 +7,7 @@ import {
   unpackChunkRow,
   resolveTypertGateway,
   commandArguments,
+  createHistoryPageReader,
 } from '../lib/dsh-protocol-compat.js'
 
 const request = (method, payload = {}, rpcId = 'rpc-1') => ({
@@ -123,7 +124,61 @@ const older = await invokeLegacyRpc(gateway, request('session.history', {
 }), { signal, describeHost: () => ({}) })
 assert.equal(older.result.value.events[0].event.type, 'turn/start')
 assert(calls.some(([, call]) => call.namespace === 'session' && call.method === 'page'
-  && call.args.request.throughSeq === 9))
+  && call.args.request.throughSeq === 4 && call.args.request.beforeSeq === 5))
+
+// A logical history read fixes one address/cursor. Native live appends must
+// neither move its pagination boundary nor cause repeated tail snapshots.
+const fixedCalls = []
+let fixedCursor = 20, opened = 0, closed = 0
+const fixedGateway = {
+  async invoke(call) {
+    fixedCalls.push(call)
+    if (call.method === 'list') return { items: [{ sessionId: 'fixed' }] }
+    assert.equal(call.method, 'page')
+    return { records: [{ type: 'event', event: { seq: 2, type: 'turn/start', data: { turn: 1 } } }], hasMore: true }
+  },
+  async stream(call) {
+    fixedCalls.push(call)
+    opened++
+    return (async function* () {
+      try {
+        yield { type: 'snapshot', cursor: fixedCursor, hasMore: true,
+          records: [{ type: 'event', event: { seq: fixedCursor, type: 'turn/end', data: { turn: 1 } } }],
+          projections: { asOfSeq: fixedCursor, values: { marker: fixedCursor } } }
+      } finally { closed++ }
+    })()
+  },
+}
+const fixed = createHistoryPageReader(fixedGateway, 'fixed', signal)
+const fixedTail = await fixed({ maxMessages: 30 })
+fixedCursor = 200
+await fixed({ maxMessages: 30, beforeSeq: 12 })
+await fixed({ maxMessages: 30, beforeSeq: 5 })
+const smallerTail = await fixed({ maxMessages: 4 })
+assert.equal(opened, 1)
+assert.equal(closed, 1, 'temporary follow iterator must close after its snapshot')
+assert.equal(fixedCalls.filter(c => c.method === 'list').length, 1)
+assert(fixedCalls.filter(c => c.method === 'page').every(c => c.args.request.throughSeq === 20))
+assert.equal(smallerTail.historyEndSeq, 20)
+assert.deepEqual(smallerTail.projections, fixedTail.projections)
+const fresh = createHistoryPageReader(fixedGateway, 'fixed', signal)
+assert.equal((await fresh({ maxMessages: 30 })).historyEndSeq, 200, 'no mutable cross-request cache')
+const abortFixed = new AbortController()
+const olderRead = createHistoryPageReader(fixedGateway, 'fixed', abortFixed.signal)
+const followBeforeOlder = fixedCalls.filter(c => c.method === 'follow').length
+await olderRead({ maxMessages: 30, beforeSeq: 12 })
+fixedCursor = 2000
+await olderRead({ maxMessages: 8, beforeSeq: 5 })
+await olderRead({ maxMessages: 8, beforeSeq: 0 })
+assert.equal(fixedCalls.filter(c => c.method === 'follow').length, followBeforeOlder,
+  'older-only reads must never open follow or download an unrelated latest snapshot')
+assert.deepEqual(fixedCalls.filter(c => c.method === 'page').slice(-3).map(c =>
+  [c.args.request.beforeSeq, c.args.request.throughSeq]), [[12, 11], [5, 4], [0, -1]])
+assert.equal(fixedCalls.filter(c => c.method === 'list').length, 3, 'each reader resolves its durable address once')
+abortFixed.abort()
+const beforeAbortCalls = fixedCalls.length
+await assert.rejects(olderRead({ maxMessages: 8, beforeSeq: 5 }), { name: 'AbortError' })
+assert.equal(fixedCalls.length, beforeAbortCalls)
 
 const failure = await invokeLegacyRpc(gateway, request('broken/read', { args: {} }), {
   signal, describeHost: () => ({}),

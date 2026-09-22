@@ -117,7 +117,39 @@ async function call(route, body) {
     body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(90000) })
   const value = await r.json(); assert(r.ok, value.error || String(r.status)); return value
 }
+let nativeCookie = ''
 async function rpc(method, payload = {}) {
+  // The frozen baseline has a legacy local API. New releases deliberately
+  // remove that business endpoint: use the authenticated native WebUI API
+  // after installation, never reopen a retired API merely for this fixture.
+  if (version() !== baselineVersion) {
+    // Keep the native browser session across updates/rollback, just as WebUI
+    // does. A failed update must NOT mint a new login via its success endpoint.
+    if (!nativeCookie) {
+      const scope = sha(Buffer.from('web')).slice(0, 24)
+      const ref = JSON.parse(fs.readFileSync(path.join(home, 'harness-remote-updates', `profile-${scope}.json`)))
+      const resumed = await call('/resume?job=' + ref.jobId)
+      assert.equal(new URL(resumed.url).origin, origin)
+      const exchange = await fetch(resumed.url, { redirect: 'manual', signal: AbortSignal.timeout(5000) })
+      nativeCookie = exchange.headers.getSetCookie().map(value => value.split(';')[0]).join('; ')
+      assert(nativeCookie, 'native host session cookie required')
+    }
+    const nativeMethod = method === 'session.history' ? 'session/page' : 'session/list'
+    assert(['session.history', 'session.list'].includes(method))
+    const session = method === 'session.history'
+      ? (await rpc('session.list')).items.find(item => item.sessionId === payload.sessionId) : undefined
+    if (session) assert(Number.isSafeInteger(session.projections?.asOfSeq), 'native page requires its snapshot cursor')
+    const args = method === 'session.history'
+      ? { request: { address: { kind: 'session', sessionId: payload.sessionId }, throughSeq: session?.projections?.asOfSeq, maxMessages: payload.maxMessages } }
+      : { _request: payload }
+    const response = await fetch(origin + '/api/' + nativeMethod, { method: 'POST',
+      headers: { origin, cookie: nativeCookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ type: 'client-request', rpcId: 'fixture-native', method: nativeMethod, payload: { args } }),
+      signal: AbortSignal.timeout(10000) })
+    const value = await response.json()
+    assert(response.ok && value.result?.ok, 'native fixture RPC failed: ' + nativeMethod)
+    return value.result.value
+  }
   const token = JSON.parse(fs.readFileSync(path.join(home, 'gate-wechat-state.json'))).token
   const r = await fetch(`http://127.0.0.1:${port + 2}/api/${method}`, { method: 'POST', headers: {
     authorization: `Bearer ${token}`, 'content-type': 'application/json' },
@@ -137,8 +169,8 @@ try {
   const created = await rpc('session.create', { cwd: root })
   report.createdSession = created.sessionId
   const gateFile = path.join(home, 'gate-wechat-state.json')
-  const gate = JSON.parse(fs.readFileSync(gateFile)); gate.wechatBindings['fixture-owner'] = gate.token; json(gateFile, gate)
-  const gateBefore = sha(Buffer.from(JSON.stringify([gate.token, gate.wechatBindings])))
+  const gate = JSON.parse(fs.readFileSync(gateFile))
+  const gateBefore = sha(Buffer.from(JSON.stringify([gate.token, gate.publicIdentityNodeId])))
   const bridge = path.join(root, 'bridge.mjs')
   fs.writeFileSync(bridge, `const { install } = await import(${JSON.stringify(pathToFileURL(path.join(installer, 'bin/setup.mjs')).href)}); const result = await install(${JSON.stringify({ cli, assetsRoot: assets, open: false })}); console.log(JSON.stringify(result));\n`)
   const log = fs.openSync(path.join(root, 'bridge.log'), 'a', 0o600)
@@ -168,7 +200,7 @@ try {
     if (rollback) assert.equal(result.rollback, true, result.message)
     await ready(); assert.equal(version(), nextVersion)
     const after = JSON.parse(fs.readFileSync(gateFile))
-    assert.equal(sha(Buffer.from(JSON.stringify([after.token, after.wechatBindings]))), gateBefore)
+    assert.equal(sha(Buffer.from(JSON.stringify([after.token, after.publicIdentityNodeId]))), gateBefore)
     assert((await rpc('session.list')).items.some(s => s.sessionId === created.sessionId))
     await rpc('session.history', { sessionId: created.sessionId, maxMessages: 1 })
     report.checks.push({ stage: rollback ? 'startup-failure-rollback' : 'webui-forward-update', target, result, dataPreserved: true })

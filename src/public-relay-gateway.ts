@@ -14,15 +14,10 @@ import type { AgentCapability } from './agent-metadata.js'
 import type { WechatAttachmentObjectDescriptor } from './attachment-service.js'
 import type { HostPlatformDescriptor } from './host-platform.js'
 import { decryptRemoteAttachment, decryptCloudObject, encryptCloudObject, type EncryptedCloudObjectDescriptor, type RemoteAttachmentDescriptor } from './object-crypto.js'
-import { archiveHistoryJson, HISTORY_ARCHIVE_ENTRY } from './history-archive.js'
+import { HISTORY_ARCHIVE_ENTRY } from './history-archive.js'
 import { PublicObjectClient } from './public-object-client.js'
+import { OBJECT_UPLOAD_BUDGET_MS } from './object-transfer-budget.js'
 import HistorySnapshotCache from './history-snapshot-cache.js'
-
-// Compact history is already protected by the node/client E2EE session.  A
-// small ZIP is faster and cheaper to carry in that existing response than to
-// perform the three-step OSS cold-upload handshake.  Large archives still use
-// OSS so they do not occupy the realtime relay or the mini-program JS thread.
-const INLINE_HISTORY_ARCHIVE_MAX_BYTES = 96 * 1024
 
 interface ClientContext {
   readonly e2ee: AgentE2EESession
@@ -52,6 +47,8 @@ export interface PublicRelayGatewayOptions {
   readonly identityPath?: string
   readonly historyCachePath?: string
   readonly onDiagnostic?: (level: 'info' | 'warn', message: string) => void
+  /** Explicit test/self-host allowlist; product builds use the pinned OSS origin. */
+  readonly trustedObjectOrigins?: readonly string[]
 }
 
 export class PublicRelayGateway {
@@ -63,6 +60,7 @@ export class PublicRelayGateway {
   private readonly maxStreamsPerClient: number
   private readonly issueLanCredential?: PublicRelayGatewayOptions['issueLanCredential']
   private readonly objectClient: PublicObjectClient
+  private starting: Promise<void> | null = null
   private readonly historySnapshots: HistorySnapshotCache
   private readonly pendingHistorySnapshots = new Map<string, Promise<Record<string, unknown>>>()
   private readonly attachmentObjects = new Map<string, {
@@ -101,7 +99,12 @@ export class PublicRelayGateway {
       onTransportDisconnect: () => this.disconnectAll(),
     }
     this.agent = new PublicRelayAgent(config, agentOptions)
-    this.objectClient = new PublicObjectClient(config.relayOrigin, () => this.agent.identity, this.agent.fetchImpl)
+    this.objectClient = new PublicObjectClient(
+      config.relayOrigin,
+      () => this.agent.identity,
+      this.agent.fetchImpl,
+      options.trustedObjectOrigins || config.objectOrigins,
+    )
     this.historySnapshots = new HistorySnapshotCache({
       file: options.historyCachePath,
       onDiagnostic: options.onDiagnostic,
@@ -109,10 +112,23 @@ export class PublicRelayGateway {
   }
 
   start(): Promise<void> {
-    return this.agent.start()
+    if (this.starting) return this.starting
+    // Own the whole startup, not only the Agent's enrollment. A stopped or
+    // replaced startup must never reactivate the next run's object client.
+    const starting = Promise.resolve().then(async () => {
+      if (this.starting !== starting) return
+      await this.agent.start()
+      if (this.starting !== starting) return
+      // Real transfers supply route evidence; no periodic HEAD/report task.
+      this.objectClient.start()
+    })
+    this.starting = starting
+    return starting
   }
 
   stop(): void {
+    this.starting = null
+    this.objectClient.stop()
     for (const clientId of this.clients.keys()) this.disconnect(clientId)
     this.agent.stop()
   }
@@ -121,25 +137,25 @@ export class PublicRelayGateway {
     return this.agent.snapshot()
   }
 
-  async prepareHistorySnapshot(payloadJson: string): Promise<Record<string, unknown>> {
-    const archive = archiveHistoryJson(payloadJson)
-    if (archive.byteLength <= INLINE_HISTORY_ARCHIVE_MAX_BYTES) {
-      return {
-        contentKind: 'history-json',
-        contentEncoding: 'zip',
-        archiveEntry: HISTORY_ARCHIVE_ENTRY,
-        originalBytes: Buffer.byteLength(payloadJson),
-        archiveBase64: Buffer.from(archive).toString('base64'),
-      }
-    }
+  // COMPAT(history-window-v1): called by window(), never page()/detail().
+  // Retire its cache/index together with the old history endpoint after the
+  // client support window closes; picture/file object transfers remain active.
+  async storeHistorySnapshot(
+    payloadJson: string,
+    archive: Uint8Array,
+    signal?: AbortSignal,
+  ): Promise<Record<string, unknown>> {
+    signal?.throwIfAborted()
     const digest = createHash('sha256').update(this.agent.identity.nodeId).update('\0').update(payloadJson).digest('base64url')
     const cached = this.historySnapshots.get(digest)
     if (cached) return cached
     const pending = this.pendingHistorySnapshots.get(digest)
-    if (pending) return pending
+    if (pending) return await waitFor(pending, signal)
     const upload = (async (): Promise<Record<string, unknown>> => {
       const encrypted = encryptCloudObject(archive, 'history-json')
-      const ticket = await this.objectClient.upload('history', encrypted.ciphertext)
+      // The cache fill is shared. Cancelling one viewer must not cancel another;
+      // its independent budget still prevents orphaned transfers running forever.
+      const ticket = await this.objectClient.upload('history', encrypted.ciphertext, AbortSignal.timeout(20_000))
       const descriptor = {
         ...encrypted.descriptor,
         objectId: ticket.objectId,
@@ -151,11 +167,10 @@ export class PublicRelayGateway {
       return this.historySnapshots.set(digest, descriptor)
     })()
     this.pendingHistorySnapshots.set(digest, upload)
-    try {
-      return await upload
-    } finally {
-      this.pendingHistorySnapshots.delete(digest)
-    }
+    void upload.finally(() => {
+      if (this.pendingHistorySnapshots.get(digest) === upload) this.pendingHistorySnapshots.delete(digest)
+    }).catch(() => { /* each waiter observes the original rejection */ })
+    return await waitFor(upload, signal)
   }
 
   async uploadArtifactObject(data: Uint8Array, signal: AbortSignal): Promise<Record<string, unknown>> {
@@ -184,7 +199,7 @@ export class PublicRelayGateway {
     if (cached && cached.expiresAt > Date.now() + 60_000) return cached.descriptor
     const pending = this.pendingAttachmentObjects.get(digest)
     if (pending) return await waitFor(pending, signal)
-    const transferSignal = AbortSignal.timeout(60_000)
+    const transferSignal = AbortSignal.timeout(OBJECT_UPLOAD_BUDGET_MS)
     const upload = (async (): Promise<WechatAttachmentObjectDescriptor> => {
       const encrypted = encryptCloudObject(data, 'image')
       const ticket = await this.objectClient.upload('attachment', encrypted.ciphertext, transferSignal)

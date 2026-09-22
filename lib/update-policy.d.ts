@@ -30,6 +30,12 @@ export interface Release {
         sha256: string;
         bytes: number;
     };
+    npmInstaller?: {
+        version: string;
+        url: string;
+        sha256: string;
+        bytes: number;
+    };
 }
 export interface UpdateCatalog {
     schemaVersion: 1;
@@ -63,6 +69,7 @@ export interface UpdateAdvice {
 }
 export declare function compareVersions(a: string, b: string): number;
 export declare function trustedReleaseAsset(asset: Release['asset'], version: string): boolean;
+export declare function trustedNpmInstaller(source: Release['npmInstaller']): boolean;
 export declare function validateCatalog(value: unknown): UpdateCatalog;
 export declare function releaseMatches(r: Release, current: RuntimeVersion): boolean;
 export declare function assessUpdate(raw: unknown, current: RuntimeVersion, now?: number, preview?: boolean): UpdateAdvice;

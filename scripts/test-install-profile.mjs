@@ -22,16 +22,35 @@ try {
     fs.symlinkSync('packages', path.join(profile, 'relative'))
     fs.symlinkSync('../missing', path.join(profile, 'dangling'))
   }
+  // pnpm on Windows can create relative directory symlinks (not junctions).
+  // Test nested parents as in node_modules/@scope/package, then actually move
+  // the backup back into place. A simple absolute-junction copy misses this.
+  const nested = path.join(profile, 'node_modules', '@fixture')
+  fs.mkdirSync(nested, { recursive: true })
+  let relativeDirectory = false
+  try {
+    fs.symlinkSync(path.relative(nested, packages), path.join(nested, 'package'), 'dir')
+    relativeDirectory = true
+  } catch (error) {
+    if (process.platform !== 'win32' || error.code !== 'EPERM') throw error
+    console.log('SKIP relative directory symlink fixture: Windows symlink privilege unavailable')
+  }
   const saved = path.join(root, 'saved')
   backupProfile(profile, saved)
   assert.throws(() => backupProfile(profile, saved), /已存在/)
   assert.equal(fs.readlinkSync(path.join(saved, 'dependency')), fs.readlinkSync(link))
   assert.equal(fs.readlinkSync(path.join(saved, 'internal')), fs.readlinkSync(internal))
+  if (relativeDirectory) {
+    const copiedLink = path.join(saved, 'node_modules', '@fixture', 'package')
+    assert.equal(path.resolve(path.dirname(copiedLink), fs.readlinkSync(copiedLink)),
+      process.platform === 'win32' ? packages : path.join(saved, 'packages'))
+  }
   fs.writeFileSync(path.join(packages, 'fixture.txt'), 'changed')
   fs.renameSync(profile, path.join(root, 'failed'))
   fs.renameSync(saved, profile)
   assert.equal(fs.readFileSync(path.join(profile, 'internal', 'fixture.txt'), 'utf8'), 'fixture')
   assert.equal(fs.readFileSync(path.join(profile, 'dependency', 'keep.txt'), 'utf8'), 'external data')
+  if (relativeDirectory) assert.equal(fs.readFileSync(path.join(nested, 'package', 'fixture.txt'), 'utf8'), 'fixture')
   console.log('PASS rollback copy preserves link text and restores original path semantics')
 
   const home = path.join(root, 'actual home'), active = path.join(home, 'profiles', 'custom')

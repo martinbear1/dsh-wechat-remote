@@ -4,9 +4,10 @@ import type { WebSocket } from 'ws'
 import { resolveTypertGateway, type TypertGatewayLike } from './dsh-protocol-compat.js'
 import { resolveDshSessionAddress, isSessionReadError } from './dsh-session-address.js'
 import { presentationProjection } from './session-presentation.js'
-import { AssistantStreamCompatibility, assistantAttemptPresentation } from './assistant-stream-compat.js'
+import { AssistantStreamCompatibility, assistantRecordPresentation } from './assistant-stream-compat.js'
 import { resourcePresentation } from './agent-resources.js'
 import { TurnActivityCompatibility } from './turn-activity.js'
+import type { WechatHistoryService } from './history-service.js'
 
 type JsonRecord = Record<string, unknown>
 
@@ -348,12 +349,27 @@ export class DshRealtimeCompatibility {
         const assistant = new AssistantStreamCompatibility(event =>
           this.send(state, { type: 'session/event', sessionId, event }))
         const activity = new TurnActivityCompatibility()
+        // Only small, recent call metadata assists native read/diff renderers.
+        // Missing/large input safely uses generic output; it never causes an
+        // extra history scan during streaming. Disposal releases this map.
+        const calls = new Map<unknown, JsonRecord>()
+        const rememberCall = (event: JsonRecord) => {
+          const data = recordOf(event.data)
+          if (event.type !== 'tool/call' || !data) return
+          calls.delete(data.callId)
+          if (Buffer.byteLength(JSON.stringify(event)) <= 16 * 1024) {
+            calls.set(data.callId, { event })
+            if (calls.size > 32) calls.delete(calls.keys().next().value)
+          }
+        }
         for await (const raw of iterable) {
           const frame = recordOf(raw)
           if (frame?.type === 'snapshot') {
             for(const entry of Array.isArray(frame.records)?frame.records:[]) {
               const record=recordOf(entry)
-              activity.accept(recordOf(record?.event) || record || {})
+              const event = recordOf(record?.event) || record || {}
+              activity.accept(event)
+              rememberCall(event)
             }
             this.send(state, {
               type: 'session/subscribed', sessionId,
@@ -364,16 +380,29 @@ export class DshRealtimeCompatibility {
             assistant.follow(recordOf(frame.frame) || {})
           } else if (frame?.type === 'event' && recordOf(frame.event)) {
             const resources = resourcePresentation(frame.event as JsonRecord)
-            const attempt = assistantAttemptPresentation(frame.event as JsonRecord)
             const turnActivity = activity.accept(frame.event as JsonRecord)
-            this.send(state, { type: 'session/event', sessionId, event: frame.event,
-              ...((resources || attempt || turnActivity) ? {view:{...(resources?{agentResources:resources}:{}),...(attempt?{agentTranscript:attempt}:{}),...(turnActivity?{agentActivity:turnActivity}:{})}} : {}) })
+            const event = frame.event as JsonRecord
+            rememberCall(event)
+            let entry: JsonRecord = assistantRecordPresentation({ event,
+              ...((resources || turnActivity) ? {view:{...(resources?{agentResources:resources}:{}),...(turnActivity?{agentActivity:turnActivity}:{})}} : {}) })
+            // One presentation contract for current clients. New minis also
+            // accept full records from released plugins; no second live format
+            // is maintained in this plugin just for obsolete mini versions.
+            const history = this.ctx.get('wechatHistory') as WechatHistoryService | undefined
+            if (history && (event.type === 'tool/call' || event.type === 'tool/result'
+              || event.type === 'tool/ptc-dispatch-start' || event.type === 'tool/ptc-dispatch')) {
+              const data = recordOf(event.data), message = recordOf(data?.message)
+              const callId = recordOf(message?.source)?.callId
+              entry = history.presentRecord(sessionId, { event }, entry, calls.get(callId))
+              if (event.type === 'tool/result') calls.delete(callId)
+            }
+            this.send(state, { type: 'session/event', sessionId, ...entry })
           }
         }
         if (!combined.aborted) throw new Error('DSH Session stream ended unexpectedly')
       } catch (error) {
         if (combined.aborted) return
-        if (!isSessionReadError(error)) throw error
+        if (!isSessionReadError(error) && (error as { code?: string })?.code !== 'history-detail-unavailable') throw error
         // A subsequent explicit read may retry it, but reconnecting another
         // client must not resurrect an already failed/deleted subscription.
         this.knownSessions.delete(sessionId)

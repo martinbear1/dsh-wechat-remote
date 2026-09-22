@@ -912,41 +912,65 @@ async function historyValue(gateway, request, signal) {
   const sessionId = typeof request.sessionId === "string" ? request.sessionId : "";
   if (!sessionId) throw new Error("session.history requires sessionId");
   const maxMessages = Number.isSafeInteger(request.maxMessages) ? Math.max(1, Math.min(30, Number(request.maxMessages))) : 8;
-  const address = await resolveDshSessionAddress(gateway, sessionId, signal);
-  const first = recordOf(await firstStreamFrame(
-    gateway,
-    "session",
-    "follow",
-    { request: { address, maxMessages } },
-    signal
-  ));
-  if (first?.type !== "snapshot" || !Number.isSafeInteger(first.cursor)) {
-    throw new Error("session/follow returned an invalid opening snapshot");
-  }
-  if (Number.isSafeInteger(request.beforeSeq)) {
+  return createHistoryPageReader(gateway, sessionId, signal)({
+    maxMessages,
+    ...Number.isSafeInteger(request.beforeSeq) ? { beforeSeq: Number(request.beforeSeq) } : {}
+  });
+}
+function createHistoryPageReader(gateway, sessionId, signal) {
+  let address;
+  let opening;
+  const readPage = async (request, throughSeq) => {
+    const resolved = await (address ??= resolveDshSessionAddress(gateway, sessionId, signal));
+    signal.throwIfAborted();
     const page = recordOf(await gateway.invoke({
       namespace: "session",
       method: "page",
-      args: {
-        request: {
-          address,
-          throughSeq: first.cursor,
-          beforeSeq: request.beforeSeq,
-          maxMessages
-        }
-      },
+      args: { request: { address: resolved, throughSeq, beforeSeq: request.beforeSeq, maxMessages: request.maxMessages } },
       signal
     })) ?? {};
+    signal.throwIfAborted();
+    return { events: historyEvents(page.records), hasMore: page.hasMore === true };
+  };
+  return async (request) => {
+    signal.throwIfAborted();
+    if (!opening && request.beforeSeq !== void 0) {
+      return readPage(request, request.beforeSeq - 1);
+    }
+    if (!opening) {
+      opening = (async () => {
+        const resolved = await (address ??= resolveDshSessionAddress(gateway, sessionId, signal));
+        signal.throwIfAborted();
+        const maxMessages2 = request.maxMessages;
+        const first2 = recordOf(await firstStreamFrame(gateway, "session", "follow", {
+          request: { address: resolved, maxMessages: maxMessages2 }
+        }, signal));
+        signal.throwIfAborted();
+        if (first2?.type !== "snapshot" || !Number.isSafeInteger(first2.cursor) || Number(first2.cursor) < -1) {
+          throw new Error("session/follow returned an invalid opening snapshot");
+        }
+        return { first: first2, maxMessages: maxMessages2 };
+      })();
+    }
+    const { first, maxMessages } = await opening;
+    signal.throwIfAborted();
+    const latest = request.beforeSeq === void 0;
+    if (latest && request.maxMessages === maxMessages) {
+      return {
+        events: historyEvents(first.records),
+        hasMore: first.hasMore === true,
+        projections: withPresentationProjections(first.projections),
+        historyEndSeq: first.cursor
+      };
+    }
+    const page = await readPage(request, Number(first.cursor));
     return {
-      events: historyEvents(page.records),
-      hasMore: page.hasMore === true
+      ...page,
+      ...latest ? {
+        projections: withPresentationProjections(first.projections),
+        historyEndSeq: first.cursor
+      } : {}
     };
-  }
-  return {
-    events: historyEvents(first.records),
-    hasMore: first.hasMore === true,
-    projections: withPresentationProjections(first.projections),
-    historyEndSeq: first.cursor
   };
 }
 async function workspaceValue(gateway, signal) {

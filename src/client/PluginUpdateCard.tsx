@@ -30,6 +30,10 @@ export function PluginUpdateCard({ localOrigin }: { localOrigin: string }): JSX.
         setCheck(data)
         if (data.activeJob?.statusOrigin) {
           setJob(data.activeJob); setProgress({ phase: 'recovering', progress: 20, message: '正在恢复更新进度…', terminal: false })
+        } else if (data.mode === 'busy') {
+          // Preparation has no worker port yet. Do not display an old job's
+          // successful result as the outcome of this still-pending request.
+          setProgress({ phase: 'preparing', progress: 0, message: '更新仍在准备或等待确认，请稍后重新检查；不要重复安装。', terminal: true })
         } else if (data.lastResult) setProgress(data.lastResult)
       }
     } catch (e) { if (mounted.current && refreshId.current === id) { setCheck(null); setError(e instanceof Error ? e.message : '暂时无法检查更新') } }
@@ -61,7 +65,7 @@ export function PluginUpdateCard({ localOrigin }: { localOrigin: string }): JSX.
           }
         } catch { /* DSH itself is restarting; keep the last confirmed phase */ }
         if (Date.now() > deadline) {
-          setProgress({ phase: 'unknown', progress: 100, message: '暂时无法确认更新结果。请重新打开此主机 WebUI 检查版本；不要重复安装或删除节点。', terminal: true })
+          setProgress({ phase: 'unknown', progress: 0, message: '暂时无法确认更新结果。请重新打开此主机 WebUI 检查版本；不要重复安装或删除节点。', terminal: true })
           return
         }
       }
@@ -97,13 +101,31 @@ export function PluginUpdateCard({ localOrigin }: { localOrigin: string }): JSX.
     if (!check?.canInstall || busy || checking || error || installing.current) return
     installing.current = true
     setError(''); setProgress({ phase: 'download', progress: 10, message: '正在下载并验证更新包；当前插件尚未替换', terminal: false })
+    let rejected = false
     try {
       const response = await fetch(localOrigin + '/gate/update/start', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ticket: check.ticket }) })
       const data = await response.json() as Job & { error?: string }
+      rejected = !response.ok && typeof data.error === 'string'
       if (!response.ok || !data.statusOrigin) throw new Error(data.error || '无法取得更新进度，请重新检查')
       if (mounted.current) setJob(data)
     } catch (e) {
-      if (mounted.current) setProgress({ phase: 'failed', progress: 100, message: e instanceof Error ? e.message : '更新未开始，请重新检查', terminal: true, ok: false })
+      if (!mounted.current) return
+      // The ticket is single-use. A lost HTTP reply is NOT proof that installation
+      // never started. Recover a known worker before offering another action.
+      setCheck(value => value ? { ...value, canInstall: false, ticket: '' } : value)
+      if (rejected) {
+        setProgress({ phase: 'failed', progress: 0, message: (e instanceof Error ? e.message : '更新暂不可用') + '。请重新检查更新。', terminal: true, ok: false })
+      } else {
+        try {
+          const response = await fetch(localOrigin + '/gate/update/status', { signal: AbortSignal.timeout(3000) })
+          const recovered = await response.json() as { activeJob?: Job | null }
+          if (response.ok && recovered.activeJob?.statusOrigin) {
+            if (mounted.current) setJob(recovered.activeJob)
+            return
+          }
+        } catch { /* Keep result unknown, not a misleading failure/success. */ }
+        if (mounted.current) setProgress({ phase: 'unknown', progress: 0, message: '连接中断，暂时无法确认更新结果。请稍后检查更新；不要重复安装或删除节点。', terminal: true })
+      }
     } finally { installing.current = false }
   }
   const copyCommand = async () => {
@@ -126,7 +148,7 @@ export function PluginUpdateCard({ localOrigin }: { localOrigin: string }): JSX.
         {check.advice.checkedAt && check.advice.severity !== 'unknown' ? <small className={styles.updateChecked}>最近检查 {new Date(check.advice.checkedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</small> : null}
       </> : null}</> : null}
     {error ? <p role="alert">{error}</p> : null}
-    {progress ? <div role="status" aria-live="polite"><progress className={styles.updateProgress} max={100} value={progress.progress} /><p>{progress.message}</p>
+    {progress ? <div role="status" aria-live="polite">{!progress.terminal || progress.ok === true ? <progress className={styles.updateProgress} max={100} value={progress.progress} /> : null}<p>{progress.message}</p>
       {resumeFailed ? <p role="alert">插件已完成更新，但未能自动打开 WebUI。请使用 DSH 启动时显示的地址打开，无需重复更新。</p> : null}</div> : null}
   </div>
 }

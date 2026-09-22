@@ -4,13 +4,15 @@ export declare const DEFAULT_PUBLIC_RELAY_ORIGIN = "https://relay.xyxfood.xyz";
 export interface PublicRelayConfig {
     readonly enabled: boolean;
     readonly relayOrigin: string;
+    /** Optional exact HTTPS origins for a self-hosted encrypted object store. */
+    readonly objectOrigins?: readonly string[];
 }
 export interface AgentIdentity {
     readonly nodeId: string;
     readonly publicKeyPem: string;
     readonly privateKeyPem: string;
 }
-export type RemoteAccessState = 'active' | 'pending' | 'expired' | 'suspended' | 'not_entitled';
+export type RemoteAccessState = 'active' | 'expired' | 'suspended' | 'not_entitled';
 export interface RemoteAccessStatus {
     readonly status: RemoteAccessState;
     readonly validUntil?: number | null;
@@ -114,5 +116,4 @@ export declare class PublicRelayAgent {
 export declare function publicPairingPayload(status: AgentStatus, lan?: {
     readonly host: string;
     readonly port: number;
-    readonly code?: string;
 }): string | null;

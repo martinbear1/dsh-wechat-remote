@@ -14,8 +14,8 @@ const info = (address, internal = false) => ({
 
 assert.equal(selectLanIPv4({
   utun4: [info('198.18.0.1')],
-  en0: [info('192.168.3.243')],
-}), '192.168.3.243')
+  en0: [info('192.168.50.10')],
+}), '192.168.50.10')
 assert.equal(selectLanIPv4({
   overlay0: [info('100.64.0.1')],
   en0: [info('172.20.10.2')],

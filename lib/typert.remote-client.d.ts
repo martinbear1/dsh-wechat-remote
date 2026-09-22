@@ -32,6 +32,8 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     roots: (request: WechatDirectoryRootsRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatDirectoryRootsResult>>
   }
   interface TypertRemoteNamespace$776563686174486973746f7279 {
+    detail: (request: { readonly sessionId: string; readonly reference: string; readonly part?: number; readonly offset?: number; }, signal?: AbortSignal) => Promise<RemoteResult<WechatHistoryWindowResult>>
+    page: (request: WechatHistoryWindowRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatHistoryWindowResult>>
     window: (request: WechatHistoryWindowRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatHistoryWindowResult>>
   }
   interface TypertRemoteNamespace$776563686174486f7374 {
@@ -51,6 +53,8 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'wechatDirectory/create': (request: WechatDirectoryCreateRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatDirectoryCreateResult>>
     'wechatDirectory/list': (request: WechatDirectoryListRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatDirectoryListResult>>
     'wechatDirectory/roots': (request: WechatDirectoryRootsRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatDirectoryRootsResult>>
+    'wechatHistory/detail': (request: { readonly sessionId: string; readonly reference: string; readonly part?: number; readonly offset?: number; }, signal?: AbortSignal) => Promise<RemoteResult<WechatHistoryWindowResult>>
+    'wechatHistory/page': (request: WechatHistoryWindowRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatHistoryWindowResult>>
     'wechatHistory/window': (request: WechatHistoryWindowRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatHistoryWindowResult>>
     'wechatHost/describe': (request: WechatHostDescribeRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatHostDescribeResult>>
   }

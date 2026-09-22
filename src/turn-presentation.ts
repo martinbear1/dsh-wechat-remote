@@ -27,7 +27,7 @@ export function nativeTurnUsage(): Promise<UsageFold | undefined> {
 
 /** Timing follows DSH's assistant-step readings: first nonempty token delta,
  * first settled step TTFT, and summed sampled output / summed decode time. */
-function timing(events: Value[], start: Value, end: Value): Value {
+function timing(events: Value[], start: Value, end: Value, firstTokens?: ReadonlyMap<number, number>): Value {
   const result: Value = {}
   if (number(start.time) && number(end.time) && end.time >= start.time) result.elapsedMs = end.time - start.time
   let open: Value | undefined, firstStep = Infinity, firstTokenMs: number | undefined
@@ -43,7 +43,7 @@ function timing(events: Value[], start: Value, end: Value): Value {
     } else if (event.type === 'assistant/message') {
       // V3 no longer has durable assistant/chunk events. Their original times
       // live inside the settled attempt; never substitute socket arrival time.
-      const compactFirst=firstCompactTokenTime(data.stream)
+      const compactFirst=firstTokens?.get(event.seq) ?? firstCompactTokenTime(data.stream)
       if(open && open.step===data.step && open.first===undefined && number(compactFirst) && compactFirst>=open.time)open.first=compactFirst
       // An untimed lowest step makes first-token latency unavailable too.
       if (number(data.step) && data.step < firstStep) {
@@ -66,7 +66,7 @@ function timing(events: Value[], start: Value, end: Value): Value {
 /** Optional portable per-turn facet, attached to the final textual reply.
  * Read BEFORE transport compaction: retry usage and token timing need chunks.
  * Partial pages/running turns are intentionally not disclosed as complete. */
-export function turnDetails(entries: readonly unknown[], usageFold?: UsageFold): Value[] {
+export function turnDetails(entries: readonly unknown[], usageFold?: UsageFold, firstTokens?: ReadonlyMap<number, number>): Value[] {
   const turns = new Map<number, Value[]>()
   for (const entry of entries) {
     const event = record(record(entry).event), turn = record(event.data).turn
@@ -82,7 +82,7 @@ export function turnDetails(entries: readonly unknown[], usageFold?: UsageFold):
       && Array.isArray(e.data.message.content) && e.data.message.content.some((b: Value) => b.type === 'text' && typeof b.text === 'string' && b.text.trim()))
     if (!closing) continue
     const value: Value = { turnId: String(turn), messageId: closing.data.message.id }
-    const time = timing(events, starts[0], ends[0])
+    const time = timing(events, starts[0], ends[0], firstTokens)
     if (Object.keys(time).length) value.timing = time
     // Accounting failure must not take down the history reader.
     let usage: Value | undefined

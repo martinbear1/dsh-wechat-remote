@@ -29,6 +29,8 @@ export interface PublicRelayGatewayOptions {
     readonly identityPath?: string;
     readonly historyCachePath?: string;
     readonly onDiagnostic?: (level: 'info' | 'warn', message: string) => void;
+    /** Explicit test/self-host allowlist; product builds use the pinned OSS origin. */
+    readonly trustedObjectOrigins?: readonly string[];
 }
 export declare class PublicRelayGateway {
     readonly agent: PublicRelayAgent;
@@ -39,6 +41,7 @@ export declare class PublicRelayGateway {
     private readonly maxStreamsPerClient;
     private readonly issueLanCredential?;
     private readonly objectClient;
+    private starting;
     private readonly historySnapshots;
     private readonly pendingHistorySnapshots;
     private readonly attachmentObjects;
@@ -47,7 +50,7 @@ export declare class PublicRelayGateway {
     start(): Promise<void>;
     stop(): void;
     snapshot(): AgentStatus;
-    prepareHistorySnapshot(payloadJson: string): Promise<Record<string, unknown>>;
+    storeHistorySnapshot(payloadJson: string, archive: Uint8Array, signal?: AbortSignal): Promise<Record<string, unknown>>;
     uploadArtifactObject(data: Uint8Array, signal: AbortSignal): Promise<Record<string, unknown>>;
     downloadInputObject(descriptor: Record<string, any>, signal: AbortSignal): Promise<Uint8Array>;
     uploadAttachmentObject(data: Uint8Array, metadata: {

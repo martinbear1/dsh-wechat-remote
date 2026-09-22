@@ -26,6 +26,21 @@ export function assistantAttemptPresentation(event: Row): Row | undefined {
     message:{id:'agent-attempt-'+event.seq,role:'assistant',content}}
 }
 
+/** The chat pane uses the settled message (or an interrupted attempt's visible
+ * prefix), not the retained token-by-token stream. Derive that prefix before
+ * removing the redundant samples. History and live delivery share this step;
+ * native records, timing evidence and provider data on the host stay intact. */
+export function assistantRecordPresentation<T extends Row>(entry: T): T {
+  const event = entry.event
+  if (!event || !['assistant/message', 'assistant/attempt'].includes(event.type)
+    || !Array.isArray(event.data?.stream)) return entry
+  const attempt = assistantAttemptPresentation(event)
+  const { stream: _, ...data } = event.data
+  return { ...entry, event: { ...event, data },
+    ...(attempt ? { view: { ...entry.view, agentTranscript: attempt } } : {}),
+  }
+}
+
 /** First actual token's original timestamp, without expanding compact runs. */
 export function firstCompactTokenTime(stream: unknown): number | undefined {
   if(!Array.isArray(stream))return undefined

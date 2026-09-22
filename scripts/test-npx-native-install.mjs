@@ -20,7 +20,7 @@ const profile = path.join(home, 'profiles/web'), catalogFile = path.join(root, '
 fs.mkdirSync(home)
 const expectedPayload = path.join(root, 'expected-plugin.tgz')
 fs.writeFileSync(expectedPayload, execFileSync('tar', ['-xOf', installer, 'package/assets/plugin.tgz'], { maxBuffer: 32 * 1024 * 1024 }))
-const expectedFiles = ['lib/update-policy.js', 'lib/update-service.js', 'lib/update-worker.js'].map(file => [file,
+const expectedFiles = ['lib/update-policy.js', 'lib/update-download.js', 'lib/update-service.js', 'lib/update-worker.js'].map(file => [file,
   createHash('sha256').update(execFileSync('tar', ['-xOf', expectedPayload, 'package/' + file], { maxBuffer: 1024 * 1024 })).digest('hex')])
 const assertCandidateBytes = () => {
   for (const [file, hash] of expectedFiles) assert.equal(createHash('sha256').update(fs.readFileSync(path.join(profile, 'node_modules/@harness-remote/dsh-wechat-remote', file))).digest('hex'), hash, 'installed bytes must match this candidate, not a same-version npm cache')
@@ -60,10 +60,10 @@ function startNpx(args, name) {
   fs.closeSync(log); children.push(child)
   return child
 }
-async function runInstaller(name) {
+async function runInstaller(name, args = []) {
   // Explicit package/bin avoids npm treating an absolute .tgz path with spaces
   // as a shell executable. Published users simply use the registry package name.
-  const child = startNpx(['--package=' + installer, 'dsh-wechat-remote'], name)
+  const child = startNpx(['--package=' + installer, 'dsh-wechat-remote', ...args], name)
   let timer
   try {
     const code = await Promise.race([
@@ -79,7 +79,8 @@ async function waitReady(predicate, timeout = 900000) {
     try {
       const response = await fetch(origin, { signal: AbortSignal.timeout(500) })
       // A fresh official DSH protects its WebUI with a token. 401 is a live
-      // surface, not failed startup; subsequent private RPC verifies our host.
+      // surface, not failed startup; the loopback gate status verifies the
+      // installed plugin without reviving the retired plaintext LAN RPC.
       if ((response.ok || response.status === 401) && (!predicate || await predicate())) return
     } catch {}
     await pause(500)
@@ -91,16 +92,16 @@ async function call(route, body) {
     body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(360000) })
   const value = await r.json(); assert(r.ok, value.error || String(r.status)); return value
 }
-async function rpc(method, payload = {}) {
-  const state = JSON.parse(fs.readFileSync(path.join(home, 'gate-wechat-state.json')))
-  const r = await fetch(`http://127.0.0.1:${gatePort}/api/${method}`, { method: 'POST', headers: {
-    authorization: `Bearer ${state.token}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ type: 'client-request', rpcId: 'npx-fixture', method, payload }), signal: AbortSignal.timeout(10000) })
-  const value = await r.json(); assert(value.result?.ok, 'Fixture RPC failed: ' + method); return value.result.value
+async function gateStatus() {
+  const response = await fetch(`http://127.0.0.1:${localPort}/gate/status`, { signal: AbortSignal.timeout(1000) })
+  assert(response.ok, `Gate status failed: ${response.status}`)
+  const value = await response.json()
+  assert(value?.gate && value?.lan?.port === gatePort, 'Gate status did not describe the isolated fixture')
+  return value
 }
 function bindingDigest() {
   const state = JSON.parse(fs.readFileSync(path.join(home, 'gate-wechat-state.json')))
-  return createHash('sha256').update(JSON.stringify([state.token, state.wechatBindings])).digest('hex')
+  return createHash('sha256').update(JSON.stringify([state.token, state.publicIdentityNodeId])).digest('hex')
 }
 function fixtureHosts() {
   const output = process.platform === 'win32' ? execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
@@ -142,7 +143,7 @@ try {
   step('actual npx DSH starts with no global DSH on child PATH and an empty home')
   const beforePatch = fs.readFileSync(path.join(profile, 'cordis.patch.yml'), 'utf8')
   await runInstaller('installer-first')
-  await waitReady(async () => version() === payloadVersion && Array.isArray((await rpc('session.list')).items))
+  await waitReady(async () => version() === payloadVersion && Boolean((await gateStatus()).gate))
   assertCandidateBytes()
   assert.equal(fs.readFileSync(path.join(profile, 'cordis.patch.yml'), 'utf8'), beforePatch)
   const jobs = path.join(home, 'harness-remote-updates')
@@ -152,16 +153,21 @@ try {
   assert.equal(installedJob.home, home)
   report.realNpxCli = installedJob.cli
   step(`packed npm installer discovers live npx host, natively installs ${payloadVersion}, restores patch and restarts correct CLI`)
-  const session = await rpc('session.create', { cwd: root })
   const binding = bindingDigest()
   // A separate ordinary terminal can have a global DSH on PATH. Its presence
   // must not override the authenticated live npx host on a different port.
   const isolatedPath = env.PATH
   env.PATH = [nodeDir, process.env.PATH || ''].join(path.delimiter)
   try { await runInstaller('installer-repeat') } finally { env.PATH = isolatedPath }
+  await waitReady(async () => version() === payloadVersion && Boolean((await gateStatus()).gate))
   assert.equal(bindingDigest(), binding)
-  assert((await rpc('session.list')).items.some(item => item.sessionId === session.sessionId))
-  step('repeat install from ordinary PATH is a no-op and preserves session/token/bindings')
+  step('repeat install from ordinary PATH is a no-op and preserves token/bindings')
+  await runInstaller('installer-repair', ['--repair'])
+  await waitReady(async () => version() === payloadVersion && Boolean((await gateStatus()).gate))
+  assertCandidateBytes()
+  assert.equal(bindingDigest(), binding)
+  assert.equal(fs.readFileSync(path.join(profile, 'cordis.patch.yml'), 'utf8'), beforePatch)
+  step('explicit same-version repair reinstalls the final payload and preserves configuration/token/bindings')
   if (process.argv.includes('--with-update')) {
     assert.equal(payloadVersion, '1.7.5', 'The published RC forward-update proof starts from stable 1.7.5; use test-real-update-forward for newer candidates')
     const version = '1.7.6-rc.1'
@@ -191,12 +197,11 @@ try {
   stopFixtureHosts()
   await pause(1000)
   startNpx(['@deepseek-ai/dsh@0.1.5-rc.1', 'web', '--port', String(port), '--no-open'], 'dsh-next-start')
-  await waitReady(async () => Array.isArray((await rpc('session.list')).items))
+  await waitReady(async () => Boolean((await gateStatus()).gate))
   assert.equal(version(), process.argv.includes('--with-update') ? '1.7.6-rc.1' : payloadVersion)
   if (!process.argv.includes('--with-update')) assertCandidateBytes()
   assert.equal(bindingDigest(), binding)
-  assert((await rpc('session.list')).items.some(item => item.sessionId === session.sessionId))
-  step('a later normal npx startup loads the installed plugin and preserves session/token/bindings')
+  step('a later normal npx startup loads the installed plugin and preserves token/bindings')
   report.ok = true
 } catch (error) { report.error = error.message; process.exitCode = 1 }
 finally {

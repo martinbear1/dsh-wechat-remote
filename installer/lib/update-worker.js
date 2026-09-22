@@ -92,7 +92,8 @@ function backupProfile(profile, backup) {
     filter(source, target) {
       if (!fs.lstatSync(source).isSymbolicLink()) return true;
       const type = process.platform === "win32" ? fs.statSync(source, { throwIfNoEntry: false })?.isDirectory() ? "junction" : "file" : void 0;
-      fs.symlinkSync(fs.readlinkSync(source), target, type);
+      const link = fs.readlinkSync(source);
+      fs.symlinkSync(type === "junction" ? path.resolve(path.dirname(source), link) : link, target, type);
       return false;
     }
   });
@@ -403,7 +404,7 @@ function durableSnapshot(job) {
   }
   if (fs4.existsSync(job.stateFile)) {
     const state = JSON.parse(fs4.readFileSync(job.stateFile, "utf8"));
-    result["$binding"] = createHash2("sha256").update(JSON.stringify([state.token, state.wechatBindings])).digest("hex");
+    result["$binding"] = createHash2("sha256").update(JSON.stringify([state.token, state.publicIdentityNodeId])).digest("hex");
   }
   return result;
 }

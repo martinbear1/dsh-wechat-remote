@@ -2,6 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 
 import { invokeLegacyRpc, invokeLegacyPermissionRpc, parseLegacyClientRequest, resolveTypertGateway, type TypertGatewayLike } from './dsh-protocol-compat.js'
 import { DshRealtimeCompatibility, type LegacyRealtimePeer } from './dsh-realtime-compat.js'
+import { objectRpcBudget } from './object-transfer-budget.js'
 
 export interface CompatibilityHttpRequest {
   readonly method: string
@@ -134,7 +135,7 @@ export class DshCompatibilityApi implements DshCompatibilityTransport {
       }
       this.realtime.subscribeSession(legacy.payload.sessionId)
       const reply = await invokeLegacyRpc(gateway, legacy, {
-        signal: AbortSignal.any([request.signal, AbortSignal.timeout(90_000)]),
+        signal: AbortSignal.any([request.signal, AbortSignal.timeout(objectRpcBudget(legacy.method, legacy.payload) ?? 90_000)]),
         describeHost: () => ({ cwd: process.cwd() }),
         flushPermission: sessionId => this.flushPermission(sessionId),
       })

@@ -4,7 +4,7 @@ import { validateCatalog, compareVersions, trustedReleaseAsset } from '../lib/up
  * Tested DSH/platform/architecture lists describe evidence, not admission.
  * Keep trusted artifacts, explicit withdrawals and the no-downgrade floor.
  */
-export function selectInstallTarget(pinned, remote, current, now = Date.now()) {
+export function selectInstallTarget(pinned, remote, current, now = Date.now(), bundledOnly = false) {
   const local = validateCatalog(pinned.catalog)
   // Choosing an explicit prerelease installer authorizes its exact embedded
   // preview, not arbitrary remote previews or a change to stable recommendations.
@@ -21,7 +21,7 @@ export function selectInstallTarget(pinned, remote, current, now = Date.now()) {
 
   // An installer never silently substitutes an older plugin than its own bundle.
   // Keep the bundled bytes/hash for the same version even if remote metadata differs.
-  const candidates = [bundled, ...(online?.releases || []).filter(r => r.channel === 'stable'
+  const candidates = [bundled, ...(bundledOnly ? [] : online?.releases || []).filter(r => r.channel === 'stable'
     && compareVersions(r.version, bundled.version) > 0 && trustedReleaseAsset(r.asset, r.version))]
     .sort((a, b) => compareVersions(b.version, a.version))
   const rules = [...local.blocked, ...(online?.blocked || [])]

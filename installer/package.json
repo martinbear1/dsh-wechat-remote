@@ -1,6 +1,6 @@
 {
   "name": "dsh-wechat-remote",
-  "version": "1.7.8",
+  "version": "1.7.9",
   "private": false,
   "description": "Agent远程管理助手：DSH 微信连接插件的一键安装与升级",
   "type": "module",

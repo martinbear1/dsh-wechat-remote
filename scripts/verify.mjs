@@ -1,7 +1,7 @@
 /**
  * 制品一致性守卫（微信版插件）：客户端 bundle 必须用包自身的名字注册
  * （window.__ModuleLoader__.load({ id })），宿主网关必须是微信专用表面
- * （兼容 3092/3093、多 profile 端口、claim/verify、滚动 token、独立状态文件）。
+ * （兼容 3092/3093、多 profile 端口、加密局域网、升级探针、独立状态文件）。
  * DSH 的 client-modules 加载器会拒绝「注册 id 与启动条目 id 不一致」的
  * bundle，直接打崩 Web UI —— 本脚本把这类硬约束变成可执行的回归检查。
  *
@@ -10,6 +10,7 @@
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { selectInstallTarget } from '../installer/bin/release-selection.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const pkg = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'))
@@ -28,6 +29,11 @@ const releaseMetadata = JSON.parse(readFileSync(path.join(root, 'installer/asset
 check(releaseMetadata.version === pkg.version, '安装器内嵌版本与插件不一致；请重新构建安装器')
 const ownRelease = releaseMetadata.catalog?.releases?.find(release => release.version === pkg.version)
 check(ownRelease?.channel === (pkg.version.includes('-') ? 'preview' : 'stable'), '安装器发布通道与版本不一致')
+try {
+  selectInstallTarget(releaseMetadata, undefined, { agentVersion: '', platform: '' })
+} catch (error) {
+  check(false, `安装器内嵌目录不可用：${error.message}`)
+}
 
 // 1. 客户端 bundle：注册 id 必须等于包名，且不含任何遗留/异包 id。
 const client = readFileSync(path.join(root, 'lib/client.js'), 'utf8')
@@ -44,7 +50,7 @@ check(!client.includes('sidebar.footer.action'), 'lib/client.js 不应再占用�
 check(client.includes('wechatHost/describe'), 'lib/client.js 没有通过 DSH 原生 RPC 发现当前 profile 的本地门')
 check(!client.includes('/api/wechatHost.describe'), 'lib/client.js 残留错误的手写 Web API 地址')
 check(client.includes('http://127.0.0.1:3093'), 'lib/client.js 缺少旧 web/default 3093 回退')
-for (const required of ['Agent远程管理助手', '添加到微信', '生成配对码', '局域网直连', '远程访问', '微信账号保护']) {
+for (const required of ['Agent远程管理助手', '添加到微信', '生成二维码', '局域网直连', '远程访问', '账号连接保护']) {
   check(client.includes(required), `lib/client.js 用户配对界面缺少「${required}」`)
 }
 for (const privateDetail of ['relayOrigin', 'lastError', '本机配对门', 'xyxfood.xyz']) {
@@ -62,6 +68,7 @@ check(!/\.[0-9][0-9a-f]{6}_[A-Za-z]/.test(client), 'lib/client.js 生成了数�
 const entry = readFileSync(path.join(root, 'lib/index.js'), 'utf8')
 const host = readFileSync(path.join(root, 'lib/gate-runtime.js'), 'utf8')
 const agentMetadata = readFileSync(path.join(root, 'lib/agent-metadata.js'), 'utf8')
+const secureFileArtifact = readFileSync(path.join(root, 'lib/secure-file.js'), 'utf8')
 check(entry.includes('export const apply ='), 'lib/index.js 缺少函数式 apply 导出（宿主插件不会加载）')
 check(!entry.includes('export function apply'), 'lib/index.js 不应使用会被 Cordis 识别为构造器的普通 function apply')
 check(entry.includes("export const name = 'gate'"), 'lib/index.js 缺少 gate name 导出')
@@ -79,17 +86,23 @@ check(host.includes('selectedGatePorts.localPort'), 'lib/index.js 未使用推�
 check(host.includes('defaultGateStatePath()'), '宿主未按 DSH profile 选择状态文件')
 check(agentMetadata.includes("normalized === 'web' || normalized === 'default'"), '默认 profile 未保留发布版凭证迁移路径')
 check(agentMetadata.includes("'gate-wechat-state.json'"), '状态文件名不是 gate-wechat-state.json')
-check(host.includes("url.pathname === '/pair/claim-wechat'"), 'lib/index.js 缺少 /pair/claim-wechat 端点')
-check(host.includes("url.pathname === '/pair/verify-wechat'"), 'lib/index.js 缺少 /pair/verify-wechat 端点')
-check(!host.includes("url.pathname === '/pair/claim'"), 'lib/index.js 不应暴露 iOS 风格 /pair/claim 端点')
+for (const retired of ['/pair/claim-wechat', '/pair/verify-wechat', '/pair/claim', 'code2session']) {
+  check(!host.includes(retired), `lib/gate-runtime.js 残留旧明文配对表面：${retired}`)
+}
+for (const retiredConfigCode of ['loadWechatConfig', 'wechatAppId', 'wechatAppSecret']) {
+  check(!host.includes(retiredConfigCode), `lib/gate-runtime.js 仍在读取旧微信身份配置：${retiredConfigCode}`)
+}
+check(host.includes("req.url === '/wechat-remote/secure-lan'"), 'lib/gate-runtime.js 缺少身份钉扎的加密局域网入口')
+check(host.includes('isVerificationProbe(req)'), 'lib/gate-runtime.js 缺少旧版安装器的严格回环验证探针')
+check(!host.includes('proxy.ws('), 'lib/gate-runtime.js 不应继续暴露普通 WebSocket 代理')
 check(host.includes('timingSafeEqual'), 'lib/index.js 缺少常数时间 token 比较')
-check(host.includes('rotated'), 'lib/index.js 缺少凭证滚动逻辑')
 check(host.includes('rateBuckets'), 'lib/index.js 缺少每 IP 限速')
-check(host.includes('icacls'), 'lib/index.js 缺少 Windows ACL 收紧')
+check(secureFileArtifact.includes('icacls'), 'lib/secure-file.js 缺少 Windows ACL 收紧')
 check(host.includes('DSH 本体继续运行'), 'lib/index.js 缺少端口占用的崩溃隔离（server error 处理器）')
 check(host.includes("runtime.state = disposed ? 'stopped' : 'unavailable'"), '端口错误没有降级成可诊断状态')
-check(host.includes('wechat: {'), 'lib/index.js 缺少 /gate/status 的微信身份字段')
-check(client.includes('微信账号保护'), 'lib/client.js 设置页缺少「微信账号保护」状态行')
+check(!host.includes('wechat: {'), 'lib/gate-runtime.js 不应再暴露旧微信绑定表状态')
+check(client.includes('账号连接保护'), 'lib/client.js 设置页缺少「账号连接保护」状态行')
+check(!client.includes('配对码</span>') && !client.includes('qr.code'), 'lib/client.js 不应再展示旧 8 位配对码')
 
 // 3. bundle 补丁行必须引用本包名（否则插不进 cordis 图）。
 const patch = readFileSync(path.join(root, 'cordis.patch.yml'), 'utf8')
@@ -156,13 +169,13 @@ check(typert.includes('wechatHost/describe'), '严格 Typert 契约缺少 wechat
 check(host.includes("from './history-service.js'"), 'lib/index.js 未挂载微信历史 Remote')
 check(host.includes("mountChild('history', WechatHistoryService"), 'gate runtime 未在当前 fiber 下挂载历史服务')
 const history = readFileSync(path.join(root, 'lib/history-service.js'), 'utf8')
-const historyPrewarmer = readFileSync(path.join(root, 'lib/history-prewarmer.js'), 'utf8')
 check(history.includes('super(ctx, "wechatHistory")') || history.includes("super(ctx, 'wechatHistory')"), '历史服务的 Typert key 不是 wechatHistory')
 check(history.includes("method: 'session.history'") || history.includes('method: "session.history"'), '历史服务没有读取 DSH 原生 session.history')
 check(history.includes("event?.type !== 'assistant/chunk'") || history.includes('event?.type !== "assistant/chunk"'), '历史服务没有压缩已完成轮次的流式增量')
 check(history.includes("host: '127.0.0.1'") || history.includes('host: "127.0.0.1"'), '历史服务数据源不是 loopback DSH')
 check(typert.includes('wechatHistory/window'), '严格 Typert 契约缺少 wechatHistory/window')
-check(/ctx\.inject\(\[['"]wechatHistory['"]\]/.test(historyPrewarmer), '历史预热器没有使用 Cordis 原生服务注入生命周期')
+check(typert.includes('wechatHistory/page') && typert.includes('wechatHistory/detail'), '严格 Typert 契约缺少有界历史/详情接口')
+check(!host.includes('prewarmLatestHistory') && !host.includes('bindHistorySnapshotPrewarmer'), '仍在后台预加载完整历史')
 check(!host.includes('ctx.wechatHistory'), 'Host 异步回调仍在注入作用域外读取 wechatHistory')
 const historySnapshotCache = readFileSync(path.join(root, 'lib/history-snapshot-cache.js'), 'utf8')
 check(host.includes('wechat-history-snapshots-'), '宿主没有按 Agent 隔离历史快照索引')
@@ -206,7 +219,11 @@ check(tunnel.includes("startsWith('/api/')"), '公网隧道没有限制到 DSH /
 check(tunnel.includes("host: '127.0.0.1'"), '公网隧道上游不是固定 loopback DSH')
 check(tunnel.includes('this.compatibilityApi.request(') || tunnel.includes('this.compatibilityApi?.request('), '公网隧道未使用进程内适配入口')
 check(!tunnel.includes('createServer('), '公网隧道不得新增入站监听器')
-check(tunnel.includes('MAX_SEND_QUEUE_BYTES'), '公网隧道缺少明确的待发队列字节上限')
+const sendQueue = readFileSync(path.join(root, 'lib/tunnel-send-queue.js'), 'utf8')
+check(tunnel.includes('new TunnelSendQueue(') && sendQueue.includes('maxBytes ?? 4 * 1024 * 1024'), '公网隧道缺少明确的待发队列字节上限')
+for (const file of ['lib/tunnel-send-queue.js', 'lib/tunnel-send-queue.d.ts', 'lib/history-read-budget.js', 'lib/history-read-budget.d.ts']) {
+  check(pkg.files.includes(file), `安装制品缺少传输调度模块：${file}`)
+}
 check(tunnel.includes('response.pause()'), '公网 HTTP 隧道缺少上游背压暂停')
 
 const secureFile = readFileSync(path.join(root, 'lib/secure-file.js'), 'utf8')
@@ -233,4 +250,4 @@ if (fails.length > 0) {
   console.error('VERIFY FAILED:\n- ' + fails.join('\n- '))
   process.exit(1)
 }
-console.log(`verify ok: ${name} 制品一致（注册 id / 多 profile 实际端口 / 滚动 token / 加固基线）`)
+console.log(`verify ok: ${name} 制品一致（注册 id / 多 profile 实际端口 / 加密局域网 / 升级探针）`)

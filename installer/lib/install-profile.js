@@ -19,7 +19,8 @@ function backupProfile(profile, backup) {
     filter(source, target) {
       if (!fs.lstatSync(source).isSymbolicLink()) return true;
       const type = process.platform === "win32" ? fs.statSync(source, { throwIfNoEntry: false })?.isDirectory() ? "junction" : "file" : void 0;
-      fs.symlinkSync(fs.readlinkSync(source), target, type);
+      const link = fs.readlinkSync(source);
+      fs.symlinkSync(type === "junction" ? path.resolve(path.dirname(source), link) : link, target, type);
       return false;
     }
   });

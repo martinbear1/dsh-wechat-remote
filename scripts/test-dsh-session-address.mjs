@@ -25,8 +25,9 @@ const gateway = {
     if (call.method === 'list') return { items: rows }
     if (call.method === 'modelCatalog') return { groups: [], default: { provider: 'p', model: 'm' } }
     if (call.method === 'page') {
+      if (nativeRejection) throw nativeRejection
       assert.deepEqual(call.args.request.address, { kind: 'subagent', parentSessionId: 'root', childSessionId: 'child', mode: 'one-shot' })
-      assert.equal(call.args.request.throughSeq, 10)
+      assert.equal(call.args.request.throughSeq, 4)
       return { hasMore: false, records: [{ type: 'event', event: { seq: 2, type: 'turn/start', data: {} } }] }
     }
     assert.fail('unexpected native method ' + call.method)
@@ -61,19 +62,22 @@ for (const payload of [{ sessionId: 'child' }, { sessionId: 'child', beforeSeq: 
     ...payload, parentSessionId: 'forged', mode: 'continuable', address: { kind: 'session', sessionId: 'root' },
   }), options)
   assert.equal(reply.result.ok, true)
-  assert.deepEqual(calls.filter(c => c.method === 'follow').at(-1).args.request.address, {
+  const nativeMethod = payload.beforeSeq === undefined ? 'follow' : 'page'
+  assert.deepEqual(calls.filter(c => c.method === nativeMethod).at(-1).args.request.address, {
     kind: 'subagent', parentSessionId: 'root', childSessionId: 'child', mode: 'one-shot',
   }, 'client-supplied parent, mode and address are never trusted')
 }
 const models = await invokeLegacyRpc(gateway, request('session.models', { sessionId: 'nested' }), options)
 assert.equal(models.result.ok, true)
 assert.equal(calls.filter(c => c.method === 'follow').at(-1).args.request.address.childSessionId, 'nested')
-assert.equal(closed, 3, 'snapshot readers release upstream subscriptions')
+assert.equal(closed, 2, 'snapshot readers release upstream subscriptions; older pages need no subscription')
 
-// Native validation is final even if a catalog changed between list and follow.
+// Native validation is final even if a catalog changed between list and follow/page.
 nativeRejection = Object.assign(new Error('subagent does not belong to the supplied parent'), { code: 'subagent/unauthorized' })
-const rejected = await invokeLegacyRpc(gateway, request('session.history', { sessionId: 'child' }), options)
-assert.equal(rejected.result.error.code, nativeRejection.code)
+for (const payload of [{ sessionId: 'child' }, { sessionId: 'child', beforeSeq: 5 }]) {
+  const rejected = await invokeLegacyRpc(gateway, request('session.history', payload), options)
+  assert.equal(rejected.result.error.code, nativeRejection.code)
+}
 nativeRejection = undefined
 
 for (const entry of [undefined, { id: 'child', kind: 'diagnostic', reason: 'corrupt' },

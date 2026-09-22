@@ -253,9 +253,10 @@
   min-height: 292px;
   margin-top: 16px;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 24px;
+  gap: 10px;
 }
 
 .qr,
@@ -281,26 +282,10 @@
   font-size: 12px;
 }
 
-.qrMeta {
-  min-width: 150px;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 5px;
-}
-
-.qrMeta span,
-.qrMeta small {
+.qrValidity {
   color: var(--dsw-alias-label-tertiary, #7d8492);
   font-size: 11px;
   line-height: 17px;
-}
-
-.qrMeta code {
-  color: var(--dsw-alias-state-business-primary, #4e79ff);
-  font-family: var(--ds-font-family-code, ui-monospace, monospace);
-  font-size: 16px;
-  letter-spacing: 2px;
 }
 
 .securityNote {
@@ -347,9 +332,6 @@
     gap: 12px;
   }
 
-  .qrMeta {
-    align-items: center;
-  }
 }
 .updateCard { border: 1px solid var(--border-color, #ddd); border-radius: 12px; padding: 20px; margin-top: 20px; line-height: 1.6; overflow-wrap: anywhere; }
 .updateLabel { color: inherit; }

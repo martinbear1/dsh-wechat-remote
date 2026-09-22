@@ -63,7 +63,14 @@ export class AgentResourcesService extends TypertRemoteService {
   }
   private async guarded(operation: () => Promise<Row>): Promise<ResourceResult> {
     try { return {ok:true, valueJson:JSON.stringify(await operation())} }
-    catch (error) { return {ok:false, error:{code:'resource-unavailable', message:error instanceof Error ? error.message : '文件不可用'}} }
+    catch (error) {
+      const value = error && typeof error === 'object' ? error as {code?: unknown; message?: unknown} : null
+      const code = value?.code === 'object_backend_unavailable'
+        ? 'object_backend_unavailable'
+        : 'resource-unavailable'
+      const message = typeof value?.message === 'string' ? value.message : '文件不可用'
+      return {ok:false, error:{code, message}}
+    }
   }
   @Remote('capabilities')
   async capabilities(request: {scope: string; purpose?: 'sessionArchive'}, signal: AbortSignal): Promise<ResourceResult> {

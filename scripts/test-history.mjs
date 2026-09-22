@@ -1,15 +1,11 @@
 import assert from 'node:assert/strict'
-import { EventEmitter } from 'node:events'
+import { randomBytes } from 'node:crypto'
 import { inflateRawSync } from 'node:zlib'
 
 import { buildHistoryWindow } from '../lib/history-service.js'
-import { archiveHistoryJson } from '../lib/history-archive.js'
-import { Context } from '@deepseek-ai/cordis'
+import { archiveHistoryJson, archiveHistoryJsonAsync } from '../lib/history-archive.js'
 import WechatHistoryService from '../lib/history-service.js'
-import {
-  bindHistorySnapshotPrewarmer,
-  HistorySnapshotPrewarmer,
-} from '../lib/history-prewarmer.js'
+import { HistoryReadBudget } from '../lib/history-read-budget.js'
 
 function unzipSingleEntry(archive) {
   const value = Buffer.from(archive)
@@ -33,6 +29,14 @@ assert.equal(unzipSingleEntry(archive), archiveSource)
 assert.ok(archive.length < Buffer.byteLength(archiveSource) / 5, 'history ZIP should materially reduce the encrypted payload')
 
 const signal = new AbortController().signal
+assert.deepEqual(await archiveHistoryJsonAsync(archiveSource, signal), archive,
+  'async compression must preserve the released native-unzip ZIP format byte for byte')
+await assert.rejects(archiveHistoryJsonAsync(archiveSource, AbortSignal.abort()), { name: 'AbortError' })
+let eventLoopRan = false
+const yieldCheck = archiveHistoryJsonAsync(archiveSource.repeat(8), signal)
+setImmediate(() => { eventLoopRan = true })
+await yieldCheck
+assert.equal(eventLoopRan, true, 'large compression must release the JS event loop')
 const calls = []
 const completed = await buildHistoryWindow({
   sessionId: 'session-split',
@@ -149,6 +153,10 @@ assert.equal(invalid.error.code, 'invalid-history-request')
 let latestRevision = 0
 let latestFetches = 0
 const alwaysFreshService = {
+  reads: new HistoryReadBudget(),
+  createPageReader() { return this.fetchNativePage },
+  snapshotThresholdBytes: Number.MAX_SAFE_INTEGER,
+  storeSnapshot: undefined,
   fetchNativePage: async () => {
     latestFetches += 1
     return {
@@ -165,7 +173,6 @@ const alwaysFreshService = {
       },
     }
   },
-  deliver: async payloadJson => ({ ok: true, value: { payloadJson } }),
 }
 const latestRequest = { sessionId: 'session-always-fresh', maxMessages: 30 }
 const firstLatest = await WechatHistoryService.prototype.window.call(alwaysFreshService, latestRequest, signal)
@@ -175,187 +182,161 @@ assert.equal(latestFetches, 2, 'latest history must never be served from a mutab
 assert.notEqual(firstLatest.value.payloadJson, secondLatest.value.payloadJson,
   'a completed native turn must be observable on the next history read')
 
-class FakeSocket extends EventEmitter {
-  close() { this.emit('close') }
-  terminate() { this.emit('close') }
-}
-
-function hostStatus(sessionId, running) {
-  return Buffer.from(JSON.stringify({
-    payload: { type: 'host/session-status', sessionId, running },
-  }))
-}
-
-async function waitFor(predicate, timeoutMs = 500, label = 'history prewarmer') {
-  const deadline = Date.now() + timeoutMs
-  while (!predicate()) {
-    if (Date.now() >= deadline) throw new Error(`timed out waiting for ${label}`)
-    await new Promise(resolve => setTimeout(resolve, 2))
+// History owns pagination, compression and transport budgeting as one policy.
+// The object gateway receives an already-planned archive and never decides how
+// a failed upload should alter the logical history window.
+function transportService(fetchNativePage, storeSnapshot) {
+  return {
+    reads: new HistoryReadBudget(),
+    createPageReader() { return this.fetchNativePage },
+    snapshotThresholdBytes: 32 * 1024,
+    storeSnapshot,
+    fetchNativePage,
   }
 }
 
-const fakeSocket = new FakeSocket()
-const warmed = []
-const prewarmer = new HistorySnapshotPrewarmer({
-  dshPort: 3080,
-  socketFactory: url => {
-    assert.equal(url, 'ws://127.0.0.1:3080/api/events.host')
-    return fakeSocket
+function historyValue(text, hasMore = true) {
+  return {
+    ok: true,
+    value: {
+      hasMore,
+      events: [{
+        event: {
+          type: 'assistant/message',
+          seq: 100,
+          data: { message: { id: 'transport-message', content: [{ type: 'text', text }] } },
+        },
+      }],
+    },
+  }
+}
+
+let smallStoreCalls = 0
+const smallTransport = transportService(
+  async () => historyValue('small'),
+  async () => { smallStoreCalls += 1; throw new Error('small response must not use object storage') },
+)
+const smallResult = await WechatHistoryService.prototype.window.call(
+  smallTransport,
+  { sessionId: 'session-small-transport', maxMessages: 8 },
+  signal,
+)
+assert.equal(typeof smallResult.value.payloadJson, 'string')
+assert.equal(smallStoreCalls, 0)
+
+let compactStoreCalls = 0
+const compactTransport = transportService(
+  async () => historyValue('repeatable history '.repeat(12_000)),
+  async () => { compactStoreCalls += 1; throw new Error('compact ZIP must stay inline') },
+)
+const compactResult = await WechatHistoryService.prototype.window.call(
+  compactTransport,
+  { sessionId: 'session-compact-transport', maxMessages: 8 },
+  signal,
+)
+const compactDescriptor = JSON.parse(compactResult.value.snapshotJson)
+assert.equal(typeof compactDescriptor.archiveBase64, 'string')
+assert.equal(compactDescriptor.objectId, undefined)
+assert.equal(compactStoreCalls, 0)
+assert.equal(unzipSingleEntry(Buffer.from(compactDescriptor.archiveBase64, 'base64'))
+  .includes('repeatable history'), true)
+
+const mediumText = randomBytes(160 * 1024).toString('base64')
+let storedArchive
+const objectTransport = transportService(
+  async () => historyValue(mediumText),
+  async (payloadJson, archiveBytes) => {
+    storedArchive = Buffer.from(archiveBytes)
+    assert.equal(unzipSingleEntry(storedArchive), payloadJson)
+    return { contentKind: 'history-json', objectId: 'object-transport-test' }
   },
-  settleDelayMs: 0,
-  retryDelayMs: 5,
-  warm: async (sessionId) => {
-    warmed.push(sessionId)
-    return 'object'
+)
+const objectResult = await WechatHistoryService.prototype.window.call(
+  objectTransport,
+  { sessionId: 'session-object-transport', maxMessages: 8 },
+  signal,
+)
+assert.equal(JSON.parse(objectResult.value.snapshotJson).objectId, 'object-transport-test')
+assert.ok(storedArchive.length > 96 * 1024)
+
+let unavailableStoreCalls = 0
+const unavailableTransport = transportService(
+  async () => historyValue(mediumText),
+  async () => { unavailableStoreCalls += 1; throw new Error('object storage unavailable') },
+)
+const unavailableResult = await WechatHistoryService.prototype.window.call(
+  unavailableTransport,
+  { sessionId: 'session-unavailable-transport', maxMessages: 8 },
+  signal,
+)
+const unavailableDescriptor = JSON.parse(unavailableResult.value.snapshotJson)
+assert.equal(unavailableStoreCalls, 1)
+assert.equal(typeof unavailableDescriptor.archiveBase64, 'string')
+assert.equal(unzipSingleEntry(Buffer.from(unavailableDescriptor.archiveBase64, 'base64'))
+  .includes('transport-message'), true)
+
+const adaptiveText = randomBytes(600 * 1024).toString('base64')
+const adaptivePageSizes = []
+let adaptiveStoreCalls = 0
+const adaptiveTransport = transportService(
+  async payload => {
+    adaptivePageSizes.push(payload.maxMessages)
+    const chars = Math.ceil(adaptiveText.length * payload.maxMessages / 30)
+    return historyValue(adaptiveText.slice(0, chars), true)
   },
-})
-prewarmer.start()
-fakeSocket.emit('open')
-fakeSocket.emit('message', hostStatus('session-prewarm1234', true), false)
-fakeSocket.emit('message', hostStatus('session-prewarm1234', false), false)
-await waitFor(() => warmed.length === 1)
-fakeSocket.emit('message', hostStatus('session-prewarm1234', false), false)
-await new Promise(resolve => setTimeout(resolve, 10))
-assert.equal(warmed.length, 1, 'only a true-to-false native edge should prewarm')
-fakeSocket.emit('message', hostStatus('session-prewarm1234', true), false)
-fakeSocket.emit('message', hostStatus('session-prewarm1234', false), false)
-await waitFor(() => warmed.length === 2)
-prewarmer.stop()
+  async () => { adaptiveStoreCalls += 1; throw new Error('object storage unavailable') },
+)
+const adaptiveResult = await WechatHistoryService.prototype.window.call(
+  adaptiveTransport,
+  { sessionId: 'session-adaptive-transport', maxMessages: 30 },
+  signal,
+)
+assert.equal(adaptiveStoreCalls, 1, 'an unavailable object backend is probed once per request')
+assert.deepEqual(adaptivePageSizes, [30, 15], 'oversized history must shrink through normal pagination')
+const adaptiveDescriptor = JSON.parse(adaptiveResult.value.snapshotJson)
+const adaptiveValue = JSON.parse(unzipSingleEntry(Buffer.from(adaptiveDescriptor.archiveBase64, 'base64')))
+assert.equal(adaptiveValue.hasMore, true, 'adaptive transport must preserve the native older-history cursor')
+assert.ok(Buffer.from(adaptiveDescriptor.archiveBase64, 'base64').length <= 384 * 1024)
 
-let deliverHostEvent
-let observerReleased = false
-const inProcessWarm = []
-const inProcessPrewarmer = new HistorySnapshotPrewarmer({
-  socketFactory() { throw new Error('modern prewarmer must not open the old WebSocket endpoint') },
-  hostEventSource(receive) {
-    deliverHostEvent = receive
-    return () => { observerReleased = true }
+let explicitStoreCalls = 0
+const explicitTransport = transportService(
+  async () => historyValue(mediumText),
+  async () => { explicitStoreCalls += 1; throw new Error('explicit inline must not touch object storage') },
+)
+const explicitResult = await WechatHistoryService.prototype.window.call(
+  explicitTransport,
+  { sessionId: 'session-explicit-inline', maxMessages: 8, delivery: 'inline' },
+  signal,
+)
+assert.equal(typeof explicitResult.value.payloadJson, 'string')
+assert.equal(explicitStoreCalls, 0)
+
+const negotiatedInlineResult = await WechatHistoryService.prototype.window.call(
+  explicitTransport,
+  {
+    sessionId: 'session-negotiated-inline',
+    maxMessages: 8,
+    delivery: 'inline',
+    acceptInlineArchive: true,
   },
-  settleDelayMs: 0,
-  async warm(sessionId) { inProcessWarm.push(sessionId); return 'inline' },
-})
-inProcessPrewarmer.start()
-deliverHostEvent(hostStatus('session-process1234', true))
-deliverHostEvent(hostStatus('session-process1234', false))
-await waitFor(() => inProcessWarm.length === 1)
-inProcessPrewarmer.stop()
-assert.equal(observerReleased, true)
+  signal,
+)
+assert.equal(typeof JSON.parse(negotiatedInlineResult.value.snapshotJson).archiveBase64, 'string')
+assert.equal(explicitStoreCalls, 0, 'negotiated inline retries must never probe object storage again')
 
-// Production wiring must capture the Cordis service inside an inject fiber.
-// Reading a sibling service later from the parent plugin context is rejected by
-// Cordis and used to terminate DSH when the Host socket opened.
-const lifecycleCtx = new Context()
-const historyFiber = await lifecycleCtx.plugin(WechatHistoryService, {})
-const lifecycleSocket = new FakeSocket()
-let lifecycleWarmCalls = 0
-const bindingFiber = await bindHistorySnapshotPrewarmer(lifecycleCtx, {
-  socketFactory: () => lifecycleSocket,
-  settleDelayMs: 0,
-  warm: async (service, sessionId) => {
-    assert.equal(typeof service.window, 'function')
-    assert.equal(sessionId, 'session-lifecycle1234')
-    lifecycleWarmCalls += 1
-    return 'inline'
-  },
-})
-assert.equal(lifecycleSocket.listenerCount('open'), 1,
-  'Cordis inject fiber must start exactly one Host observer')
-lifecycleSocket.emit('open')
-lifecycleSocket.emit('message', hostStatus('session-lifecycle1234', true), false)
-lifecycleSocket.emit('message', hostStatus('session-lifecycle1234', false), false)
-await waitFor(() => lifecycleWarmCalls === 1, 500, 'Cordis-injected history prewarmer')
-await historyFiber.dispose()
-lifecycleSocket.emit('message', hostStatus('session-lifecycle1234', true), false)
-lifecycleSocket.emit('message', hostStatus('session-lifecycle1234', false), false)
-await new Promise(resolve => setTimeout(resolve, 10))
-assert.equal(lifecycleWarmCalls, 1, 'service disposal must stop its injected Host observer')
-await bindingFiber.dispose()
+let giantStoreCalls = 0
+const giantTransport = transportService(
+  async () => historyValue(adaptiveText),
+  async () => { giantStoreCalls += 1; throw new Error('object storage unavailable') },
+)
+const giantResult = await WechatHistoryService.prototype.window.call(
+  giantTransport,
+  { sessionId: 'session-giant-single-message', maxMessages: 1 },
+  signal,
+)
+assert.equal(giantResult.ok, false, 'one irreducible oversized message must fail instead of flooding the relay')
+assert.equal(giantResult.error.code, 'history-unavailable')
+assert.equal(giantStoreCalls, 1)
 
-const retrySocket = new FakeSocket()
-let retryCalls = 0
-const retryPrewarmer = new HistorySnapshotPrewarmer({
-  socketFactory: () => retrySocket,
-  settleDelayMs: 0,
-  retryDelayMs: 5,
-  warm: async () => {
-    retryCalls += 1
-    if (retryCalls === 1) throw new Error('temporary object transport failure')
-    return 'object'
-  },
-})
-retryPrewarmer.start()
-retrySocket.emit('message', hostStatus('session-retry123456', true), false)
-retrySocket.emit('message', hostStatus('session-retry123456', false), false)
-await waitFor(() => retryCalls === 2)
-retryPrewarmer.stop()
-
-const overlapSocket = new FakeSocket()
-let overlapCalls = 0
-let releaseFirstWarm
-const firstWarmGate = new Promise(resolve => { releaseFirstWarm = resolve })
-const overlapPrewarmer = new HistorySnapshotPrewarmer({
-  socketFactory: () => overlapSocket,
-  settleDelayMs: 0,
-  warm: async () => {
-    overlapCalls += 1
-    if (overlapCalls === 1) await firstWarmGate
-    return 'object'
-  },
-})
-overlapPrewarmer.start()
-overlapSocket.emit('message', hostStatus('session-overlap1234', true), false)
-overlapSocket.emit('message', hostStatus('session-overlap1234', false), false)
-await waitFor(() => overlapCalls === 1)
-overlapSocket.emit('message', hostStatus('session-overlap1234', true), false)
-overlapSocket.emit('message', hostStatus('session-overlap1234', false), false)
-await new Promise(resolve => setTimeout(resolve, 5))
-releaseFirstWarm()
-await waitFor(() => overlapCalls === 2)
-overlapPrewarmer.stop()
-
-const removedSocket = new FakeSocket()
-let removedWarmCalls = 0
-const removedPrewarmer = new HistorySnapshotPrewarmer({
-  socketFactory: () => removedSocket,
-  settleDelayMs: 15,
-  warm: async () => { removedWarmCalls += 1; return 'object' },
-})
-removedPrewarmer.start()
-removedSocket.emit('message', hostStatus('session-removed1234', true), false)
-removedSocket.emit('message', hostStatus('session-removed1234', false), false)
-removedSocket.emit('message', Buffer.from(JSON.stringify({
-  payload: { type: 'host/session-removed', sessionId: 'session-removed1234' },
-})), false)
-await new Promise(resolve => setTimeout(resolve, 25))
-assert.equal(removedWarmCalls, 0, 'removed sessions must leave no queued prewarm work')
-removedPrewarmer.stop()
-
-const abortSocket = new FakeSocket()
-let activeStarted = false
-let activeAborted = false
-const abortPrewarmer = new HistorySnapshotPrewarmer({
-  socketFactory: () => abortSocket,
-  settleDelayMs: 0,
-  warm: async (_sessionId, activeSignal) => await new Promise((resolve, reject) => {
-    activeStarted = true
-    activeSignal.addEventListener('abort', () => {
-      activeAborted = true
-      reject(activeSignal.reason)
-    }, { once: true })
-  }),
-})
-abortPrewarmer.start()
-abortSocket.emit('message', hostStatus('session-abort123456', true), false)
-abortSocket.emit('message', hostStatus('session-abort123456', false), false)
-await waitFor(() => activeStarted)
-abortPrewarmer.stop()
-await waitFor(() => activeAborted)
-
-const unavailableSource = new HistorySnapshotPrewarmer({
-  hostEventSource() { throw new Error('optional gateway unavailable during reload') },
-  warm: async () => { throw new Error('must not warm without source') },
-})
-assert.doesNotThrow(() => unavailableSource.start(), 'optional prewarming must not prevent plugin startup')
-unavailableSource.stop()
 
 console.log('history service tests passed')

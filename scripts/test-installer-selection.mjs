@@ -4,9 +4,10 @@ import os from 'node:os'
 import path from 'node:path'
 import { gzipSync } from 'node:zlib'
 import { createHash } from 'node:crypto'
+import { fileURLToPath } from 'node:url'
 import { selectInstallTarget } from '../installer/bin/release-selection.mjs'
 import { selectRelease } from '../installer/bin/setup.mjs'
-import { assessUpdate } from '../installer/lib/update-policy.js'
+import { assessUpdate, releaseMatches, validateCatalog } from '../installer/lib/update-policy.js'
 
 const now = Date.now()
 const release = (version = '1.7.2', extra = {}) => ({ version, channel: 'stable',
@@ -19,6 +20,31 @@ const pinned = { version: '1.7.2', catalog: catalog() }
 const current = { agentKind: 'dsh', agentVersion: '0.1.5-rc.2', pluginVersion: '0.0.0', platform: 'windows', arch: 'x64' }
 let cases = 0
 const test = async (name, fn) => { await fn(); cases++; console.log('PASS ' + name) }
+
+await test('pending preview can install without inventing hardware evidence or bypassing safeguards', () => {
+  const r = release('1.7.9-rc.7', { channel: 'preview', dsh: [], platforms: [], architectures: [] })
+  const local = { version: r.version, catalog: catalog([r]) }
+  assert.equal(selectInstallTarget(local, undefined, current, now).version, r.version)
+  assert.equal(releaseMatches(r, current), false)
+  assert.equal(assessUpdate(local.catalog, current, now).targetVersion, undefined)
+  for (const extra of [{ dsh: ['0.1.5-rc.1'] }, { platforms: ['macos'] }, { architectures: ['x64'] },
+    { version: '1.7.9', channel: 'stable', asset: undefined }, { targets: [] },
+    { asset: { ...r.asset, sha256: 'invalid' } }]) {
+    assert.throws(() => validateCatalog(catalog([{ ...r, ...extra }])))
+  }
+  assert.throws(() => selectInstallTarget(local, catalog([], {
+    blocked: [{ pluginVersion: r.version, reason: 'withdrawn preview' }],
+  }), current, now), /withdrawn preview/)
+})
+
+await test('actual generated installer metadata and bundled bytes pass offline installation selection', async () => {
+  const assets = new URL('../installer/assets/', import.meta.url)
+  const metadata = JSON.parse(fs.readFileSync(new URL('release.json', assets), 'utf8'))
+  const selected = await selectRelease({ dshVersion: '0.1.5-rc.1', pluginVersion: '0.0.0', platform: 'darwin', arch: 'x64' },
+    fileURLToPath(assets), false, async () => { throw Error('offline fixture') })
+  assert.equal(selected.release.version, metadata.version)
+  assert.equal(createHash('sha256').update(selected.archive).digest('hex'), metadata.catalog.releases[0].asset.sha256)
+})
 
 await test('explicit installation accepts unlisted RC, alpha, old and future hosts on x64/ARM64', () => {
   for (const platform of ['windows', 'macos', 'linux']) for (const arch of ['x64', 'arm64', 'riscv64', 'arm', 'futurecpu']) {
@@ -111,6 +137,27 @@ try {
       const selected = await selectRelease({ ...host, pluginVersion: version }, root, repair, offline)
       assert.equal(Boolean(selected.archive), changed)
     }
+  })
+  await test('unavailable newer release reuses the eligible bundle for new install and same-version repair', async () => {
+    const remote = catalog([release('1.7.4')])
+    const fetchCatalog = async () => Buffer.from(JSON.stringify(remote))
+    const unavailable = async () => { throw new TypeError('offline fixture') }
+    for (const [version, repair, changed] of [['0.0.0',false,true],['1.7.1',false,true],['1.7.2',false,false],['1.7.2',true,true]]) {
+      const selected = await selectRelease({...host,pluginVersion:version},root,repair,fetchCatalog,unavailable)
+      assert.equal(selected.release.version,'1.7.2'); assert.equal(Boolean(selected.archive),changed)
+      if (changed) assert.deepEqual(selected.archive,archive)
+    }
+    for (const repair of [false,true]) await assert.rejects(selectRelease({...host,pluginVersion:'1.7.3'},root,repair,fetchCatalog,unavailable),/无法下载/)
+  })
+  await test('download fallback retains online withdrawals and never bypasses integrity errors', async () => {
+    const blocked = catalog([release('1.7.4')],{blocked:[{pluginVersion:'1.7.2',reason:'withdrawn bundled target'}]})
+    await assert.rejects(selectRelease(host,root,true,async()=>Buffer.from(JSON.stringify(blocked)),async()=>{throw Error('offline')}),/withdrawn bundled target/)
+    const expiring = {...blocked,expiresAt:Date.now()+40}
+    await assert.rejects(selectRelease(host,root,true,async()=>Buffer.from(JSON.stringify(expiring)),async()=>{
+      await new Promise(resolve=>setTimeout(resolve,80)); throw Error('late offline')
+    }),/withdrawn bundled target/)
+    const newer = catalog([release('1.7.4')])
+    await assert.rejects(selectRelease(host,root,true,async()=>Buffer.from(JSON.stringify(newer)),async()=>new Response('x')),/校验失败/)
   })
   await test('real selector rejects known incompatibility before reading a missing archive', async () => {
     fs.unlinkSync(path.join(root, 'plugin.tgz'))

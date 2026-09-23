@@ -31,8 +31,8 @@ if (process.argv[2]) {
   fs.mkdirSync(assets, { recursive: true })
   // Record THIS release's native test evidence. Older release matrices are not
   // automatically proof of a new installer's compatibility or admission rules.
-  const release = { version, channel: version.includes('-') ? 'preview' : 'stable', dsh: ['0.1.5-rc.1'],
-    platforms: ['windows', 'macos', 'linux'], architectures: ['x64'], asset: {
+  const release = { version, channel: version.includes('-') ? 'preview' : 'stable', dsh: [],
+    platforms: [], architectures: [], asset: {
       url: `https://github.com/martinbear1/dsh-wechat-remote/releases/download/v${version}/harness-remote-dsh-wechat-remote-${version}.tgz`,
       sha256: createHash('sha256').update(archive).digest('hex'), bytes: archive.length } }
   // Evidence only: this flag records a completed hardware test, never grants
@@ -42,13 +42,21 @@ if (process.argv[2]) {
     // hardware evidence merely because it can be built on this workstation.
     release.dsh = []; release.platforms = []; release.architectures = []
   }
-  if (process.argv.includes('--linux-arm64-rc1')) {
-    if (process.argv.includes('--unverified')) throw new Error('Conflicting hardware evidence flags')
-    release.architectures.push('arm64')
-    release.targets = [
-      ...release.platforms.map(platform => ({ platform, arch: 'x64', dsh: release.dsh })),
-      { platform: 'linux', arch: 'arm64', dsh: ['0.1.5-rc.1'] },
-    ]
+  const evidenceIndex = process.argv.indexOf('--evidence')
+  if (evidenceIndex >= 0) {
+    if (process.argv.includes('--unverified')) throw new Error('Conflicting evidence flags')
+    const evidence = JSON.parse(fs.readFileSync(process.argv[evidenceIndex + 1], 'utf8'))
+    if (!Array.isArray(evidence.targets) || !evidence.targets.length) throw new Error('Missing native test targets')
+    release.targets = evidence.targets.map(t => {
+      if (!['windows', 'macos', 'linux'].includes(t.platform) || !['x64', 'arm64'].includes(t.arch)
+        || !Array.isArray(t.dsh) || !t.dsh.length || t.dsh.some(v => !/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(v))) throw new Error('Invalid native test target')
+      return { platform: t.platform, arch: t.arch, dsh: [...t.dsh] }
+    })
+    release.dsh = [...new Set(release.targets.flatMap(t => t.dsh))]
+    release.platforms = [...new Set(release.targets.map(t => t.platform))]
+    release.architectures = [...new Set(release.targets.map(t => t.arch))]
+  } else if (!process.argv.includes('--unverified')) {
+    throw new Error('Supply this release\'s native test evidence explicitly; never inherit the previous release matrix')
   }
   const metadata = { version, catalog: {
     schemaVersion: 1, revision: `installer-${version}`, issuedAt: Date.now(), expiresAt: Date.now() + 28 * 86400000,

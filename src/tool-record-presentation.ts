@@ -1,3 +1,4 @@
+import { presentToolResult } from './tool-result-compat.js'
 type Row = Record<string, any>
 
 // Metadata consumed by native ui-tool / ui-cordis's central cards. Unknown
@@ -15,6 +16,7 @@ function rows(value: unknown, keys: readonly string[]): unknown {
 /** Read-only mobile presentation; original native records remain intact.
  * Resources, turn usage and signed details are derived from the original. */
 export function toolRecordPresentation<T extends Row>(entry: T): T {
+  entry = presentToolResult(entry)
   if (entry.event?.type !== 'tool/result') return entry
   const data = entry.event.data, meta = data?.meta
   if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return entry

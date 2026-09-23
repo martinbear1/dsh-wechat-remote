@@ -66,7 +66,10 @@ async function installStopped({ cli, home, profile, profileName, directory, id, 
   const dsh = validateDshCli(cli)
   let version = '0.0.0'
   try { version = JSON.parse(fs.readFileSync(path.join(profile, 'node_modules', packageName, 'package.json'), 'utf8')).version } catch {}
-  const selected = await selectRelease({ dshVersion: dsh.version, pluginVersion: version, platform: process.platform, arch: process.arch }, assetsRoot, repair)
+  // A stopped host cannot prove its installed copy is loadable. Re-executing
+  // the normal installation command also repairs that copy (never downgrades),
+  // using the same backed-up native add rather than a second repair workflow.
+  const selected = await selectRelease({ dshVersion: dsh.version, pluginVersion: version, platform: process.platform, arch: process.arch }, assetsRoot, repair || version !== '0.0.0')
   fs.mkdirSync(profile, { recursive: true, mode: 0o700 })
   if (fs.realpathSync(profile) !== profile) throw new Error('无法确认 DSH 配置目录的实际位置。')
   const lock = path.join(profile, '.harness-remote-update.lock')
@@ -178,7 +181,9 @@ export async function install({ profileName = 'web', cli, home: configuredHome, 
       let ready = false
       try {
         const response = await fetch(`http://127.0.0.1:${host.localPort}/gate/status`, { signal: AbortSignal.timeout(5000), redirect: 'error' })
-        await response.arrayBuffer(); ready = response.ok
+        await response.arrayBuffer()
+        const business = response.ok ? await control(job, 'health') : undefined
+        ready = business?.ready === true
       } catch {}
       if (!ready) {
         console.log('检测到已安装插件尚未就绪，正在重新安装修复…')
@@ -192,7 +197,9 @@ export async function install({ profileName = 'web', cli, home: configuredHome, 
     validateJob(job)
     fs.writeFileSync(path.join(directory, 'release.tgz'), selected.archive, { mode: 0o600, flag: 'wx' })
     fs.copyFileSync(path.join(root, 'lib/update-worker.js'), path.join(directory, 'update-worker.js'))
-    if (host.pluginVersion === '0.0.0') fs.copyFileSync(path.join(root, 'lib/native-recovery.js'), path.join(directory, 'native-recovery.js'))
+    // Recovery belongs to the independent installer, including when the old
+    // plugin already failed before this operation and cannot serve health RPC.
+    fs.copyFileSync(path.join(root, 'lib/native-recovery.js'), path.join(directory, 'native-recovery.js'))
     writePrivateJsonAtomic(path.join(directory, 'job.json'), job)
     await control(job, 'launch')
     const ready = await waitForJson(path.join(directory, 'worker-ready.json'), v => v.id === id)

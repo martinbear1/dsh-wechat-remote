@@ -1,8 +1,8 @@
 /* Generated from the shared plugin installation sources. */
 
 // src/install-control.ts
-import fs2 from "node:fs";
-import path5 from "node:path";
+import fs3 from "node:fs";
+import path6 from "node:path";
 import http from "node:http";
 
 // src/dsh-runtime.ts
@@ -617,6 +617,84 @@ function withPresentationProjections(block) {
   return { ...source, values };
 }
 
+// src/dsh-host-contract.ts
+import fs from "node:fs";
+import path4 from "node:path";
+var contracts = /* @__PURE__ */ new WeakMap();
+function runningDshVersion(entry = process.argv[1]) {
+  if (!entry) return;
+  let directory;
+  try {
+    directory = path4.dirname(fs.realpathSync(entry));
+  } catch {
+    return;
+  }
+  for (let depth = 0; depth < 8; depth++) {
+    try {
+      const manifest = JSON.parse(fs.readFileSync(path4.join(directory, "package.json"), "utf8"));
+      if (manifest.name === "@deepseek-ai/dsh") return manifest.version;
+    } catch {
+    }
+    const parent = path4.dirname(directory);
+    if (parent === directory) break;
+    directory = parent;
+  }
+}
+function usesDuplexEvents(version) {
+  if (!version) return false;
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:-[\w.-]+)?$/.exec(version);
+  if (!match) throw new Error("\u65E0\u6CD5\u8BC6\u522B\u5F53\u524D DSH \u4E8B\u4EF6\u534F\u8BAE\u7248\u672C");
+  const [, major, minor, patch] = match.map(Number);
+  return major > 0 || minor > 1 || minor === 1 && patch >= 7;
+}
+function openHostEvents(gateway, endpoint, payload, signal) {
+  let contract = contracts.get(gateway);
+  if (!contract) {
+    contract = { duplex: usesDuplexEvents(runningDshVersion()) };
+    contracts.set(gateway, contract);
+  }
+  signal.throwIfAborted();
+  const empty = { async *[Symbol.asyncIterator]() {
+  } };
+  return contract.duplex ? gateway.wireStream.open(endpoint, payload, empty, void 0, signal) : gateway.wireStream.open(endpoint, payload, signal);
+}
+function projectedSubagentCatalog(parent, projection, rows) {
+  const entries = projection?.values?.subagentCatalog;
+  if (!Array.isArray(entries) || !Array.isArray(rows)) throw new Error("DSH \u5B50\u4EE3\u7406\u76EE\u5F55\u6682\u4E0D\u53EF\u8BFB\u53D6");
+  const byId = new Map(rows.map((row) => [row.sessionId, row]));
+  const parents = new Set(rows.filter((row) => row.origin === "subagent").map((row) => row.parentSessionId));
+  const ids = /* @__PURE__ */ new Set();
+  return { parentAvailable: byId.get(parent)?.agentAvailable === true, entries: entries.map((entry) => {
+    if (typeof entry.id !== "string" || !entry.id || ids.has(entry.id)) throw new Error("DSH \u5B50\u4EE3\u7406\u76EE\u5F55\u4E0D\u5B8C\u6574");
+    ids.add(entry.id);
+    if (entry.mode !== "one-shot" && entry.mode !== "continuable") return { id: entry.id, kind: "diagnostic", reason: "unsupported" };
+    const row = byId.get(entry.id);
+    if (row && (row.origin !== "subagent" || row.parentSessionId !== parent)) throw new Error("DSH \u5B50\u4EE3\u7406\u5F52\u5C5E\u4E0D\u4E00\u81F4");
+    return {
+      id: entry.id,
+      kind: "child",
+      mode: entry.mode,
+      ...typeof entry.label === "string" ? { label: entry.label } : {},
+      activity: row?.running === true ? "running" : "inactive",
+      hasChildren: parents.has(entry.id)
+    };
+  }) };
+}
+async function invokeHostRemote(ctx, gateway, request) {
+  if (request.namespace !== "subagents" || request.method !== "list") return gateway.invoke(request);
+  const registry = ctx.get("typert")?.local;
+  if (registry?.get("subagents/list") || registry?.hasSeen?.("subagents/list") || !usesDuplexEvents(runningDshVersion())) return gateway.invoke(request);
+  const parent = request.args.parentSessionId;
+  if (typeof parent !== "string" || !parent || parent.length > 256) throw new Error("\u7236\u4F1A\u8BDD\u6807\u8BC6\u65E0\u6548");
+  request.signal?.throwIfAborted();
+  const [projection, listing] = await Promise.all([
+    gateway.invoke({ namespace: "session", method: "projections", args: { request: { sessionId: parent } }, signal: request.signal }),
+    gateway.invoke({ namespace: "session", method: "list", args: { _request: {} }, signal: request.signal })
+  ]);
+  request.signal?.throwIfAborted();
+  return projectedSubagentCatalog(parent, projection, listing?.items);
+}
+
 // src/dsh-protocol-compat.ts
 var SINGLE_REQUEST_METHODS = /* @__PURE__ */ new Set([
   "session.attachment",
@@ -817,8 +895,8 @@ function resolveTypertGateway(ctx) {
   const candidate = ctx.get("typertGateway");
   if (!candidate || typeof candidate.invoke !== "function" || typeof candidate.stream !== "function") return null;
   return {
-    wireStream: candidate.wireStream,
-    invoke: (request) => candidate.invoke(request),
+    wireStream: candidate.wireStream ? { open: (endpoint, payload, signal) => openHostEvents(candidate, endpoint, payload, signal) } : void 0,
+    invoke: (request) => invokeHostRemote(ctx, candidate, request),
     stream: (request) => candidate.stream(request),
     commandAttachmentField: () => {
       const registry = ctx.get("typert");
@@ -1074,8 +1152,8 @@ async function invokeLegacyRpc(gateway, request, options) {
 }
 
 // src/install-lifecycle.ts
-import fs from "node:fs";
-import path4 from "node:path";
+import fs2 from "node:fs";
+import path5 from "node:path";
 import { execFileSync as execFileSync2, spawn } from "node:child_process";
 var serviceName = (s) => /^[A-Za-z0-9_.@-]{1,180}$/.test(s);
 function run(command, args) {
@@ -1084,13 +1162,13 @@ function run(command, args) {
 function validateManager(value) {
   if (value.kind === "process") return;
   if (value.kind === "systemd" && process.platform === "linux" && serviceName(value.unit) && value.unit.endsWith(".service")) return;
-  if (value.kind === "launchd" && process.platform === "darwin" && serviceName(value.label) && /^gui\/\d+$/.test(value.domain) && value.domain === `gui/${process.getuid?.()}` && path4.isAbsolute(value.plist) && fs.statSync(value.plist).isFile()) return;
+  if (value.kind === "launchd" && process.platform === "darwin" && serviceName(value.label) && /^gui\/\d+$/.test(value.domain) && value.domain === `gui/${process.getuid?.()}` && path5.isAbsolute(value.plist) && fs2.statSync(value.plist).isFile()) return;
   throw new Error("\u65E0\u6CD5\u786E\u8BA4\u539F\u540E\u53F0\u670D\u52A1\uFF0C\u672A\u505C\u6B62 DSH\u3002");
 }
 function currentHostManager() {
   if (process.env.PM2_HOME || process.env.NODE_APP_INSTANCE || process.env.KUBERNETES_SERVICE_HOST || process.env.container) throw new Error("\u6B64\u540E\u53F0\u7BA1\u7406\u65B9\u5F0F\u5C1A\u4E0D\u652F\u6301\u81EA\u52A8\u91CD\u542F\u3002");
   if (process.platform === "linux") {
-    const group = fs.readFileSync("/proc/self/cgroup", "utf8");
+    const group = fs2.readFileSync("/proc/self/cgroup", "utf8");
     const units = group.split(/[\n/]/).filter((s) => serviceName(s) && s.endsWith(".service"));
     const unit = units.at(-1);
     if (unit && !/^user@\d+\.service$/.test(unit)) {
@@ -1119,17 +1197,17 @@ function currentHostManager() {
 }
 function startUpdateWorker(manager, directory, executable) {
   validateManager(manager);
-  const id = path4.basename(directory);
+  const id = path5.basename(directory);
   if (!/^[a-f0-9]{32}$/.test(id)) throw new Error("\u65E0\u6548\u7684\u66F4\u65B0\u4EFB\u52A1");
-  const args = [path4.join(directory, "update-worker.js"), path4.join(directory, "job.json")];
+  const args = [path5.join(directory, "update-worker.js"), path5.join(directory, "job.json")];
   if (manager.kind === "systemd") {
     run("systemd-run", ["--user", "--quiet", "--collect", `--unit=dsh-wechat-update-${id}`, "--property=Type=exec", `--working-directory=${directory}`, executable, ...args]);
   } else if (manager.kind === "launchd") {
-    run("/bin/launchctl", ["submit", "-l", `dsh.wechat.update.${id}`, "-o", path4.join(directory, "worker.log"), "-e", path4.join(directory, "worker.log"), "--", executable, ...args]);
+    run("/bin/launchctl", ["submit", "-l", `dsh.wechat.update.${id}`, "-o", path5.join(directory, "worker.log"), "-e", path5.join(directory, "worker.log"), "--", executable, ...args]);
   } else {
-    const log = fs.openSync(path4.join(directory, "worker.log"), "a", 384);
+    const log = fs2.openSync(path5.join(directory, "worker.log"), "a", 384);
     const child = spawn(executable, args, { cwd: directory, env: process.env, windowsHide: true, detached: true, stdio: ["ignore", log, log] });
-    fs.closeSync(log);
+    fs2.closeSync(log);
     child.unref();
     child.on("error", () => {
     });
@@ -1157,6 +1235,17 @@ function assertNativeUpdateCapabilities(context) {
 }
 
 // src/install-control.ts
+async function nativeInstallSessions(ctx, signal) {
+  const controller = ctx.get("sessionController");
+  if (typeof controller?.list !== "function") throw new Error("DSH \u539F\u751F\u4F1A\u8BDD\u68C0\u67E5\u4E0D\u53EF\u7528\uFF0C\u672A\u505C\u6B62\u8282\u70B9\u3002");
+  signal.throwIfAborted();
+  const value = await controller.list({}, signal);
+  signal.throwIfAborted();
+  if (!Array.isArray(value?.items) || value.items.some((s) => typeof s.sessionId !== "string" || !s.sessionId || typeof s.running !== "boolean") || new Set(value.items.map((s) => s.sessionId)).size !== value.items.length) {
+    throw new Error("DSH \u539F\u751F\u4F1A\u8BDD\u72B6\u6001\u4E0D\u5B8C\u6574\uFF0C\u672A\u505C\u6B62\u8282\u70B9\u3002");
+  }
+  return value;
+}
 async function quiesceNativeHost(ctx, read, disposing) {
   const items = (await read("session.list")).items;
   if (!Array.isArray(items) || items.some((s) => s.running !== false)) throw new Error("\u8BF7\u7B49\u5F85\u8FD0\u884C\u4E2D\u7684\u4F1A\u8BDD\u7ED3\u675F\u540E\u518D\u66F4\u65B0\u3002");
@@ -1170,11 +1259,11 @@ async function quiesceNativeHost(ctx, read, disposing) {
 async function createInstallControl(context, config) {
   const ctx = context.root;
   assertNativeUpdateCapabilities(ctx);
-  const home = adapterDshHome(), id = path5.basename(config.directory);
-  if (!/^[a-f0-9]{32}$/.test(id) || !/^[a-f0-9]{48}$/.test(config.token) || path5.dirname(config.directory) !== path5.join(home, "harness-remote-updates") || fs2.realpathSync(config.directory) !== config.directory) throw new Error("\u5B89\u88C5\u63A7\u5236\u8BF7\u6C42\u4E0D\u5C5E\u4E8E\u5F53\u524D DSH\u3002");
-  const scope = resolveAgentProfileScope("", process.argv, home), profile = path5.join(home, "profiles", scope);
-  const cli = fs2.realpathSync(process.argv[1]);
-  const manifest = JSON.parse(fs2.readFileSync(path5.resolve(cli, "../../package.json"), "utf8"));
+  const home = adapterDshHome(), id = path6.basename(config.directory);
+  if (!/^[a-f0-9]{32}$/.test(id) || !/^[a-f0-9]{48}$/.test(config.token) || path6.dirname(config.directory) !== path6.join(home, "harness-remote-updates") || fs3.realpathSync(config.directory) !== config.directory) throw new Error("\u5B89\u88C5\u63A7\u5236\u8BF7\u6C42\u4E0D\u5C5E\u4E8E\u5F53\u524D DSH\u3002");
+  const scope = resolveAgentProfileScope("", process.argv, home), profile = path6.join(home, "profiles", scope);
+  const cli = fs3.realpathSync(process.argv[1]);
+  const manifest = JSON.parse(fs3.readFileSync(path6.resolve(cli, "../../package.json"), "utf8"));
   if (manifest.name !== "@deepseek-ai/dsh" || process.execArgv.length) throw new Error("\u6B64 DSH \u542F\u52A8\u65B9\u5F0F\u5C1A\u4E0D\u652F\u6301\u81EA\u52A8\u66F4\u65B0\u3002");
   const manager = currentHostManager(), webPort = resolveDshWebRuntime(ctx, process.env).port;
   const ports = deriveGatePorts(scope, loadAgentDescriptor().agentInstanceId);
@@ -1183,6 +1272,9 @@ async function createInstallControl(context, config) {
   let launched = false, quiesced = false;
   const read = async (method, payload = {}) => {
     if (!["session.list", "session.history"].includes(method)) throw new Error("\u4E0D\u652F\u6301\u7684\u5B89\u88C5\u68C0\u67E5");
+    if (method === "session.list" && typeof ctx.get("sessionController")?.list === "function") {
+      return nativeInstallSessions(ctx, AbortSignal.timeout(1e4));
+    }
     const request = { type: "client-request", rpcId: "installer-read", method, payload };
     const response = gateway ? await invokeLegacyRpc(gateway, request, { signal: AbortSignal.timeout(1e4), describeHost: () => ({}) }) : await (await fetch(`http://127.0.0.1:${webPort}/api/${method}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(request), signal: AbortSignal.timeout(1e4), redirect: "error" })).json();
     if (!response.result?.ok) throw new Error("\u65E0\u6CD5\u9A8C\u8BC1 DSH \u4F1A\u8BDD\u72B6\u6001\uFF0C\u672A\u505C\u6B62\u8282\u70B9\u3002");
@@ -1190,7 +1282,7 @@ async function createInstallControl(context, config) {
   };
   const version = () => {
     try {
-      return JSON.parse(fs2.readFileSync(path5.join(profile, "node_modules/@harness-remote/dsh-wechat-remote/package.json"), "utf8")).version;
+      return JSON.parse(fs3.readFileSync(path6.join(profile, "node_modules/@harness-remote/dsh-wechat-remote/package.json"), "utf8")).version;
     } catch {
       return "0.0.0";
     }
@@ -1230,9 +1322,14 @@ async function createInstallControl(context, config) {
         quiesced
       });
       if (req.url === "/read" && !quiesced) return json(200, await read(input.method, input.payload));
+      if (req.url === "/health" && !quiesced) {
+        if (!gateway) throw new Error("DSH \u4E1A\u52A1\u63A5\u53E3\u5C1A\u672A\u5C31\u7EEA");
+        await gateway.invoke({ namespace: "session", method: "list", args: { _request: {} }, signal: AbortSignal.timeout(1e4) });
+        return json(200, { ready: true });
+      }
       if (req.url === "/launch" && !launched && !quiesced) {
-        const filename = path5.join(config.directory, "job.json");
-        const job = JSON.parse(fs2.readFileSync(filename, "utf8"));
+        const filename = path6.join(config.directory, "job.json");
+        const job = JSON.parse(fs3.readFileSync(filename, "utf8"));
         if (job.id !== id || job.controlOrigin !== origin || job.statusToken !== config.token || job.parentPid !== process.pid || job.home !== home || job.profile !== profile || job.cli !== cli || job.pnpm !== config.pnpm) throw new Error("\u5B89\u88C5\u76EE\u6807\u53D1\u751F\u53D8\u5316");
         startUpdateWorker(manager, config.directory, process.execPath);
         launched = true;
@@ -1277,7 +1374,7 @@ async function createInstallControl(context, config) {
     server.closeAllConnections();
     server.close();
   }
-  writePrivateJsonAtomic(path5.join(config.directory, "control-ready.json"), { origin, pid: process.pid });
+  writePrivateJsonAtomic(path6.join(config.directory, "control-ready.json"), { origin, pid: process.pid });
   return { origin, close };
 }
 var apply = async (ctx, config) => {
@@ -1288,5 +1385,6 @@ export {
   apply,
   createInstallControl,
   inject,
+  nativeInstallSessions,
   quiesceNativeHost
 };

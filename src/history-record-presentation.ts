@@ -1,6 +1,7 @@
 /** Read-only mobile presentation of a native record. Never a native event,
  * tool invocation, file-read authority, or dump of arbitrary metadata. */
 import { toolRecordPresentation } from './tool-record-presentation.js'
+import { toolResultFailed } from './tool-result-compat.js'
 
 type Row = Record<string, any>
 export interface DetailPart {
@@ -81,6 +82,7 @@ export function historyDetailDocument(entry: Row, _call?: Row): DetailDocument {
       const meta = toolRecordPresentation(entry).event?.data?.meta
       if (record(meta) && Object.keys(meta).length) text('结果数据', meta, 'code')
       text('错误', data.error && pick(data.error, ['name', 'code', 'message']))
+      if (data.message?.role === 'tool' && toolResultFailed(data.message) && !data.error) add(notice('此工具执行未成功。'))
       break
     }
     case 'assistant/message': case 'assistant/attempt': content(data.message, '回复'); break

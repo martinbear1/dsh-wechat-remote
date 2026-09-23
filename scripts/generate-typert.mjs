@@ -50,6 +50,7 @@ try {
     'history-records.ts',
     'history-record-presentation.ts',
     'tool-record-presentation.ts',
+    'tool-result-compat.ts',
     'history-turn-evidence.ts',
     'history-read-budget.ts',
     'history-archive.ts',
@@ -73,6 +74,8 @@ try {
     'gate-ports.ts',
     'gate-state.ts',
     'dsh-runtime.ts',
+    'dsh-host-contract.ts',
+    'typert-schema-compat.ts',
     'dsh-protocol-compat.ts',
     'dsh-session-address.ts',
     'session-presentation.ts',
@@ -181,7 +184,10 @@ try {
   if (!host) throw new Error('wechat directory Host artifact was not generated')
   if (!host.remote) throw new Error('wechat directory Remote projection was not generated')
 
-  writeFileSync(path.join(root, 'lib', 'typert.host.js'), host.js)
+  // Build-owned compatibility footer: regenerate on every bundle, never patch
+  // a checked-in generated manifest or evaluate schemas at import time.
+  writeFileSync(path.join(root, 'lib', 'typert.host.js'), host.js
+    + "\nimport { attachLegacySchemaAccess } from './typert-schema-compat.js'\nattachLegacySchemaAccess(TYPERT)\n")
   writeFileSync(path.join(root, 'lib', 'typert.host.d.ts'), host.dts)
   writeFileSync(path.join(root, 'lib', 'typert.remote-client.js'), host.remote.js)
   writeFileSync(path.join(root, 'lib', 'typert.remote-client.d.ts'), host.remote.dts)

@@ -564,6 +564,7 @@ async function executeUpdate(job, progress, quiesce) {
   const emit = (phase, n, message) => progress({ phase, progress: n, message, terminal: false });
   let stopped = false, disposed = false, modified = false, newChild;
   let before = {}, sessionIds = [], readableIds = [];
+  let preexistingFailure = false;
   try {
     emit("preparing", 25, "\u51C6\u5907\u5B89\u88C5\u5DE5\u5177\uFF0C\u5F53\u524D\u8282\u70B9\u4ECD\u53EF\u4F7F\u7528");
     const runtime = await pinInstallRuntime({ executable: job.executable, cli: job.pnpm, version: INSTALL_PNPM_VERSION }, job.directory);
@@ -572,6 +573,13 @@ async function executeUpdate(job, progress, quiesce) {
     emit("checking", 50, "\u786E\u8BA4\u4F1A\u8BDD\u7A7A\u95F2\u5E76\u4FDD\u5B58\u72B6\u6001");
     const old = job.controlOrigin ? await control(job, "describe") : await describe(job);
     if (old.pluginVersion !== job.previousVersion) throw new Error("\u5F53\u524D\u63D2\u4EF6\u5728\u68C0\u67E5\u540E\u53D1\u751F\u53D8\u5316");
+    if (job.controlOrigin && job.previousVersion !== "0.0.0") {
+      try {
+        preexistingFailure = (await control(job, "health")).ready !== true;
+      } catch {
+        preexistingFailure = true;
+      }
+    }
     const list = (await beforeRpc(job, "session.list")).items;
     if (!Array.isArray(list) || list.some((s) => s.running !== false)) throw new Error("\u8BF7\u7B49\u5F85\u5168\u90E8\u4F1A\u8BDD\u7ED3\u675F\u540E\u518D\u66F4\u65B0");
     sessionIds = list.map((s) => s.sessionId).sort();
@@ -643,7 +651,7 @@ async function executeUpdate(job, progress, quiesce) {
           fs4.renameSync(job.profile, path4.join(job.directory, "profile-failed"));
           fs4.renameSync(previous, job.profile);
         }
-        if (job.previousVersion === "0.0.0") {
+        if (job.previousVersion === "0.0.0" || preexistingFailure) {
           const recovery = await import(pathToFileURL(path4.join(job.directory, "native-recovery.js")).href);
           await recovery.verifyNativeRestore(job, () => start(job), sessionIds, readableIds);
         } else {
@@ -664,7 +672,7 @@ async function executeUpdate(job, progress, quiesce) {
         return { phase: "attention", progress: 100, message: "\u81EA\u52A8\u6062\u590D\u672A\u5B8C\u6210\u3002\u5907\u4EFD\u5DF2\u4FDD\u7559\uFF0C\u8BF7\u6309\u4E3B\u673A\u66F4\u65B0\u8BB0\u5F55\u6062\u590D\uFF1B\u4E0D\u8981\u5220\u9664\u8282\u70B9\u6216\u6570\u636E\u3002", terminal: true, ok: false, rollback: false };
       }
     }
-    return { phase: "failed", progress: 100, message: (error instanceof Error ? error.message : "\u66F4\u65B0\u5931\u8D25") + (rollback ? "\uFF1B\u5DF2\u6062\u590D\u539F\u63D2\u4EF6\u3002" : "\uFF1B\u5F53\u524D\u63D2\u4EF6\u672A\u66FF\u6362\u3002"), terminal: true, ok: false, rollback };
+    return { phase: "failed", progress: 100, message: (error instanceof Error ? error.message : "\u66F4\u65B0\u5931\u8D25") + (rollback ? preexistingFailure ? "\uFF1B\u5DF2\u6062\u590D\u5B89\u88C5\u524D\u72B6\u6001\uFF0C\u539F\u6709\u63D2\u4EF6\u6545\u969C\u5C1A\u672A\u4FEE\u590D\uFF0C\u6570\u636E\u5DF2\u4FDD\u7559\u3002" : "\uFF1B\u5DF2\u6062\u590D\u539F\u63D2\u4EF6\u3002" : "\uFF1B\u5F53\u524D\u63D2\u4EF6\u672A\u66FF\u6362\u3002"), terminal: true, ok: false, rollback };
   }
 }
 async function workerMain(filename) {

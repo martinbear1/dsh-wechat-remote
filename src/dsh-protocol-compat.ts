@@ -2,6 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { setTimeout as delay } from 'node:timers/promises'
 import { resolveDshSessionAddress } from './dsh-session-address.js'
 import { withPresentationProjections } from './session-presentation.js'
+import { openHostEvents, invokeHostRemote } from './dsh-host-contract.js'
 
 type JsonRecord = Record<string, unknown>
 
@@ -271,8 +272,8 @@ export function resolveTypertGateway(ctx: Context): TypertGatewayLike | null {
   const candidate = ctx.get('typertGateway') as Partial<TypertGatewayLike> | undefined
   if (!candidate || typeof candidate.invoke !== 'function' || typeof candidate.stream !== 'function') return null
   return {
-    wireStream: candidate.wireStream,
-    invoke: request => candidate.invoke!(request),
+    wireStream: candidate.wireStream ? { open: (endpoint, payload, signal) => openHostEvents(candidate, endpoint, payload, signal) } : undefined,
+    invoke: request => invokeHostRemote(ctx, candidate, request),
     stream: request => candidate.stream!(request),
     commandAttachmentField: () => {
       const registry = ctx.get('typert') as { local?: { get(endpoint: string): {parameters?: readonly {wire?: string}[]} | undefined; hasSeen?(endpoint: string): boolean } } | undefined

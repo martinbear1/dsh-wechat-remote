@@ -7452,7 +7452,7 @@ async function verifyNativeRestore(job, start, sessionIds, readableIds) {
     const child = start();
     ref = await waitForJson(path2.join(directory, "control-ready.json"), (value) => Number.isInteger(value.pid) && value.pid > 0 && (!child || value.pid === child.pid) && /^http:\/\/127\.0\.0\.1:[1-9]\d{0,4}$/.test(value.origin), 18e4);
     const host = await request("describe");
-    if (host.pid !== ref.pid || host.home !== job.home || host.profile !== job.profile || host.cli !== job.cli || host.dshVersion !== job.dshVersion || host.pluginVersion !== "0.0.0") {
+    if (host.pid !== ref.pid || host.home !== job.home || host.profile !== job.profile || host.cli !== job.cli || host.dshVersion !== job.dshVersion || host.pluginVersion !== job.previousVersion) {
       throw new Error("\u6062\u590D\u540E\u7684 DSH \u8EAB\u4EFD\u4E0D\u5339\u914D\u3002");
     }
     const items = (await request("read", { method: "session.list" })).items;

@@ -1,5 +1,6 @@
 /** DSH-native facts -> optional, provider-neutral turn presentation. No paths
  * from prose/shell output, no synthetic persisted events, no model execution. */
+import { toolResultFailed } from './tool-result-compat.js'
 type Row = Record<string, any>
 const record = (v:any):Row => v && typeof v==='object' && !Array.isArray(v)?v:{}
 const pathValue=(v:any)=>typeof v==='string'&&v.trim()&&v.length<=4096?v:null
@@ -61,7 +62,7 @@ export class TurnActivityCompatibility {
       const callId=d.message?.source?.callId ?? d.message?.callId
       const result=d.message?.content?.[0]
       const path=s.calls.get(callId)
-      if(path && result && result.isError!==true && !d.error && !s.results.has(callId)) {
+      if(path && result && !toolResultFailed(d.message) && !d.error && !s.results.has(callId)) {
         s.results.add(callId);s.changes.push({seq,path})
         return {schema:'agent.activity.v1',turn:s.turn,changedFiles:[{reference:path}]}
       }

@@ -13,6 +13,22 @@ import { homedir } from 'node:os'
 import { assertNativeUpdateCapabilities } from './install-capabilities.js'
 
 export interface InstallControlConfig { directory: string; token: string; pnpm: string }
+/** Installer-owned in-process read. A broken third-party Typert contributor
+ * must not prevent the operator from proving idle and repairing that plugin.
+ * No network endpoint is exempted from its authentication/schema validation. */
+export async function nativeInstallSessions(ctx: Context, signal: AbortSignal): Promise<any> {
+  const controller = ctx.get('sessionController') as { list?: (request: object, signal: AbortSignal) => Promise<any> } | undefined
+  if (typeof controller?.list !== 'function') throw new Error('DSH 原生会话检查不可用，未停止节点。')
+  signal.throwIfAborted()
+  const value = await controller.list({}, signal)
+  signal.throwIfAborted()
+  if (!Array.isArray(value?.items) || value.items.some((s: any) => typeof s.sessionId !== 'string'
+    || !s.sessionId || typeof s.running !== 'boolean')
+    || new Set(value.items.map((s: any) => s.sessionId)).size !== value.items.length) {
+    throw new Error('DSH 原生会话状态不完整，未停止节点。')
+  }
+  return value
+}
 export async function quiesceNativeHost(ctx: Context, read: (method: string) => Promise<any>, disposing: () => void): Promise<void> {
   const items = (await read('session.list')).items
   if (!Array.isArray(items) || items.some((s: any) => s.running !== false)) throw new Error('请等待运行中的会话结束后再更新。')
@@ -43,6 +59,9 @@ export async function createInstallControl(context: Context, config: InstallCont
   let launched = false, quiesced = false
   const read = async (method: string, payload = {}): Promise<any> => {
     if (!['session.list', 'session.history'].includes(method)) throw new Error('不支持的安装检查')
+    if (method === 'session.list' && typeof (ctx.get('sessionController') as any)?.list === 'function') {
+      return nativeInstallSessions(ctx, AbortSignal.timeout(10000))
+    }
     const request = { type: 'client-request' as const, rpcId: 'installer-read', method, payload }
     const response = gateway
       ? await invokeLegacyRpc(gateway, request, { signal: AbortSignal.timeout(10000), describeHost: () => ({}) })
@@ -68,6 +87,11 @@ export async function createInstallControl(context: Context, config: InstallCont
         stateFile: gateStatePathForProfile(scope, homedir(), home), identityFile: defaultAgentIdentityPath(), gatePort: ports.publicPort, localPort: ports.localPort, manager, dshVersion: manifest.version,
         pluginVersion: version(), platform: process.platform, arch: process.arch, quiesced })
       if (req.url === '/read' && !quiesced) return json(200, await read(input.method, input.payload))
+      if (req.url === '/health' && !quiesced) {
+        if (!gateway) throw new Error('DSH 业务接口尚未就绪')
+        await gateway.invoke({ namespace: 'session', method: 'list', args: { _request: {} }, signal: AbortSignal.timeout(10000) })
+        return json(200, { ready: true })
+      }
       if (req.url === '/launch' && !launched && !quiesced) {
         const filename = path.join(config.directory, 'job.json')
         const job = JSON.parse(fs.readFileSync(filename, 'utf8'))

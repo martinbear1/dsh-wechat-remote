@@ -1,5 +1,5 @@
-/** Verify a restored, plugin-free DSH through the same native control adapter.
- * Only the first-install rollback uses this; ordinary updates probe the plugin.
+/** Verify a restored DSH through the same independent native control adapter.
+ * Also supports restoring an already-broken plugin, without claiming it is fixed.
  * Bundled outside the profile so neither a failed add nor rollback removes it. */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -29,7 +29,7 @@ export async function verifyNativeRestore(job, start, sessionIds, readableIds) {
       && /^http:\/\/127\.0\.0\.1:[1-9]\d{0,4}$/.test(value.origin), 180000)
     const host = await request('describe')
     if (host.pid !== ref.pid || host.home !== job.home || host.profile !== job.profile
-      || host.cli !== job.cli || host.dshVersion !== job.dshVersion || host.pluginVersion !== '0.0.0') {
+      || host.cli !== job.cli || host.dshVersion !== job.dshVersion || host.pluginVersion !== job.previousVersion) {
       throw new Error('恢复后的 DSH 身份不匹配。')
     }
     const items = (await request('read', { method: 'session.list' })).items

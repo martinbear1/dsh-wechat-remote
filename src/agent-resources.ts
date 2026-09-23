@@ -4,6 +4,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { resolveTypertGateway } from './dsh-protocol-compat.js'
 import { exportSessionArchive, sessionExportAvailable } from './dsh-session-export.js'
+import { workspaceReadArguments, nativeFileBytes } from './dsh-host-contract.js'
 
 type Row = Record<string, any>
 export interface ResourceResult {
@@ -39,7 +40,8 @@ export class AgentResourcesService extends TypertRemoteService {
     if (this.config.invoke) return this.config.invoke(method, input, signal)
     const gateway = resolveTypertGateway(this.host)
     if (!gateway) throw new Error('此节点尚不支持文件浏览')
-    return await gateway.invoke({namespace:'workspaceFiles', method, args:input, signal}) as Row
+    return await gateway.invoke({namespace:'workspaceFiles', method,
+      args:method === 'readBytes' ? workspaceReadArguments(this.host, input) : input, signal}) as Row
   }
   private id(scope: string, location: string, kind: string): string {
     const data = Buffer.from(JSON.stringify({scope, location, kind, expires:Date.now() + 60 * 60_000})).toString('base64url')
@@ -180,7 +182,7 @@ export class AgentResourcesService extends TypertRemoteService {
         const data = Buffer.alloc(before.bytes)
         for (let offset=0; offset<data.length; offset+=CHUNK_BYTES) {
           const value = await this.native('readBytes',request.scope,{path:before.absolutePath,range:{offset,length:Math.min(CHUNK_BYTES,data.length-offset)}},signal)
-          const chunk = Buffer.from(value.data || '', 'base64')
+          const chunk = nativeFileBytes(value.data)
           if (value.absolutePath !== before.absolutePath || value.version !== before.version || value.offset !== offset || chunk.length !== Math.min(CHUNK_BYTES,data.length-offset)) throw new Error('文件正在变化，请生成完成后重试')
           chunk.copy(data,offset)
         }

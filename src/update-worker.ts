@@ -265,6 +265,7 @@ export async function executeUpdate(job: UpdateJob, progress: (p: UpdateProgress
   const emit = (phase: string, n: number, message: string) => progress({ phase, progress: n, message, terminal: false })
   let stopped = false, disposed = false, modified = false, newChild: ChildProcess | undefined
   let before: Record<string, string> = {}, sessionIds: string[] = [], readableIds: string[] = []
+  let preexistingFailure = false
   try {
     emit('preparing', 25, '准备安装工具，当前节点仍可使用')
     const runtime = await pinInstallRuntime({ executable: job.executable, cli: job.pnpm, version: INSTALL_PNPM_VERSION }, job.directory)
@@ -275,6 +276,10 @@ export async function executeUpdate(job: UpdateJob, progress: (p: UpdateProgress
     emit('checking', 50, '确认会话空闲并保存状态')
     const old = job.controlOrigin ? await control(job, 'describe') : await describe(job)
     if (old.pluginVersion !== job.previousVersion) throw new Error('当前插件在检查后发生变化')
+    if (job.controlOrigin && job.previousVersion !== '0.0.0') {
+      try { preexistingFailure = (await control(job, 'health')).ready !== true }
+      catch { preexistingFailure = true }
+    }
     const list = (await beforeRpc(job, 'session.list')).items
     if (!Array.isArray(list) || list.some((s: any) => s.running !== false)) throw new Error('请等待全部会话结束后再更新')
     sessionIds = list.map((s: any) => s.sessionId).sort()
@@ -334,9 +339,9 @@ export async function executeUpdate(job: UpdateJob, progress: (p: UpdateProgress
           fs.renameSync(job.profile, path.join(job.directory, 'profile-failed'))
           fs.renameSync(previous, job.profile)
         }
-        if (job.previousVersion === '0.0.0') {
-          // First installation has no old plugin RPC to probe. The independent
-          // installer supplies its native DSH adapter, outside the profile.
+        if (job.previousVersion === '0.0.0' || preexistingFailure) {
+          // Do not demand healthy plugin RPC from a baseline that was already
+          // broken. Still verify native identity, sessions and durable hashes.
           const recovery = await import(pathToFileURL(path.join(job.directory, 'native-recovery.js')).href)
           await recovery.verifyNativeRestore(job, () => start(job), sessionIds, readableIds)
         } else { start(job); await healthy(job, job.previousVersion) }
@@ -352,7 +357,9 @@ export async function executeUpdate(job: UpdateJob, progress: (p: UpdateProgress
         return { phase: 'attention', progress: 100, message: '自动恢复未完成。备份已保留，请按主机更新记录恢复；不要删除节点或数据。', terminal: true, ok: false, rollback: false }
       }
     }
-    return { phase: 'failed', progress: 100, message: (error instanceof Error ? error.message : '更新失败') + (rollback ? '；已恢复原插件。' : '；当前插件未替换。'), terminal: true, ok: false, rollback }
+    return { phase: 'failed', progress: 100, message: (error instanceof Error ? error.message : '更新失败') + (rollback
+      ? preexistingFailure ? '；已恢复安装前状态，原有插件故障尚未修复，数据已保留。' : '；已恢复原插件。'
+      : '；当前插件未替换。'), terminal: true, ok: false, rollback }
   }
 }
 

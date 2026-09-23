@@ -17,7 +17,7 @@ const pick = (value: Row | undefined, names: string[]): Row => Object.fromEntrie
  * attachments and arbitrary metadata are not retained in this cache. */
 function factOf(event: Row): Fact {
   const d = event.data || {}, data: Row = pick(d, ['turn', 'step', 'callId', 'name'])
-  const message = (m: Row = {}) => ({ ...pick(m, ['id', 'role']),
+  const message = (m: Row = {}) => ({ ...pick(m, ['id', 'role', 'isError', 'toolCallId']),
     source: pick(m.source, ['kind', 'callId', 'provider', 'model']),
     content: [...new Map((Array.isArray(m.content) ? m.content : []).filter(Boolean).map((b: Row) => {
       const block = b.type === 'text' || b.type === 'reasoning'

@@ -92,6 +92,47 @@ import path from "node:path";
 import { createHash, randomBytes as randomBytes2 } from "node:crypto";
 import { spawn, execFile } from "node:child_process";
 var PLUGIN_PACKAGE = "@harness-remote/dsh-wechat-remote";
+var NATIVE_PLUGIN_PACKAGE = "dsh-wechat-remote";
+var ProfileOwnershipError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ProfileOwnershipError";
+  }
+};
+function assertCliInstallOwner(profile, activeRoot) {
+  if (path.basename(profile).toLowerCase() === "desktop") {
+    throw new ProfileOwnershipError("Desktop \u7531\u684C\u9762\u5E94\u7528\u7BA1\u7406\uFF0C\u8BF7\u5728\u5176\u63D2\u4EF6\u7BA1\u7406\u9875\u5B89\u88C5\u6216\u66F4\u65B0\uFF1B\u6B64\u547D\u4EE4\u4E0D\u4F1A\u66F4\u65B0 Desktop\u3002");
+  }
+  let manifest;
+  try {
+    manifest = JSON.parse(fs.readFileSync(path.join(profile, "package.json"), "utf8"));
+  } catch (error) {
+    if (error.code === "ENOENT" && !activeRoot) return;
+    throw new ProfileOwnershipError("\u65E0\u6CD5\u8BFB\u53D6\u5F53\u524D DSH \u914D\u7F6E\u7684\u5B89\u88C5\u5F52\u5C5E\uFF0C\u672A\u66FF\u6362\u63D2\u4EF6\u3002");
+  }
+  const object = (value) => value && typeof value === "object" && !Array.isArray(value);
+  if (!object(manifest) || manifest.dependencies !== void 0 && !object(manifest.dependencies) || manifest.dsh !== void 0 && !object(manifest.dsh) || manifest.dsh?.profile !== void 0 && !object(manifest.dsh.profile)) {
+    throw new ProfileOwnershipError("DSH \u914D\u7F6E\u7684\u5B89\u88C5\u5F52\u5C5E\u65E0\u6548\uFF0C\u672A\u66FF\u6362\u63D2\u4EF6\u3002");
+  }
+  const bundles = manifest.dsh?.profile?.bundles ?? [];
+  if (!Array.isArray(bundles) || bundles.some((name) => typeof name !== "string")) {
+    throw new ProfileOwnershipError("DSH \u914D\u7F6E\u7684\u63D2\u4EF6\u5217\u8868\u65E0\u6548\uFF0C\u672A\u66FF\u6362\u63D2\u4EF6\u3002");
+  }
+  const referenced = (name) => Object.hasOwn(manifest.dependencies ?? {}, name) || bundles.includes(name);
+  if (referenced(NATIVE_PLUGIN_PACKAGE)) {
+    throw new ProfileOwnershipError(referenced(PLUGIN_PACKAGE) ? "\u5F53\u524D DSH \u914D\u7F6E\u540C\u65F6\u767B\u8BB0\u4E86\u4E24\u79CD\u5FAE\u4FE1\u8FDE\u63A5\u63D2\u4EF6\u5B89\u88C5\u5305\uFF0C\u672A\u66FF\u6362\u63D2\u4EF6\u3002\u8BF7\u5148\u5728\u8BE5\u7AEF\u539F\u751F\u63D2\u4EF6\u7BA1\u7406\u9875\u6838\u5BF9\u5B89\u88C5\u6765\u6E90\uFF0C\u52FF\u91CD\u590D\u5B89\u88C5\u3002" : "\u5F53\u524D\u63D2\u4EF6\u7531\u8BE5\u7AEF DSH \u539F\u751F\u63D2\u4EF6\u7BA1\u7406\u9875\u7BA1\u7406\uFF0C\u8BF7\u56DE\u5230\u8BE5\u9875\u9762\u66F4\u65B0\uFF1B\u672A\u53E6\u5916\u5B89\u88C5\u7B2C\u4E8C\u4EFD\u63D2\u4EF6\u3002");
+  }
+  if (activeRoot) {
+    let matches = false;
+    try {
+      matches = fs.realpathSync(activeRoot) === fs.realpathSync(path.join(profile, "node_modules", PLUGIN_PACKAGE));
+    } catch {
+    }
+    if (!referenced(PLUGIN_PACKAGE) || !matches) {
+      throw new ProfileOwnershipError("\u8FD0\u884C\u4E2D\u7684\u63D2\u4EF6\u4E0E\u5F53\u524D\u914D\u7F6E\u767B\u8BB0\u7684\u5B89\u88C5\u6765\u6E90\u4E0D\u4E00\u81F4\uFF0C\u672A\u66FF\u6362\u63D2\u4EF6\u3002");
+    }
+  }
+}
 function safeProfileName(value) {
   return /^[A-Za-z0-9_-]{1,80}$/.test(value);
 }
@@ -217,6 +258,7 @@ async function installProfile(job) {
   const scope = path.basename(job.profile), home = path.dirname(path.dirname(job.profile));
   if (scope.toLowerCase() === "desktop") throw new Error("Desktop \u63D2\u4EF6\u5B89\u88C5\u7531\u684C\u9762\u5E94\u7528\u7BA1\u7406\uFF0C\u4E0D\u80FD\u4F7F\u7528 CLI \u4FEE\u6539\u3002");
   if (!safeProfileName(scope) || path.dirname(job.profile) !== path.join(home, "profiles") || !/^[\w.+-]{1,80}$/.test(job.targetVersion)) throw new Error("\u5B89\u88C5\u76EE\u6807\u4E0D\u660E\u786E\u3002");
+  assertCliInstallOwner(job.profile);
   fs.mkdirSync(job.profile, { recursive: true, mode: 448 });
   const archive = path.join(job.directory, "release.tgz");
   const digest = createHash("sha256").update(fs.readFileSync(archive)).digest("hex");
@@ -402,6 +444,7 @@ function durableSnapshot(job) {
     if (!fs4.existsSync(dir)) return;
     for (const e of fs4.readdirSync(dir, { withFileTypes: true })) {
       const file = path4.join(dir, e.name);
+      if (path4.relative(job.home, file).split(path4.sep).includes("harness-remote") && (["installation-offers", ".storage-lock", "storage-layout.json", "storage-transaction.json", "gate-wechat-state.json"].includes(e.name) || /^\.storage-lock-pending-\d+-[a-f0-9]{32}$/.test(e.name))) continue;
       if (e.isSymbolicLink()) result[path4.relative(job.home, file)] = createHash2("sha256").update(fs4.readlinkSync(file)).digest("hex");
       else if (e.isDirectory()) walk(file);
       else if (e.isFile()) result[path4.relative(job.home, file)] = hashFile(file);
@@ -413,7 +456,7 @@ function durableSnapshot(job) {
   for (const e of fs4.readdirSync(job.home, { withFileTypes: true })) {
     if (e.isFile() && /(?:identity|settings|credentials|public|gate-wechat)/i.test(e.name) && !e.name.endsWith(".log")) {
       const f = path4.join(job.home, e.name);
-      if (f === job.stateFile) continue;
+      if (e.name === "gate-wechat-state.json" || f === job.stateFile) continue;
       result[e.name] = hashFile(f);
     }
   }
@@ -581,6 +624,7 @@ async function executeUpdate(job, progress, quiesce) {
   let before = {}, sessionIds = [], readableIds = [];
   let preexistingFailure = false;
   try {
+    assertCliInstallOwner(job.profile);
     emit("preparing", 25, "\u51C6\u5907\u5B89\u88C5\u5DE5\u5177\uFF0C\u5F53\u524D\u8282\u70B9\u4ECD\u53EF\u4F7F\u7528");
     const runtime = await pinInstallRuntime({ executable: job.executable, cli: job.pnpm, version: INSTALL_PNPM_VERSION }, job.directory);
     job.pnpm = runtime.cli;
@@ -605,6 +649,7 @@ async function executeUpdate(job, progress, quiesce) {
       } catch {
       }
     }
+    assertCliInstallOwner(job.profile);
     await quiesce();
     disposed = Boolean(job.controlOrigin);
     before = durableSnapshot(job);
@@ -822,6 +867,7 @@ if (process.argv[1] && path4.resolve(process.argv[1]) === fileURLToPath(import.m
 export {
   captureCandidateLock,
   control,
+  durableSnapshot,
   executeUpdate,
   healthy,
   migrateLegacyGrantOwner,

@@ -1,5 +1,14 @@
 import type { InstallRuntime } from './install-runtime.js';
 export declare const PLUGIN_PACKAGE = "@harness-remote/dsh-wechat-remote";
+export declare const NATIVE_PLUGIN_PACKAGE = "dsh-wechat-remote";
+export declare class ProfileOwnershipError extends Error {
+    constructor(message: string);
+}
+/** A native bundle and the CLI payload are different package-manager owners,
+ * even though they carry the same runtime. Never repair one by adding the other.
+ * Inspect only the selected profile; another host's installation is irrelevant.
+ * Unreferenced node_modules leftovers from a failed native add are not owners. */
+export declare function assertCliInstallOwner(profile: string, activeRoot?: string): void;
 export interface ProfileInstall {
     profile: string;
     directory: string;

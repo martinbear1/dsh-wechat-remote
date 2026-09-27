@@ -8,7 +8,7 @@ import { auditArchive } from '../lib/update-download.js'
 const root = fileURLToPath(new URL('../', import.meta.url))
 const target = path.join(root, 'installer', 'lib')
 fs.mkdirSync(target, { recursive: true })
-for (const name of ['install-control', 'update-worker', 'install-profile', 'install-runtime', 'update-download', 'update-policy', 'secure-file']) {
+for (const name of ['install-control', 'update-worker', 'install-profile', 'install-runtime', 'update-download', 'update-policy', 'secure-file', 'node-storage', 'companion-updates']) {
   await build({ entryPoints: [path.join(root, 'src', name + '.ts')], bundle: true,
     platform: 'node', target: 'node22', format: 'esm', outfile: path.join(target, name + '.js'),
     banner: { js: '/* Generated from the shared plugin installation sources. */' } })

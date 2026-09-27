@@ -70,3 +70,23 @@ export async function waitForInstallControl(filename, {
     return await waitForJson(filename, accept, Math.max(0, deadline - Date.now()))
   }
 }
+
+/** A single bounded, authenticated waiting operation. Never stop or install
+ * while busy; every actual update still rechecks and flushes inside the host. */
+export async function waitForWebIdle(read, {
+  onBusy = () => {}, timeoutMs = 30 * 60 * 1000, intervalMs = 5000,
+  now = Date.now, wait = ms => new Promise(resolve => setTimeout(resolve, ms)),
+} = {}) {
+  const deadline = now() + timeoutMs
+  let reported = false
+  for (;;) {
+    const value = await read()
+    if (!Array.isArray(value?.items) || value.items.some(row => typeof row.running !== 'boolean')) {
+      throw Error('无法确认 Web 会话状态，未更新插件。')
+    }
+    if (!value.items.some(row => row.running)) return
+    if (!reported) { onBusy(); reported = true }
+    if (now() >= deadline) throw Object.assign(Error('Web 任务尚未结束，原插件未替换。'), { code: 'DSH_COMPANION_BUSY' })
+    await wait(Math.min(intervalMs, deadline - now()))
+  }
+}

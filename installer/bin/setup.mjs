@@ -5,13 +5,14 @@ import net from 'node:net'
 import { spawn } from 'node:child_process'
 import { randomBytes, createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
-import { attachControl, waitForJson, waitForInstallControl } from './native-control.mjs'
+import { attachControl, waitForJson, waitForInstallControl, waitForWebIdle } from './native-control.mjs'
 import { resolveInstallRuntime, verifyInstallRuntime } from '../lib/install-runtime.js'
-import { installProfile, backupProfile, NativeInstallError } from '../lib/install-profile.js'
+import { installProfile, backupProfile, NativeInstallError, assertCliInstallOwner } from '../lib/install-profile.js'
 import { compareVersions } from '../lib/update-policy.js'
 import { selectInstallTarget } from './release-selection.mjs'
 import { boundedFetch, downloadRelease, auditArchive, DownloadUnavailableError } from '../lib/update-download.js'
 import { writePrivateJsonAtomic } from '../lib/secure-file.js'
+import { offerCompanionUpdate } from '../lib/companion-updates.js'
 import { control, validateJob, releaseOwnedUpdateLock } from '../lib/update-worker.js'
 import { chooseDsh, validateDshCli, resolveHome, mayHaveRunningDsh, assertInstallTarget, installHostArgv } from './dsh-discovery.mjs'
 
@@ -26,7 +27,7 @@ function portBusy(port) {
   })
 }
 export async function selectRelease(host, assetsRoot = path.join(root, 'assets'), repair = false,
-  fetchCatalog = () => boundedFetch('https://relay.xyxfood.xyz/v1/update-policy', 256 * 1024), fetchPackage = fetch) {
+  fetchCatalog = () => boundedFetch('https://relay.xyxfood.xyz/v1/update-policy', 256 * 1024), fetchPackage = fetch, bundledOnly = false) {
   const current = { agentKind: 'dsh', agentVersion: host.dshVersion, pluginVersion: host.pluginVersion,
     platform: { win32: 'windows', darwin: 'macos', linux: 'linux' }[host.platform], arch: host.arch }
   const pinned = JSON.parse(fs.readFileSync(path.join(assetsRoot, 'release.json'), 'utf8'))
@@ -35,7 +36,7 @@ export async function selectRelease(host, assetsRoot = path.join(root, 'assets')
     remote = JSON.parse((await fetchCatalog()).toString('utf8'))
   } catch { /* Authenticated npm package retains its bundled release. */ }
   const selectionTime = Date.now()
-  let release = selectInstallTarget(pinned, remote, current, selectionTime)
+  let release = selectInstallTarget(pinned, remote, current, selectionTime, bundledOnly)
   if (host.pluginVersion !== '0.0.0' && (compareVersions(host.pluginVersion, release.version) > 0
     || (compareVersions(host.pluginVersion, release.version) === 0 && !repair))) return { release, archive: null }
   let archive
@@ -62,14 +63,14 @@ export async function selectRelease(host, assetsRoot = path.join(root, 'assets')
 
 /** With no running host, native plugin add needs neither HMR nor healthy third-
  * party plugins. Reuse the same installation core; only live hosts need disposal. */
-async function installStopped({ cli, home, profile, profileName, directory, id, runtime, assetsRoot, repair, open }) {
+async function installStopped({ cli, home, profile, profileName, directory, id, runtime, assetsRoot, repair, open, bundledOnly, startAfterInstall, assertTarget }) {
   const dsh = validateDshCli(cli)
   let version = '0.0.0'
   try { version = JSON.parse(fs.readFileSync(path.join(profile, 'node_modules', packageName, 'package.json'), 'utf8')).version } catch {}
   // A stopped host cannot prove its installed copy is loadable. Re-executing
   // the normal installation command also repairs that copy (never downgrades),
   // using the same backed-up native add rather than a second repair workflow.
-  const selected = await selectRelease({ dshVersion: dsh.version, pluginVersion: version, platform: process.platform, arch: process.arch }, assetsRoot, repair || version !== '0.0.0')
+  const selected = await selectRelease({ dshVersion: dsh.version, pluginVersion: version, platform: process.platform, arch: process.arch }, assetsRoot, repair || version !== '0.0.0', undefined, undefined, bundledOnly)
   fs.mkdirSync(profile, { recursive: true, mode: 0o700 })
   if (fs.realpathSync(profile) !== profile) throw new Error('无法确认 DSH 配置目录的实际位置。')
   const lock = path.join(profile, '.harness-remote-update.lock')
@@ -79,6 +80,7 @@ async function installStopped({ cli, home, profile, profileName, directory, id, 
     // Recheck immediately before writing: a host may have started during npm
     // discovery/download. Never mutate its dependencies underneath that process.
     if (await mayHaveRunningDsh()) throw new Error('DSH 已开始运行，请重新执行安装命令以连接该实例。')
+    assertTarget()
     if (selected.archive) {
       fs.writeFileSync(path.join(directory, 'release.tgz'), selected.archive, { mode: 0o600, flag: 'wx' })
       backupProfile(profile, path.join(directory, 'profile-before'))
@@ -94,6 +96,9 @@ async function installStopped({ cli, home, profile, profileName, directory, id, 
     }
     throw error
   } finally { if (!keepLock) releaseOwnedUpdateLock(lock, id) }
+  if (startAfterInstall === false) {
+    return { version: selected.archive ? selected.release.version : version, changed: Boolean(selected.archive), starting: false }
+  }
   // Use DSH's own browser opening behavior. Startup failure does not undo an
   // otherwise successful native add; an unrelated plugin can fail to boot.
   const logFile = path.join(directory, 'startup.log'), log = fs.openSync(logFile, 'a', 0o600)
@@ -110,24 +115,29 @@ async function installStopped({ cli, home, profile, profileName, directory, id, 
   console.log(`插件 ${installedVersion} 已安装。${starting ? '已启动 DSH，请等待 WebUI 就绪。' : `DSH 未能启动，请查看：${logFile}`}`)
   return { version: installedVersion, changed: Boolean(selected.archive), starting: Boolean(starting) }
 }
-export async function install({ profileName = 'web', cli, home: configuredHome, assetsRoot, open = true, repair = false } = {}) {
+async function installSingle({ profileName = 'web', cli, home: configuredHome, assetsRoot, open = true, repair = false, bundledOnly = false,
+  startAfterInstall = true, deferBusy = false, onBusy = () => {}, assertTarget = () => {} } = {}) {
   if (!/^[A-Za-z0-9_-]{1,80}$/.test(profileName)) throw new Error('无效的 profile 名称。')
   if (profileName.toLowerCase() === 'desktop') throw new Error('Desktop 由桌面应用管理。请在其插件管理页安装插件包；未修改 Desktop 或 Web 配置。')
   if (cli) cli = validateDshCli(cli).cli
-  const runtime = resolveInstallRuntime(root); await verifyInstallRuntime(runtime)
   const home = resolveHome(configuredHome || process.env.DSH_HOME)
+  const profile = path.join(home, 'profiles', profileName)
+  // Refuse a different package owner before downloads, locks, HMR or helpers.
+  assertCliInstallOwner(profile)
+  const runtime = resolveInstallRuntime(root); await verifyInstallRuntime(runtime)
   fs.mkdirSync(home, { recursive: true, mode: 0o700 })
   if (fs.realpathSync(home) !== home) throw new Error('DSH 数据目录是链接，暂不自动替换安装。')
-  const profile = path.join(home, 'profiles', profileName), id = randomBytes(16).toString('hex')
+  const id = randomBytes(16).toString('hex')
   const directory = path.join(home, 'harness-remote-updates', id), token = randomBytes(24).toString('hex')
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 })
   let remove, ref, job, locked = false, authorized = false, launched
   const lockFile = path.join(profile, '.harness-remote-update.lock')
-  console.log('正在检查 DSH 与插件…')
+  console.log(`正在检查 DSH ${profileName === 'web' ? 'Web' : profileName} 与插件；不直接修改 Desktop 安装…`)
   try {
     if (!await mayHaveRunningDsh()) {
       cli ||= await chooseDsh()
-      return await installStopped({ cli, home, profile, profileName, directory, id, runtime, assetsRoot, repair, open })
+      assertTarget()
+      return await installStopped({ cli, home, profile, profileName, directory, id, runtime, assetsRoot, repair, open, bundledOnly, startAfterInstall, assertTarget })
     }
     // A live host must identify the same home/profile; never synthesize a second
     // profile just because this terminal inherited different environment values.
@@ -175,7 +185,12 @@ export async function install({ profileName = 'web', cli, home: configuredHome, 
     assertInstallTarget(host, { home, profile, cli, pid: launched?.pid || ref.pid })
     remove(); remove = undefined
     await sleep(600)
-    let selected = await selectRelease(host, assetsRoot, repair)
+    if (deferBusy) await waitForWebIdle(() => {
+      assertTarget()
+      return control(job, 'read', { method: 'session.list' })
+    }, { onBusy })
+    assertTarget()
+    let selected = await selectRelease(host, assetsRoot, repair, undefined, undefined, bundledOnly)
     if (!selected.archive && host.pluginVersion === selected.release.version) {
       // A version string on disk is not proof that a prior restart completed.
       // Re-running the normal command must also repair a stuck installed copy.
@@ -188,7 +203,7 @@ export async function install({ profileName = 'web', cli, home: configuredHome, 
       } catch {}
       if (!ready) {
         console.log('检测到已安装插件尚未就绪，正在重新安装修复…')
-        selected = await selectRelease(host, assetsRoot, true)
+        selected = await selectRelease(host, assetsRoot, true, undefined, undefined, bundledOnly)
       }
     }
     if (!selected.archive) { console.log(`插件 ${host.pluginVersion} 无需更新。`); return { version: host.pluginVersion, changed: false } }
@@ -196,6 +211,7 @@ export async function install({ profileName = 'web', cli, home: configuredHome, 
     job = { ...host, argv: installHostArgv(host), id, directory, parentPid: host.pid, pnpm: runtime.cli, targetVersion: selected.release.version,
       previousVersion: host.pluginVersion, statusToken: token, controlOrigin: ref.origin }
     validateJob(job)
+    assertTarget()
     fs.writeFileSync(path.join(directory, 'release.tgz'), selected.archive, { mode: 0o600, flag: 'wx' })
     fs.copyFileSync(path.join(root, 'lib/update-worker.js'), path.join(directory, 'update-worker.js'))
     // Recovery belongs to the independent installer, including when the old
@@ -237,6 +253,17 @@ export async function install({ profileName = 'web', cli, home: configuredHome, 
     }
   }
 }
+export async function install(options = {}) {
+  const result = await installSingle(options)
+  if ((options.profileName || 'web') === 'web' && options.companion !== false) {
+    try {
+      const home = resolveHome(options.home || process.env.DSH_HOME)
+      const offer = offerCompanionUpdate(home, 'web', root, result.version)
+      if (offer) console.log('已通知同一数据目录下的 Desktop；由其原生插件管理器处理，未运行或不支持接收时请在 Desktop 插件页更新。')
+    } catch { console.log('Web 已完成安装；另一端未自动更新，仍可使用它自己的原生插件管理入口。') }
+  }
+  return result
+}
 export function parseArguments(args) {
   const options = {}, seen = new Set()
   const names = { '--profile': 'profileName', '--dsh-cli': 'cli', '--home': 'home' }
@@ -252,6 +279,6 @@ export function parseArguments(args) {
 }
 if (process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const args = process.argv.slice(2)
-  if (args.includes('--help') || args.includes('-h')) console.log('安装或升级 DSH 微信连接插件：npx -y dsh-wechat-remote@latest\n支持全局安装与 npx 使用的 DSH，已启动或关闭均可；请在相同系统账号下执行。Windows 可使用 npx.cmd。\n可选：--profile <名称>（默认 web）；--home <DSH 数据目录>；--dsh-cli <DSH 的 lib/bin.js>；--repair（重新安装，不降级）')
+  if (args.includes('--help') || args.includes('-h')) console.log('安装或升级 DSH Web 微信连接插件：npx -y dsh-wechat-remote@latest\n支持全局安装与 npx 使用的 DSH Web，已启动或关闭均可；请在相同系统账号下执行。Windows 可使用 npx.cmd。\nDesktop 首次安装请使用桌面应用的插件管理页；已安装的 Desktop 可接收同版本更新通知，由桌面应用处理。此命令不直接修改 Desktop，也不支持 --profile desktop。\n可选：--profile <名称>（默认 web）；--home <DSH 数据目录>；--dsh-cli <DSH 的 lib/bin.js>；--repair（重新安装，不降级）')
   else Promise.resolve().then(() => install(parseArguments(args))).catch(error => { console.error(error.message); process.exitCode = 1 })
 }

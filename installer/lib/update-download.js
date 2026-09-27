@@ -183,6 +183,20 @@ function pluginFromInstaller(archive, release) {
   auditArchive(plugin, release);
   return plugin;
 }
+function auditNativeArchive(archive, version) {
+  let manifest, metadata, plugin;
+  const files = visitArchive(archive, (name, data) => {
+    if (name === "package/package.json") manifest = readManifest(data);
+    if (name === "package/assets/release.json") metadata = readManifest(data);
+    if (name === "package/assets/plugin.tgz") plugin = Buffer.from(data);
+  });
+  if (manifest?.name !== "dsh-wechat-remote" || manifest.version !== version || manifest.dsh?.bundle?.patch !== "./cordis.patch.yml" || !files.has("package/native/lib/index.js") || !files.has("package/native/lib/client.js") || !files.has("package/cordis.patch.yml") || !plugin || metadata?.version !== version || ["preinstall", "install", "postinstall", "prepare", "prepack", "postpack"].some((key) => manifest.scripts?.[key])) {
+    throw new Error("\u539F\u751F\u8054\u52A8\u5B89\u88C5\u5305\u7ED3\u6784\u6216\u7248\u672C\u4E0D\u5339\u914D");
+  }
+  const release = metadata.catalog?.releases?.find((row) => row.version === version);
+  if (!release) throw new Error("\u539F\u751F\u8054\u52A8\u5B89\u88C5\u5305\u7F3A\u5C11\u5185\u7F6E\u7248\u672C\u4FE1\u606F");
+  auditArchive(plugin, release);
+}
 async function downloadNpmRelease(release, fetcher = fetch, options = {}) {
   if (!trustedReleaseAsset(release.asset, release.version) || !trustedNpmInstaller(release.npmInstaller)) throw new Error("\u5907\u7528\u5B89\u88C5\u5305\u6765\u6E90\u4E0D\u53D7\u4FE1\u4EFB");
   const source = release.npmInstaller;
@@ -217,6 +231,7 @@ async function downloadRelease(release, fetcher = fetch, options = {}) {
 export {
   DownloadUnavailableError,
   auditArchive,
+  auditNativeArchive,
   boundedFetch,
   downloadNpmRelease,
   downloadRelease,

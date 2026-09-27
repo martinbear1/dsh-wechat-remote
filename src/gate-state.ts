@@ -3,7 +3,8 @@ import {
   renameSync,
 } from 'node:fs'
 import { randomBytes } from 'node:crypto'
-import { tightenPrivateFile, writePrivateJsonAtomic } from './secure-file.js'
+import { tightenPrivateFile } from './secure-file.js'
+import { writeNodeState as writePrivateJsonAtomic } from './node-storage.js'
 
 export interface GateState {
   publicIdentityNodeId?: string

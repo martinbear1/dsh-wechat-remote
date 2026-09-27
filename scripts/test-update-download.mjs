@@ -106,16 +106,18 @@ test('unresponsive primary switches on response deadline; body download gets its
   },{responseTimeoutMs:15,timeoutMs:500})
   assert.deepEqual(result,plugin); assert.equal(calls,2)
 })
-test('redirects share a wall-clock deadline instead of renewing it', async () => {
-  let calls=0; const started=Date.now()
-  await assert.rejects(downloadRelease(release,async(url,{signal})=> {
+test('redirects share a wall-clock deadline instead of renewing it', async t => {
+  // Control elapsed time, not Windows timer scheduling. A timer may fire just
+  // before Date.now reaches the boundary and legitimately allow a final 1ms
+  // fallback probe; counting those real-time probes made this test flaky.
+  let calls=0, now=1000
+  t.mock.method(Date, 'now', () => now)
+  await assert.rejects(downloadRelease(release,async(url)=> {
     calls++
-    return new Promise((resolve,reject)=> {
-      const timer=setTimeout(()=>resolve(new Response(null,{status:302,headers:{location:url}})),25)
-      signal.addEventListener('abort',()=>{clearTimeout(timer);reject(signal.reason)},{once:true})
-    })
+    now += 25
+    return new Response(null,{status:302,headers:{location:url}})
   },{responseTimeoutMs:200,timeoutMs:60}),DownloadUnavailableError)
-  assert(calls<=3); assert(Date.now()-started<400)
+  assert.equal(calls,3); assert.equal(now,1075)
 })
 test('headers followed by a stalled body switch early; active slow body keeps its budget', async () => {
   let calls=0

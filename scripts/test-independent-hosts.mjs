@@ -15,6 +15,7 @@ import { createInstallControl } from '../lib/install-control.js'
 import { installProfile } from '../lib/install-profile.js'
 import { install } from '../installer/bin/setup.mjs'
 import { resolveDshWebRuntime } from '../lib/dsh-runtime.js'
+import { prepareNodeStorage, nodeStorageDirectory } from '../lib/node-storage.js'
 
 function context(home, name, version = '0.1.7-rc.2') {
   const dir = path.join(home, 'profiles', name)
@@ -57,8 +58,9 @@ if (process.argv[2] === '--identity-worker') {
   test('existing Web binding bytes and nodeId stay in place; Desktop never imports them', t => {
     const home = fixture(t), web = context(home, 'web'), desktop = context(home, 'desktop')
     const webIdentity = defaultAgentIdentityPath(web), webState = defaultGateStatePath(web)
-    assert.equal(webIdentity, path.join(home, 'harness-remote-public-identity.json'))
-    assert.equal(webState, path.join(home, 'gate-wechat-state.json'))
+    prepareNodeStorage(home, 'web')
+    assert.equal(webIdentity, path.join(nodeStorageDirectory(home, 'web'), 'identity.json'))
+    assert.equal(webState, path.join(nodeStorageDirectory(home, 'web'), 'gate-wechat-state.json'))
     const before = loadOrCreateAgentIdentity(webIdentity)
     writeFileSync(webState, JSON.stringify({ version: 1, token: 'fixture-existing-binding' }))
     const keyBytes = readFileSync(webIdentity), stateBytes = readFileSync(webState)

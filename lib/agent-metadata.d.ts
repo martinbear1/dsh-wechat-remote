@@ -21,10 +21,8 @@ export declare function agentDshHome(ctx?: HostContext): string;
 export declare function agentProfileScope(ctx?: HostContext): string;
 export declare function resolveAgentProfileScope(modulePath: string, argv: readonly string[], dshHome: string): string;
 /**
- * Keep the historic web/default credential path so an upgrade never unpairs
- * existing users. Every additional DSH profile gets an isolated state file;
- * otherwise installing a test profile can silently rotate the production
- * profile's LAN token and WeChat binding.
+ * Every node has one scoped authority. prepareNodeStorage migrates the Web
+ * legacy files before runtime use; web/default are the historical same node.
  */
 export declare function gateStatePathForProfile(profileScope: string, homeDirectory?: string, dshHome?: string): string;
 export declare function defaultGateStatePath(ctx?: HostContext): string;

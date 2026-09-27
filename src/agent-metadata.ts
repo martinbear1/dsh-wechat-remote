@@ -8,6 +8,7 @@ import { createPrivateJsonAtomic, readPrivateJson } from './secure-file.js'
 import { hostPlatformDescriptor, type HostPlatformDescriptor } from './host-platform.js'
 import { adapterDshHome } from './dsh-runtime.js'
 import { dshProfileFacts, hostRuntimeVersion, type HostContext } from './dsh-host-context.js'
+import { nodeStorageDirectory } from './node-storage.js'
 
 export interface AgentCapability {
   readonly id: string
@@ -96,27 +97,15 @@ function instanceStorageKey(profileScope = agentProfileScope()): string {
 }
 
 /**
- * Keep the historic web/default credential path so an upgrade never unpairs
- * existing users. Every additional DSH profile gets an isolated state file;
- * otherwise installing a test profile can silently rotate the production
- * profile's LAN token and WeChat binding.
+ * Every node has one scoped authority. prepareNodeStorage migrates the Web
+ * legacy files before runtime use; web/default are the historical same node.
  */
 export function gateStatePathForProfile(
   profileScope: string,
   homeDirectory = homedir(),
   dshHome = path.join(homeDirectory, '.dsh'),
 ): string {
-  const normalized = profileScope.trim().toLowerCase()
-  if (normalized === 'web' || normalized === 'default') {
-    return path.join(dshHome, 'gate-wechat-state.json')
-  }
-  return path.join(
-    dshHome,
-    'harness-remote',
-    'instances',
-    instanceStorageKey(profileScope),
-    'gate-wechat-state.json',
-  )
+  return path.join(nodeStorageDirectory(dshHome, profileScope), 'gate-wechat-state.json')
 }
 
 export function defaultGateStatePath(ctx?: HostContext): string {
@@ -133,21 +122,11 @@ export function agentDisplayName(ctx?: HostContext): string {
 
 export function defaultAgentIdentityPath(ctx?: HostContext): string {
   const scope = agentProfileScope(ctx), home = agentDshHome(ctx)
-  // Preserve an existing default web nodeId and its cloud ownership.
-  if (scope === 'web' || scope === 'default') {
-    return path.join(home, 'harness-remote-public-identity.json')
-  }
-  return path.join(home, 'harness-remote', 'instances', instanceStorageKey(scope), 'identity.json')
+  return path.join(nodeStorageDirectory(home, scope), 'identity.json')
 }
 
 export function defaultRelayConfigPath(ctx?: HostContext): string {
-  // Desktop is a new, independently configured node. Do not inherit Web's
-  // operator overrides. COMPAT: existing CLI profiles retain their old shared
-  // relay override until an explicit configuration migration is introduced.
-  if (agentProfileScope(ctx) === 'desktop') {
-    return path.join(path.dirname(defaultAgentIdentityPath(ctx)), 'public.json')
-  }
-  return path.join(agentDshHome(ctx), 'harness-remote-public.json')
+  return path.join(path.dirname(defaultAgentIdentityPath(ctx)), 'public.json')
 }
 
 function packageVersionFromAncestors(start: string): string | null {

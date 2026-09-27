@@ -20,6 +20,7 @@ interface HarnessRemoteSettingsProps {
 
 interface GateStatusResp {
   gate?: GateRuntimeInfo
+  companionUpdate?: { state: string; message: string }
   lan: { ip: string; port: number }
   publicRelay: {
     enabled: boolean
@@ -283,6 +284,8 @@ export function HarnessRemoteSettings({
       )}
       {localOrigin ? <PluginUpdateCard localOrigin={localOrigin} /> : null}
       {runtime?.profileScope === 'desktop' ? <p className={styles.securityNote}>插件更新请使用桌面应用的插件管理。</p> : null}
+      {status?.companionUpdate && status.companionUpdate.state !== 'idle' && status.companionUpdate.message
+        ? <p className={styles.securityNote} role="status">{status.companionUpdate.message}</p> : null}
     </section>
   )
 }

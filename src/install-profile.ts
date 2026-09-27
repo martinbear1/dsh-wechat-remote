@@ -6,6 +6,48 @@ import { spawn, execFile } from 'node:child_process'
 import type { InstallRuntime } from './install-runtime.js'
 
 export const PLUGIN_PACKAGE = '@harness-remote/dsh-wechat-remote'
+export const NATIVE_PLUGIN_PACKAGE = 'dsh-wechat-remote'
+export class ProfileOwnershipError extends Error {
+  constructor(message: string) { super(message); this.name = 'ProfileOwnershipError' }
+}
+/** A native bundle and the CLI payload are different package-manager owners,
+ * even though they carry the same runtime. Never repair one by adding the other.
+ * Inspect only the selected profile; another host's installation is irrelevant.
+ * Unreferenced node_modules leftovers from a failed native add are not owners. */
+export function assertCliInstallOwner(profile: string, activeRoot?: string): void {
+  if (path.basename(profile).toLowerCase() === 'desktop') {
+    throw new ProfileOwnershipError('Desktop 由桌面应用管理，请在其插件管理页安装或更新；此命令不会更新 Desktop。')
+  }
+  let manifest: any
+  try { manifest = JSON.parse(fs.readFileSync(path.join(profile, 'package.json'), 'utf8')) }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT' && !activeRoot) return
+    throw new ProfileOwnershipError('无法读取当前 DSH 配置的安装归属，未替换插件。')
+  }
+  const object = (value: any) => value && typeof value === 'object' && !Array.isArray(value)
+  if (!object(manifest) || (manifest.dependencies !== undefined && !object(manifest.dependencies))
+      || (manifest.dsh !== undefined && !object(manifest.dsh))
+      || (manifest.dsh?.profile !== undefined && !object(manifest.dsh.profile))) {
+    throw new ProfileOwnershipError('DSH 配置的安装归属无效，未替换插件。')
+  }
+  const bundles = manifest.dsh?.profile?.bundles ?? []
+  if (!Array.isArray(bundles) || bundles.some((name: unknown) => typeof name !== 'string')) {
+    throw new ProfileOwnershipError('DSH 配置的插件列表无效，未替换插件。')
+  }
+  const referenced = (name: string) => Object.hasOwn(manifest.dependencies ?? {}, name) || bundles.includes(name)
+  if (referenced(NATIVE_PLUGIN_PACKAGE)) {
+    throw new ProfileOwnershipError(referenced(PLUGIN_PACKAGE)
+      ? '当前 DSH 配置同时登记了两种微信连接插件安装包，未替换插件。请先在该端原生插件管理页核对安装来源，勿重复安装。'
+      : '当前插件由该端 DSH 原生插件管理页管理，请回到该页面更新；未另外安装第二份插件。')
+  }
+  if (activeRoot) {
+    let matches = false
+    try { matches = fs.realpathSync(activeRoot) === fs.realpathSync(path.join(profile, 'node_modules', PLUGIN_PACKAGE)) } catch {}
+    if (!referenced(PLUGIN_PACKAGE) || !matches) {
+      throw new ProfileOwnershipError('运行中的插件与当前配置登记的安装来源不一致，未替换插件。')
+    }
+  }
+}
 export interface ProfileInstall {
   profile: string; directory: string; cli: string; targetVersion: string
   runtime: InstallRuntime
@@ -120,6 +162,7 @@ export async function installProfile(job: ProfileInstall): Promise<void> {
   if (scope.toLowerCase() === 'desktop') throw new Error('Desktop 插件安装由桌面应用管理，不能使用 CLI 修改。')
   if (!safeProfileName(scope) || path.dirname(job.profile) !== path.join(home, 'profiles')
     || !/^[\w.+-]{1,80}$/.test(job.targetVersion)) throw new Error('安装目标不明确。')
+  assertCliInstallOwner(job.profile)
   fs.mkdirSync(job.profile, { recursive: true, mode: 0o700 })
   const archive = path.join(job.directory, 'release.tgz')
   // A local file dependency is identified by its source, not just its bytes.

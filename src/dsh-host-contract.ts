@@ -73,6 +73,31 @@ export function projectedSubagentCatalog(parent: string, projection: Row | null,
   }) }
 }
 export async function invokeHostRemote(ctx: HostContext, gateway: Row, request: Row): Promise<unknown> {
+  if (request.namespace === 'settings' && request.method === 'update'
+      && request.args?.ns === 'agent-presets' && request.args.patch
+      && Object.hasOwn(request.args.patch, 'default')) {
+    // The shipped phone names the old form. Discover the live native form
+    // before ONE mutation: version guesses and write-then-retry are unsafe.
+    request.signal?.throwIfAborted()
+    const description = await gateway.invoke({ namespace: 'settings', method: 'describe', args: {}, signal: request.signal })
+    request.signal?.throwIfAborted()
+    const rows = description?.namespaces
+    if (!Array.isArray(rows)) throw new Error('DSH 预设配置暂不可读取，未修改默认预设')
+    const old = rows.filter((row: Row) => row.ns === 'agent-presets')
+    const modern = rows.filter((row: Row) => row.ns === 'agent-preset-registry')
+    if (old.length === 1 && modern.length === 0) return gateway.invoke(request)
+    if (modern.length !== 1 || old.length !== 0) throw new Error('DSH 预设配置入口不唯一或未就绪，未修改默认预设')
+    // Map only the known phone operation, never forward arbitrary old fields
+    // into a different form or reinterpret an old form's revision number.
+    if (Object.keys(request.args.patch).length !== 1 || typeof request.args.patch.default !== 'string') {
+      throw new Error('默认预设设置参数无效')
+    }
+    if (request.args.expectedRevision !== undefined) throw new Error('预设配置已迁移，请刷新后重试')
+    const row = modern[0]
+    if (!Number.isSafeInteger(row.revision)) throw new Error('DSH 预设配置版本无效')
+    return gateway.invoke({ ...request, args: { ns: row.ns,
+      patch: { selectedDefault: request.args.patch.default }, expectedRevision: row.revision } })
+  }
   if (request.namespace !== 'subagents' || request.method !== 'list') return gateway.invoke(request)
   const registry = (ctx.get('typert') as Row | undefined)?.local
   // A withdrawn descriptor is a host error, not permission to bypass it.

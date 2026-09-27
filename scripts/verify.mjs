@@ -11,6 +11,8 @@ import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { selectInstallTarget } from '../installer/bin/release-selection.mjs'
+import { nodeStorageDirectory } from '../lib/node-storage.js'
+import { gateStatePathForProfile } from '../lib/agent-metadata.js'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const pkg = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'))
@@ -86,7 +88,13 @@ check(host.includes('selectedGatePorts.publicPort'), 'lib/index.js 未使用推�
 check(host.includes('selectedGatePorts.localPort'), 'lib/index.js 未使用推导出的本地门')
 check(host.includes('defaultGateStatePath(ctx)'), '宿主未按实际 DSH profile 选择状态文件')
 check(host.includes('identityPath: defaultAgentIdentityPath(ctx)'), '公网身份未绑定当前宿主实例')
-check(agentMetadata.includes("normalized === 'web' || normalized === 'default'"), '默认 profile 未保留发布版凭证迁移路径')
+const storageProbe = path.join(root, '.verify-storage-not-created')
+check(nodeStorageDirectory(storageProbe, 'web') === nodeStorageDirectory(storageProbe, 'default'), 'web/default 未保持同一旧节点迁移目标')
+check(nodeStorageDirectory(storageProbe, 'web') !== nodeStorageDirectory(storageProbe, 'desktop'), 'Web/Desktop 存储目录未隔离')
+for (const scope of ['web', 'default', 'desktop']) {
+  check(gateStatePathForProfile(scope, root, storageProbe) === path.join(nodeStorageDirectory(storageProbe, scope), 'gate-wechat-state.json'),
+    `${scope} 运行目录与迁移目标不一致`)
+}
 check(agentMetadata.includes("'gate-wechat-state.json'"), '状态文件名不是 gate-wechat-state.json')
 for (const retired of ['/pair/claim-wechat', '/pair/verify-wechat', '/pair/claim', 'code2session']) {
   check(!host.includes(retired), `lib/gate-runtime.js 残留旧明文配对表面：${retired}`)
@@ -230,7 +238,8 @@ check(tunnel.includes('response.pause()'), '公网 HTTP 隧道缺少上游背压
 
 const secureFile = readFileSync(path.join(root, 'lib/secure-file.js'), 'utf8')
 check(secureFile.includes('renameSync(temporary, file)'), '私密状态文件没有同卷原子替换')
-check(metadata.includes('harness-remote-public-identity.json'), '默认实例没有兼容 public-research.5 的 Agent 身份')
+const nodeStorage = readFileSync(path.join(root, 'lib/node-storage.js'), 'utf8')
+check(nodeStorage.includes('harness-remote-public-identity.json') && host.includes('prepareNodeStorage'), '缺少旧 Web 身份自动迁移')
 check(metadata.includes('agentInstanceId'), 'Agent 元数据缺少实例标识')
 const gatePorts = readFileSync(path.join(root, 'lib/gate-ports.js'), 'utf8')
 check(gatePorts.includes('LEGACY_PUBLIC_PORT = 3092'), 'web/default 没有保持 3092 兼容')

@@ -164,6 +164,27 @@ export function pluginFromInstaller(archive: Buffer, release: Release): Buffer {
   return plugin
 }
 
+/** Structural audit of a local native bundle before handing it to the owning
+ * host's package manager. Integrity/origin is established separately. */
+export function auditNativeArchive(archive: Buffer, version: string): void {
+  let manifest: any, metadata: any, plugin: Buffer | undefined
+  const files = visitArchive(archive, (name, data) => {
+    if (name === 'package/package.json') manifest = readManifest(data)
+    if (name === 'package/assets/release.json') metadata = readManifest(data)
+    if (name === 'package/assets/plugin.tgz') plugin = Buffer.from(data)
+  })
+  if (manifest?.name !== 'dsh-wechat-remote' || manifest.version !== version
+      || manifest.dsh?.bundle?.patch !== './cordis.patch.yml'
+      || !files.has('package/native/lib/index.js') || !files.has('package/native/lib/client.js')
+      || !files.has('package/cordis.patch.yml') || !plugin || metadata?.version !== version
+      || ['preinstall', 'install', 'postinstall', 'prepare', 'prepack', 'postpack'].some(key => manifest.scripts?.[key])) {
+    throw new Error('原生联动安装包结构或版本不匹配')
+  }
+  const release = metadata.catalog?.releases?.find((row: Release) => row.version === version)
+  if (!release) throw new Error('原生联动安装包缺少内置版本信息')
+  auditArchive(plugin, release)
+}
+
 /** Also used by the publication gate to verify the alternate independently. */
 export async function downloadNpmRelease(release: Release, fetcher = fetch, options: DownloadOptions = {}): Promise<Buffer> {
   if (!trustedReleaseAsset(release.asset, release.version) || !trustedNpmInstaller(release.npmInstaller)) throw new Error('备用安装包来源不受信任')

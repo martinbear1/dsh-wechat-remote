@@ -15,6 +15,7 @@ import { assertNativeUpdateCapabilities } from './install-capabilities.js'
 import { currentHostManager } from './install-lifecycle.js'
 import { tightenPrivateFile, writePrivateJsonAtomic } from './secure-file.js'
 import { resolveInstallRuntime, verifyInstallRuntime } from './install-runtime.js'
+import { assertCliInstallOwner, ProfileOwnershipError } from './install-profile.js'
 
 const ownRoot = fileURLToPath(new URL('../', import.meta.url))
 const ownVersion = () => JSON.parse(fs.readFileSync(path.join(ownRoot, 'package.json'), 'utf8')).version as string
@@ -24,7 +25,7 @@ export function previewUpdatesEnabled(env: NodeJS.ProcessEnv = process.env): boo
 }
 interface UpdateJobReference { jobId: string; statusOrigin: string; statusToken: string }
 export function updateAction(advice: UpdateAdvice, release: Release | undefined,
-  eligible: { eligible: boolean; reason: string }, occupied: boolean, ctx?: HostContext): {
+  eligible: { eligible: boolean; reason: string; manualInstallAllowed?: boolean }, occupied: boolean, ctx?: HostContext): {
     canInstall: boolean; mode: 'none' | 'automatic' | 'manual' | 'busy'; reason: string; manualCommand: string
   } {
   const none = { canInstall: false, mode: 'none' as const, reason: '', manualCommand: '' }
@@ -33,6 +34,7 @@ export function updateAction(advice: UpdateAdvice, release: Release | undefined,
   if (occupied) return { ...none, mode: 'busy', reason: '当前更新尚未结束，请稍后重试。' }
   if (desktopOwnsLifecycle(ctx)) return { ...none, mode: 'manual',
     reason: '请在 DSH 桌面应用的插件管理页更新，并按应用提示重新加载或重启。' }
+  if (eligible.manualInstallAllowed === false) return { ...none, mode: 'manual', reason: eligible.reason }
   const assetValid = trustedReleaseAsset(release.asset, release.version)
   if (assetValid && eligible.eligible) return { ...none, mode: 'automatic', canInstall: true }
   // Host-side command, not an executable instruction supplied by the WebUI.
@@ -177,23 +179,26 @@ export class PluginUpdateService {
     })().finally(() => { this.checking = undefined })
     return this.checking
   }
-  private eligibility(): { eligible: boolean; reason: string; profile?: string; pnpm?: string; cli?: string } {
+  private eligibility(): { eligible: boolean; reason: string; manualInstallAllowed?: boolean; profile?: string; pnpm?: string; cli?: string } {
     try {
       // Missing OS/CPU/DSH test evidence must never disable this updater.
       // The catalog excludes known broken releases, not untested combinations.
       // Check actual native capabilities and restart ownership on every host.
       if (desktopOwnsLifecycle(this.ctx)) throw new Error('请通过 DSH 桌面应用的插件管理页更新')
+      const profile = path.join(agentDshHome(this.ctx), 'profiles', agentProfileScope(this.ctx))
+      assertCliInstallOwner(profile)
       currentHostManager()
       if (process.argv.some(a => /(?:api.?key|password|secret|token)[= ]/i.test(a))
           || process.execArgv.length) throw new Error('此启动方式不能安全自动重启，请手工更新')
       const cli = fs.realpathSync(process.argv[1])
       if (JSON.parse(fs.readFileSync(path.resolve(cli, '../../package.json'), 'utf8')).name !== '@deepseek-ai/dsh') throw new Error('无法确认 DSH 启动程序')
-      const profile = path.join(agentDshHome(this.ctx), 'profiles', agentProfileScope(this.ctx))
       if (fs.realpathSync(profile) !== profile || !fs.realpathSync(ownRoot).startsWith(profile + path.sep)) throw new Error('插件不在可安全更新的独立 profile 中')
+      assertCliInstallOwner(profile, ownRoot)
       assertNativeUpdateCapabilities(this.ctx)
       fs.accessSync(profile, fs.constants.W_OK)
       return { eligible: true, reason: '', profile, pnpm: resolveInstallRuntime(ownRoot).cli, cli }
-    } catch (error) { return { eligible: false, reason: error instanceof Error ? error.message : '安装环境暂不支持自动更新' } }
+    } catch (error) { return { eligible: false, reason: error instanceof Error ? error.message : '安装环境暂不支持自动更新',
+      ...(error instanceof ProfileOwnershipError ? { manualInstallAllowed: false } : {}) } }
   }
   private async begin(ticket: string): Promise<unknown> {
     if (this.isMaintaining()) throw new Error('当前实例正在验证或重启，请稍后重试')

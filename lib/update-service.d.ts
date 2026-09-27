@@ -6,6 +6,7 @@ export declare function previewUpdatesEnabled(env?: NodeJS.ProcessEnv): boolean;
 export declare function updateAction(advice: UpdateAdvice, release: Release | undefined, eligible: {
     eligible: boolean;
     reason: string;
+    manualInstallAllowed?: boolean;
 }, occupied: boolean, ctx?: HostContext): {
     canInstall: boolean;
     mode: 'none' | 'automatic' | 'manual' | 'busy';

@@ -6,10 +6,23 @@ import { randomBytes } from 'node:crypto'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
+import { readFileSync } from 'node:fs'
 import { build } from 'esbuild'
 import { WebSocket } from 'ws'
 import { SecureLanServer } from '../lib/secure-lan.js'
 import { loadOrCreateAgentIdentity } from '../lib/public-relay-agent.js'
+
+// Optional compatibility run executes the released Web transport itself, not
+// another instance of the new implementation with a different display label.
+let WebLanServer = SecureLanServer
+if (process.env.HARNESS_LEGACY_PLUGIN_ROOT) {
+  const legacy = process.env.HARNESS_LEGACY_PLUGIN_ROOT
+  const manifest = JSON.parse(readFileSync(path.join(legacy, 'package.json'), 'utf8'))
+  assert.equal(manifest.name, '@harness-remote/dsh-wechat-remote')
+  assert.equal(manifest.version, '1.7.10')
+  WebLanServer = (await import(pathToFileURL(path.join(legacy, 'lib/secure-lan.js')).href)).SecureLanServer
+}
 
 assert(process.env.HARNESS_MINI_DIR, 'HARNESS_MINI_DIR required')
 const compiled = await build({ entryPoints: [path.join(process.env.HARNESS_MINI_DIR, 'utils/e2ee.js')],
@@ -24,7 +37,8 @@ const clients = [], nodes = []
 async function host(label) {
   const identity = loadOrCreateAgentIdentity(path.join(stage, label + '.json'))
   let token = randomBytes(32).toString('base64url'), calls = 0
-  const lan = new SecureLanServer({ identity: () => identity, token: () => token, dshPort: 1,
+  const Server = label === 'web' ? WebLanServer : SecureLanServer
+  const lan = new Server({ identity: () => identity, token: () => token, dshPort: 1,
     compatibilityApi: { async request() { calls++; return { statusCode: 200, headers: {}, body: Buffer.from(label) } } } })
   const server = createServer((_req, res) => { res.writeHead(404); res.end() })
   server.on('upgrade', (req, socket, head) => lan.sockets.handleUpgrade(req, socket, head,

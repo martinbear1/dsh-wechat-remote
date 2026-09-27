@@ -5,16 +5,17 @@ import path from 'node:path'
 import { deriveGatePorts, describeGateListenFailure } from '../lib/gate-ports.js'
 import { gateStatePathForProfile, resolveAgentProfileScope } from '../lib/agent-metadata.js'
 import { adapterDshHome } from '../lib/dsh-runtime.js'
+import { nodeStorageDirectory } from '../lib/node-storage.js'
 
 const stateRoot = path.join(path.parse(process.cwd()).root, 'isolated-home')
 assert.equal(
   gateStatePathForProfile('web', stateRoot),
-  path.join(stateRoot, '.dsh', 'gate-wechat-state.json'),
-  'web upgrades must preserve the released credential path',
+  path.join(nodeStorageDirectory(path.join(stateRoot, '.dsh'), 'web'), 'gate-wechat-state.json'),
+  'web uses the migrated scoped authority',
 )
 assert.equal(
   gateStatePathForProfile('default', stateRoot),
-  path.join(stateRoot, '.dsh', 'gate-wechat-state.json'),
+  gateStatePathForProfile('web', stateRoot),
 )
 const researchState = gateStatePathForProfile('research-a', stateRoot)
 assert.match(researchState, /[\\/]harness-remote[\\/]instances[\\/][0-9a-f]{24}[\\/]gate-wechat-state\.json$/)
@@ -23,7 +24,7 @@ const portableHome = path.join(stateRoot, 'portable-dsh')
 assert.equal(adapterDshHome({ DSH_HOME: portableHome }, stateRoot), portableHome)
 assert.equal(adapterDshHome({ DSH_HOME: '  ' }, stateRoot), path.join(stateRoot, '.dsh'))
 assert.equal(adapterDshHome({ DSH_HOME: '~/portable' }, stateRoot), path.join(stateRoot, 'portable'))
-assert.equal(gateStatePathForProfile('web', stateRoot, portableHome), path.join(portableHome, 'gate-wechat-state.json'))
+assert.equal(gateStatePathForProfile('web', stateRoot, portableHome), path.join(nodeStorageDirectory(portableHome, 'web'), 'gate-wechat-state.json'))
 assert.equal(resolveAgentProfileScope(path.join(portableHome, 'profiles', 'research-a', 'node_modules', '.pnpm', 'plugin', 'lib', 'index.js'), [], portableHome), 'research-a')
 assert.equal(resolveAgentProfileScope(path.join(stateRoot, 'linked-plugin', 'lib', 'index.js'), ['node', 'dsh', '--profile', 'research-b'], portableHome), 'research-b')
 assert.equal(resolveAgentProfileScope('/external/plugin.js', ['node', 'dsh', '--profile=research-c'], portableHome), 'research-c')

@@ -23,7 +23,8 @@ import { WebSocket } from 'ws'
 import { defaultAgentIdentityPath, type AgentCapability } from './agent-metadata.js'
 import { adapterDshHome } from './dsh-runtime.js'
 import type { HostPlatformDescriptor } from './host-platform.js'
-import { readPrivateJson, writePrivateJsonAtomic } from './secure-file.js'
+import { readPrivateJson } from './secure-file.js'
+import { writeNodeState as writePrivateJsonAtomic } from './node-storage.js'
 import { createAgentHttpProof } from './agent-http-proof.js'
 
 const CONFIG_PATH = path.join(adapterDshHome(), 'harness-remote-public.json')

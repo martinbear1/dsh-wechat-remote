@@ -71,6 +71,8 @@ import { mountPairingManagement } from './pairing-management.js'
 import { resolveTypertGateway } from './dsh-protocol-compat.js'
 import { DshCompatibilityApi } from './dsh-compatibility-api.js'
 import { loadGateState, saveGateState, type GateState } from './gate-state.js'
+import { prepareNodeStorage } from './node-storage.js'
+import { mountCompanionUpdates } from './companion-updates.js'
 import { PluginUpdateService } from './update-service.js'
 
 interface RateBucket {
@@ -129,6 +131,7 @@ export function mountWechatGate(ctx: Context): () => void {
   const dshWebRuntime = resolveDshWebRuntime(ctx)
   const UPSTREAM_PORT = dshWebRuntime.port
   const desktopHost = desktopOwnsLifecycle(ctx)
+  prepareNodeStorage(agentDshHome(ctx), agentProfileScope(ctx))
   let management: WechatGateRuntimeInfo['management'] = desktopHost ? 'unavailable' : 'loopback'
   let pairingManagement: ReturnType<typeof mountPairingManagement>
   const STATE_FILE = defaultGateStatePath(ctx)
@@ -321,6 +324,7 @@ export function mountWechatGate(ctx: Context): () => void {
 
   const proxy = httpProxy.createProxyServer({})
   const updater = new PluginUpdateService(ctx, { web: UPSTREAM_PORT, gate: PUBLIC_PORT, local: LOCAL_PORT })
+  const companionUpdates = mountCompanionUpdates(ctx, installedPluginVersion())
   const compatibilityApi = new DshCompatibilityApi(ctx, UPSTREAM_PORT, () => updater.isMaintaining())
   let taskNotifications: TaskNotifications | undefined
   updater.trackPublicRequests(() => compatibilityApi.hasInFlightRequests())
@@ -551,6 +555,7 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
   function gateStatusValue(): object {
     return {
       gate: gateRuntimeSnapshot(),
+      companionUpdate: companionUpdates.status(),
       lan: { ip: lanIPv4(), port: PUBLIC_PORT },
       // Status never releases a QR ticket; only the explicit pair-code operation
       // (authenticated native channel or restricted legacy loopback door) does.
@@ -679,6 +684,7 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
     disposed = true
     void pairingManagement?.dispose().catch(error => console.warn('[wechat-gate] pairing route cleanup failed:', messageOf(error)))
     updater.dispose()
+    companionUpdates.dispose()
     secureLan.close()
     compatibilityApi.dispose()
     taskNotifications?.dispose()

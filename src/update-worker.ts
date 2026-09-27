@@ -6,7 +6,7 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { createHash, createPublicKey, randomBytes } from 'node:crypto'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { writePrivateJsonAtomic } from './secure-file.js'
-import { installProfile, backupProfile, NativeInstallError } from './install-profile.js'
+import { installProfile, backupProfile, NativeInstallError, assertCliInstallOwner } from './install-profile.js'
 import { INSTALL_PNPM_VERSION, pinInstallRuntime } from './install-runtime.js'
 import { validateManager, startManagedHost, stopManagedHost, finishUpdateWorker, type HostManager } from './install-lifecycle.js'
 
@@ -81,12 +81,18 @@ async function rpc(job: UpdateJob, method: string, payload = {}, deadline?: Abor
   if (!res.ok || !body.result?.ok) throw new Error('主机会话服务未就绪')
   return body.result.value
 }
-function durableSnapshot(job: UpdateJob): Record<string, string> {
+export function durableSnapshot(job: UpdateJob): Record<string, string> {
   const result: Record<string, string> = {}
   const walk = (dir: string) => {
     if (!fs.existsSync(dir)) return
     for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
       const file = path.join(dir, e.name)
+      // Coordination receipts and the migration journal/ledger are runtime
+      // bookkeeping, not user data. QR tickets may expire while upgrading.
+      // Their durable binding is checked separately below.
+      if (path.relative(job.home, file).split(path.sep).includes('harness-remote')
+          && (['installation-offers', '.storage-lock', 'storage-layout.json', 'storage-transaction.json', 'gate-wechat-state.json'].includes(e.name)
+            || /^\.storage-lock-pending-\d+-[a-f0-9]{32}$/.test(e.name))) continue
       if (e.isSymbolicLink()) result[path.relative(job.home, file)] = createHash('sha256').update(fs.readlinkSync(file)).digest('hex')
       else if (e.isDirectory()) walk(file)
       else if (e.isFile()) result[path.relative(job.home, file)] = hashFile(file)
@@ -98,7 +104,7 @@ function durableSnapshot(job: UpdateJob): Record<string, string> {
       // Pairing tickets may legitimately expire. Protect durable identity and
       // the encrypted-LAN grant, not transient QR state.
       const f = path.join(job.home, e.name)
-      if (f === job.stateFile) continue
+      if (e.name === 'gate-wechat-state.json' || f === job.stateFile) continue
       result[e.name] = hashFile(f)
     }
   }
@@ -267,6 +273,7 @@ export async function executeUpdate(job: UpdateJob, progress: (p: UpdateProgress
   let before: Record<string, string> = {}, sessionIds: string[] = [], readableIds: string[] = []
   let preexistingFailure = false
   try {
+    assertCliInstallOwner(job.profile)
     emit('preparing', 25, '准备安装工具，当前节点仍可使用')
     const runtime = await pinInstallRuntime({ executable: job.executable, cli: job.pnpm, version: INSTALL_PNPM_VERSION }, job.directory)
     // The next host validates this job after the old package was replaced.
@@ -287,6 +294,7 @@ export async function executeUpdate(job: UpdateJob, progress: (p: UpdateProgress
     for (const sessionId of sessionIds) {
       try { await beforeRpc(job, 'session.history', { sessionId, maxMessages: 1 }); readableIds.push(sessionId) } catch { /* baseline unavailable */ }
     }
+    assertCliInstallOwner(job.profile)
     await quiesce() // Parent installs a maintenance fence, checks and flushes native sessions.
     disposed = Boolean(job.controlOrigin)
     before = durableSnapshot(job)

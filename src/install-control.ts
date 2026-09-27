@@ -4,7 +4,8 @@ import path from 'node:path'
 import http from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import { resolveDshWebRuntime } from './dsh-runtime.js'
-import { agentDshHome, agentProfileScope, gateStatePathForProfile, loadAgentDescriptor, defaultAgentIdentityPath } from './agent-metadata.js'
+import { agentDshHome, agentProfileScope, loadAgentDescriptor } from './agent-metadata.js'
+import { installedNodeStatePaths } from './node-storage.js'
 import { desktopOwnsLifecycle } from './dsh-host-context.js'
 import { deriveGatePorts } from './gate-ports.js'
 import { resolveTypertGateway, invokeLegacyRpc } from './dsh-protocol-compat.js'
@@ -12,6 +13,7 @@ import { currentHostManager, startUpdateWorker } from './install-lifecycle.js'
 import { writePrivateJsonAtomic } from './secure-file.js'
 import { homedir } from 'node:os'
 import { assertNativeUpdateCapabilities } from './install-capabilities.js'
+import { assertCliInstallOwner } from './install-profile.js'
 
 export interface InstallControlConfig { directory: string; token: string; pnpm: string }
 /** Installer-owned in-process read. A broken third-party Typert contributor
@@ -51,6 +53,7 @@ export async function createInstallControl(context: Context, config: InstallCont
     || path.dirname(config.directory) !== path.join(home, 'harness-remote-updates')
     || fs.realpathSync(config.directory) !== config.directory) throw new Error('安装控制请求不属于当前 DSH。')
   const scope = agentProfileScope(ctx), profile = path.join(home, 'profiles', scope)
+  assertCliInstallOwner(profile)
   const cli = fs.realpathSync(process.argv[1])
   const manifest = JSON.parse(fs.readFileSync(path.resolve(cli, '../../package.json'), 'utf8'))
   if (manifest.name !== '@deepseek-ai/dsh' || process.execArgv.length) throw new Error('此 DSH 启动方式尚不支持自动更新。')
@@ -80,13 +83,16 @@ export async function createInstallControl(context: Context, config: InstallCont
     if (!['127.0.0.1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress || '')
       || req.headers.host !== `127.0.0.1:${(server.address() as any).port}` || req.headers['x-forwarded-for']
       || req.headers.authorization !== `Bearer ${config.token}` || req.method !== 'POST') return json(403, {})
+    // Only this authenticated installer can renew its short lease while waiting
+    // for old Web tasks. An abandoned helper still closes automatically.
+    if (!launched) timer.refresh()
     try {
       let body = ''
       for await (const chunk of req) { body += chunk.toString(); if (body.length > 4096) throw new Error('请求过大') }
       const input = body ? JSON.parse(body) : {}
       if (req.url === '/describe') return json(200, { pid: process.pid, cli, executable: process.execPath,
         argv: process.argv.slice(1), execArgv: process.execArgv, cwd: process.cwd(), home, profile, webPort,
-        stateFile: gateStatePathForProfile(scope, homedir(), home), identityFile: defaultAgentIdentityPath(ctx), gatePort: ports.publicPort, localPort: ports.localPort, manager, dshVersion: manifest.version,
+        ...installedNodeStatePaths(home, scope), gatePort: ports.publicPort, localPort: ports.localPort, manager, dshVersion: manifest.version,
         pluginVersion: version(), platform: process.platform, arch: process.arch, quiesced })
       if (req.url === '/read' && !quiesced) return json(200, await read(input.method, input.payload))
       if (req.url === '/health' && !quiesced) {
@@ -95,6 +101,7 @@ export async function createInstallControl(context: Context, config: InstallCont
         return json(200, { ready: true })
       }
       if (req.url === '/launch' && !launched && !quiesced) {
+        assertCliInstallOwner(profile)
         const filename = path.join(config.directory, 'job.json')
         const job = JSON.parse(fs.readFileSync(filename, 'utf8'))
         if (job.id !== id || job.controlOrigin !== origin || job.statusToken !== config.token || job.parentPid !== process.pid
@@ -103,6 +110,7 @@ export async function createInstallControl(context: Context, config: InstallCont
         return json(200, { started: true })
       }
       if (req.url === '/quiesce' && launched && !quiesced) {
+        assertCliInstallOwner(profile)
         // Native disposal closes every transport and flushes every service,
         // including old plugins with no updater-aware public-transport fence.
         // The private control server deliberately survives this one disposal.

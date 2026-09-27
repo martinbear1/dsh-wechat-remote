@@ -14,6 +14,9 @@ export declare function boundedFetch(url: string, maxBytes: number, fetcher?: ty
 /** Audit the plugin BEFORE any package manager sees it. */
 export declare function auditArchive(archive: Buffer, release: Release): void;
 export declare function pluginFromInstaller(archive: Buffer, release: Release): Buffer;
+/** Structural audit of a local native bundle before handing it to the owning
+ * host's package manager. Integrity/origin is established separately. */
+export declare function auditNativeArchive(archive: Buffer, version: string): void;
 /** Also used by the publication gate to verify the alternate independently. */
 export declare function downloadNpmRelease(release: Release, fetcher?: typeof fetch, options?: DownloadOptions): Promise<Buffer>;
 export declare function downloadRelease(release: Release, fetcher?: typeof fetch, options?: DownloadOptions): Promise<Buffer>;

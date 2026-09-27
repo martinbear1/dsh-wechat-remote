@@ -272,7 +272,7 @@ export function resolveTypertGateway(ctx: Context): TypertGatewayLike | null {
   const candidate = ctx.get('typertGateway') as Partial<TypertGatewayLike> | undefined
   if (!candidate || typeof candidate.invoke !== 'function' || typeof candidate.stream !== 'function') return null
   return {
-    wireStream: candidate.wireStream ? { open: (endpoint, payload, signal) => openHostEvents(candidate, endpoint, payload, signal) } : undefined,
+    wireStream: candidate.wireStream ? { open: (endpoint, payload, signal) => openHostEvents(candidate, endpoint, payload, signal, ctx) } : undefined,
     invoke: request => invokeHostRemote(ctx, candidate, request),
     stream: request => candidate.stream!(request),
     commandAttachmentField: () => {

@@ -4,9 +4,10 @@ import { homedir, hostname } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { readPrivateJson, writePrivateJsonAtomic } from './secure-file.js'
+import { createPrivateJsonAtomic, readPrivateJson } from './secure-file.js'
 import { hostPlatformDescriptor, type HostPlatformDescriptor } from './host-platform.js'
 import { adapterDshHome } from './dsh-runtime.js'
+import { dshProfileFacts, hostRuntimeVersion, type HostContext } from './dsh-host-context.js'
 
 export interface AgentCapability {
   readonly id: string
@@ -30,9 +31,7 @@ interface StableMetadata {
   readonly id: string
 }
 
-const ROOT = path.join(adapterDshHome(), 'harness-remote')
-const HOST_PATH = path.join(ROOT, 'host.json')
-let cachedDescriptor: AgentDescriptor | null = null
+const cachedDescriptors = new Map<string, AgentDescriptor>()
 
 export const AGENT_CAPABILITIES: readonly AgentCapability[] = Object.freeze([
   Object.freeze({ id: 'dsh.rpc', version: 1 }),
@@ -56,13 +55,18 @@ function stableId(file: string): string {
     return stored.id
   }
   const id = randomBytes(18).toString('base64url')
-  writePrivateJsonAtomic(file, { version: 1, id })
-  return id
+  if (createPrivateJsonAtomic(file, { version: 1, id })) return id
+  return stableId(file) // Another profile created the shared host metadata first.
 }
 
 /** Installed DSH profile name without exposing its filesystem path. */
-export function agentProfileScope(): string {
-  return resolveAgentProfileScope(fileURLToPath(import.meta.url), process.argv, adapterDshHome())
+export function agentDshHome(ctx?: HostContext): string {
+  return dshProfileFacts(ctx)?.home ?? adapterDshHome()
+}
+
+export function agentProfileScope(ctx?: HostContext): string {
+  return dshProfileFacts(ctx)?.name
+    ?? resolveAgentProfileScope(fileURLToPath(import.meta.url), process.argv, adapterDshHome())
 }
 
 export function resolveAgentProfileScope(modulePath: string, argv: readonly string[], dshHome: string): string {
@@ -115,17 +119,27 @@ export function gateStatePathForProfile(
   )
 }
 
-export function defaultGateStatePath(): string {
-  return gateStatePathForProfile(agentProfileScope(), homedir(), adapterDshHome())
+export function defaultGateStatePath(ctx?: HostContext): string {
+  return gateStatePathForProfile(agentProfileScope(ctx), homedir(), agentDshHome(ctx))
 }
 
-export function defaultAgentIdentityPath(): string {
-  const scope = agentProfileScope()
+export function defaultAgentIdentityPath(ctx?: HostContext): string {
+  const scope = agentProfileScope(ctx), home = agentDshHome(ctx)
   // Preserve an existing default web nodeId and its cloud ownership.
   if (scope === 'web' || scope === 'default') {
-    return path.join(adapterDshHome(), 'harness-remote-public-identity.json')
+    return path.join(home, 'harness-remote-public-identity.json')
   }
-  return path.join(ROOT, 'instances', instanceStorageKey(scope), 'identity.json')
+  return path.join(home, 'harness-remote', 'instances', instanceStorageKey(scope), 'identity.json')
+}
+
+export function defaultRelayConfigPath(ctx?: HostContext): string {
+  // Desktop is a new, independently configured node. Do not inherit Web's
+  // operator overrides. COMPAT: existing CLI profiles retain their old shared
+  // relay override until an explicit configuration migration is introduced.
+  if (agentProfileScope(ctx) === 'desktop') {
+    return path.join(path.dirname(defaultAgentIdentityPath(ctx)), 'public.json')
+  }
+  return path.join(agentDshHome(ctx), 'harness-remote-public.json')
 }
 
 function packageVersionFromAncestors(start: string): string | null {
@@ -149,7 +163,10 @@ function packageVersionFromAncestors(start: string): string | null {
 }
 
 /** DSH CLI version, not the plugin adapter version and not host.describe's protocol version. */
-export function installedDshVersion(): string {
+export function installedDshVersion(ctx?: HostContext): string {
+  if (dshProfileFacts(ctx)) return hostRuntimeVersion(ctx)!
+  // COMPAT: display-only fallback for legacy hosts. Protocol selection never
+  // uses PATH or DSH_RUNTIME_VERSION, and modern hosts never take this branch.
   const override = process.env.DSH_RUNTIME_VERSION
   if (override && /^[A-Za-z0-9._+-]{1,64}$/.test(override)) return override
   const argvEntry = process.argv[1]
@@ -179,19 +196,24 @@ export function installedDshVersion(): string {
   return 'unknown'
 }
 
-export function loadAgentDescriptor(): AgentDescriptor {
-  if (cachedDescriptor) return cachedDescriptor
-  const instancePath = path.join(ROOT, 'instances', instanceStorageKey(), 'agent.json')
-  cachedDescriptor = {
+export function loadAgentDescriptor(ctx?: HostContext): AgentDescriptor {
+  const root = path.join(agentDshHome(ctx), 'harness-remote')
+  const instancePath = path.join(root, 'instances', instanceStorageKey(agentProfileScope(ctx)), 'agent.json')
+  const cached = cachedDescriptors.get(instancePath)
+  if (cached) return cached
+  // Resolve the running version before touching persistent identities.
+  const agentVersion = installedDshVersion(ctx)
+  const descriptor: AgentDescriptor = {
     schemaVersion: 1,
-    hostId: stableId(HOST_PATH),
+    hostId: stableId(path.join(root, 'host.json')),
     agentInstanceId: stableId(instancePath),
     hostName: hostname(),
     agentKind: 'deepseek-harness',
     agentName: 'DeepSeek Harness',
-    agentVersion: installedDshVersion(),
+    agentVersion,
     hostPlatform: hostPlatformDescriptor(),
     capabilities: AGENT_CAPABILITIES,
   }
-  return cachedDescriptor
+  cachedDescriptors.set(instancePath, descriptor)
+  return descriptor
 }

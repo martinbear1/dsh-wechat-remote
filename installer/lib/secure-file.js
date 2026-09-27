@@ -7,6 +7,7 @@ import {
   closeSync,
   existsSync,
   fsyncSync,
+  linkSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -33,6 +34,12 @@ function tightenPrivateFile(file) {
   }
 }
 function writePrivateJsonAtomic(file, value) {
+  publishPrivateJson(file, value, true);
+}
+function createPrivateJsonAtomic(file, value) {
+  return publishPrivateJson(file, value, false);
+}
+function publishPrivateJson(file, value, replace) {
   const parent = dirname(file);
   mkdirSync(parent, { recursive: true, mode: 448 });
   const temporary = `${file}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
@@ -53,8 +60,17 @@ function writePrivateJsonAtomic(file, value) {
       closeSync(fd);
     }
     tightenPrivateFile(temporary);
-    renameSync(temporary, file);
+    if (replace) renameSync(temporary, file);
+    else {
+      try {
+        linkSync(temporary, file);
+      } catch (error) {
+        if (error.code === "EEXIST") return false;
+        throw error;
+      }
+    }
     tightenPrivateFile(file);
+    return true;
   } finally {
     if (existsSync(temporary)) {
       try {
@@ -70,6 +86,7 @@ function readPrivateJson(file) {
   return value;
 }
 export {
+  createPrivateJsonAtomic,
   readPrivateJson,
   tightenPrivateFile,
   writePrivateJsonAtomic

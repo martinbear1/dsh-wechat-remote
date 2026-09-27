@@ -3,8 +3,9 @@ import fs from 'node:fs'
 import path from 'node:path'
 import http from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
-import { adapterDshHome, resolveDshWebRuntime } from './dsh-runtime.js'
-import { resolveAgentProfileScope, gateStatePathForProfile, loadAgentDescriptor, defaultAgentIdentityPath } from './agent-metadata.js'
+import { resolveDshWebRuntime } from './dsh-runtime.js'
+import { agentDshHome, agentProfileScope, gateStatePathForProfile, loadAgentDescriptor, defaultAgentIdentityPath } from './agent-metadata.js'
+import { desktopOwnsLifecycle } from './dsh-host-context.js'
 import { deriveGatePorts } from './gate-ports.js'
 import { resolveTypertGateway, invokeLegacyRpc } from './dsh-protocol-compat.js'
 import { currentHostManager, startUpdateWorker } from './install-lifecycle.js'
@@ -41,19 +42,20 @@ export async function quiesceNativeHost(ctx: Context, read: (method: string) => 
 }
 export async function createInstallControl(context: Context, config: InstallControlConfig): Promise<{ origin: string; close(): void }> {
   const ctx = context.root
+  if (desktopOwnsLifecycle(ctx)) throw new Error('请通过 DSH 桌面应用的插件管理页更新，未停止节点。')
   // The independent installer and WebUI updater enforce the same host
   // contract. Never stop an unknown/incomplete host just to try an upgrade.
   assertNativeUpdateCapabilities(ctx)
-  const home = adapterDshHome(), id = path.basename(config.directory)
+  const home = agentDshHome(ctx), id = path.basename(config.directory)
   if (!/^[a-f0-9]{32}$/.test(id) || !/^[a-f0-9]{48}$/.test(config.token)
     || path.dirname(config.directory) !== path.join(home, 'harness-remote-updates')
     || fs.realpathSync(config.directory) !== config.directory) throw new Error('安装控制请求不属于当前 DSH。')
-  const scope = resolveAgentProfileScope('', process.argv, home), profile = path.join(home, 'profiles', scope)
+  const scope = agentProfileScope(ctx), profile = path.join(home, 'profiles', scope)
   const cli = fs.realpathSync(process.argv[1])
   const manifest = JSON.parse(fs.readFileSync(path.resolve(cli, '../../package.json'), 'utf8'))
   if (manifest.name !== '@deepseek-ai/dsh' || process.execArgv.length) throw new Error('此 DSH 启动方式尚不支持自动更新。')
   const manager = currentHostManager(), webPort = resolveDshWebRuntime(ctx, process.env).port
-  const ports = deriveGatePorts(scope, loadAgentDescriptor().agentInstanceId)
+  const ports = deriveGatePorts(scope, loadAgentDescriptor(ctx).agentInstanceId)
   const nativeExit = ctx.get('appExit') as ((code: number) => void) | undefined
   const gateway = resolveTypertGateway(ctx)
   let launched = false, quiesced = false
@@ -84,7 +86,7 @@ export async function createInstallControl(context: Context, config: InstallCont
       const input = body ? JSON.parse(body) : {}
       if (req.url === '/describe') return json(200, { pid: process.pid, cli, executable: process.execPath,
         argv: process.argv.slice(1), execArgv: process.execArgv, cwd: process.cwd(), home, profile, webPort,
-        stateFile: gateStatePathForProfile(scope, homedir(), home), identityFile: defaultAgentIdentityPath(), gatePort: ports.publicPort, localPort: ports.localPort, manager, dshVersion: manifest.version,
+        stateFile: gateStatePathForProfile(scope, homedir(), home), identityFile: defaultAgentIdentityPath(ctx), gatePort: ports.publicPort, localPort: ports.localPort, manager, dshVersion: manifest.version,
         pluginVersion: version(), platform: process.platform, arch: process.arch, quiesced })
       if (req.url === '/read' && !quiesced) return json(200, await read(input.method, input.payload))
       if (req.url === '/health' && !quiesced) {

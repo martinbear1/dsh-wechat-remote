@@ -83,7 +83,8 @@ check(host.includes("from './dsh-compatibility-api.js'"), 'lib/gate-runtime.js �
 check(host.includes('setCors(req, res)'), '本地门没有为实际 GET 响应设置严格回环 CORS')
 check(host.includes('selectedGatePorts.publicPort'), 'lib/index.js 未使用推导出的局域网门')
 check(host.includes('selectedGatePorts.localPort'), 'lib/index.js 未使用推导出的本地门')
-check(host.includes('defaultGateStatePath()'), '宿主未按 DSH profile 选择状态文件')
+check(host.includes('defaultGateStatePath(ctx)'), '宿主未按实际 DSH profile 选择状态文件')
+check(host.includes('identityPath: defaultAgentIdentityPath(ctx)'), '公网身份未绑定当前宿主实例')
 check(agentMetadata.includes("normalized === 'web' || normalized === 'default'"), '默认 profile 未保留发布版凭证迁移路径')
 check(agentMetadata.includes("'gate-wechat-state.json'"), '状态文件名不是 gate-wechat-state.json')
 for (const retired of ['/pair/claim-wechat', '/pair/verify-wechat', '/pair/claim', 'code2session']) {
@@ -204,7 +205,7 @@ for (const required of ['harness-remote-public.json', 'DEFAULT_PUBLIC_RELAY_ORIG
   check(publicRelay.includes(required), `公网 Agent 缺少安全约束：${required}`)
 }
 check(!publicRelay.includes('createServer('), '公网 Agent 不得创建入站 HTTP 监听器')
-check(host.includes('loadPublicRelayConfig()'), '宿主没有加载公网 Agent 产品配置')
+check(host.includes('loadPublicRelayConfig(defaultRelayConfigPath(ctx))'), '宿主没有加载当前实例的公网 Agent 产品配置')
 check(host.includes('if (relayConfig)'), '缺少公网 Agent 显式关闭分支')
 check(host.includes('new PublicRelayGateway'), '宿主未挂载加密公网网关')
 check(host.includes('compatibilityApi,'), '新版 DSH 公网链路未复用宿主协议适配边界')

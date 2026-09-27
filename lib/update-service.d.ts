@@ -1,11 +1,12 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Context } from '@deepseek-ai/cordis';
+import { type HostContext } from './dsh-host-context.js';
 import { type RuntimeVersion, type UpdateAdvice, type Release } from './update-policy.js';
 export declare function previewUpdatesEnabled(env?: NodeJS.ProcessEnv): boolean;
 export declare function updateAction(advice: UpdateAdvice, release: Release | undefined, eligible: {
     eligible: boolean;
     reason: string;
-}, occupied: boolean): {
+}, occupied: boolean, ctx?: HostContext): {
     canInstall: boolean;
     mode: 'none' | 'automatic' | 'manual' | 'busy';
     reason: string;

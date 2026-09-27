@@ -4,8 +4,9 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
-import { adapterDshHome, isAllowedDshWebOrigin } from './dsh-runtime.js'
-import { agentProfileScope, defaultGateStatePath, loadAgentDescriptor } from './agent-metadata.js'
+import { isAllowedDshWebOrigin } from './dsh-runtime.js'
+import { agentDshHome, agentProfileScope, defaultGateStatePath, loadAgentDescriptor } from './agent-metadata.js'
+import { desktopOwnsLifecycle, type HostContext } from './dsh-host-context.js'
 import { assessUpdate, validateCatalog, trustedReleaseAsset, type RuntimeVersion, type UpdateCatalog, type UpdateAdvice, type Release } from './update-policy.js'
 import { boundedFetch, downloadRelease } from './update-download.js'
 import { validateJob, releaseOwnedUpdateLock, control, type UpdateJob } from './update-worker.js'
@@ -23,17 +24,19 @@ export function previewUpdatesEnabled(env: NodeJS.ProcessEnv = process.env): boo
 }
 interface UpdateJobReference { jobId: string; statusOrigin: string; statusToken: string }
 export function updateAction(advice: UpdateAdvice, release: Release | undefined,
-  eligible: { eligible: boolean; reason: string }, occupied: boolean): {
+  eligible: { eligible: boolean; reason: string }, occupied: boolean, ctx?: HostContext): {
     canInstall: boolean; mode: 'none' | 'automatic' | 'manual' | 'busy'; reason: string; manualCommand: string
   } {
   const none = { canInstall: false, mode: 'none' as const, reason: '', manualCommand: '' }
   if (!advice.targetVersion || !release || release.version !== advice.targetVersion
       || !['info', 'recommended', 'required'].includes(advice.severity) || advice.expiresAt <= Date.now()) return none
   if (occupied) return { ...none, mode: 'busy', reason: '当前更新尚未结束，请稍后重试。' }
+  if (desktopOwnsLifecycle(ctx)) return { ...none, mode: 'manual',
+    reason: '请在 DSH 桌面应用的插件管理页更新，并按应用提示重新加载或重启。' }
   const assetValid = trustedReleaseAsset(release.asset, release.version)
   if (assetValid && eligible.eligible) return { ...none, mode: 'automatic', canInstall: true }
   // Host-side command, not an executable instruction supplied by the WebUI.
-  const profile = agentProfileScope()
+  const profile = agentProfileScope(ctx)
   const manualCommand = release.channel === 'stable' && /^\d+\.\d+\.\d+$/.test(release.version) && /^[A-Za-z0-9_-]+$/.test(profile)
     ? `npx -y dsh-wechat-remote@latest${profile === 'web' ? '' : ` --profile ${profile}`}` : ''
   return { canInstall: false, mode: 'manual', reason: !eligible.eligible ? eligible.reason : '自动更新包暂不可用，请手动更新。', manualCommand }
@@ -82,12 +85,15 @@ export class PluginUpdateService {
   // verifies durable data. Automatic phone reconnects must not rotate a token
   // or append a message in the middle of that comparison.
   private fenceStartup(): void {
+    // A CLI worker must never intercept the Desktop-owned server or inherit
+    // another launcher's restart-verification job.
+    if (desktopOwnsLifecycle(this.ctx)) return
     let directory = process.env.HARNESS_REMOTE_UPDATE_JOB
     if (!directory) {
       try {
         const ref = JSON.parse(fs.readFileSync(this.progressIndex(), 'utf8'))
         if (!/^[a-f0-9]{32}$/.test(ref.jobId)) return
-        const candidate = path.join(adapterDshHome(), 'harness-remote-updates', ref.jobId)
+        const candidate = path.join(agentDshHome(this.ctx), 'harness-remote-updates', ref.jobId)
         const result = JSON.parse(fs.readFileSync(path.join(candidate, 'result.json'), 'utf8'))
         if (result.terminal || !['restarting', 'verifying', 'rolling-back'].includes(result.phase)) return
         directory = candidate
@@ -95,8 +101,8 @@ export class PluginUpdateService {
     }
     const job = JSON.parse(fs.readFileSync(path.join(directory, 'job.json'), 'utf8')) as UpdateJob
     validateJob(job)
-    if (job.directory !== directory || job.home !== adapterDshHome()
-        || job.profile !== path.join(adapterDshHome(), 'profiles', agentProfileScope())
+    if (job.directory !== directory || job.home !== agentDshHome(this.ctx)
+        || job.profile !== path.join(agentDshHome(this.ctx), 'profiles', agentProfileScope(this.ctx))
         || job.webPort !== this.ports.web || job.gatePort !== this.ports.gate) throw new Error('重启验证任务与当前实例不匹配')
     const complete = () => {
       try { return JSON.parse(fs.readFileSync(path.join(directory, 'verification-complete.json'), 'utf8')).id === job.id } catch { return false }
@@ -136,19 +142,19 @@ export class PluginUpdateService {
   }
   trackPublicRequests(check: () => boolean): void { this.otherInFlight = check }
   current(): RuntimeVersion {
-    const d = loadAgentDescriptor()
+    const d = loadAgentDescriptor(this.ctx)
     return { agentKind: d.agentKind, agentVersion: d.agentVersion, pluginVersion: ownVersion(), platform: d.hostPlatform.kind, arch: process.arch }
   }
   isMaintaining(): boolean { return this.maintenance || Boolean(this.startupJob) }
   private progressIndex(): string {
-    const scope = createHash('sha256').update(agentProfileScope()).digest('hex').slice(0, 24)
-    return path.join(adapterDshHome(), 'harness-remote-updates', `profile-${scope}.json`)
+    const scope = createHash('sha256').update(agentProfileScope(this.ctx)).digest('hex').slice(0, 24)
+    return path.join(agentDshHome(this.ctx), 'harness-remote-updates', `profile-${scope}.json`)
   }
   private recovery(): { activeJob: UpdateJobReference | null; lastResult: unknown } {
     try {
       const job = JSON.parse(fs.readFileSync(this.progressIndex(), 'utf8'))
       if (!/^[a-f0-9]{32}$/.test(job.jobId)) throw new Error('invalid progress index')
-      const dir = path.join(adapterDshHome(), 'harness-remote-updates', job.jobId)
+      const dir = path.join(agentDshHome(this.ctx), 'harness-remote-updates', job.jobId)
       const result = JSON.parse(fs.readFileSync(path.join(dir, 'result.json'), 'utf8'))
       return { activeJob: result.terminal ? null : job, lastResult: result }
     } catch { return { activeJob: this.busy ? this.activeJob || null : null, lastResult: null } }
@@ -176,13 +182,13 @@ export class PluginUpdateService {
       // Missing OS/CPU/DSH test evidence must never disable this updater.
       // The catalog excludes known broken releases, not untested combinations.
       // Check actual native capabilities and restart ownership on every host.
-      if (process.versions.electron) throw new Error('此启动方式尚不支持自动重启')
+      if (desktopOwnsLifecycle(this.ctx)) throw new Error('请通过 DSH 桌面应用的插件管理页更新')
       currentHostManager()
       if (process.argv.some(a => /(?:api.?key|password|secret|token)[= ]/i.test(a))
           || process.execArgv.length) throw new Error('此启动方式不能安全自动重启，请手工更新')
       const cli = fs.realpathSync(process.argv[1])
       if (JSON.parse(fs.readFileSync(path.resolve(cli, '../../package.json'), 'utf8')).name !== '@deepseek-ai/dsh') throw new Error('无法确认 DSH 启动程序')
-      const profile = path.join(adapterDshHome(), 'profiles', agentProfileScope())
+      const profile = path.join(agentDshHome(this.ctx), 'profiles', agentProfileScope(this.ctx))
       if (fs.realpathSync(profile) !== profile || !fs.realpathSync(ownRoot).startsWith(profile + path.sep)) throw new Error('插件不在可安全更新的独立 profile 中')
       assertNativeUpdateCapabilities(this.ctx)
       fs.accessSync(profile, fs.constants.W_OK)
@@ -208,7 +214,7 @@ export class PluginUpdateService {
           || JSON.stringify(refreshed) !== JSON.stringify(plan.release)) throw new Error('兼容清单已变化，请重新检查确认')
       const eligible = this.eligibility()
       if (!eligible.eligible) throw new Error(eligible.reason)
-      const id = randomBytes(16).toString('hex'), home = adapterDshHome()
+      const id = randomBytes(16).toString('hex'), home = agentDshHome(this.ctx)
       ownedLockId = id
       const directory = path.join(home, 'harness-remote-updates', id)
       lockPath = path.join(eligible.profile!, '.harness-remote-update.lock')
@@ -219,7 +225,7 @@ export class PluginUpdateService {
       fs.writeFileSync(path.join(directory, 'release.tgz'), archive, { flag: 'wx', mode: 0o600 })
       const statusToken = randomBytes(24).toString('hex')
       controller = await createInstallControl(this.ctx, { directory, token: statusToken, pnpm: eligible.pnpm! })
-      const job: UpdateJob = { id, directory, profile: eligible.profile!, home, stateFile: defaultGateStatePath(),
+      const job: UpdateJob = { id, directory, profile: eligible.profile!, home, stateFile: defaultGateStatePath(this.ctx),
         cli: eligible.cli!, argv: [eligible.cli!, ...process.argv.slice(2)], execArgv: process.execArgv,
         executable: process.execPath, cwd: process.cwd(), pnpm: eligible.pnpm!, parentPid: process.pid,
         webPort: this.ports.web, gatePort: this.ports.gate, localPort: this.ports.local,
@@ -271,7 +277,7 @@ export class PluginUpdateService {
         const release = this.catalog?.releases.find(r => r.version === advice.targetVersion)
         const recovered = this.recovery()
         const eligible = release ? this.eligibility() : { eligible: false, reason: '' }
-        const action = updateAction(advice, release, eligible, Boolean(this.busy || this.isMaintaining() || recovered.activeJob))
+        const action = updateAction(advice, release, eligible, Boolean(this.busy || this.isMaintaining() || recovered.activeJob), this.ctx)
         this.ticket = undefined
         if (action.canInstall) this.ticket = { value: randomBytes(24).toString('hex'), expiresAt: Date.now() + 120000, revision: advice.revision, release: release! }
         return json(200, { advice, ...action, channel: previewUpdatesEnabled() ? 'preview' : 'stable',
@@ -282,10 +288,10 @@ export class PluginUpdateService {
         const query = new URL(req.url, 'http://localhost').searchParams
         const id = query.get('job') || ''
         if (!/^[a-f0-9]{32}$/.test(id) || query.size !== 1 || this.isMaintaining()) throw new Error('更新尚未完成验证')
-        const directory = path.join(adapterDshHome(), 'harness-remote-updates', id)
+        const directory = path.join(agentDshHome(this.ctx), 'harness-remote-updates', id)
         const job = JSON.parse(fs.readFileSync(path.join(directory, 'job.json'), 'utf8')) as UpdateJob
         const result = JSON.parse(fs.readFileSync(path.join(directory, 'result.json'), 'utf8'))
-        if (job.id !== id || job.home !== adapterDshHome() || job.profile !== path.join(adapterDshHome(), 'profiles', agentProfileScope())
+        if (job.id !== id || job.home !== agentDshHome(this.ctx) || job.profile !== path.join(agentDshHome(this.ctx), 'profiles', agentProfileScope(this.ctx))
           || job.webPort !== this.ports.web || !result.terminal || !result.ok || ownVersion() !== job.targetVersion) throw new Error('当前实例与完成的更新不匹配')
         // This loopback + exact browser Origin/Host door is already the local
         // management authority. Never put the launch URL in public metadata,

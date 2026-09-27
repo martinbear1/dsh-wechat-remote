@@ -55,13 +55,17 @@ import {
 } from './public-relay-agent.js'
 import {
   agentProfileScope,
+  agentDshHome,
+  defaultAgentIdentityPath,
+  defaultRelayConfigPath,
   defaultGateStatePath,
   loadAgentDescriptor,
   type AgentDescriptor,
 } from './agent-metadata.js'
 import { hostPlatformDescriptor, selectLanIPv4 } from './host-platform.js'
 import { deriveGatePorts, describeGateListenFailure } from './gate-ports.js'
-import { adapterDshHome, isAllowedDshWebOrigin, resolveDshWebRuntime } from './dsh-runtime.js'
+import { isAllowedDshWebOrigin, resolveDshWebRuntime } from './dsh-runtime.js'
+import { hostRuntimeVersion } from './dsh-host-context.js'
 import { resolveTypertGateway } from './dsh-protocol-compat.js'
 import { DshCompatibilityApi } from './dsh-compatibility-api.js'
 import { loadGateState, saveGateState, type GateState } from './gate-state.js'
@@ -117,9 +121,12 @@ function recordOf(value: unknown): Record<string, unknown> | null {
  * and are therefore scoped to this exact plugin instance.
  */
 export function mountWechatGate(ctx: Context): () => void {
+  // Validate launcher authority before any credential writes or listeners.
+  // A malformed Desktop context must disable this adapter, not borrow Web.
+  hostRuntimeVersion(ctx)
   const dshWebRuntime = resolveDshWebRuntime(ctx)
   const UPSTREAM_PORT = dshWebRuntime.port
-  const STATE_FILE = defaultGateStatePath()
+  const STATE_FILE = defaultGateStatePath(ctx)
   const TARGET = {
     target: 'http://127.0.0.1:' + UPSTREAM_PORT,
     changeOrigin: true,
@@ -131,7 +138,7 @@ export function mountWechatGate(ctx: Context): () => void {
   let publicRelayStatus: AgentStatus = { enabled: false, state: 'disabled' }
   let agentDescriptor: AgentDescriptor
   try {
-    agentDescriptor = loadAgentDescriptor()
+    agentDescriptor = loadAgentDescriptor(ctx)
   } catch (error: unknown) {
     // A damaged optional metadata file must not prevent DSH itself from booting.
     // Keep this process usable but do not overwrite evidence needed for repair.
@@ -152,7 +159,7 @@ export function mountWechatGate(ctx: Context): () => void {
     }
   }
   const selectedGatePorts = deriveGatePorts(
-    agentProfileScope(),
+    agentProfileScope(ctx),
     agentDescriptor.agentInstanceId,
     process.env,
   )
@@ -764,9 +771,10 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
   // provisions public + LAN routes. A local config may explicitly disable or
   // override it; failures stay isolated and never alter LAN/WebUI behavior.
   try {
-    const relayConfig = loadPublicRelayConfig()
+    const relayConfig = loadPublicRelayConfig(defaultRelayConfigPath(ctx))
     if (relayConfig) {
       publicRelayGateway = new PublicRelayGateway(relayConfig, {
+        identityPath: defaultAgentIdentityPath(ctx),
         agentVersion: agentDescriptor.agentVersion,
         adapterVersion: installedPluginVersion(),
         hostId: agentDescriptor.hostId,
@@ -784,7 +792,7 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
         // private index by stable Agent identity so multiple profiles on one
         // host cannot reuse another public node's object ticket.
         historyCachePath: path.join(
-          adapterDshHome(),
+          agentDshHome(ctx),
           `wechat-history-snapshots-${agentDescriptor.agentInstanceId}.json`,
         ),
         onDiagnostic: (level, message) => {

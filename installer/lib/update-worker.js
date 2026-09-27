@@ -15,6 +15,7 @@ import {
   closeSync,
   existsSync,
   fsyncSync,
+  linkSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -41,6 +42,9 @@ function tightenPrivateFile(file) {
   }
 }
 function writePrivateJsonAtomic(file, value) {
+  publishPrivateJson(file, value, true);
+}
+function publishPrivateJson(file, value, replace) {
   const parent = dirname(file);
   mkdirSync(parent, { recursive: true, mode: 448 });
   const temporary = `${file}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
@@ -61,8 +65,17 @@ function writePrivateJsonAtomic(file, value) {
       closeSync(fd);
     }
     tightenPrivateFile(temporary);
-    renameSync(temporary, file);
+    if (replace) renameSync(temporary, file);
+    else {
+      try {
+        linkSync(temporary, file);
+      } catch (error) {
+        if (error.code === "EEXIST") return false;
+        throw error;
+      }
+    }
     tightenPrivateFile(file);
+    return true;
   } finally {
     if (existsSync(temporary)) {
       try {
@@ -117,6 +130,7 @@ var NativeInstallError = class extends Error {
   }
 };
 function runNativePlugin(cli, profile, home, toolPath, runtime, logFile, archiveName, timeoutMs = 6e5, operation = "add") {
+  if (profile.toLowerCase() === "desktop") throw new Error("Desktop \u63D2\u4EF6\u5B89\u88C5\u7531\u684C\u9762\u5E94\u7528\u7BA1\u7406\uFF0C\u4E0D\u80FD\u4F7F\u7528 CLI \u4FEE\u6539\u3002");
   if (!safeProfileName(profile) || !/^harness-remote-[\w.+-]+\.tgz$/.test(archiveName)) throw new Error("\u65E0\u6548\u7684\u5B89\u88C5\u76EE\u6807\u3002");
   return new Promise((resolve, reject) => {
     const log = fs.openSync(logFile, "a", 384);
@@ -201,6 +215,7 @@ function runNativePlugin(cli, profile, home, toolPath, runtime, logFile, archive
 }
 async function installProfile(job) {
   const scope = path.basename(job.profile), home = path.dirname(path.dirname(job.profile));
+  if (scope.toLowerCase() === "desktop") throw new Error("Desktop \u63D2\u4EF6\u5B89\u88C5\u7531\u684C\u9762\u5E94\u7528\u7BA1\u7406\uFF0C\u4E0D\u80FD\u4F7F\u7528 CLI \u4FEE\u6539\u3002");
   if (!safeProfileName(scope) || path.dirname(job.profile) !== path.join(home, "profiles") || !/^[\w.+-]{1,80}$/.test(job.targetVersion)) throw new Error("\u5B89\u88C5\u76EE\u6807\u4E0D\u660E\u786E\u3002");
   fs.mkdirSync(job.profile, { recursive: true, mode: 448 });
   const archive = path.join(job.directory, "release.tgz");

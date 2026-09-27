@@ -112,6 +112,7 @@ async function installStopped({ cli, home, profile, profileName, directory, id, 
 }
 export async function install({ profileName = 'web', cli, home: configuredHome, assetsRoot, open = true, repair = false } = {}) {
   if (!/^[A-Za-z0-9_-]{1,80}$/.test(profileName)) throw new Error('无效的 profile 名称。')
+  if (profileName.toLowerCase() === 'desktop') throw new Error('Desktop 由桌面应用管理。请在其插件管理页安装插件包；未修改 Desktop 或 Web 配置。')
   if (cli) cli = validateDshCli(cli).cli
   const runtime = resolveInstallRuntime(root); await verifyInstallRuntime(runtime)
   const home = resolveHome(configuredHome || process.env.DSH_HOME)

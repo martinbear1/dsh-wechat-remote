@@ -1,37 +1,25 @@
 /** Host-only contract differences. No network probing or per-request retries. */
-import fs from 'node:fs'
-import path from 'node:path'
+import { hostRuntimeVersion, type HostContext } from './dsh-host-context.js'
+export type { HostContext } from './dsh-host-context.js'
 type Row = Record<string, any>
-export interface HostContext { get(name: string): unknown }
 const contracts = new WeakMap<object, { duplex: boolean }>()
 /** Inspect only the RUNNING CLI, never another global/npm cache install. */
-export function runningDshVersion(entry = process.argv[1]): string | undefined {
-  if (!entry) return
-  let directory: string
-  try { directory = path.dirname(fs.realpathSync(entry)) } catch { return }
-  for (let depth = 0; depth < 8; depth++) {
-    try {
-      const manifest = JSON.parse(fs.readFileSync(path.join(directory, 'package.json'), 'utf8'))
-      if (manifest.name === '@deepseek-ai/dsh') return manifest.version
-    } catch { /* ancestor may not be a package */ }
-    const parent = path.dirname(directory)
-    if (parent === directory) break
-    directory = parent
-  }
+export function runningDshVersion(entry = process.argv[1], ctx?: HostContext): string | undefined {
+  return hostRuntimeVersion(ctx, entry)
 }
 /** No carrier-arity capability exists. Follow the official 0.1.7-alpha.1
  * boundary centrally, not Function.length or trial calls. Retire the legacy
  * branch once pre-0.1.7 hosts leave the support matrix. */
 export function usesDuplexEvents(version: string | undefined): boolean {
   if (!version) return false // Pre-packaged/source hosts use the legacy carrier.
-  const match = /^(\d+)\.(\d+)\.(\d+)(?:-[\w.-]+)?$/.exec(version)
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:-[\w.-]+)?(?:\+[\w.-]+)?$/.exec(version)
   if (!match) throw new Error('无法识别当前 DSH 事件协议版本')
   const [, major, minor, patch] = match.map(Number)
   return major > 0 || minor > 1 || minor === 1 && patch >= 7
 }
-export function openHostEvents(gateway: Row, endpoint: string, payload: unknown, signal: AbortSignal): Promise<AsyncIterable<unknown>> {
+export function openHostEvents(gateway: Row, endpoint: string, payload: unknown, signal: AbortSignal, ctx?: HostContext): Promise<AsyncIterable<unknown>> {
   let contract = contracts.get(gateway)
-  if (!contract) { contract = { duplex: usesDuplexEvents(runningDshVersion()) }; contracts.set(gateway, contract) }
+  if (!contract) { contract = { duplex: usesDuplexEvents(hostRuntimeVersion(ctx)) }; contracts.set(gateway, contract) }
   signal.throwIfAborted()
   // Same in-process operator identity as before. No new network authority,
   // buffered uplink, background task or duplicate subscription.
@@ -51,7 +39,7 @@ export function workspaceReadArguments(ctx: HostContext, args: Row): Row {
   if (names?.includes('range') && !names.includes('options')) return args
   if (descriptor || registry?.local?.hasSeen?.('workspaceFiles/readBytes')) throw new Error('DSH 文件接口暂不可用，请稍后重试')
   // Old SRC mode has no strict descriptors; use the running host contract.
-  if (usesDuplexEvents(runningDshVersion())) {
+  if (usesDuplexEvents(hostRuntimeVersion(ctx))) {
     const { range, ...rest } = args
     return { ...rest, options: { range } }
   }
@@ -88,7 +76,7 @@ export async function invokeHostRemote(ctx: HostContext, gateway: Row, request: 
   if (request.namespace !== 'subagents' || request.method !== 'list') return gateway.invoke(request)
   const registry = (ctx.get('typert') as Row | undefined)?.local
   // A withdrawn descriptor is a host error, not permission to bypass it.
-  if (registry?.get('subagents/list') || registry?.hasSeen?.('subagents/list') || !usesDuplexEvents(runningDshVersion())) return gateway.invoke(request)
+  if (registry?.get('subagents/list') || registry?.hasSeen?.('subagents/list') || !usesDuplexEvents(hostRuntimeVersion(ctx))) return gateway.invoke(request)
   const parent = request.args.parentSessionId
   if (typeof parent !== 'string' || !parent || parent.length > 256) throw new Error('父会话标识无效')
   request.signal?.throwIfAborted()

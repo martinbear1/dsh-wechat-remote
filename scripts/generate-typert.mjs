@@ -75,6 +75,7 @@ try {
     'gate-state.ts',
     'dsh-runtime.ts',
     'dsh-host-contract.ts',
+    'dsh-host-context.ts',
     'typert-schema-compat.ts',
     'dsh-protocol-compat.ts',
     'dsh-session-address.ts',

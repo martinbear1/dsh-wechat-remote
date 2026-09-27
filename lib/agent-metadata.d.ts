@@ -1,4 +1,5 @@
 import { type HostPlatformDescriptor } from './host-platform.js';
+import { type HostContext } from './dsh-host-context.js';
 export interface AgentCapability {
     readonly id: string;
     readonly version: number;
@@ -16,7 +17,8 @@ export interface AgentDescriptor {
 }
 export declare const AGENT_CAPABILITIES: readonly AgentCapability[];
 /** Installed DSH profile name without exposing its filesystem path. */
-export declare function agentProfileScope(): string;
+export declare function agentDshHome(ctx?: HostContext): string;
+export declare function agentProfileScope(ctx?: HostContext): string;
 export declare function resolveAgentProfileScope(modulePath: string, argv: readonly string[], dshHome: string): string;
 /**
  * Keep the historic web/default credential path so an upgrade never unpairs
@@ -25,8 +27,9 @@ export declare function resolveAgentProfileScope(modulePath: string, argv: reado
  * profile's LAN token and WeChat binding.
  */
 export declare function gateStatePathForProfile(profileScope: string, homeDirectory?: string, dshHome?: string): string;
-export declare function defaultGateStatePath(): string;
-export declare function defaultAgentIdentityPath(): string;
+export declare function defaultGateStatePath(ctx?: HostContext): string;
+export declare function defaultAgentIdentityPath(ctx?: HostContext): string;
+export declare function defaultRelayConfigPath(ctx?: HostContext): string;
 /** DSH CLI version, not the plugin adapter version and not host.describe's protocol version. */
-export declare function installedDshVersion(): string;
-export declare function loadAgentDescriptor(): AgentDescriptor;
+export declare function installedDshVersion(ctx?: HostContext): string;
+export declare function loadAgentDescriptor(ctx?: HostContext): AgentDescriptor;

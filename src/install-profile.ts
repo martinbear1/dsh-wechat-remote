@@ -54,6 +54,7 @@ export class NativeInstallError extends Error {
 export function runNativePlugin(cli: string, profile: string, home: string, toolPath: string,
   runtime: InstallRuntime, logFile: string, archiveName: string, timeoutMs = 600000,
   operation: 'add' | 'install' = 'add'): Promise<void> {
+  if (profile.toLowerCase() === 'desktop') throw new Error('Desktop 插件安装由桌面应用管理，不能使用 CLI 修改。')
   if (!safeProfileName(profile) || !/^harness-remote-[\w.+-]+\.tgz$/.test(archiveName)) throw new Error('无效的安装目标。')
   return new Promise((resolve, reject) => {
     const log = fs.openSync(logFile, 'a', 0o600)
@@ -114,6 +115,9 @@ export function runNativePlugin(cli: string, profile: string, home: string, tool
 /** The caller must stop the owning host and complete its backup first. */
 export async function installProfile(job: ProfileInstall): Promise<void> {
   const scope = path.basename(job.profile), home = path.dirname(path.dirname(job.profile))
+  // Reject before staging an archive or creating directories. The Desktop
+  // launcher owns this profile even when it is not currently running.
+  if (scope.toLowerCase() === 'desktop') throw new Error('Desktop 插件安装由桌面应用管理，不能使用 CLI 修改。')
   if (!safeProfileName(scope) || path.dirname(job.profile) !== path.join(home, 'profiles')
     || !/^[\w.+-]{1,80}$/.test(job.targetVersion)) throw new Error('安装目标不明确。')
   fs.mkdirSync(job.profile, { recursive: true, mode: 0o700 })

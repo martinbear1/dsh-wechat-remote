@@ -1,7 +1,7 @@
 /* Generated from the shared plugin installation sources. */
 
 // src/install-control.ts
-import fs3 from "node:fs";
+import fs2 from "node:fs";
 import path6 from "node:path";
 import http from "node:http";
 
@@ -29,9 +29,9 @@ function resolveDshWebRuntime(ctx, environment = process.env) {
 
 // src/agent-metadata.ts
 import { createHash, randomBytes as randomBytes2 } from "node:crypto";
-import { existsSync as existsSync3, readFileSync as readFileSync2, realpathSync } from "node:fs";
+import { existsSync as existsSync3, readFileSync as readFileSync3, realpathSync as realpathSync2 } from "node:fs";
 import { homedir as homedir3, hostname } from "node:os";
-import path3 from "node:path";
+import path4 from "node:path";
 import { fileURLToPath } from "node:url";
 
 // src/secure-file.ts
@@ -41,6 +41,7 @@ import {
   closeSync,
   existsSync,
   fsyncSync,
+  linkSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -67,6 +68,12 @@ function tightenPrivateFile(file) {
   }
 }
 function writePrivateJsonAtomic(file, value) {
+  publishPrivateJson(file, value, true);
+}
+function createPrivateJsonAtomic(file, value) {
+  return publishPrivateJson(file, value, false);
+}
+function publishPrivateJson(file, value, replace) {
   const parent = dirname(file);
   mkdirSync(parent, { recursive: true, mode: 448 });
   const temporary = `${file}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
@@ -87,8 +94,17 @@ function writePrivateJsonAtomic(file, value) {
       closeSync(fd);
     }
     tightenPrivateFile(temporary);
-    renameSync(temporary, file);
+    if (replace) renameSync(temporary, file);
+    else {
+      try {
+        linkSync(temporary, file);
+      } catch (error) {
+        if (error.code === "EEXIST") return false;
+        throw error;
+      }
+    }
     tightenPrivateFile(file);
+    return true;
   } finally {
     if (existsSync(temporary)) {
       try {
@@ -329,10 +345,78 @@ function raceSignal(promise, signal) {
   });
 }
 
+// src/dsh-host-context.ts
+import { readFileSync as readFileSync2, realpathSync } from "node:fs";
+import path3 from "node:path";
+var profiles = /* @__PURE__ */ new WeakMap();
+var versions = /* @__PURE__ */ new WeakMap();
+var versionPattern = /^\d+\.\d+\.\d+(?:-[\w.-]+)?(?:\+[\w.-]+)?$/;
+function dshProfileFacts(ctx) {
+  const value = ctx?.get("profileContext");
+  if (value === void 0 || value === null) {
+    if (process.versions.electron) throw new Error("\u684C\u9762\u5BBF\u4E3B\u672A\u63D0\u4F9B\u8FD0\u884C\u5B9E\u4F8B\u4FE1\u606F\uFF0C\u672A\u4F7F\u7528 Web \u914D\u7F6E");
+    return;
+  }
+  if (typeof value !== "object") throw new Error("DSH \u8FD0\u884C\u5B9E\u4F8B\u4FE1\u606F\u65E0\u6548\uFF0C\u672A\u4F7F\u7528\u5176\u4ED6\u5B9E\u4F8B\u7684\u914D\u7F6E");
+  const cached = profiles.get(value);
+  if (cached) return cached;
+  const row = value;
+  if (typeof row.name !== "string" || !row.name || row.name.length > 80 || /[\\/\u0000-\u001f]/.test(row.name) || [".", "..", "node_modules"].includes(row.name) || !["home", "dir", "installAnchor"].every((key) => typeof row[key] === "string" && path3.isAbsolute(row[key]) && !row[key].includes("\0"))) {
+    throw new Error("DSH \u8FD0\u884C\u5B9E\u4F8B\u4FE1\u606F\u4E0D\u5B8C\u6574\uFF0C\u672A\u4F7F\u7528\u5176\u4ED6\u5B9E\u4F8B\u7684\u914D\u7F6E");
+  }
+  const facts = Object.freeze({
+    name: row.name,
+    home: path3.normalize(row.home),
+    dir: path3.normalize(row.dir),
+    installAnchor: path3.normalize(row.installAnchor)
+  });
+  profiles.set(value, facts);
+  return facts;
+}
+function desktopOwnsLifecycle(ctx) {
+  return Boolean(process.versions.electron) || dshProfileFacts(ctx)?.name === "desktop";
+}
+function hostRuntimeVersion(ctx, entry = process.argv[1]) {
+  const profile = dshProfileFacts(ctx);
+  if (profile) {
+    const cached = versions.get(profile);
+    if (cached) return cached;
+    let manifest;
+    try {
+      manifest = JSON.parse(readFileSync2(profile.installAnchor, "utf8"));
+    } catch {
+      throw new Error("\u65E0\u6CD5\u8BFB\u53D6\u5F53\u524D DSH \u7684\u8FD0\u884C\u7248\u672C\uFF0C\u672A\u4F7F\u7528\u5176\u4ED6\u5B89\u88C5\u7248\u672C\u4EE3\u66FF");
+    }
+    if (manifest.name !== "@deepseek-ai/dsh" || typeof manifest.version !== "string" || !versionPattern.test(manifest.version)) throw new Error("\u5F53\u524D DSH \u7684\u8FD0\u884C\u7248\u672C\u4FE1\u606F\u65E0\u6548");
+    versions.set(profile, manifest.version);
+    return manifest.version;
+  }
+  if (!entry) return;
+  let directory;
+  try {
+    directory = path3.dirname(realpathSync(entry));
+  } catch {
+    return;
+  }
+  for (let depth = 0; depth < 8; depth++) {
+    try {
+      const manifest = JSON.parse(readFileSync2(path3.join(directory, "package.json"), "utf8"));
+      if (manifest.name === "@deepseek-ai/dsh") {
+        if (typeof manifest.version !== "string" || !versionPattern.test(manifest.version)) {
+          throw new Error("invalid host version");
+        }
+        return manifest.version;
+      }
+    } catch {
+    }
+    const parent = path3.dirname(directory);
+    if (parent === directory) break;
+    directory = parent;
+  }
+}
+
 // src/agent-metadata.ts
-var ROOT = path3.join(adapterDshHome(), "harness-remote");
-var HOST_PATH = path3.join(ROOT, "host.json");
-var cachedDescriptor = null;
+var cachedDescriptors = /* @__PURE__ */ new Map();
 var AGENT_CAPABILITIES = Object.freeze([
   Object.freeze({ id: "dsh.rpc", version: 1 }),
   Object.freeze({ id: "dsh.realtime", version: 1 }),
@@ -349,16 +433,19 @@ function stableId(file) {
   if (existsSync3(file)) {
     const stored = readPrivateJson(file);
     if (stored.version !== 1 || !/^[A-Za-z0-9_-]{20,64}$/.test(stored.id)) {
-      throw new Error(`Harness Remote metadata is invalid: ${path3.basename(file)}`);
+      throw new Error(`Harness Remote metadata is invalid: ${path4.basename(file)}`);
     }
     return stored.id;
   }
   const id = randomBytes2(18).toString("base64url");
-  writePrivateJsonAtomic(file, { version: 1, id });
-  return id;
+  if (createPrivateJsonAtomic(file, { version: 1, id })) return id;
+  return stableId(file);
 }
-function agentProfileScope() {
-  return resolveAgentProfileScope(fileURLToPath(import.meta.url), process.argv, adapterDshHome());
+function agentDshHome(ctx) {
+  return dshProfileFacts(ctx)?.home ?? adapterDshHome();
+}
+function agentProfileScope(ctx) {
+  return dshProfileFacts(ctx)?.name ?? resolveAgentProfileScope(fileURLToPath(import.meta.url), process.argv, adapterDshHome());
 }
 function resolveAgentProfileScope(modulePath, argv, dshHome) {
   const valid = (value) => Boolean(value) && value.length <= 80 && !/[\\/\u0000-\u001f]/.test(value) && value !== "." && value !== ".." && value !== "node_modules";
@@ -367,7 +454,7 @@ function resolveAgentProfileScope(modulePath, argv, dshHome) {
     const candidate = arg === "--profile" ? argv[index + 1] : arg.startsWith("--profile=") ? arg.slice("--profile=".length) : void 0;
     if (valid(candidate)) return candidate;
   }
-  const relative = path3.relative(path3.join(dshHome, "profiles"), modulePath);
+  const relative = path4.relative(path4.join(dshHome, "profiles"), modulePath);
   const parts = relative.split(/[\\/]/);
   if (valid(parts[0]) && parts[1] === "node_modules") return parts[0];
   if (argv[2] === "web") return "web";
@@ -376,12 +463,12 @@ function resolveAgentProfileScope(modulePath, argv, dshHome) {
 function instanceStorageKey(profileScope = agentProfileScope()) {
   return createHash("sha256").update(`deepseek-harness\0${profileScope}`).digest("hex").slice(0, 24);
 }
-function gateStatePathForProfile(profileScope, homeDirectory = homedir3(), dshHome = path3.join(homeDirectory, ".dsh")) {
+function gateStatePathForProfile(profileScope, homeDirectory = homedir3(), dshHome = path4.join(homeDirectory, ".dsh")) {
   const normalized = profileScope.trim().toLowerCase();
   if (normalized === "web" || normalized === "default") {
-    return path3.join(dshHome, "gate-wechat-state.json");
+    return path4.join(dshHome, "gate-wechat-state.json");
   }
-  return path3.join(
+  return path4.join(
     dshHome,
     "harness-remote",
     "instances",
@@ -389,54 +476,55 @@ function gateStatePathForProfile(profileScope, homeDirectory = homedir3(), dshHo
     "gate-wechat-state.json"
   );
 }
-function defaultAgentIdentityPath() {
-  const scope = agentProfileScope();
+function defaultAgentIdentityPath(ctx) {
+  const scope = agentProfileScope(ctx), home = agentDshHome(ctx);
   if (scope === "web" || scope === "default") {
-    return path3.join(adapterDshHome(), "harness-remote-public-identity.json");
+    return path4.join(home, "harness-remote-public-identity.json");
   }
-  return path3.join(ROOT, "instances", instanceStorageKey(scope), "identity.json");
+  return path4.join(home, "harness-remote", "instances", instanceStorageKey(scope), "identity.json");
 }
 function packageVersionFromAncestors(start) {
-  let current = path3.resolve(start);
+  let current = path4.resolve(start);
   for (let depth = 0; depth < 8; depth += 1) {
-    const manifest = path3.join(current, "package.json");
+    const manifest = path4.join(current, "package.json");
     try {
-      const value = JSON.parse(readFileSync2(manifest, "utf8"));
+      const value = JSON.parse(readFileSync3(manifest, "utf8"));
       if (value.name === "@deepseek-ai/dsh" && typeof value.version === "string" && value.version) {
         return value.version;
       }
     } catch {
     }
-    const parent = path3.dirname(current);
+    const parent = path4.dirname(current);
     if (parent === current) break;
     current = parent;
   }
   return null;
 }
-function installedDshVersion() {
+function installedDshVersion(ctx) {
+  if (dshProfileFacts(ctx)) return hostRuntimeVersion(ctx);
   const override = process.env.DSH_RUNTIME_VERSION;
   if (override && /^[A-Za-z0-9._+-]{1,64}$/.test(override)) return override;
   const argvEntry = process.argv[1];
   if (argvEntry) {
     let resolvedEntry = argvEntry;
     try {
-      resolvedEntry = realpathSync(argvEntry);
+      resolvedEntry = realpathSync2(argvEntry);
     } catch {
     }
-    const found = packageVersionFromAncestors(path3.dirname(resolvedEntry));
+    const found = packageVersionFromAncestors(path4.dirname(resolvedEntry));
     if (found) return found;
   }
-  for (const entry of String(process.env.PATH || "").split(path3.delimiter)) {
+  for (const entry of String(process.env.PATH || "").split(path4.delimiter)) {
     if (!entry) continue;
     try {
-      const command = path3.join(entry, process.platform === "win32" ? "dsh.cmd" : "dsh");
-      const found = packageVersionFromAncestors(path3.dirname(realpathSync(command)));
+      const command = path4.join(entry, process.platform === "win32" ? "dsh.cmd" : "dsh");
+      const found = packageVersionFromAncestors(path4.dirname(realpathSync2(command)));
       if (found) return found;
     } catch {
     }
     try {
-      const value = JSON.parse(readFileSync2(
-        path3.join(entry, "node_modules", "@deepseek-ai", "dsh", "package.json"),
+      const value = JSON.parse(readFileSync3(
+        path4.join(entry, "node_modules", "@deepseek-ai", "dsh", "package.json"),
         "utf8"
       ));
       if (value.name === "@deepseek-ai/dsh" && typeof value.version === "string" && value.version) {
@@ -447,21 +535,25 @@ function installedDshVersion() {
   }
   return "unknown";
 }
-function loadAgentDescriptor() {
-  if (cachedDescriptor) return cachedDescriptor;
-  const instancePath = path3.join(ROOT, "instances", instanceStorageKey(), "agent.json");
-  cachedDescriptor = {
+function loadAgentDescriptor(ctx) {
+  const root = path4.join(agentDshHome(ctx), "harness-remote");
+  const instancePath = path4.join(root, "instances", instanceStorageKey(agentProfileScope(ctx)), "agent.json");
+  const cached = cachedDescriptors.get(instancePath);
+  if (cached) return cached;
+  const agentVersion = installedDshVersion(ctx);
+  const descriptor = {
     schemaVersion: 1,
-    hostId: stableId(HOST_PATH),
+    hostId: stableId(path4.join(root, "host.json")),
     agentInstanceId: stableId(instancePath),
     hostName: hostname(),
     agentKind: "deepseek-harness",
     agentName: "DeepSeek Harness",
-    agentVersion: installedDshVersion(),
+    agentVersion,
     hostPlatform: hostPlatformDescriptor(),
     capabilities: AGENT_CAPABILITIES
   };
-  return cachedDescriptor;
+  cachedDescriptors.set(instancePath, descriptor);
+  return descriptor;
 }
 
 // src/gate-ports.ts
@@ -618,39 +710,18 @@ function withPresentationProjections(block) {
 }
 
 // src/dsh-host-contract.ts
-import fs from "node:fs";
-import path4 from "node:path";
 var contracts = /* @__PURE__ */ new WeakMap();
-function runningDshVersion(entry = process.argv[1]) {
-  if (!entry) return;
-  let directory;
-  try {
-    directory = path4.dirname(fs.realpathSync(entry));
-  } catch {
-    return;
-  }
-  for (let depth = 0; depth < 8; depth++) {
-    try {
-      const manifest = JSON.parse(fs.readFileSync(path4.join(directory, "package.json"), "utf8"));
-      if (manifest.name === "@deepseek-ai/dsh") return manifest.version;
-    } catch {
-    }
-    const parent = path4.dirname(directory);
-    if (parent === directory) break;
-    directory = parent;
-  }
-}
 function usesDuplexEvents(version) {
   if (!version) return false;
-  const match = /^(\d+)\.(\d+)\.(\d+)(?:-[\w.-]+)?$/.exec(version);
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:-[\w.-]+)?(?:\+[\w.-]+)?$/.exec(version);
   if (!match) throw new Error("\u65E0\u6CD5\u8BC6\u522B\u5F53\u524D DSH \u4E8B\u4EF6\u534F\u8BAE\u7248\u672C");
   const [, major, minor, patch] = match.map(Number);
   return major > 0 || minor > 1 || minor === 1 && patch >= 7;
 }
-function openHostEvents(gateway, endpoint, payload, signal) {
+function openHostEvents(gateway, endpoint, payload, signal, ctx) {
   let contract = contracts.get(gateway);
   if (!contract) {
-    contract = { duplex: usesDuplexEvents(runningDshVersion()) };
+    contract = { duplex: usesDuplexEvents(hostRuntimeVersion(ctx)) };
     contracts.set(gateway, contract);
   }
   signal.throwIfAborted();
@@ -683,7 +754,7 @@ function projectedSubagentCatalog(parent, projection, rows) {
 async function invokeHostRemote(ctx, gateway, request) {
   if (request.namespace !== "subagents" || request.method !== "list") return gateway.invoke(request);
   const registry = ctx.get("typert")?.local;
-  if (registry?.get("subagents/list") || registry?.hasSeen?.("subagents/list") || !usesDuplexEvents(runningDshVersion())) return gateway.invoke(request);
+  if (registry?.get("subagents/list") || registry?.hasSeen?.("subagents/list") || !usesDuplexEvents(hostRuntimeVersion(ctx))) return gateway.invoke(request);
   const parent = request.args.parentSessionId;
   if (typeof parent !== "string" || !parent || parent.length > 256) throw new Error("\u7236\u4F1A\u8BDD\u6807\u8BC6\u65E0\u6548");
   request.signal?.throwIfAborted();
@@ -895,7 +966,7 @@ function resolveTypertGateway(ctx) {
   const candidate = ctx.get("typertGateway");
   if (!candidate || typeof candidate.invoke !== "function" || typeof candidate.stream !== "function") return null;
   return {
-    wireStream: candidate.wireStream ? { open: (endpoint, payload, signal) => openHostEvents(candidate, endpoint, payload, signal) } : void 0,
+    wireStream: candidate.wireStream ? { open: (endpoint, payload, signal) => openHostEvents(candidate, endpoint, payload, signal, ctx) } : void 0,
     invoke: (request) => invokeHostRemote(ctx, candidate, request),
     stream: (request) => candidate.stream(request),
     commandAttachmentField: () => {
@@ -1152,7 +1223,7 @@ async function invokeLegacyRpc(gateway, request, options) {
 }
 
 // src/install-lifecycle.ts
-import fs2 from "node:fs";
+import fs from "node:fs";
 import path5 from "node:path";
 import { execFileSync as execFileSync2, spawn } from "node:child_process";
 var serviceName = (s) => /^[A-Za-z0-9_.@-]{1,180}$/.test(s);
@@ -1162,13 +1233,13 @@ function run(command, args) {
 function validateManager(value) {
   if (value.kind === "process") return;
   if (value.kind === "systemd" && process.platform === "linux" && serviceName(value.unit) && value.unit.endsWith(".service")) return;
-  if (value.kind === "launchd" && process.platform === "darwin" && serviceName(value.label) && /^gui\/\d+$/.test(value.domain) && value.domain === `gui/${process.getuid?.()}` && path5.isAbsolute(value.plist) && fs2.statSync(value.plist).isFile()) return;
+  if (value.kind === "launchd" && process.platform === "darwin" && serviceName(value.label) && /^gui\/\d+$/.test(value.domain) && value.domain === `gui/${process.getuid?.()}` && path5.isAbsolute(value.plist) && fs.statSync(value.plist).isFile()) return;
   throw new Error("\u65E0\u6CD5\u786E\u8BA4\u539F\u540E\u53F0\u670D\u52A1\uFF0C\u672A\u505C\u6B62 DSH\u3002");
 }
 function currentHostManager() {
   if (process.env.PM2_HOME || process.env.NODE_APP_INSTANCE || process.env.KUBERNETES_SERVICE_HOST || process.env.container) throw new Error("\u6B64\u540E\u53F0\u7BA1\u7406\u65B9\u5F0F\u5C1A\u4E0D\u652F\u6301\u81EA\u52A8\u91CD\u542F\u3002");
   if (process.platform === "linux") {
-    const group = fs2.readFileSync("/proc/self/cgroup", "utf8");
+    const group = fs.readFileSync("/proc/self/cgroup", "utf8");
     const units = group.split(/[\n/]/).filter((s) => serviceName(s) && s.endsWith(".service"));
     const unit = units.at(-1);
     if (unit && !/^user@\d+\.service$/.test(unit)) {
@@ -1205,9 +1276,9 @@ function startUpdateWorker(manager, directory, executable) {
   } else if (manager.kind === "launchd") {
     run("/bin/launchctl", ["submit", "-l", `dsh.wechat.update.${id}`, "-o", path5.join(directory, "worker.log"), "-e", path5.join(directory, "worker.log"), "--", executable, ...args]);
   } else {
-    const log = fs2.openSync(path5.join(directory, "worker.log"), "a", 384);
+    const log = fs.openSync(path5.join(directory, "worker.log"), "a", 384);
     const child = spawn(executable, args, { cwd: directory, env: process.env, windowsHide: true, detached: true, stdio: ["ignore", log, log] });
-    fs2.closeSync(log);
+    fs.closeSync(log);
     child.unref();
     child.on("error", () => {
     });
@@ -1258,15 +1329,16 @@ async function quiesceNativeHost(ctx, read, disposing) {
 }
 async function createInstallControl(context, config) {
   const ctx = context.root;
+  if (desktopOwnsLifecycle(ctx)) throw new Error("\u8BF7\u901A\u8FC7 DSH \u684C\u9762\u5E94\u7528\u7684\u63D2\u4EF6\u7BA1\u7406\u9875\u66F4\u65B0\uFF0C\u672A\u505C\u6B62\u8282\u70B9\u3002");
   assertNativeUpdateCapabilities(ctx);
-  const home = adapterDshHome(), id = path6.basename(config.directory);
-  if (!/^[a-f0-9]{32}$/.test(id) || !/^[a-f0-9]{48}$/.test(config.token) || path6.dirname(config.directory) !== path6.join(home, "harness-remote-updates") || fs3.realpathSync(config.directory) !== config.directory) throw new Error("\u5B89\u88C5\u63A7\u5236\u8BF7\u6C42\u4E0D\u5C5E\u4E8E\u5F53\u524D DSH\u3002");
-  const scope = resolveAgentProfileScope("", process.argv, home), profile = path6.join(home, "profiles", scope);
-  const cli = fs3.realpathSync(process.argv[1]);
-  const manifest = JSON.parse(fs3.readFileSync(path6.resolve(cli, "../../package.json"), "utf8"));
+  const home = agentDshHome(ctx), id = path6.basename(config.directory);
+  if (!/^[a-f0-9]{32}$/.test(id) || !/^[a-f0-9]{48}$/.test(config.token) || path6.dirname(config.directory) !== path6.join(home, "harness-remote-updates") || fs2.realpathSync(config.directory) !== config.directory) throw new Error("\u5B89\u88C5\u63A7\u5236\u8BF7\u6C42\u4E0D\u5C5E\u4E8E\u5F53\u524D DSH\u3002");
+  const scope = agentProfileScope(ctx), profile = path6.join(home, "profiles", scope);
+  const cli = fs2.realpathSync(process.argv[1]);
+  const manifest = JSON.parse(fs2.readFileSync(path6.resolve(cli, "../../package.json"), "utf8"));
   if (manifest.name !== "@deepseek-ai/dsh" || process.execArgv.length) throw new Error("\u6B64 DSH \u542F\u52A8\u65B9\u5F0F\u5C1A\u4E0D\u652F\u6301\u81EA\u52A8\u66F4\u65B0\u3002");
   const manager = currentHostManager(), webPort = resolveDshWebRuntime(ctx, process.env).port;
-  const ports = deriveGatePorts(scope, loadAgentDescriptor().agentInstanceId);
+  const ports = deriveGatePorts(scope, loadAgentDescriptor(ctx).agentInstanceId);
   const nativeExit = ctx.get("appExit");
   const gateway = resolveTypertGateway(ctx);
   let launched = false, quiesced = false;
@@ -1282,7 +1354,7 @@ async function createInstallControl(context, config) {
   };
   const version = () => {
     try {
-      return JSON.parse(fs3.readFileSync(path6.join(profile, "node_modules/@harness-remote/dsh-wechat-remote/package.json"), "utf8")).version;
+      return JSON.parse(fs2.readFileSync(path6.join(profile, "node_modules/@harness-remote/dsh-wechat-remote/package.json"), "utf8")).version;
     } catch {
       return "0.0.0";
     }
@@ -1311,7 +1383,7 @@ async function createInstallControl(context, config) {
         profile,
         webPort,
         stateFile: gateStatePathForProfile(scope, homedir4(), home),
-        identityFile: defaultAgentIdentityPath(),
+        identityFile: defaultAgentIdentityPath(ctx),
         gatePort: ports.publicPort,
         localPort: ports.localPort,
         manager,
@@ -1329,7 +1401,7 @@ async function createInstallControl(context, config) {
       }
       if (req.url === "/launch" && !launched && !quiesced) {
         const filename = path6.join(config.directory, "job.json");
-        const job = JSON.parse(fs3.readFileSync(filename, "utf8"));
+        const job = JSON.parse(fs2.readFileSync(filename, "utf8"));
         if (job.id !== id || job.controlOrigin !== origin || job.statusToken !== config.token || job.parentPid !== process.pid || job.home !== home || job.profile !== profile || job.cli !== cli || job.pnpm !== config.pnpm) throw new Error("\u5B89\u88C5\u76EE\u6807\u53D1\u751F\u53D8\u5316");
         startUpdateWorker(manager, config.directory, process.execPath);
         launched = true;

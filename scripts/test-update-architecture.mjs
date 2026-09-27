@@ -41,7 +41,8 @@ try {
     assert.equal(result.eligible, false, 'This test runner is not a native DSH host')
     assert(!/架构/.test(result.reason), 'CPU alone must not reject an update')
     Object.defineProperty(process.versions, 'electron', { configurable: true, value: 'fixture' })
-    assert.match(service.eligibility().reason, /启动方式尚不支持自动重启/)
+    assert.equal(service.eligibility().eligible, false)
+    assert.match(service.eligibility().reason, /桌面应用的插件管理/)
     delete process.versions.electron
   }
   console.log('PASS ARM64 and x64 share native host checks; unsupported launcher is still refused')

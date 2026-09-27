@@ -4,6 +4,7 @@ import {
   closeSync,
   existsSync,
   fsyncSync,
+  linkSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -33,6 +34,16 @@ export function tightenPrivateFile(file: string): void {
  * The temporary file lives beside the destination, so rename is same-volume.
  */
 export function writePrivateJsonAtomic(file: string, value: unknown): void {
+  publishPrivateJson(file, value, true)
+}
+
+/** Publish a fully written identity once. Concurrent first starts must read
+ * the winner, never overwrite it or observe an empty placeholder file. */
+export function createPrivateJsonAtomic(file: string, value: unknown): boolean {
+  return publishPrivateJson(file, value, false)
+}
+
+function publishPrivateJson(file: string, value: unknown, replace: boolean): boolean {
   const parent = dirname(file)
   mkdirSync(parent, { recursive: true, mode: 0o700 })
   const temporary = `${file}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`
@@ -49,8 +60,16 @@ export function writePrivateJsonAtomic(file: string, value: unknown): void {
       try { fsyncSync(fd) } catch { /* best effort */ }
     } finally { closeSync(fd) }
     tightenPrivateFile(temporary)
-    renameSync(temporary, file)
+    if (replace) renameSync(temporary, file)
+    else {
+      try { linkSync(temporary, file) }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false
+        throw error // Do not replace an existing identity on unsupported storage.
+      }
+    }
     tightenPrivateFile(file)
+    return true
   } finally {
     if (existsSync(temporary)) {
       try { rmSync(temporary, { force: true }) } catch { /* best effort */ }

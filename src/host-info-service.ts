@@ -91,7 +91,7 @@ export class WechatHostInfoService extends TypertRemoteService {
   ): Promise<WechatHostDescribeResult> {
     void request
     signal.throwIfAborted()
-    const descriptor = loadAgentDescriptor()
+    const descriptor = loadAgentDescriptor(this.ctx)
     return {
       ok: true,
       value: {

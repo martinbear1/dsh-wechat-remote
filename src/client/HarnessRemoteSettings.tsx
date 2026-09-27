@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { FishLogo } from '@deepseek-ai/dsh-client-ui-primitives'
 import styles from './HarnessRemoteSettings.module.css'
 import { PluginUpdateCard } from './PluginUpdateCard.tsx'
+import { CompanionUpdateCard } from './CompanionUpdateCard.tsx'
 import { resolvePairingClient, type GateRuntimeInfo, type HarnessRemoteHostDescription,
   type CallPairingManagement } from './pairing-client.js'
 export type { HarnessRemoteHostDescription } from './pairing-client.js'
@@ -84,8 +85,11 @@ export function HarnessRemoteSettings({
   const [qr, setQr] = useState<PairCodeResp | null>(null)
   const [error, setError] = useState<string | null>(null)
   const mountedRef = useRef(true)
+  const loadingStatus = useRef(false)
 
   const loadStatus = useCallback(async (): Promise<void> => {
+    if (loadingStatus.current) return
+    loadingStatus.current = true
     try {
       const discovered = await resolvePairingClient(describeHost, callManagement)
       if (!mountedRef.current) return
@@ -102,7 +106,7 @@ export function HarnessRemoteSettings({
       if (!mountedRef.current) return
       setLoadState('error')
       setError('连接服务暂未就绪。请确认 DSH 正在运行，然后重试。')
-    }
+    } finally { loadingStatus.current = false }
   }, [describeHost, callManagement])
 
   const generateQr = useCallback(async (): Promise<void> => {
@@ -136,7 +140,9 @@ export function HarnessRemoteSettings({
   useEffect(() => {
     mountedRef.current = true
     void loadStatus()
-    const timer = window.setInterval(() => void loadStatus(), 30000)
+    // This page also presents companion installation state; avoid overlapping
+    // reads and keep short upgrades visible rather than polling every 30 s.
+    const timer = window.setInterval(() => void loadStatus(), 2000)
     return () => {
       mountedRef.current = false
       window.clearInterval(timer)
@@ -203,6 +209,7 @@ export function HarnessRemoteSettings({
         </span>
       </div>
 
+      <CompanionUpdateCard value={status?.companionUpdate} />
       <div className={styles.capabilities}>
         <Capability
           title="局域网直连"
@@ -284,8 +291,6 @@ export function HarnessRemoteSettings({
       )}
       {localOrigin ? <PluginUpdateCard localOrigin={localOrigin} /> : null}
       {runtime?.profileScope === 'desktop' ? <p className={styles.securityNote}>插件更新请使用桌面应用的插件管理。</p> : null}
-      {status?.companionUpdate && status.companionUpdate.state !== 'idle' && status.companionUpdate.message
-        ? <p className={styles.securityNote} role="status">{status.companionUpdate.message}</p> : null}
     </section>
   )
 }

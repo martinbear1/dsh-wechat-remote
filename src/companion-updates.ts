@@ -17,7 +17,7 @@ const core = '@harness-remote/dsh-wechat-remote', native = 'dsh-wechat-remote'
 const versionPattern = /^\d+\.\d+\.\d+(?:-[\w.-]+)?$/
 type Target = { owner: 'cli' | 'native'; version: string }
 interface Offer { schema: 1; id: string; from: Scope; to: Scope; version: string; previous: string; source: string }
-export type CompanionResult = { state: 'idle' | 'pending' | 'busy' | 'restart-required' | 'complete' | 'unavailable'; message: string }
+export type CompanionResult = { state: 'idle' | 'pending' | 'busy' | 'preparing' | 'installing' | 'verifying' | 'recovering' | 'restart-required' | 'complete' | 'unavailable'; message: string }
 const pending = (): CompanionResult => ({ state: 'pending', message: '另一端将在其原生更新入口可用时处理；当前节点不受影响。' })
 function scopeOf(value: string): Scope | undefined {
   return value === 'desktop' ? 'desktop' : value === 'web' || value === 'default' ? 'web' : undefined
@@ -30,7 +30,8 @@ function recordResult(home: string, scope: Scope, offer: Offer, value: Companion
   catch { return false }
   try {
     const last = read(file)
-    if (last.id === offer.id && last.state === 'complete' && value.state !== 'complete') return false
+    if (last.id === offer.id && last.state === 'complete'
+        && !['complete', 'recovering', 'unavailable'].includes(value.state)) return false
   } catch { /* first receipt */ }
   writePrivateJsonAtomic(file, { id: offer.id, version: offer.version, ...value })
   return true
@@ -135,7 +136,7 @@ export async function stageCompanionArchive(home: string, source: string, versio
  * scripts are approved, and downloaded is never reported as running. */
 export async function applyNativeCompanion(home: string, scope: Scope, runningVersion: string, offer: Offer,
   services: { list(): Promise<{ items: { running: boolean }[] }>; install(spec: string): Promise<any>;
-    stage?: typeof stageCompanionArchive; signal?: AbortSignal }): Promise<CompanionResult> {
+    stage?: typeof stageCompanionArchive; signal?: AbortSignal; progress?(value: CompanionResult): void }): Promise<CompanionResult> {
   services.signal?.throwIfAborted()
   const target = validateCompanionOffer(home, scope, offer)
   if (target.owner !== 'native') throw new Error('此节点应由 Web 安装器更新')
@@ -149,6 +150,7 @@ export async function applyNativeCompanion(home: string, scope: Scope, runningVe
   services.signal?.throwIfAborted()
   if (!Array.isArray(list?.items) || list.items.some(row => typeof row.running !== 'boolean')) throw new Error('无法确认另一端的会话状态')
   if (list.items.some(row => row.running)) return { state: 'busy', message: '另一端正在执行任务，任务结束后再处理更新。' }
+  services.progress?.({ state: 'preparing', message: '正在准备另一端的插件更新；任务空闲并完成复核后才会安装。' })
   // The core-only Web updater has no outer installer directory. In that case
   // the Desktop owner resolves the exact public package using its ordinary
   // registry, compatibility checks and build-approval policy.
@@ -166,6 +168,7 @@ export async function applyNativeCompanion(home: string, scope: Scope, runningVe
   // idle query. A new offer, manual install or disable wins over this attempt.
   const ready = validateCompanionOffer(home, scope, offer)
   if (ready.owner !== target.owner || ready.version !== offer.previous) throw new Error('另一端的安装已变化，未重复安装')
+  services.progress?.({ state: 'installing', message: '正在通过原生插件管理器更新，请暂勿退出应用或重复安装。' })
   const result = await services.install(archive)
   if (!['applied', 'restart-required'].includes(result?.application) || result.error || result.bundle !== native) {
     throw new Error('原生插件管理器未完成更新，请在该应用的插件管理页查看原因或完成审批')
@@ -204,6 +207,7 @@ export async function webInstallerRuntime(environment: NodeJS.ProcessEnv = proce
 }
 async function runWebInstaller(home: string, offer: Offer, progress: (value: CompanionResult) => void = () => {}, signal?: AbortSignal): Promise<CompanionResult> {
   signal?.throwIfAborted()
+  progress({ state: 'preparing', message: '检测到 Web 旧插件，正在准备同步升级；原配对和会话将保留。' })
   const target = validateCompanionOffer(home, 'web', offer)
   if (target.owner !== 'cli') return Promise.resolve(pending())
   const worker = path.join(offer.source, 'bin/companion-worker.mjs')
@@ -218,12 +222,23 @@ async function runWebInstaller(home: string, offer: Offer, progress: (value: Com
       env: runtime.env, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] })
     child.on('message', (value: any) => {
       if (value?.type === 'companion-busy') progress({ state: 'busy', message: 'Web 正在执行任务，暂不更新；正在等待其空闲。' })
+      if (value?.type === 'companion-progress') {
+        const state = value.phase === 'installing' ? 'installing'
+          : ['restarting', 'verifying'].includes(value.phase) ? 'verifying'
+          : value.phase === 'rolling-back' ? 'recovering'
+          : ['preparing', 'checking'].includes(value.phase) ? 'preparing' : undefined
+        const messages = { preparing: '正在检查 Web 安装条件并保存状态；无需手动停止任务。',
+          installing: '正在升级 Web 插件，请暂勿关闭 Web、退出 Desktop 或重复安装。',
+          verifying: '正在恢复 Web 连接并核验版本、原配对和会话，请稍候。',
+          recovering: '更新未通过验证，正在恢复 Web 原插件，请暂勿关闭应用。' }
+        if (state) progress({ state, message: messages[state] })
+      }
     })
     let tail = ''
     child.stderr?.on('data', bytes => { tail = (tail + bytes.toString()).slice(-2048) })
     child.once('error', reject)
     child.once('exit', code => code === 0 ? resolve({ state: 'restart-required', message: 'Web 插件已安装，等待该节点启动或重新连接确认。' })
-      : code === 75 ? resolve({ state: 'busy', message: 'Web 仍在执行任务，本次未更新；任务结束后可使用原安装命令升级。' })
+      : code === 75 ? resolve({ state: 'unavailable', message: '等待已结束，Web 仍有任务，本次未更新；任务结束后可使用原安装命令升级。' })
       : reject(new Error(tail.trim() || 'Web 联动更新未完成；原有节点保持独立。')))
   })
 }
@@ -274,6 +289,7 @@ function mount(ctx: any, version: string): { status(): CompanionResult; dispose(
         if (!manager?.installBundle || !controller?.list) { receipt(offer!, pending()); return }
         receipt(offer!, await applyNativeCompanion(home, scope, version, offer!, {
           signal: lifetime.signal,
+          progress: value => receipt(offer!, value),
           list: () => controller.list({}, AbortSignal.any([lifetime.signal, AbortSignal.timeout(15_000)])),
           install: spec => manager.installBundle(spec),
         }))
@@ -341,7 +357,7 @@ function mount(ctx: any, version: string): { status(): CompanionResult; dispose(
       if (offer.from === scope && offer.version === version) {
         const peer = validateCompanionOffer(home, to, offer)
         const last = read(path.join(directory, `result-${to}.json`))
-        if (last.id === offer.id && ['pending', 'busy', 'restart-required', 'complete', 'unavailable'].includes(last.state)) {
+        if (last.id === offer.id && ['pending', 'busy', 'preparing', 'installing', 'verifying', 'recovering', 'restart-required', 'complete', 'unavailable'].includes(last.state)) {
           if (['complete', 'restart-required'].includes(last.state) && peer.version !== version) {
             return { state: 'unavailable', message: '另一端的安装已变化，请在该应用内核对；当前节点不受影响。' }
           }

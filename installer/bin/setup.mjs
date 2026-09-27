@@ -63,7 +63,7 @@ export async function selectRelease(host, assetsRoot = path.join(root, 'assets')
 
 /** With no running host, native plugin add needs neither HMR nor healthy third-
  * party plugins. Reuse the same installation core; only live hosts need disposal. */
-async function installStopped({ cli, home, profile, profileName, directory, id, runtime, assetsRoot, repair, open, bundledOnly, startAfterInstall, assertTarget }) {
+async function installStopped({ cli, home, profile, profileName, directory, id, runtime, assetsRoot, repair, open, bundledOnly, startAfterInstall, assertTarget, onProgress }) {
   const dsh = validateDshCli(cli)
   let version = '0.0.0'
   try { version = JSON.parse(fs.readFileSync(path.join(profile, 'node_modules', packageName, 'package.json'), 'utf8')).version } catch {}
@@ -85,12 +85,14 @@ async function installStopped({ cli, home, profile, profileName, directory, id, 
       fs.writeFileSync(path.join(directory, 'release.tgz'), selected.archive, { mode: 0o600, flag: 'wx' })
       backupProfile(profile, path.join(directory, 'profile-before'))
       console.log(`正在通过 DSH 原生方式安装插件 ${selected.release.version}…`)
+      onProgress({ phase: 'installing' })
       modified = true
       await installProfile({ profile, directory, cli: dsh.cli, targetVersion: selected.release.version, runtime })
     }
   } catch (error) {
     keepLock = error instanceof NativeInstallError && error.mayStillBeRunning
     if (modified && !keepLock) {
+      onProgress({ phase: 'rolling-back' })
       fs.renameSync(profile, path.join(directory, 'profile-failed'))
       fs.renameSync(path.join(directory, 'profile-before'), profile)
     }
@@ -116,7 +118,7 @@ async function installStopped({ cli, home, profile, profileName, directory, id, 
   return { version: installedVersion, changed: Boolean(selected.archive), starting: Boolean(starting) }
 }
 async function installSingle({ profileName = 'web', cli, home: configuredHome, assetsRoot, open = true, repair = false, bundledOnly = false,
-  startAfterInstall = true, deferBusy = false, onBusy = () => {}, assertTarget = () => {} } = {}) {
+  startAfterInstall = true, deferBusy = false, onBusy = () => {}, onProgress = () => {}, assertTarget = () => {} } = {}) {
   if (!/^[A-Za-z0-9_-]{1,80}$/.test(profileName)) throw new Error('无效的 profile 名称。')
   if (profileName.toLowerCase() === 'desktop') throw new Error('Desktop 由桌面应用管理。请在其插件管理页安装插件包；未修改 Desktop 或 Web 配置。')
   if (cli) cli = validateDshCli(cli).cli
@@ -133,11 +135,12 @@ async function installSingle({ profileName = 'web', cli, home: configuredHome, a
   let remove, ref, job, locked = false, authorized = false, launched
   const lockFile = path.join(profile, '.harness-remote-update.lock')
   console.log(`正在检查 DSH ${profileName === 'web' ? 'Web' : profileName} 与插件；不直接修改 Desktop 安装…`)
+  onProgress({ phase: 'preparing' })
   try {
     if (!await mayHaveRunningDsh()) {
       cli ||= await chooseDsh()
       assertTarget()
-      return await installStopped({ cli, home, profile, profileName, directory, id, runtime, assetsRoot, repair, open, bundledOnly, startAfterInstall, assertTarget })
+      return await installStopped({ cli, home, profile, profileName, directory, id, runtime, assetsRoot, repair, open, bundledOnly, startAfterInstall, assertTarget, onProgress })
     }
     // A live host must identify the same home/profile; never synthesize a second
     // profile just because this terminal inherited different environment values.
@@ -229,7 +232,10 @@ async function installSingle({ profileName = 'web', cli, home: configuredHome, a
     const until = Date.now() + 1200000
     while (Date.now() < until) {
       try { result = JSON.parse(fs.readFileSync(path.join(directory, 'result.json'), 'utf8')) } catch {}
-      if (result?.phase !== previous && result?.phase) { console.log(`${result.progress}% ${result.message}`); previous = result.phase }
+      if (result?.phase !== previous && result?.phase) {
+        console.log(`${result.progress}% ${result.message}`); previous = result.phase
+        onProgress({ phase: result.phase })
+      }
       if (result?.terminal) break
       await sleep(500)
     }

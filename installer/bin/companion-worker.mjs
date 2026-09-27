@@ -8,6 +8,12 @@ import { companionTarget, validateCompanionOffer } from '../lib/companion-update
 import { compareVersions } from '../lib/update-policy.js'
 const root = fileURLToPath(new URL('../', import.meta.url))
 const [home, version, previous, offerId] = process.argv.slice(2)
+// A UI/process closing after admission must not abort an installation or its
+// rollback merely because the optional progress receiver has disappeared.
+function notifyParent(value) {
+  if (!process.connected || !process.send) return
+  try { process.send(value, () => {}) } catch { /* transaction remains owned here */ }
+}
 try {
   if (!home || !path.isAbsolute(home) || fs.realpathSync(home) !== path.normalize(home)) throw Error('DSH 数据目录不明确')
   const manifest = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'))
@@ -24,7 +30,8 @@ try {
       || ![previous, version].includes(target.version)) throw Error('Web 安装归属或版本已变化，未覆盖')
   if (compareVersions(version, target.version) > 0) {
     const result = await install({ home, profileName: 'web', open: false, startAfterInstall: false, companion: false, bundledOnly: true,
-      deferBusy: true, assertTarget, onBusy: () => process.send?.({ type: 'companion-busy' }) })
+      deferBusy: true, assertTarget, onBusy: () => notifyParent({ type: 'companion-busy' }),
+      onProgress: value => notifyParent({ type: 'companion-progress', phase: value.phase }) })
     if (result.version !== version) throw Error('Web 安装版本需要单独核对')
   }
 } catch (error) {

@@ -13,7 +13,7 @@ interface Offer {
     source: string;
 }
 export type CompanionResult = {
-    state: 'idle' | 'pending' | 'busy' | 'restart-required' | 'complete' | 'unavailable';
+    state: 'idle' | 'pending' | 'busy' | 'preparing' | 'installing' | 'verifying' | 'recovering' | 'restart-required' | 'complete' | 'unavailable';
     message: string;
 };
 /** Only already enabled installations participate. Do not re-enable a plugin,
@@ -39,6 +39,7 @@ export declare function applyNativeCompanion(home: string, scope: Scope, running
     install(spec: string): Promise<any>;
     stage?: typeof stageCompanionArchive;
     signal?: AbortSignal;
+    progress?(value: CompanionResult): void;
 }): Promise<CompanionResult>;
 /** The existing Web transaction supplies idle fencing, exact launcher reuse,
  * verification and rollback. It is never passed the Desktop profile. */

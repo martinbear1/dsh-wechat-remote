@@ -56,6 +56,22 @@
   margin: 0;
 }
 
+.companionCard {
+  border: 1px solid var(--dsw-alias-state-business-primary, #4e79ff);
+  border-left-width: 4px;
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-3, #fff);
+  padding: 14px 16px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.companionCard strong { font-size: 14px; }
+.companionCard p { margin: 4px 0; font-size: 13px; }
+.companionCard small { color: var(--dsw-alias-label-secondary, #4d5564); }
+.companionCard progress { display: block; width: 100%; margin: 8px 0; accent-color: #4e79ff; }
+.companionCard[data-state='complete'] { border-color: var(--dsw-alias-state-success-primary, #1f9d68); }
+.companionCard[data-state='unavailable'], .companionCard[data-state='recovering'] { border-color: #b5861d; }
+
 .identityCopy h3 {
   font-size: 15px;
   font-weight: 650;

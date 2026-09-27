@@ -499,7 +499,7 @@ function recordResult(home, scope, offer, value) {
   }
   try {
     const last = read(file);
-    if (last.id === offer.id && last.state === "complete" && value.state !== "complete") return false;
+    if (last.id === offer.id && last.state === "complete" && !["complete", "recovering", "unavailable"].includes(value.state)) return false;
   } catch {
   }
   writePrivateJsonAtomic(file, { id: offer.id, version: offer.version, ...value });
@@ -615,6 +615,7 @@ async function applyNativeCompanion(home, scope, runningVersion, offer, services
   services.signal?.throwIfAborted();
   if (!Array.isArray(list?.items) || list.items.some((row) => typeof row.running !== "boolean")) throw new Error("\u65E0\u6CD5\u786E\u8BA4\u53E6\u4E00\u7AEF\u7684\u4F1A\u8BDD\u72B6\u6001");
   if (list.items.some((row) => row.running)) return { state: "busy", message: "\u53E6\u4E00\u7AEF\u6B63\u5728\u6267\u884C\u4EFB\u52A1\uFF0C\u4EFB\u52A1\u7ED3\u675F\u540E\u518D\u5904\u7406\u66F4\u65B0\u3002" };
+  services.progress?.({ state: "preparing", message: "\u6B63\u5728\u51C6\u5907\u53E6\u4E00\u7AEF\u7684\u63D2\u4EF6\u66F4\u65B0\uFF1B\u4EFB\u52A1\u7A7A\u95F2\u5E76\u5B8C\u6210\u590D\u6838\u540E\u624D\u4F1A\u5B89\u88C5\u3002" });
   const archive = offer.source ? await (services.stage ?? stageCompanionArchive)(home, offer.source, offer.version) : `${native}@${offer.version}`;
   services.signal?.throwIfAborted();
   validateCompanionOffer(home, scope, offer);
@@ -624,6 +625,7 @@ async function applyNativeCompanion(home, scope, runningVersion, offer, services
   if (current.items.some((row) => row.running)) return { state: "busy", message: "\u53E6\u4E00\u7AEF\u6B63\u5728\u6267\u884C\u4EFB\u52A1\uFF0C\u4EFB\u52A1\u7ED3\u675F\u540E\u518D\u5904\u7406\u66F4\u65B0\u3002" };
   const ready = validateCompanionOffer(home, scope, offer);
   if (ready.owner !== target.owner || ready.version !== offer.previous) throw new Error("\u53E6\u4E00\u7AEF\u7684\u5B89\u88C5\u5DF2\u53D8\u5316\uFF0C\u672A\u91CD\u590D\u5B89\u88C5");
+  services.progress?.({ state: "installing", message: "\u6B63\u5728\u901A\u8FC7\u539F\u751F\u63D2\u4EF6\u7BA1\u7406\u5668\u66F4\u65B0\uFF0C\u8BF7\u6682\u52FF\u9000\u51FA\u5E94\u7528\u6216\u91CD\u590D\u5B89\u88C5\u3002" });
   const result = await services.install(archive);
   if (!["applied", "restart-required"].includes(result?.application) || result.error || result.bundle !== native) {
     throw new Error("\u539F\u751F\u63D2\u4EF6\u7BA1\u7406\u5668\u672A\u5B8C\u6210\u66F4\u65B0\uFF0C\u8BF7\u5728\u8BE5\u5E94\u7528\u7684\u63D2\u4EF6\u7BA1\u7406\u9875\u67E5\u770B\u539F\u56E0\u6216\u5B8C\u6210\u5BA1\u6279");
@@ -658,6 +660,7 @@ async function webInstallerRuntime(environment = process.env, electron = Boolean
 async function runWebInstaller(home, offer, progress = () => {
 }, signal) {
   signal?.throwIfAborted();
+  progress({ state: "preparing", message: "\u68C0\u6D4B\u5230 Web \u65E7\u63D2\u4EF6\uFF0C\u6B63\u5728\u51C6\u5907\u540C\u6B65\u5347\u7EA7\uFF1B\u539F\u914D\u5BF9\u548C\u4F1A\u8BDD\u5C06\u4FDD\u7559\u3002" });
   const target = validateCompanionOffer(home, "web", offer);
   if (target.owner !== "cli") return Promise.resolve(pending());
   const worker = path5.join(offer.source, "bin/companion-worker.mjs");
@@ -673,13 +676,23 @@ async function runWebInstaller(home, offer, progress = () => {
     });
     child.on("message", (value) => {
       if (value?.type === "companion-busy") progress({ state: "busy", message: "Web \u6B63\u5728\u6267\u884C\u4EFB\u52A1\uFF0C\u6682\u4E0D\u66F4\u65B0\uFF1B\u6B63\u5728\u7B49\u5F85\u5176\u7A7A\u95F2\u3002" });
+      if (value?.type === "companion-progress") {
+        const state = value.phase === "installing" ? "installing" : ["restarting", "verifying"].includes(value.phase) ? "verifying" : value.phase === "rolling-back" ? "recovering" : ["preparing", "checking"].includes(value.phase) ? "preparing" : void 0;
+        const messages = {
+          preparing: "\u6B63\u5728\u68C0\u67E5 Web \u5B89\u88C5\u6761\u4EF6\u5E76\u4FDD\u5B58\u72B6\u6001\uFF1B\u65E0\u9700\u624B\u52A8\u505C\u6B62\u4EFB\u52A1\u3002",
+          installing: "\u6B63\u5728\u5347\u7EA7 Web \u63D2\u4EF6\uFF0C\u8BF7\u6682\u52FF\u5173\u95ED Web\u3001\u9000\u51FA Desktop \u6216\u91CD\u590D\u5B89\u88C5\u3002",
+          verifying: "\u6B63\u5728\u6062\u590D Web \u8FDE\u63A5\u5E76\u6838\u9A8C\u7248\u672C\u3001\u539F\u914D\u5BF9\u548C\u4F1A\u8BDD\uFF0C\u8BF7\u7A0D\u5019\u3002",
+          recovering: "\u66F4\u65B0\u672A\u901A\u8FC7\u9A8C\u8BC1\uFF0C\u6B63\u5728\u6062\u590D Web \u539F\u63D2\u4EF6\uFF0C\u8BF7\u6682\u52FF\u5173\u95ED\u5E94\u7528\u3002"
+        };
+        if (state) progress({ state, message: messages[state] });
+      }
     });
     let tail = "";
     child.stderr?.on("data", (bytes) => {
       tail = (tail + bytes.toString()).slice(-2048);
     });
     child.once("error", reject);
-    child.once("exit", (code) => code === 0 ? resolve({ state: "restart-required", message: "Web \u63D2\u4EF6\u5DF2\u5B89\u88C5\uFF0C\u7B49\u5F85\u8BE5\u8282\u70B9\u542F\u52A8\u6216\u91CD\u65B0\u8FDE\u63A5\u786E\u8BA4\u3002" }) : code === 75 ? resolve({ state: "busy", message: "Web \u4ECD\u5728\u6267\u884C\u4EFB\u52A1\uFF0C\u672C\u6B21\u672A\u66F4\u65B0\uFF1B\u4EFB\u52A1\u7ED3\u675F\u540E\u53EF\u4F7F\u7528\u539F\u5B89\u88C5\u547D\u4EE4\u5347\u7EA7\u3002" }) : reject(new Error(tail.trim() || "Web \u8054\u52A8\u66F4\u65B0\u672A\u5B8C\u6210\uFF1B\u539F\u6709\u8282\u70B9\u4FDD\u6301\u72EC\u7ACB\u3002")));
+    child.once("exit", (code) => code === 0 ? resolve({ state: "restart-required", message: "Web \u63D2\u4EF6\u5DF2\u5B89\u88C5\uFF0C\u7B49\u5F85\u8BE5\u8282\u70B9\u542F\u52A8\u6216\u91CD\u65B0\u8FDE\u63A5\u786E\u8BA4\u3002" }) : code === 75 ? resolve({ state: "unavailable", message: "\u7B49\u5F85\u5DF2\u7ED3\u675F\uFF0CWeb \u4ECD\u6709\u4EFB\u52A1\uFF0C\u672C\u6B21\u672A\u66F4\u65B0\uFF1B\u4EFB\u52A1\u7ED3\u675F\u540E\u53EF\u4F7F\u7528\u539F\u5B89\u88C5\u547D\u4EE4\u5347\u7EA7\u3002" }) : reject(new Error(tail.trim() || "Web \u8054\u52A8\u66F4\u65B0\u672A\u5B8C\u6210\uFF1B\u539F\u6709\u8282\u70B9\u4FDD\u6301\u72EC\u7ACB\u3002")));
   });
 }
 function mountCompanionUpdates(ctx, version) {
@@ -743,6 +756,7 @@ function mount(ctx, version) {
         }
         receipt(offer, await applyNativeCompanion(home, scope, version, offer, {
           signal: lifetime.signal,
+          progress: (value) => receipt(offer, value),
           list: () => controller.list({}, AbortSignal.any([lifetime.signal, AbortSignal.timeout(15e3)])),
           install: (spec) => manager.installBundle(spec)
         }));
@@ -834,7 +848,7 @@ function mount(ctx, version) {
       if (offer.from === scope && offer.version === version) {
         const peer = validateCompanionOffer(home, to, offer);
         const last = read(path5.join(directory, `result-${to}.json`));
-        if (last.id === offer.id && ["pending", "busy", "restart-required", "complete", "unavailable"].includes(last.state)) {
+        if (last.id === offer.id && ["pending", "busy", "preparing", "installing", "verifying", "recovering", "restart-required", "complete", "unavailable"].includes(last.state)) {
           if (["complete", "restart-required"].includes(last.state) && peer.version !== version) {
             return { state: "unavailable", message: "\u53E6\u4E00\u7AEF\u7684\u5B89\u88C5\u5DF2\u53D8\u5316\uFF0C\u8BF7\u5728\u8BE5\u5E94\u7528\u5185\u6838\u5BF9\uFF1B\u5F53\u524D\u8282\u70B9\u4E0D\u53D7\u5F71\u54CD\u3002" };
           }

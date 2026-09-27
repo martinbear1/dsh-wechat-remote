@@ -55,6 +55,7 @@ import {
 } from './public-relay-agent.js'
 import {
   agentProfileScope,
+  agentDisplayName,
   agentDshHome,
   defaultAgentIdentityPath,
   defaultRelayConfigPath,
@@ -65,7 +66,8 @@ import {
 import { hostPlatformDescriptor, selectLanIPv4 } from './host-platform.js'
 import { deriveGatePorts, describeGateListenFailure } from './gate-ports.js'
 import { isAllowedDshWebOrigin, resolveDshWebRuntime } from './dsh-runtime.js'
-import { hostRuntimeVersion } from './dsh-host-context.js'
+import { hostRuntimeVersion, desktopOwnsLifecycle } from './dsh-host-context.js'
+import { mountPairingManagement } from './pairing-management.js'
 import { resolveTypertGateway } from './dsh-protocol-compat.js'
 import { DshCompatibilityApi } from './dsh-compatibility-api.js'
 import { loadGateState, saveGateState, type GateState } from './gate-state.js'
@@ -126,6 +128,9 @@ export function mountWechatGate(ctx: Context): () => void {
   hostRuntimeVersion(ctx)
   const dshWebRuntime = resolveDshWebRuntime(ctx)
   const UPSTREAM_PORT = dshWebRuntime.port
+  const desktopHost = desktopOwnsLifecycle(ctx)
+  let management: WechatGateRuntimeInfo['management'] = desktopHost ? 'unavailable' : 'loopback'
+  let pairingManagement: ReturnType<typeof mountPairingManagement>
   const STATE_FILE = defaultGateStatePath(ctx)
   const TARGET = {
     target: 'http://127.0.0.1:' + UPSTREAM_PORT,
@@ -152,7 +157,7 @@ export function mountWechatGate(ctx: Context): () => void {
       agentInstanceId: crypto.randomBytes(18).toString('base64url'),
       hostName: os.hostname(),
       agentKind: 'deepseek-harness',
-      agentName: 'DeepSeek Harness',
+      agentName: agentDisplayName(ctx),
       agentVersion: 'unknown',
       hostPlatform: hostPlatformDescriptor(),
       capabilities: [],
@@ -190,6 +195,7 @@ export function mountWechatGate(ctx: Context): () => void {
   function gateRuntimeSnapshot(): WechatGateRuntimeInfo {
     return {
       profileScope: doorRuntime.profileScope,
+      management,
       source: doorRuntime.source,
       publicDoor: { ...doorRuntime.publicDoor },
       localDoor: { ...doorRuntime.localDoor },
@@ -514,55 +520,56 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
     res.end(html)
   }
 
+  async function pairCodeValue(): Promise<object> {
+    const entry = await makePairEntry()
+    return {
+      host: lanIPv4(), port: PUBLIC_PORT, localPort: LOCAL_PORT,
+      profileScope: selectedGatePorts.profileScope, gate: gateRuntimeSnapshot(),
+      qrDataUrl: entry.qrDataUrl,
+      mode: entry.publicMode ? 'public-relay' : 'secure-lan-route',
+      payload: entry.payload, expiresAt: entry.expiresAt,
+    }
+  }
+
   async function servePairCode(
     req: IncomingMessage,
     res: ServerResponse,
   ): Promise<void> {
     setCors(req, res)
-    let entry: PairEntry
+    let value: object
     try {
-      entry = await makePairEntry()
+      value = await pairCodeValue()
     } catch (error: unknown) {
       res.writeHead(503, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
       res.end(JSON.stringify({ error: messageOf(error) }))
       return
     }
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
-    res.end(
-      JSON.stringify({
-        host: lanIPv4(),
-        port: PUBLIC_PORT,
-        localPort: LOCAL_PORT,
-        profileScope: selectedGatePorts.profileScope,
-        gate: gateRuntimeSnapshot(),
-        qrDataUrl: entry.qrDataUrl,
-        mode: entry.publicMode ? 'public-relay' : 'secure-lan-route',
-        payload: entry.payload,
-        expiresAt: entry.expiresAt,
-      }),
-    )
+    res.end(JSON.stringify(value))
+  }
+
+  function gateStatusValue(): object {
+    return {
+      gate: gateRuntimeSnapshot(),
+      lan: { ip: lanIPv4(), port: PUBLIC_PORT },
+      // Status never releases a QR ticket; only the explicit pair-code operation
+      // (authenticated native channel or restricted legacy loopback door) does.
+      publicRelay: {
+        enabled: publicRelayStatus.enabled === true,
+        state: publicRelayStatus.state || 'disabled',
+        remoteAccess: publicRelayStatus.remoteAccess || null,
+      },
+      agent: {
+        agentName: agentDescriptor.agentName,
+        hostName: agentDescriptor.hostName,
+      },
+    }
   }
 
   function serveGateStatus(req: IncomingMessage, res: ServerResponse): void {
     setCors(req, res)
-    res.writeHead(200, { 'Content-Type': 'application/json' })
-    res.end(
-      JSON.stringify({
-        gate: gateRuntimeSnapshot(),
-        lan: { ip: lanIPv4(), port: PUBLIC_PORT },
-        // Status must not echo the active pairing ticket or identity key. The QR
-        // endpoint is the sole local surface that releases those screen secrets.
-        publicRelay: {
-          enabled: publicRelayStatus.enabled === true,
-          state: publicRelayStatus.state || 'disabled',
-          remoteAccess: publicRelayStatus.remoteAccess || null,
-        },
-        agent: {
-          agentName: agentDescriptor.agentName,
-          hostName: agentDescriptor.hostName,
-        },
-      }),
-    )
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+    res.end(JSON.stringify(gateStatusValue()))
   }
 
   // ── LAN door (0.0.0.0:3092): encrypted transport only ──
@@ -670,6 +677,7 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
   // removes registered listeners but does not emit an application event.
   const dispose = (): void => {
     disposed = true
+    void pairingManagement?.dispose().catch(error => console.warn('[wechat-gate] pairing route cleanup failed:', messageOf(error)))
     updater.dispose()
     secureLan.close()
     compatibilityApi.dispose()
@@ -922,5 +930,29 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
       failDoor('public door', error)
     }
   }
+  // Connection can arrive after webServer, and may be reloaded independently.
+  // Use its native service lifetime, not polling or one-time startup discovery.
+  ctx.inject(['connection'], (pairingCtx) => {
+    if (disposed) return
+    try {
+      const mounted = mountPairingManagement(pairingCtx, {
+        status: gateStatusValue, pairCode: pairCodeValue,
+        unavailable: () => disposed || updater.isMaintaining(),
+      })
+      if (!mounted) return
+      pairingManagement = mounted
+      management = 'authenticated-rpc'
+      return async () => {
+        if (pairingManagement === mounted) {
+          pairingManagement = undefined
+          management = desktopHost ? 'unavailable' : 'loopback'
+        }
+        await mounted.dispose()
+      }
+    } catch (error) {
+      // Never replace a conflicting route or guess another profile's door.
+      console.warn('[wechat-gate] authenticated pairing unavailable:', messageOf(error))
+    }
+  })
   return dispose
 }

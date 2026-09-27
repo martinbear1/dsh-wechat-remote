@@ -5,7 +5,7 @@
  */
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -13,6 +13,7 @@ import vm from 'node:vm'
 import { randomBytes } from 'node:crypto'
 import { PublicRelayAgent, publicPairingPayload } from '../lib/public-relay-agent.js'
 import PublicRelayGateway from '../lib/public-relay-gateway.js'
+import { defaultAgentIdentityPath, loadAgentDescriptor } from '../lib/agent-metadata.js'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
 const mini = path.resolve(process.env.HARNESS_MINI_DIR || path.join(root, '../research-wechat-miniprogram'))
@@ -191,6 +192,56 @@ try {
       assert.equal(locator.calls.length, 0, 'LAN-only QR never authorizes a new device')
     }
     console.log('PASS ' + name + ' (' + ref.slice(0, 12) + '): fresh 3 nodes, new-phone recovery 3 not 6, repeat scan, wrong owner, replay, expiry, identity mismatch')
+  }
+  // Same computer, different native profiles; pair/install order must not merge
+  // records. Current released mini + cloud code remain completely unmodified.
+  const ref = execFileSync('git', ['-C', mini, 'rev-parse', refs.at(-1) + '^{commit}'], { encoding: 'utf8' }).trim()
+  const orders = [
+    ['web', 'desktop'], ['desktop', 'web'],
+  ]
+  for (const [installIndex, installOrder] of orders.entries()) {
+    for (const [pairIndex, pairOrder] of orders.entries()) {
+      for (const separateOwners of [false, true]) {
+        const id = `${installIndex}-${pairIndex}-${separateOwners}`, home = path.join(temp, 'matrix-' + id)
+        mkdirSync(home)
+        const installAnchor = path.join(home, 'package.json')
+        writeFileSync(installAnchor, JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.1.7-rc.2' }))
+        const nodes = {}, clients = {}
+        for (const profile of installOrder) {
+          const ctx = { get: key => key === 'profileContext' ? { name: profile, home,
+            dir: path.join(home, 'profiles', profile), installAnchor } : undefined }
+          const descriptor = loadAgentDescriptor(ctx)
+          const options = { ...descriptor, hostName: 'same-computer', identityPath: defaultAgentIdentityPath(ctx),
+            onFrame() {}, fetchImpl: (url, options) => fetch(localUrl(url), options) }
+          const agent = new PublicRelayAgent({ enabled: true, relayOrigin: origin }, options)
+          agents.push(agent); nodes[profile] = { agent, options, descriptor }
+        }
+        assert.equal(nodes.web.descriptor.hostId, nodes.desktop.descriptor.hostId)
+        assert.notEqual(nodes.web.agent.identity.nodeId, nodes.desktop.agent.identity.nodeId)
+        const common = phone(ref, 'matrix-' + id)
+        for (const profile of pairOrder) {
+          const client = clients[profile] = separateOwners ? phone(ref, 'matrix-' + id + '-' + profile) : common
+          const node = nodes[profile], status = await pairingStatus(node.agent)
+          assert.match(await client.scan(JSON.parse(publicPairingPayload(status,
+            { host: '192.168.1.2', port: profile === 'web' ? 3092 : 33000 }))), /已绑定当前微信账号/)
+          assert.equal(client.connectedNode, node.agent.identity.nodeId)
+          const saved = client.store.listAgentNodes().find(row => row.nodeId === node.agent.identity.nodeId)
+          assert.equal(saved.agentName, 'DeepSeek Harness · ' + (profile === 'web' ? 'Web' : 'Desktop'))
+        }
+        assert.equal(common.store.listAgentNodes().length, separateOwners ? 0 : 2)
+        const bytes = readFileSync(nodes.web.options.identityPath)
+        nodes.web.agent.stop()
+        const restarted = new PublicRelayAgent({ enabled: true, relayOrigin: origin }, nodes.web.options)
+        agents.push(restarted)
+        const status = await pairingStatus(restarted)
+        assert.equal(status.nodeId, nodes.web.agent.identity.nodeId)
+        assert.deepEqual(readFileSync(nodes.web.options.identityPath), bytes)
+        assert.match(await clients.web.scan(JSON.parse(publicPairingPayload(status,
+          { host: '192.168.1.2', port: 3092 }))), /已绑定当前微信账号/)
+        assert.equal(clients.web.store.listAgentNodes().length, separateOwners ? 1 : 2, 'reinstall/recovery must not add a third node')
+        console.log(`PASS independent nodes: install ${installOrder.join('→')}, pair ${pairOrder.join('→')}, owners=${separateOwners ? 'separate' : 'same'}, Web restart/recovery`)
+      }
+    }
   }
   console.log('Pairing HTTP regression passed. WeChat exchange and post-pair DSH connection are fixtures; no native phone claim is implied.')
 } finally {

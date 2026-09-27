@@ -10,7 +10,7 @@ export interface AgentDescriptor {
     readonly agentInstanceId: string;
     readonly hostName: string;
     readonly agentKind: 'deepseek-harness';
-    readonly agentName: 'DeepSeek Harness';
+    readonly agentName: string;
     readonly agentVersion: string;
     readonly hostPlatform: HostPlatformDescriptor;
     readonly capabilities: readonly AgentCapability[];
@@ -28,6 +28,8 @@ export declare function resolveAgentProfileScope(modulePath: string, argv: reado
  */
 export declare function gateStatePathForProfile(profileScope: string, homeDirectory?: string, dshHome?: string): string;
 export declare function defaultGateStatePath(ctx?: HostContext): string;
+/** Display metadata only: never change nodeId or deduplicate by this label. */
+export declare function agentDisplayName(ctx?: HostContext): string;
 export declare function defaultAgentIdentityPath(ctx?: HostContext): string;
 export declare function defaultRelayConfigPath(ctx?: HostContext): string;
 /** DSH CLI version, not the plugin adapter version and not host.describe's protocol version. */

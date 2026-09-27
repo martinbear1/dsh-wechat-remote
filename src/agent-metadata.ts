@@ -20,7 +20,7 @@ export interface AgentDescriptor {
   readonly agentInstanceId: string
   readonly hostName: string
   readonly agentKind: 'deepseek-harness'
-  readonly agentName: 'DeepSeek Harness'
+  readonly agentName: string
   readonly agentVersion: string
   readonly hostPlatform: HostPlatformDescriptor
   readonly capabilities: readonly AgentCapability[]
@@ -123,6 +123,14 @@ export function defaultGateStatePath(ctx?: HostContext): string {
   return gateStatePathForProfile(agentProfileScope(ctx), homedir(), agentDshHome(ctx))
 }
 
+/** Display metadata only: never change nodeId or deduplicate by this label. */
+export function agentDisplayName(ctx?: HostContext): string {
+  const profile = agentProfileScope(ctx)
+  if (profile === 'desktop') return 'DeepSeek Harness · Desktop'
+  if (profile === 'web' || profile === 'default') return 'DeepSeek Harness · Web'
+  return 'DeepSeek Harness'
+}
+
 export function defaultAgentIdentityPath(ctx?: HostContext): string {
   const scope = agentProfileScope(ctx), home = agentDshHome(ctx)
   // Preserve an existing default web nodeId and its cloud ownership.
@@ -209,7 +217,7 @@ export function loadAgentDescriptor(ctx?: HostContext): AgentDescriptor {
     agentInstanceId: stableId(instancePath),
     hostName: hostname(),
     agentKind: 'deepseek-harness',
-    agentName: 'DeepSeek Harness',
+    agentName: agentDisplayName(ctx),
     agentVersion,
     hostPlatform: hostPlatformDescriptor(),
     capabilities: AGENT_CAPABILITIES,

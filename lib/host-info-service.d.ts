@@ -13,6 +13,7 @@ export interface WechatGateDoorInfo {
 }
 export interface WechatGateRuntimeInfo {
     readonly profileScope: string;
+    readonly management?: 'authenticated-rpc' | 'loopback' | 'unavailable';
     readonly source: 'legacy-default' | 'profile-derived' | 'environment-override';
     readonly publicDoor: WechatGateDoorInfo;
     readonly localDoor: WechatGateDoorInfo;
@@ -30,7 +31,7 @@ export interface WechatHostDescribeValue {
     readonly hostId: string;
     readonly agentInstanceId: string;
     readonly agentKind: 'deepseek-harness';
-    readonly agentName: 'DeepSeek Harness';
+    readonly agentName: string;
     readonly agentVersion: string;
     readonly hostPlatform: HostPlatformDescriptor;
     readonly capabilities: readonly AgentCapability[];

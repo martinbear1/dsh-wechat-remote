@@ -1,15 +1,16 @@
 {
   "name": "dsh-wechat-remote",
-  "version": "1.7.12-rc.1",
+  "version": "1.7.12-rc.2",
   "private": false,
   "description": "Agent远程管理助手：DSH 微信连接插件的一键安装与升级",
   "type": "module",
   "license": "MIT",
   "bin": { "dsh-wechat-remote": "bin/setup.mjs" },
-  "files": ["bin/*.mjs", "lib/*.js", "lib/package.json", "assets/plugin.tgz", "assets/release.json", "README.md", "LICENSE"],
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } },
+  "files": ["cordis.patch.yml", "native/package.json", "native/lib", "bin/*.mjs", "lib/*.js", "lib/package.json", "assets/plugin.tgz", "assets/release.json", "README.md", "LICENSE"],
   "engines": { "node": ">=22.13.0" },
-  "dependencies": { "pnpm": "11.22.0", "yaml": "2.9.0" },
-  "bundleDependencies": ["pnpm", "yaml"],
+  "dependencies": { "pnpm": "11.22.0", "yaml": "2.9.0", "http-proxy": "^1.18.1", "qrcode": "^1.5.4", "tweetnacl": "^1.0.3", "ws": "^8.18.3", "zod": "^4.4.3" },
+  "bundleDependencies": ["pnpm", "yaml", "http-proxy", "qrcode", "tweetnacl", "ws", "zod"],
   "repository": { "type": "git", "url": "git+https://github.com/martinbear1/dsh-wechat-remote.git", "directory": "installer" },
   "publishConfig": { "access": "public", "registry": "https://registry.npmjs.org" }
 }

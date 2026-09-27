@@ -43,13 +43,14 @@ for (const legacy of ['@deepseek-ai/dsh-client-ui-pairing', '@harness-remote/dsh
   check(!client.includes(legacy), `lib/client.js 残留异包注册 id（${legacy}）`)
 }
 // 1b. 页面通过官方 Settings section slot 融入 WebUI，并从本 profile 的
-// Host Remote 发现实际本地门；3093 只作旧版回退。
+// Current Host describes its own pairing transport. Never guess Web's port.
 check(client.includes('settings.section'), 'lib/client.js 未注册官方 settings.section')
 check(client.includes('微信连接'), 'lib/client.js 设置导航文案不是「微信连接」')
 check(!client.includes('sidebar.footer.action'), 'lib/client.js 不应再占用侧边栏 footer')
 check(client.includes('wechatHost/describe'), 'lib/client.js 没有通过 DSH 原生 RPC 发现当前 profile 的本地门')
 check(!client.includes('/api/wechatHost.describe'), 'lib/client.js 残留错误的手写 Web API 地址')
-check(client.includes('http://127.0.0.1:3093'), 'lib/client.js 缺少旧 web/default 3093 回退')
+check(!client.includes('http://127.0.0.1:3093'), 'lib/client.js 不得盲试 Web 默认配对端口')
+check(client.includes('/wechat-remote-management'), 'lib/client.js 缺少宿主认证配对入口')
 for (const required of ['Agent远程管理助手', '添加到微信', '生成二维码', '局域网直连', '远程访问', '账号连接保护']) {
   check(client.includes(required), `lib/client.js 用户配对界面缺少「${required}」`)
 }

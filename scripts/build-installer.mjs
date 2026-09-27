@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { build } from 'esbuild'
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
+import { auditArchive } from '../lib/update-download.js'
 const root = fileURLToPath(new URL('../', import.meta.url))
 const target = path.join(root, 'installer', 'lib')
 fs.mkdirSync(target, { recursive: true })
@@ -66,4 +67,30 @@ if (process.argv[2]) {
   selectInstallTarget(metadata, undefined, { agentVersion: '', platform: '' })
   fs.writeFileSync(path.join(assets, 'release.json'), JSON.stringify(metadata, null, 2) + '\n')
   fs.copyFileSync(process.argv[2], path.join(assets, 'plugin.tgz'))
+  // One core, two native entry styles. Publish the exact audited runtime beside
+  // the installer, not as an npm dependency (which would resolve the host's
+  // optional DSH peer tree). Runtime libraries live once in the outer bundle;
+  // never duplicate pnpm or exceed older installers' bounded archive reader.
+  auditArchive(archive, release)
+  const installerManifest = JSON.parse(fs.readFileSync(path.join(root, 'installer/package.json'), 'utf8'))
+  for (const [name, range] of Object.entries(payload.dependencies || {})) {
+    if (installerManifest.dependencies?.[name] !== range || !installerManifest.bundleDependencies?.includes(name)) {
+      throw new Error(`Native runtime dependency not provided by installer: ${name}`)
+    }
+  }
+  const stage = fs.mkdtempSync(path.join(root, 'installer/.native-build-'))
+  const native = path.join(root, 'installer/native')
+  try {
+    execFileSync('tar', ['-xf', path.resolve(process.argv[2]), '-C', stage], { windowsHide: true, timeout: 30000 })
+    if (fs.existsSync(native)) {
+      if (fs.lstatSync(native).isSymbolicLink() || fs.realpathSync(native) !== path.resolve(native)) throw new Error('Native build target redirected')
+      fs.rmSync(native, { recursive: true, force: true }) // exact build-owned output only
+    }
+    fs.mkdirSync(native)
+    fs.copyFileSync(path.join(stage, 'package/package.json'), path.join(native, 'package.json'))
+    fs.cpSync(path.join(stage, 'package/lib'), path.join(native, 'lib'), { recursive: true })
+  } finally {
+    if (path.dirname(stage) !== path.resolve(root, 'installer') || !path.basename(stage).startsWith('.native-build-')) throw new Error('Invalid build stage')
+    fs.rmSync(stage, { recursive: true, force: true })
+  }
 }

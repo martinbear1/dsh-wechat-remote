@@ -6,3 +6,4 @@ miniprogram_npm/
 *.map
 *.tgz
 backups/
+installer/native/

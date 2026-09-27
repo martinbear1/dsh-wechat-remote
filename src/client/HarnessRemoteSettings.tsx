@@ -3,6 +3,9 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { FishLogo } from '@deepseek-ai/dsh-client-ui-primitives'
 import styles from './HarnessRemoteSettings.module.css'
 import { PluginUpdateCard } from './PluginUpdateCard.tsx'
+import { resolvePairingClient, type GateRuntimeInfo, type HarnessRemoteHostDescription,
+  type CallPairingManagement } from './pairing-client.js'
+export type { HarnessRemoteHostDescription } from './pairing-client.js'
 
 interface PairCodeResp {
   qrDataUrl: string
@@ -10,24 +13,9 @@ interface PairCodeResp {
   expiresAt: number
 }
 
-interface GateDoorInfo {
-  port: number
-  state: 'starting' | 'listening' | 'unavailable' | 'stopped'
-}
-
-interface GateRuntimeInfo {
-  localDoor: GateDoorInfo
-  publicDoor: GateDoorInfo
-}
-
-export interface HarnessRemoteHostDescription {
-  computerName: string
-  agentName: string
-  gate?: GateRuntimeInfo
-}
-
 interface HarnessRemoteSettingsProps {
   describeHost: () => Promise<HarnessRemoteHostDescription>
+  callManagement: CallPairingManagement
 }
 
 interface GateStatusResp {
@@ -49,8 +37,6 @@ interface GateStatusResp {
 
 type LoadState = 'loading' | 'ready' | 'error'
 type QrState = 'idle' | 'loading' | 'ready' | 'error'
-
-const DEFAULT_LOCAL_ORIGIN = 'http://127.0.0.1:3093'
 
 function StatusDot({ ok, busy = false }: { ok: boolean; busy?: boolean }): JSX.Element {
   return (
@@ -84,32 +70,9 @@ function Capability({
   )
 }
 
-async function discoverLocalOrigin(
-  describeHost: () => Promise<HarnessRemoteHostDescription>,
-): Promise<{
-  origin: string
-  runtime: GateRuntimeInfo | null
-  host: HarnessRemoteHostDescription | null
-}> {
-  try {
-    const host = await describeHost()
-    const runtime = host.gate
-    if (!runtime || !Number.isSafeInteger(runtime.localDoor.port)) {
-      return { origin: DEFAULT_LOCAL_ORIGIN, runtime: null, host }
-    }
-    return {
-      origin: `http://127.0.0.1:${runtime.localDoor.port}`,
-      runtime,
-      host,
-    }
-  } catch {
-    // Older hosts use the documented web/default loopback door.
-    return { origin: DEFAULT_LOCAL_ORIGIN, runtime: null, host: null }
-  }
-}
-
 export function HarnessRemoteSettings({
   describeHost,
+  callManagement,
 }: HarnessRemoteSettingsProps): JSX.Element {
   const [loadState, setLoadState] = useState<LoadState>('loading')
   const [qrState, setQrState] = useState<QrState>('idle')
@@ -123,20 +86,12 @@ export function HarnessRemoteSettings({
 
   const loadStatus = useCallback(async (): Promise<void> => {
     try {
-      const discovered = await discoverLocalOrigin(describeHost)
+      const discovered = await resolvePairingClient(describeHost, callManagement)
       if (!mountedRef.current) return
       setRuntime(discovered.runtime)
-      setLocalOrigin(discovered.origin)
+      setLocalOrigin(discovered.localOrigin)
       setHost(discovered.host)
-      if (
-        discovered.runtime !== null &&
-        discovered.runtime.localDoor.state !== 'listening'
-      ) {
-        throw new Error('local-door-unavailable')
-      }
-      const response = await fetch(`${discovered.origin}/gate/status`)
-      if (!response.ok) throw new Error(`gate/status ${response.status}`)
-      const next = (await response.json()) as GateStatusResp
+      const next = await discovered.status() as GateStatusResp
       if (!mountedRef.current) return
       setStatus(next)
       setRuntime(next.gate ?? discovered.runtime)
@@ -147,33 +102,24 @@ export function HarnessRemoteSettings({
       setLoadState('error')
       setError('连接服务暂未就绪。请确认 DSH 正在运行，然后重试。')
     }
-  }, [describeHost])
+  }, [describeHost, callManagement])
 
   const generateQr = useCallback(async (): Promise<void> => {
     setQrState('loading')
     setError(null)
     try {
-      const discovered = await discoverLocalOrigin(describeHost)
+      const discovered = await resolvePairingClient(describeHost, callManagement)
       if (!mountedRef.current) return
       setRuntime(discovered.runtime)
       setHost(discovered.host)
-      if (
-        discovered.runtime !== null &&
-        discovered.runtime.localDoor.state !== 'listening'
-      ) {
-        throw new Error('local-door-unavailable')
-      }
-      const [codeResponse, statusResponse] = await Promise.all([
-        fetch(`${discovered.origin}/pair/code`),
-        fetch(`${discovered.origin}/gate/status`),
+      const [code, next] = await Promise.all([
+        discovered.pairCode() as Promise<PairCodeResp>,
+        discovered.status() as Promise<GateStatusResp>,
       ])
-      if (!codeResponse.ok) throw new Error(`pair/code ${codeResponse.status}`)
-      const code = (await codeResponse.json()) as PairCodeResp
       if (!mountedRef.current) return
       setQr(code)
       setQrState('ready')
-      if (statusResponse.ok) {
-        const next = (await statusResponse.json()) as GateStatusResp
+      if (next) {
         setStatus(next)
         setRuntime(next.gate ?? discovered.runtime)
         setLoadState('ready')
@@ -184,7 +130,7 @@ export function HarnessRemoteSettings({
       setQrState('error')
       setError('暂时无法生成配对二维码，请确认电脑联网后重试。')
     }
-  }, [describeHost])
+  }, [describeHost, callManagement])
 
   useEffect(() => {
     mountedRef.current = true
@@ -221,11 +167,11 @@ export function HarnessRemoteSettings({
               ? '正在准备远程连接'
               : '暂时离线'
 
-  const localDoor = runtime?.localDoor ?? status?.gate?.localDoor
+  const lanDoor = runtime?.publicDoor ?? status?.gate?.publicDoor
   const lanReady =
     loadState === 'ready' &&
     Boolean(status?.lan.ip) &&
-    localDoor?.state === 'listening'
+    lanDoor?.state === 'listening'
   const identityReady = relay?.enabled === true && relay.state !== 'disabled'
   const agentName = status?.agent?.agentName || host?.agentName || 'DeepSeek Harness'
   const hostName = status?.agent?.hostName || host?.computerName || '当前电脑'
@@ -336,6 +282,7 @@ export function HarnessRemoteSettings({
         </div>
       )}
       {localOrigin ? <PluginUpdateCard localOrigin={localOrigin} /> : null}
+      {runtime?.profileScope === 'desktop' ? <p className={styles.securityNote}>插件更新请使用桌面应用的插件管理。</p> : null}
     </section>
   )
 }

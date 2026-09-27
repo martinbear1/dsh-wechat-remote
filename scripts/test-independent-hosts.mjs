@@ -14,6 +14,7 @@ import { updateAction, PluginUpdateService } from '../lib/update-service.js'
 import { createInstallControl } from '../lib/install-control.js'
 import { installProfile } from '../lib/install-profile.js'
 import { install } from '../installer/bin/setup.mjs'
+import { resolveDshWebRuntime } from '../lib/dsh-runtime.js'
 
 function context(home, name, version = '0.1.7-rc.2') {
   const dir = path.join(home, 'profiles', name)
@@ -45,6 +46,13 @@ if (process.argv[2] === '--identity-worker') {
     assert.equal(dshProfileFacts(desktop).dir, path.join(home, 'profiles/desktop'))
     assert.equal(hostRuntimeVersion(desktop, '/not-the-running-cli'), '0.1.7-rc.2')
     assert.equal(loadAgentDescriptor(desktop).agentVersion, '0.1.7-rc.2')
+  })
+  test('Desktop missing backend port cannot inherit another Web runtime', t => {
+    const ctx = context(fixture(t), 'desktop')
+    assert.throws(() => resolveDshWebRuntime(ctx, { DSH_PORT: '3080' }), /未使用 Web/)
+    const get = ctx.get
+    ctx.get = key => key === 'webServer' ? { port: 32001 } : get(key)
+    assert.deepEqual(resolveDshWebRuntime(ctx, { DSH_PORT: '3080' }), { port: 32001, source: 'web-server' })
   })
   test('existing Web binding bytes and nodeId stay in place; Desktop never imports them', t => {
     const home = fixture(t), web = context(home, 'web'), desktop = context(home, 'desktop')

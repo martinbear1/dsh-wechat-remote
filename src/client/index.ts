@@ -1,8 +1,7 @@
 /**
  * Harness Remote browser surface. The plugin contributes one lazy page to the
- * official Web Settings section ledger. Pairing remains owned by the
- * WeChat gate's loopback-only door; this client page only presents status and
- * requests a short-lived QR code when the user explicitly asks for one.
+ * official Settings section ledger. Pairing uses the owning Host's native
+ * authenticated channel, retaining the described local door on older Web hosts.
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
@@ -32,6 +31,11 @@ interface WechatHostDescribeResult {
  * @param ctx - client root context.
  */
 export function apply(ctx: HarnessRemoteClientContext): void {
+  const callManagement = async (endpoint: 'status' | 'pair-code'): Promise<unknown> => {
+    const response = await ctx.connection.rpc.call('/wechat-remote-management', endpoint, {})
+    if (!response.ok) throw new Error(response.error.message)
+    return response.value
+  }
   const describeHost = async (): Promise<HarnessRemoteHostDescription> => {
     const response = await ctx.connection.rpc.call(
       '/api',
@@ -55,7 +59,7 @@ export function apply(ctx: HarnessRemoteClientContext): void {
         id: 'harness-remote',
         order: 30,
         label: '微信连接',
-        inject: () => ({ describeHost }),
+        inject: () => ({ describeHost, callManagement }),
       },
       HarnessRemoteSettings,
     ),

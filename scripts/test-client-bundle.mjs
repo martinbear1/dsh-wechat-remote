@@ -78,10 +78,16 @@ assert.equal(
 
 let registered = false
 let describeHost = null
+let callManagement = null
 exports.apply({
   connection: {
     rpc: {
       async call(channel, endpoint, payload) {
+        if (channel === '/wechat-remote-management') {
+          assert.equal(endpoint, 'status')
+          assert.equal(Object.keys(payload).length, 0)
+          return { ok: true, value: { profile: 'desktop' } }
+        }
         assert.equal(channel, '/api')
         assert.equal(endpoint, 'wechatHost/describe')
         assert.equal(typeof payload, 'object')
@@ -113,6 +119,7 @@ exports.apply({
       assert.equal(spec.label, '微信连接')
       assert.equal(typeof spec.inject, 'function')
       describeHost = spec.inject().describeHost
+      callManagement = spec.inject().callManagement
       assert.equal(typeof describeHost, 'function')
       assert.equal(typeof component, 'function')
       registered = true
@@ -125,4 +132,5 @@ assert.deepEqual(await describeHost(), {
   computerName: 'Peach',
   agentName: 'DeepSeek Harness',
 })
+assert.deepEqual(await callManagement('status'), { profile: 'desktop' })
 console.log('client lazy bundle registration tests passed')

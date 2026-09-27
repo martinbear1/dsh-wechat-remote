@@ -1,8 +1,7 @@
 /**
  * Harness Remote browser surface. The plugin contributes one lazy page to the
- * official Web Settings section ledger. Pairing remains owned by the
- * WeChat gate's loopback-only door; this client page only presents status and
- * requests a short-lived QR code when the user explicitly asks for one.
+ * official Settings section ledger. Pairing uses the owning Host's native
+ * authenticated channel, retaining the described local door on older Web hosts.
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client';

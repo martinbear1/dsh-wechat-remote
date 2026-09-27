@@ -1,0 +1,6 @@
+# Native DSH installation loads the same audited core shipped for CLI recovery.
+# A relative entry is anchored by the official bundle loader to this package,
+# not resolved against another profile's potentially different plugin version.
+- insert:
+    - id: gate
+      name: './native/lib/index.js'

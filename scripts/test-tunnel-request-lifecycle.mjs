@@ -59,6 +59,23 @@ async function finished(f, id, type) {
   assert.equal(f.tunnel.streams.size, 0, 'terminal response must release its request slot')
 }
 
+test('phone tunnel cannot reach operator pairing routes, including normalized traversal', async () => {
+  const f = fixture()
+  try {
+    let id = 1
+    for (const path of ['/wechat-remote-management/pair-code', '/api/../wechat-remote-management/pair-code',
+      '/api/%2e%2e/wechat-remote-management/pair-code', '//localhost/wechat-remote-management/pair-code']) {
+      post(f.tunnel, id, path, json({}))
+      await finished(f, id, 5)
+      id += 2
+    }
+    assert.equal(f.calls.length, 0)
+    post(f.tunnel, id, '/api/session.list', json({}))
+    await finished(f, id, 4)
+    assert.equal(f.calls.length, 1)
+  } finally { f.tunnel.close() }
+})
+
 test('oversized remote images never consume slots or reach DSH; subsequent list, text and small image work', async () => {
   const f = fixture()
   try {

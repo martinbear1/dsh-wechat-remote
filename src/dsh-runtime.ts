@@ -1,6 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { homedir } from 'node:os'
 import path from 'node:path'
+import { desktopOwnsLifecycle } from './dsh-host-context.js'
 
 /** Match DSH's home override without importing a package absent in older DSH. */
 export function adapterDshHome(
@@ -52,6 +53,10 @@ export function resolveDshWebRuntime(
   const webServer = ctx.get('webServer') as { readonly port?: unknown } | undefined
   const servicePort = validPort(webServer?.port)
   if (servicePort !== null) return { port: servicePort, source: 'web-server' }
+
+  // Desktop owns its backend; inherited CLI environment/defaults may identify
+  // another running Web node. Never forward a Desktop request to that node.
+  if (desktopOwnsLifecycle(ctx)) throw new Error('桌面宿主连接尚未就绪，未使用 Web 的默认端口')
 
   const environmentPort = validPort(environment.DSH_PORT)
   if (environmentPort !== null) return { port: environmentPort, source: 'environment' }

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { build } from 'esbuild'
-import { mountPairingManagement, PAIRING_MANAGEMENT_CHANNEL } from '../lib/pairing-management.js'
+import { mountPairingManagement, createPairingHandler } from '../lib/pairing-management.js'
 
 const clientBuild = await build({ entryPoints: ['src/client/pairing-client.ts'], bundle: true,
   write: false, platform: 'node', format: 'esm' })
@@ -9,19 +9,13 @@ const { resolvePairingClient } = await import('data:text/javascript;base64,'
   + Buffer.from(clientBuild.outputFiles[0].contents).toString('base64'))
 const signal = () => new AbortController().signal
 function mount(id, extras = {}) {
-  let handler, removed = 0, calls = 0
-  const connection = { admit() {}, requestRejection() {}, rpc: {
-    handle(channel, callback) {
-      assert.equal(channel, PAIRING_MANAGEMENT_CHANNEL)
-      handler = callback
-      return async () => { removed++ }
-    },
-  } }
-  const mounted = mountPairingManagement({ get: () => connection }, {
+  let removed = 0, calls = 0
+  const handler = createPairingHandler({
     status: () => ({ id }), pairCode: async () => { calls++; return { ticket: id } },
     unavailable: () => false, ...extras,
   })
-  return { mounted, call: (endpoint, payload = {}) => handler(endpoint, payload, signal()),
+  const mounted = { async dispose() { handler.stop(); removed++ } }
+  return { mounted, call: (endpoint, payload = {}) => handler.call(endpoint, payload, signal()),
     get calls() { return calls }, get removed() { return removed } }
 }
 

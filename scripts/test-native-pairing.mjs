@@ -29,16 +29,22 @@ new Function('require', 'module', 'exports', result.outputFiles[0].text)(createR
 const { HostConnectionService, BrowserAuth, forwardWebRequest, authenticateWebHost } = module.exports
 async function host(id, late = false) {
   const ctx = new Context(), routes = new Map()
-  let record, mounted, connection, calls = 0
+  let record, mounted, connection, mountError, calls = 0
   const auth = await BrowserAuth.create(ctx, { modifyRecord: async (_key, modify) => {
     record = await modify(record) ?? record; return record
   } }, 1)
-  ctx.provide('webServer')
-  ctx.set('webServer', { register(route) {
-    assert.equal(routes.has(route.path), false)
-    routes.set(route.path, route)
-    return () => { routes.delete(route.path) }
+  // Match the real host: webServer belongs to another plugin fiber, not root.
+  // A root-provided service masked the official RPC getter's shadow context.
+  const webProvider = ctx.plugin({ name: 'native-web-fixture', apply(owner) {
+    owner.provide('webServer')
+    owner.set('webServer', { register(route) {
+      assert.equal(routes.has(route.path), false)
+      routes.set(route.path, route)
+      return () => { routes.delete(route.path) }
+    } })
   } })
+  await webProvider
+  assert(ctx.get('webServer'), 'Web fixture must provide an active server')
   const startProvider = async () => {
     const provider = ctx.plugin({ name: 'native-connection-fixture', apply(owner) {
       connection = new HostConnectionService(owner, [], auth)
@@ -48,9 +54,11 @@ async function host(id, late = false) {
   }
   let provider = late ? undefined : await startProvider()
   const fiber = ctx.plugin({ name: 'native-pairing-fixture', inject: ['webServer'], apply(owner) {
-    owner.inject(['connection'], inner => {
-      mounted = mountPairingManagement(inner, { status: () => ({ id }),
-        pairCode: async () => { calls++; return { ticket: id } }, unavailable: () => false })
+    owner.inject(['connection', 'webServer'], inner => {
+      try {
+        mounted = mountPairingManagement(inner, { status: () => ({ id }),
+          pairCode: async () => { calls++; return { ticket: id } }, unavailable: () => false })
+      } catch (error) { mountError = error; throw error }
       const current = mounted
       return () => current.dispose()
     })
@@ -73,6 +81,7 @@ async function host(id, late = false) {
     } catch (error) { res.writeHead(500); res.end(String(error)) }
   })
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  if (mountError) throw mountError
   assert(mounted, 'native mount must occur')
   const origin = 'http://127.0.0.1:' + server.address().port
   return { origin, routes, mounted, get calls() { return calls },
@@ -86,7 +95,7 @@ async function host(id, late = false) {
       assert.notEqual(mounted, before)
       assert.equal(routes.size, 1, 'one replacement route, no old listener')
     },
-    async close() { await fiber.dispose(); await provider.dispose(); await new Promise(resolve => server.close(resolve)); await ctx.fiber.dispose() } }
+    async close() { await fiber.dispose(); await provider.dispose(); await webProvider.dispose(); await new Promise(resolve => server.close(resolve)); await ctx.fiber.dispose() } }
 }
 const web = await host('web'), desktop = await host('desktop', true)
 const body = endpoint => JSON.stringify({ type: 'client-request', rpcId: 'fixture', method: endpoint, payload: {} })
@@ -104,6 +113,22 @@ try {
   assert.equal((await post(web, cookies[1])).status, 401)
   assert.equal((await post(desktop, cookies[1], 'https://attacker.invalid')).status, 403)
   assert.equal(desktop.calls, 0)
+  const malformed = async (raw, { type = 'application/json', path = 'pair-code' } = {}) =>
+    fetch(web.origin + '/wechat-remote-management/' + path, {
+      method: 'POST', headers: { cookie: cookies[0], origin: web.origin, 'content-type': type }, body: raw,
+    })
+  for (const raw of ['{', 'null', '[]', JSON.stringify({ type: 'client-request', rpcId: 'fixture', method: 'status', payload: {} }),
+    JSON.stringify({ type: 'client-request', rpcId: 'x'.repeat(300), method: 'pair-code', payload: {} }), ' '.repeat(5000)]) {
+    assert.equal((await malformed(raw)).status, 400)
+  }
+  assert.equal((await malformed(body('pair-code'), { type: 'text/plain' })).status, 415)
+  assert.equal((await malformed(body('pair-code'), { path: 'install' })).status, 404)
+  const invalidPayload = await malformed(JSON.stringify({ type: 'client-request', rpcId: 'fixture', method: 'pair-code', payload: { nodeId: 'other' } }))
+  assert.equal((await invalidPayload.json()).result.ok, false)
+  assert.equal(web.calls, 0, 'invalid requests must not create tickets')
+  const status = await malformed(body('status'), { path: 'status' })
+  assert.equal(status.headers.get('cache-control'), 'no-store')
+  assert.equal((await status.json()).result.value.id, 'web', 'malformed bodies cannot poison subsequent requests')
   const allowed = await post(web, cookies[0], web.origin)
   assert.equal(allowed.status, 200)
   assert.equal((await allowed.json()).result.value.ticket, 'web')

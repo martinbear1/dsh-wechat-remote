@@ -932,7 +932,7 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
   }
   // Connection can arrive after webServer, and may be reloaded independently.
   // Use its native service lifetime, not polling or one-time startup discovery.
-  ctx.inject(['connection'], (pairingCtx) => {
+  ctx.inject(['connection', 'webServer'], (pairingCtx) => {
     if (disposed) return
     try {
       const mounted = mountPairingManagement(pairingCtx, {

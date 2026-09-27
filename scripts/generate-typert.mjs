@@ -33,6 +33,7 @@ try {
     'index.ts',
     'gate-runtime.ts',
     'pairing-management.ts',
+    'pairing-http.ts',
     'task-notifications.ts',
     'update-policy.ts',
     'update-download.ts',

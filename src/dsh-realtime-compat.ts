@@ -1,9 +1,9 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { WebSocket } from 'ws'
 
-import { resolveTypertGateway, type TypertGatewayLike } from './dsh-protocol-compat.js'
+import { resolveTypertGateway, type LegacyClientRequest, type TypertGatewayLike } from './dsh-protocol-compat.js'
 import { resolveDshSessionAddress, isSessionReadError } from './dsh-session-address.js'
-import { presentationProjection } from './session-presentation.js'
+import { presentationProjection, legacyPermissionValue } from './session-presentation.js'
 import { AssistantStreamCompatibility, assistantRecordPresentation } from './assistant-stream-compat.js'
 import { resourcePresentation } from './agent-resources.js'
 import { TurnActivityCompatibility } from './turn-activity.js'
@@ -41,11 +41,27 @@ interface SocketState {
   readonly kind: 'mux' | 'host'
   readonly lifetime: AbortController
   readonly sessionLifetimes: Map<string, AbortController>
+  readonly permissionProjections: Map<string, JsonRecord>
   clientId?: string
 }
 
 const MAX_BUFFERED_BYTES = 4 * 1024 * 1024
 const MAX_SESSION_SUBSCRIPTIONS = 64
+
+// These calls inspect a session; they are not an instruction to activate it.
+// Unknown calls fail open: while in flight, preserve their native errors too.
+const READ_ONLY_SESSION_REQUESTS = new Set([
+  'session.history', 'session.models', 'session.list', 'session.search',
+  'session/page', 'session/projections', 'session/modelCatalog', 'session/list', 'session/search',
+  'commands/list', 'subagent.list', 'subagents/list',
+  'wechatHistory/page', 'wechatHistory/window', 'messageFeedback/list',
+])
+
+export interface ReadonlySessionConflict {
+  readonly sessionId: string
+  readonly observedAt: number
+  readonly reason: 'writer-held'
+}
 
 function recordOf(value: unknown): JsonRecord | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -64,6 +80,11 @@ export function legacyHostPayload(frame: JsonRecord): JsonRecord | null {
   switch (frame.event) {
     case 'api-session/added':
       return { type: 'host/session-added', session: args[0] }
+    case 'api-session/activity':
+      // The released phone treats session-added as a directory invalidation
+      // and rereads the native list. Do not fabricate a Session summary: this
+      // signal only announces that its activity/order may have changed.
+      return { type: 'host/session-added', sessionId: args[0] }
     case 'api-session/removed':
       return { type: 'host/session-removed', sessionId: args[0] }
     case 'api-session/status':
@@ -89,10 +110,82 @@ export class DshRealtimeCompatibility {
   private readonly knownSessions = new Map<string, number>()
   private readonly pending = new Map<string, PendingInteraction[]>()
   private readonly responding = new Set<PendingInteraction>()
+  private readonly sessionRequests = new Map<string, number>()
+  private readonly readonlyConflicts: ReadonlySessionConflict[] = []
   private remoteOwner?: SocketState
   private disposed = false
 
   constructor(private readonly ctx: Context) {}
+
+  /** Scoped to authenticated phone RPCs; never changes native Agent ownership. */
+  trackSessionRequest(request: LegacyClientRequest): () => void {
+    if (READ_ONLY_SESSION_REQUESTS.has(request.method)) return () => {}
+    const args = recordOf(request.payload.args)
+    const nested = recordOf(args?.request)
+    const ids = [...new Set([request.payload, args, nested].flatMap(value =>
+      value ? ['sessionId', 'agentId', 'parentSessionId', 'childSessionId'].map(key => stringOf(value[key])) : []
+    ).filter(id => id && id.length <= 256))]
+    for (const id of ids) this.sessionRequests.set(id, (this.sessionRequests.get(id) ?? 0) + 1)
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      for (const id of ids) {
+        const next = (this.sessionRequests.get(id) ?? 1) - 1
+        if (next > 0) this.sessionRequests.set(id, next)
+        else this.sessionRequests.delete(id)
+      }
+    }
+  }
+
+  /** Bounded metadata only: no message bodies, credentials or filesystem paths. */
+  getReadonlyConflicts(): readonly ReadonlySessionConflict[] {
+    return this.readonlyConflicts.map(value => ({ ...value }))
+  }
+
+  /**
+   * TEMPORARY COMPATIBILITY / 临时误报规避，不是 DSH 会话冲突的根因修复。
+   * 已在 DSH 0.1.7-rc.2 对应原生代码中独立复现：电脑端浏览历史的
+   * history.follow 在返回 snapshot 后仍会 promote/resolveObservedAgent，
+   * 另一进程持有写入权时产生 api-session/error；已发布小程序又把该广播
+   * 显示为全局聊天错误，即使手机并未发起修改操作。
+   *
+   * 本函数只调整我们插件到小程序的通知语义。原生的后台激活、写入占用和
+   * 电脑端错误仍可能发生；绝不能据此宣称两端会话冲突已解决。不得修改、
+   * 覆盖或 monkey-patch DSH 本体，不得强行释放/夺取原生写入权。
+   *
+   * 原生广播没有发起客户端标识，下面是保守的状态判定，不是精确溯源：
+   * 仅完整文案匹配 + 当前端无 Agent/附着 Session + 无匹配的在途手机操作
+   * 时降为被动占用诊断。能力不明、查询失败、活动会话及其他错误原样保留；
+   * 真正发送/修改操作的 RPC 失败绝不在此吞掉。诊断保留在有界内存记录中。
+   *
+   * TODO(upstream-readonly-follow): 待官方明确区分只读浏览与激活，并在相应
+   * 版本实测后复核此兼容分支；不能仅凭版本号或本次不弹错就删除写入保护。
+   * 回归：test-native-two-process-browse.mjs（原生复现，仅默认未修改模式）、
+   * test-passive-writer-notification.mjs（插件通知和真实失败保留）。
+   */
+  private readonlyConflict(frame: JsonRecord): ReadonlySessionConflict | undefined {
+    if (frame.type !== 'emit' || frame.event !== 'api-session/error' || !Array.isArray(frame.args)) return
+    const [sessionId, message] = frame.args
+    // The native event drops the domain code. Match its complete, known message,
+    // including the event's identity; never suppress arbitrary task error text.
+    if (typeof sessionId !== 'string' || !sessionId || sessionId.length > 256
+      || message !== `session "${sessionId}" is already owned by an active write handle`
+      || this.sessionRequests.has(sessionId)) return
+    try {
+      const agents = this.ctx.get('agents') as { get?: (id: string) => unknown } | undefined
+      const sessions = this.ctx.get('sessions') as { get?: (id: string) => unknown } | undefined
+      // Unknown/missing services, attached sessions and live Agents retain the
+      // original error. Only a definitely cold, non-requested activation is a
+      // passive availability notification instead of a failed phone operation.
+      if (typeof agents?.get !== 'function' || typeof sessions?.get !== 'function'
+        || agents.get(sessionId) !== undefined || sessions.get(sessionId) !== undefined) return
+    } catch { return }
+    const conflict: ReadonlySessionConflict = { sessionId, reason: 'writer-held', observedAt: Date.now() }
+    this.readonlyConflicts.push(conflict)
+    if (this.readonlyConflicts.length > 32) this.readonlyConflicts.shift()
+    return conflict
+  }
 
   attach(path: '/api/events.mux' | '/api/events.host', socket: WebSocket): void {
     const detach = this.connect(path, socket)
@@ -111,6 +204,7 @@ export class DshRealtimeCompatibility {
       kind: path.endsWith('.mux') ? 'mux' : 'host',
       lifetime: new AbortController(),
       sessionLifetimes: new Map(),
+      permissionProjections: new Map(),
     }
     this.sockets.add(state)
     if (state.kind === 'host') this.run(state, () => this.followWorkspace(state))
@@ -211,6 +305,8 @@ export class DshRealtimeCompatibility {
       try { state.socket.close(1001, 'adapter disposed') } catch { /* best effort */ }
     }
     this.pending.clear()
+    this.sessionRequests.clear()
+    this.readonlyConflicts.length = 0
   }
 
   private gateway(): TypertGatewayLike {
@@ -246,6 +342,7 @@ export class DshRealtimeCompatibility {
       controller.abort(new Error('socket closed'))
     }
     state.sessionLifetimes.clear()
+    state.permissionProjections.clear()
     if (state.clientId) {
       for (const [eventId, values] of this.pending) {
         const next = values.filter(value => value.clientId !== state.clientId)
@@ -265,6 +362,17 @@ export class DshRealtimeCompatibility {
       this.remove(state)
       state.socket.close(1009, 'realtime consumer is too slow')
       return
+    }
+    if (payload.type === 'session/projection' && payload.key === 'permissions' && typeof payload.sessionId === 'string') {
+      const previous = state.permissionProjections.get(payload.sessionId)
+      if (!previous || Number(payload.seq) >= Number(previous.seq)) {
+        state.permissionProjections.delete(payload.sessionId)
+        state.permissionProjections.set(payload.sessionId, payload)
+        if (state.permissionProjections.size > MAX_SESSION_SUBSCRIPTIONS) {
+          state.permissionProjections.delete(state.permissionProjections.keys().next().value!)
+        }
+      }
+      payload = { ...payload, value: legacyPermissionValue(payload.value, this.gateway().permissionCatalog?.()) }
     }
     state.socket.send(JSON.stringify({
       type: 'server-event',
@@ -301,6 +409,7 @@ export class DshRealtimeCompatibility {
   private controlFrame(state: SocketState, frame: JsonRecord | null): void {
     if (!frame) return
     if (frame.type === 'baseline') {
+      state.permissionProjections.clear()
       const value = recordOf(frame.value)
       const queues = recordOf(value?.queues) ?? {}
       for (const [sessionId, items] of Object.entries(queues)) {
@@ -317,6 +426,9 @@ export class DshRealtimeCompatibility {
           })
         }
       }
+      // A reconnect may have missed blank/title changes while the host-event
+      // channel stayed connected. Reconcile once after the complete baseline.
+      if (Object.keys(projections).length) this.send(state, { type: 'host/session-added' })
       return
     }
     if (frame.type === 'queue') {
@@ -328,11 +440,19 @@ export class DshRealtimeCompatibility {
         type: 'session/projection', sessionId: frame.sessionId,
         key: frame.key, value: frame.value, seq: frame.seq,
       })
+      // Older phones apply projections to the transcript, not directory rows.
+      // A freshly created row otherwise remains blank=true (hidden), and its
+      // generated title stays at the cwd fallback until a node switch. Keep
+      // the native list authoritative; never refresh per token/stream chunk.
+      if (frame.key === 'title' || frame.key === 'sessionListMetadata') {
+        this.send(state, { type: 'host/session-added', sessionId: frame.sessionId })
+      }
     }
   }
 
   private startSession(state: SocketState, sessionId: string): void {
     if (state.sessionLifetimes.has(sessionId)) return
+    if (this.gateway().canFollowSession?.(sessionId) === false) return
     const controller = new AbortController()
     const combined = AbortSignal.any([state.lifetime.signal, controller.signal])
     state.sessionLifetimes.set(sessionId, controller)
@@ -340,6 +460,7 @@ export class DshRealtimeCompatibility {
       try {
         const gateway = this.gateway()
         const address = await resolveDshSessionAddress(gateway, sessionId, combined)
+        if (gateway.canFollowSession?.(sessionId) === false) return
         const iterable = await gateway.stream({
           namespace: 'session',
           method: 'follow',
@@ -429,12 +550,38 @@ export class DshRealtimeCompatibility {
       if (state.lifetime.signal.aborted) return
       const frame = recordOf(raw)
       if (!frame) continue
+      if (frame.type === 'emit' && frame.event === 'permission-presets/catalog-changed') {
+        // The shipped phone has no catalog listener. Re-present its known
+        // selections at their original sequence, with the new live choices.
+        // It accepts equal-seq presentation refreshes; never invent a native
+        // permission change or acquire a session merely to refresh the menu.
+        for (const target of this.sockets) {
+          for (const payload of [...target.permissionProjections.values()]) this.send(target, payload)
+        }
+        continue
+      }
       if (frame.type === 'ready') {
         state.clientId = stringOf(frame.clientId)
         continue
       }
-      const host = legacyHostPayload(frame)
+      if (frame.type === 'emit' && frame.event === 'api-session/removed' && Array.isArray(frame.args)) {
+        for (const target of this.sockets) target.permissionProjections.delete(stringOf(frame.args[0]))
+      }
+      const conflict = this.readonlyConflict(frame)
+      // Temporary phone-notification mitigation only; see readonlyConflict.
+      // The original frame and native Desktop activation/lock stay untouched.
+      // Keep diagnostic evidence as an additive event ignored by the released
+      // phone instead of its global chat error. Direct RPC failures stay intact.
+      const host = conflict ? { type: 'host/remote-event', event: 'wechat-remote/session-readonly', args: [conflict] }
+        : legacyHostPayload(frame)
       if (host) {
+        // Phone-adapter history reads never activate an Agent. Once the host has
+        // activated it (e.g. accepted a prompt), attach the interested peers.
+        if (frame.event === 'api-session/status' || frame.event === 'api-session/added') {
+          for (const target of this.sockets) if (target.kind === 'mux') {
+            for (const id of this.knownSessions.keys()) this.startSession(target, id)
+          }
+        }
         for (const target of this.sockets) {
           if (target.kind === 'host') this.send(target, host)
         }

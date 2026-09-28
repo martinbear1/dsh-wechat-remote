@@ -33,6 +33,14 @@ var DownloadUnavailableError = class extends Error {
   }
 };
 var githubHosts = ["github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"];
+var artifactSourceTimeoutMs = 10 * 60 * 1e3;
+function artifactOptions(options) {
+  return {
+    ...options,
+    responseTimeoutMs: options.responseTimeoutMs ?? 3e4,
+    idleTimeoutMs: options.idleTimeoutMs ?? 6e4
+  };
+}
 async function fetchBytes(url, maxBytes, fetcher, hosts, deadline, options) {
   let next = url;
   for (let i = 0; i < 5; i++) {
@@ -198,16 +206,28 @@ function auditNativeArchive(archive, version) {
   auditArchive(plugin, release);
 }
 async function downloadNpmRelease(release, fetcher = fetch, options = {}) {
+  options = artifactOptions(options);
   if (!trustedReleaseAsset(release.asset, release.version) || !trustedNpmInstaller(release.npmInstaller)) throw new Error("\u5907\u7528\u5B89\u88C5\u5305\u6765\u6E90\u4E0D\u53D7\u4FE1\u4EFB");
   const source = release.npmInstaller;
-  const body = await fetchBytes(source.url, source.bytes, fetcher, ["registry.npmjs.org"], Date.now() + (options.timeoutMs ?? 6e4), options);
+  const body = await fetchBytes(source.url, source.bytes, fetcher, ["registry.npmjs.org"], Date.now() + (options.timeoutMs ?? artifactSourceTimeoutMs), options);
   options.signal?.throwIfAborted();
   return pluginFromInstaller(body, release);
 }
+async function downloadNativeRelease(release, fetcher = fetch, options = {}) {
+  options = artifactOptions(options);
+  if (!trustedReleaseAsset(release.asset, release.version) || !trustedNpmInstaller(release.npmInstaller) || release.npmInstaller.version !== release.version) throw new Error("\u6CA1\u6709\u53EF\u6838\u9A8C\u7684 Desktop \u66F4\u65B0\u5305");
+  const source = release.npmInstaller;
+  const body = await fetchBytes(source.url, source.bytes, fetcher, ["registry.npmjs.org"], Date.now() + (options.timeoutMs ?? artifactSourceTimeoutMs), options);
+  options.signal?.throwIfAborted();
+  pluginFromInstaller(body, release);
+  auditNativeArchive(body, release.version);
+  return body;
+}
 async function downloadRelease(release, fetcher = fetch, options = {}) {
+  options = artifactOptions(options);
   if (!trustedReleaseAsset(release.asset, release.version)) throw new Error("\u6682\u65E0\u53EF\u9A8C\u8BC1\u7684\u6B63\u5F0F\u66F4\u65B0\u5305");
   if (release.npmInstaller !== void 0 && !trustedNpmInstaller(release.npmInstaller)) throw new Error("\u5907\u7528\u5B89\u88C5\u5305\u6765\u6E90\u4E0D\u53D7\u4FE1\u4EFB");
-  const deadline = Date.now() + (options.timeoutMs ?? 12e4);
+  const deadline = Date.now() + (options.timeoutMs ?? 2 * artifactSourceTimeoutMs);
   let body;
   try {
     body = await fetchBytes(
@@ -215,7 +235,7 @@ async function downloadRelease(release, fetcher = fetch, options = {}) {
       release.asset.bytes,
       fetcher,
       githubHosts,
-      Math.min(deadline, Date.now() + 6e4),
+      Math.min(deadline, Date.now() + artifactSourceTimeoutMs),
       options
     );
   } catch (error) {
@@ -223,7 +243,7 @@ async function downloadRelease(release, fetcher = fetch, options = {}) {
     if (!(error instanceof DownloadUnavailableError) || !release.npmInstaller) throw error;
     const remaining = deadline - Date.now();
     if (remaining <= 0) throw error;
-    return downloadNpmRelease(release, fetcher, { ...options, timeoutMs: Math.min(remaining, 6e4) });
+    return downloadNpmRelease(release, fetcher, { ...options, timeoutMs: Math.min(remaining, artifactSourceTimeoutMs) });
   }
   auditArchive(body, release);
   return body;
@@ -233,6 +253,7 @@ export {
   auditArchive,
   auditNativeArchive,
   boundedFetch,
+  downloadNativeRelease,
   downloadNpmRelease,
   downloadRelease,
   pluginFromInstaller

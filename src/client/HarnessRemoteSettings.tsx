@@ -1,44 +1,20 @@
 /** Harness Remote's lazy page inside the native Web Settings navigation. */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useId, useSyncExternalStore } from 'react'
 import { FishLogo } from '@deepseek-ai/dsh-client-ui-primitives'
 import styles from './HarnessRemoteSettings.module.css'
 import { PluginUpdateCard } from './PluginUpdateCard.tsx'
-import { CompanionUpdateCard } from './CompanionUpdateCard.tsx'
-import { resolvePairingClient, type GateRuntimeInfo, type HarnessRemoteHostDescription,
+import { NativeUpdateCard } from './NativeUpdateCard.tsx'
+import { CompanionPanel } from './CompanionPanel.tsx'
+import { type HarnessRemoteHostDescription,
   type CallPairingManagement } from './pairing-client.js'
+import { pageStore, type RemotePageStore } from './remote-page-store.js'
 export type { HarnessRemoteHostDescription } from './pairing-client.js'
 
-interface PairCodeResp {
-  qrDataUrl: string
-  mode: 'secure-lan-route' | 'public-relay'
-  expiresAt: number
-}
-
-interface HarnessRemoteSettingsProps {
+export interface HarnessRemoteSettingsProps {
   describeHost: () => Promise<HarnessRemoteHostDescription>
   callManagement: CallPairingManagement
+  store?: RemotePageStore
 }
-
-interface GateStatusResp {
-  gate?: GateRuntimeInfo
-  companionUpdate?: { state: string; message: string }
-  lan: { ip: string; port: number }
-  publicRelay: {
-    enabled: boolean
-    state: 'disabled' | 'enrolling' | 'connecting' | 'online' | 'offline'
-    remoteAccess?: {
-      status: 'active' | 'expired' | 'suspended' | 'not_entitled'
-      validUntil?: number | null
-    } | null
-  }
-  agent?: {
-    agentName?: string
-    hostName?: string
-  }
-}
-
-type LoadState = 'loading' | 'ready' | 'error'
-type QrState = 'idle' | 'loading' | 'ready' | 'error'
 
 function StatusDot({ ok, busy = false }: { ok: boolean; busy?: boolean }): JSX.Element {
   return (
@@ -75,86 +51,11 @@ function Capability({
 export function HarnessRemoteSettings({
   describeHost,
   callManagement,
+  store = pageStore(describeHost, callManagement),
 }: HarnessRemoteSettingsProps): JSX.Element {
-  const [loadState, setLoadState] = useState<LoadState>('loading')
-  const [qrState, setQrState] = useState<QrState>('idle')
-  const [status, setStatus] = useState<GateStatusResp | null>(null)
-  const [runtime, setRuntime] = useState<GateRuntimeInfo | null>(null)
-  const [host, setHost] = useState<HarnessRemoteHostDescription | null>(null)
-  const [localOrigin, setLocalOrigin] = useState<string | null>(null)
-  const [qr, setQr] = useState<PairCodeResp | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const mountedRef = useRef(true)
-  const loadingStatus = useRef(false)
-
-  const loadStatus = useCallback(async (): Promise<void> => {
-    if (loadingStatus.current) return
-    loadingStatus.current = true
-    try {
-      const discovered = await resolvePairingClient(describeHost, callManagement)
-      if (!mountedRef.current) return
-      setRuntime(discovered.runtime)
-      setLocalOrigin(discovered.localOrigin)
-      setHost(discovered.host)
-      const next = await discovered.status() as GateStatusResp
-      if (!mountedRef.current) return
-      setStatus(next)
-      setRuntime(next.gate ?? discovered.runtime)
-      setLoadState('ready')
-      setError(null)
-    } catch {
-      if (!mountedRef.current) return
-      setLoadState('error')
-      setError('连接服务暂未就绪。请确认 DSH 正在运行，然后重试。')
-    } finally { loadingStatus.current = false }
-  }, [describeHost, callManagement])
-
-  const generateQr = useCallback(async (): Promise<void> => {
-    setQrState('loading')
-    setError(null)
-    try {
-      const discovered = await resolvePairingClient(describeHost, callManagement)
-      if (!mountedRef.current) return
-      setRuntime(discovered.runtime)
-      setHost(discovered.host)
-      const [code, next] = await Promise.all([
-        discovered.pairCode() as Promise<PairCodeResp>,
-        discovered.status() as Promise<GateStatusResp>,
-      ])
-      if (!mountedRef.current) return
-      setQr(code)
-      setQrState('ready')
-      if (next) {
-        setStatus(next)
-        setRuntime(next.gate ?? discovered.runtime)
-        setLoadState('ready')
-      }
-    } catch {
-      if (!mountedRef.current) return
-      setQr(null)
-      setQrState('error')
-      setError('暂时无法生成配对二维码，请确认电脑联网后重试。')
-    }
-  }, [describeHost, callManagement])
-
-  useEffect(() => {
-    mountedRef.current = true
-    void loadStatus()
-    // This page also presents companion installation state; avoid overlapping
-    // reads and keep short upgrades visible rather than polling every 30 s.
-    const timer = window.setInterval(() => void loadStatus(), 2000)
-    return () => {
-      mountedRef.current = false
-      window.clearInterval(timer)
-    }
-  }, [loadStatus])
-
-  useEffect(() => {
-    if (qrState !== 'ready' || !qr?.expiresAt) return undefined
-    const delay = Math.max(1000, qr.expiresAt - Date.now() - 60_000)
-    const timer = window.setTimeout(() => void generateQr(), delay)
-    return () => window.clearTimeout(timer)
-  }, [generateQr, qr?.expiresAt, qrState])
+  const { loadState, qrState, status, runtime, host, localOrigin, qr, error } = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
+  const { refresh: loadStatus, generateQr } = store
+  const titleId = useId()
 
   const relay = status?.publicRelay
   const publicBusy = relay?.state === 'enrolling' || relay?.state === 'connecting'
@@ -184,14 +85,14 @@ export function HarnessRemoteSettings({
   const hostName = status?.agent?.hostName || host?.computerName || '当前电脑'
 
   return (
-    <section className={styles.root} aria-labelledby="harness-remote-title">
+    <section className={styles.root} aria-labelledby={titleId}>
       <div className={styles.hero}>
         <div className={styles.identity}>
           <span className={styles.mark} aria-hidden>
             <FishLogo size={28} />
           </span>
           <div className={styles.identityCopy}>
-            <h3 id="harness-remote-title">Agent远程管理助手</h3>
+            <h3 id={titleId}>微信连接</h3>
             <p>
               {agentName}
               <span aria-hidden> · </span>
@@ -209,7 +110,15 @@ export function HarnessRemoteSettings({
         </span>
       </div>
 
-      <CompanionUpdateCard value={status?.companionUpdate} />
+      {runtime?.profileScope === 'desktop' && status && (!status.plugin || status.plugin.runningVersion !== status.plugin.installedVersion) ?
+        <aside className={styles.companionCard} data-state="self-restart-required" role="status">
+          <strong>{status.plugin ? '新版插件尚未生效，请完整重启 Desktop' : '刚升级插件？请先完整重启 Desktop'}</strong>
+          {status.plugin ? <p>正在运行 {status.plugin.runningVersion}；已安装 {status.plugin.installedVersion}。</p> :
+            <p>当前连接服务尚不能核验运行版本，不能把安装完成当作新版已生效。</p>}
+          <p>等当前任务结束后，选择顶部「应用 → 退出」，再重新打开 Desktop。仅关闭窗口、刷新页面或开关插件不能保证新版生效。</p>
+          <small>不必重装或重新配对。此操作不会升级或重启 Web。</small>
+        </aside> : null}
+
       <div className={styles.capabilities}>
         <Capability
           title="局域网直连"
@@ -249,6 +158,7 @@ export function HarnessRemoteSettings({
           <button
             type="button"
             className={styles.primaryButton}
+            disabled={loadState !== 'ready'}
             onClick={() => void generateQr()}
           >
             生成二维码
@@ -264,22 +174,22 @@ export function HarnessRemoteSettings({
             <button
               type="button"
               className={styles.secondaryButton}
-              disabled={qrState === 'loading'}
+              disabled={qrState === 'loading' || loadState !== 'ready'}
               onClick={() => void generateQr()}
             >
               {qrState === 'loading' ? '生成中…' : '重新生成'}
             </button>
           </div>
           <div className={styles.qrArea}>
-            {qrState === 'ready' && qr !== null ? (
+            {loadState === 'ready' && qrState === 'ready' && qr !== null ? (
               <img className={styles.qr} src={qr.qrDataUrl} alt="Agent远程管理助手配对二维码" />
             ) : (
               <div className={styles.qrPlaceholder} aria-live="polite">
-                {qrState === 'error' ? '生成失败' : '正在生成…'}
+                {loadState !== 'ready' ? '连接恢复后可查看二维码' : qrState === 'expired' ? '二维码已过期，请重新生成' : qrState === 'error' ? '生成失败' : '正在生成…'}
               </div>
             )}
             {qrState === 'ready' && qr !== null ? (
-              <small className={styles.qrValidity}>二维码约 15 分钟内有效</small>
+              <small className={styles.qrValidity}>有效至 {new Date(qr.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · 切换页面不重新生成</small>
             ) : null}
           </div>
           <p className={styles.securityNote}>
@@ -289,8 +199,13 @@ export function HarnessRemoteSettings({
           </p>
         </div>
       )}
-      {localOrigin ? <PluginUpdateCard localOrigin={localOrigin} /> : null}
-      {runtime?.profileScope === 'desktop' ? <p className={styles.securityNote}>插件更新请使用桌面应用的插件管理。</p> : null}
+      {localOrigin && store.updates ? <PluginUpdateCard store={store.updates} /> : null}
+      {runtime?.profileScope === 'desktop' && store.nativeUpdates ? <NativeUpdateCard store={store.nativeUpdates} /> : null}
+      <div className={styles.linkedSection}>
+        <h4>另一端插件</h4>
+        <CompanionPanel describeHost={describeHost} callManagement={callManagement} store={store} />
+      </div>
+      <p className={styles.securityNote}>设置和插件详情共用当前节点的配对与更新状态；Web 与 Desktop 各自独立。</p>
     </section>
   )
 }

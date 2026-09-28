@@ -391,7 +391,7 @@ async function workerMain(filename: string): Promise<void> {
     res.setHeader('Cache-Control', 'no-store'); res.setHeader('Access-Control-Allow-Headers', 'Authorization')
     if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return }
     if (req.method !== 'GET' || req.url !== '/status' || req.headers.authorization !== `Bearer ${job.statusToken}`) { res.writeHead(403); res.end(); return }
-    res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(status))
+    res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ ...status, jobId: job.id }))
   })
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
   try {

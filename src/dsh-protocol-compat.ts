@@ -3,10 +3,16 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { resolveDshSessionAddress } from './dsh-session-address.js'
 import { withPresentationProjections } from './session-presentation.js'
 import { openHostEvents, invokeHostRemote } from './dsh-host-contract.js'
+import { modelIdentityFormat, presentModelCatalog, needsModelAliasResolution, resolveModelAlias, legacyModelSelection } from './legacy-model-identity.js'
 
 type JsonRecord = Record<string, unknown>
 
 export interface TypertGatewayLike {
+  /** Public synchronous native metadata, not a session write or a guessed list. */
+  readonly permissionCatalog?: () => unknown
+  /** Native query snapshots do not promote a cold session into a writer. */
+  readonly readSnapshot?: (address: Awaited<ReturnType<typeof resolveDshSessionAddress>>, maxMessages: number, signal: AbortSignal) => Promise<unknown>
+  readonly canFollowSession?: (sessionId: string) => boolean
   readonly commandAttachmentField?: () => 'images' | 'submittedAttachments'
   readonly wireStream?: {
     open(endpoint: string, payload: unknown, signal: AbortSignal): Promise<AsyncIterable<unknown>>
@@ -59,6 +65,7 @@ type InvocationPlan =
   | { readonly kind: 'host-describe' }
   | { readonly kind: 'workspace-list' }
   | { readonly kind: 'session-models'; readonly request: JsonRecord }
+  | { readonly kind: 'session-select-model'; readonly request: JsonRecord }
   | { readonly kind: 'session-history'; readonly request: JsonRecord }
   | { readonly kind: 'permission-command'; readonly sessionId: string; readonly line: string; readonly preset?: string; readonly nativeReceipt?: boolean }
 
@@ -70,7 +77,6 @@ const SINGLE_REQUEST_METHODS = new Set([
   'session.openWorkspacePath',
   'session.rename',
   'session.search',
-  'session.selectModel',
   'session.updateQueue',
   'workspace.archiveSession',
   'workspace.create',
@@ -150,6 +156,7 @@ export function planLegacyRpc(request: LegacyClientRequest): InvocationPlan {
   if (method === 'session.models') {
     return { kind: 'session-models', request: payload }
   }
+  if (method === 'session.selectModel') return { kind: 'session-select-model', request: payload }
   if (method === 'session.prompt') {
     // Released clients carry the permission picker through session.prompt.
     // DSH's native UI uses commands.execute: sending this to the model neither
@@ -271,9 +278,44 @@ export function planLegacyRpc(request: LegacyClientRequest): InvocationPlan {
 export function resolveTypertGateway(ctx: Context): TypertGatewayLike | null {
   const candidate = ctx.get('typertGateway') as Partial<TypertGatewayLike> | undefined
   if (!candidate || typeof candidate.invoke !== 'function' || typeof candidate.stream !== 'function') return null
+  const query = ctx.get('sessionQuery') as { observeSession?: (...args: any[]) => Promise<any> } | undefined
+  const agents = ctx.get('agents') as { get?: (id: string) => unknown } | undefined
   return {
+    permissionCatalog: () => {
+      // Read on demand so hot-loaded/withdrawn catalog contributions cannot
+      // leave stale choices cached in the adapter. No selection is performed.
+      try {
+        const service = ctx.get('permissionPresets') as { catalog?: () => unknown } | undefined
+        return typeof service?.catalog === 'function' ? service.catalog() : undefined
+      }
+      catch { return undefined } // Catalog failure must not make chat/history unreadable.
+    },
+    ...(typeof agents?.get === 'function' ? { canFollowSession: (id: string) => Boolean(agents.get!(id)) } : {}),
+    ...(typeof query?.observeSession === 'function' ? { readSnapshot: async (address: Awaited<ReturnType<typeof resolveDshSessionAddress>>, maxMessages: number, signal: AbortSignal) => {
+      const id = address.kind === 'session' ? address.sessionId : address.childSessionId
+      const observation = await query.observeSession!(id, { signal, projectionMode: 'all' })
+      try {
+        signal.throwIfAborted()
+        const cursor = observation.cursor
+        if (!Number.isSafeInteger(cursor) || cursor < -1) throw new Error('DSH 只读会话快照无效')
+        // page validates the durable address (including child ownership) and
+        // performs native pagination. Retaining the observation is read-only.
+        const page = recordOf(await invokeHostRemote(ctx, candidate, { namespace: 'session', method: 'page',
+          args: { request: { address, throughSeq: cursor, maxMessages } }, signal }))
+        return { type: 'snapshot', header: observation.header, cursor, records: page?.records,
+          hasMore: page?.hasMore === true, projections: observation.projections ?? { asOfSeq: cursor, values: {} } }
+      } finally { observation[Symbol.dispose]() }
+    } } : {}),
     wireStream: candidate.wireStream ? { open: (endpoint, payload, signal) => openHostEvents(candidate, endpoint, payload, signal, ctx) } : undefined,
-    invoke: request => invokeHostRemote(ctx, candidate, request),
+    invoke: request => {
+      // The generated commands/list Agent parameter can resume a cold Agent.
+      // Reading composer suggestions is not consent to acquire a writer.
+      if (request.namespace === 'commands' && request.method === 'list' && typeof agents?.get === 'function'
+          && !agents.get(String(request.args.agentId))) {
+        return Promise.reject(Object.assign(new Error('此会话尚未在当前节点激活，暂不加载命令建议；历史仍可查看'), { code: 'session/agent-unavailable' }))
+      }
+      return invokeHostRemote(ctx, candidate, request)
+    },
     stream: request => candidate.stream!(request),
     commandAttachmentField: () => {
       const registry = ctx.get('typert') as { local?: { get(endpoint: string): {parameters?: readonly {wire?: string}[]} | undefined; hasSeen?(endpoint: string): boolean } } | undefined
@@ -375,13 +417,19 @@ async function firstStreamFrame(
   args: JsonRecord,
   signal: AbortSignal,
 ): Promise<unknown> {
-  const iterable = await gateway.stream({ namespace, method, args, signal })
+  const request = recordOf(args.request)
+  if (namespace === 'session' && method === 'follow' && gateway.readSnapshot && request?.address) {
+    return gateway.readSnapshot(request.address as Awaited<ReturnType<typeof resolveDshSessionAddress>>, Number(request.maxMessages) || 8, signal)
+  }
+  const opening = new AbortController()
+  const iterable = await gateway.stream({ namespace, method, args, signal: AbortSignal.any([signal, opening.signal]) })
   const iterator = iterable[Symbol.asyncIterator]()
   try {
     const first = await iterator.next()
     if (first.done) throw new Error(`${namespace}/${method} ended before its baseline`)
     return first.value
   } finally {
+    opening.abort()
     await iterator.return?.()
   }
 }
@@ -453,7 +501,7 @@ export function createHistoryPageReader(
       return {
         events: historyEvents(first.records),
         hasMore: first.hasMore === true,
-        projections: withPresentationProjections(first.projections),
+        projections: withPresentationProjections(first.projections, gateway.permissionCatalog?.()),
         historyEndSeq: first.cursor,
       }
     }
@@ -461,7 +509,7 @@ export function createHistoryPageReader(
     return {
       ...page,
       ...(latest ? {
-        projections: withPresentationProjections(first.projections),
+        projections: withPresentationProjections(first.projections, gateway.permissionCatalog?.()),
         historyEndSeq: first.cursor,
       } : {}),
     }
@@ -541,6 +589,7 @@ async function sessionModelsValue(
   request: JsonRecord,
   signal: AbortSignal,
 ): Promise<unknown> {
+  const format = modelIdentityFormat(request)
   const sessionId = typeof request.sessionId === 'string' ? request.sessionId : ''
   if (!sessionId) throw new Error('session.models requires sessionId')
   const address = await resolveDshSessionAddress(gateway, sessionId, signal)
@@ -561,7 +610,27 @@ async function sessionModelsValue(
   // the last consumed selection; only a never-configured Session uses default.
   const current = selection?.next ?? selection?.lastUsed ?? catalog.default
   if (!recordOf(current)) throw new Error('DSH returned no usable model selection')
-  return { ...catalog, current }
+  return presentModelCatalog(catalog, current, format)
+}
+
+async function selectModelValue(gateway: TypertGatewayLike, request: JsonRecord, signal: AbortSignal): Promise<unknown> {
+  signal.throwIfAborted()
+  modelIdentityFormat(request)
+  const { modelIdentity: _format, ...native } = request
+  let aliased = false
+  if (needsModelAliasResolution(request)) {
+    const catalog = await gateway.invoke({ namespace: 'session', method: 'modelCatalog', args: {}, signal })
+    const resolved = resolveModelAlias(catalog, request)
+    native.model = resolved.model
+    aliased = resolved.aliased
+  }
+  signal.throwIfAborted()
+  // Exactly one native mutation. DSH still validates provider, reasoning effort,
+  // session ownership and permissions. A receipt is not permission to replay.
+  const result = await gateway.invoke({ namespace: 'session', method: 'selectModel', args: { request: native }, signal })
+  const receipt = recordOf(result)
+  return aliased && receipt && recordOf(receipt.selected)
+    ? { ...receipt, selected: legacyModelSelection(receipt.selected) } : result
 }
 
 /** Execute one stable request and restore the pre-0.1.2 HTTP envelope. */
@@ -582,6 +651,7 @@ export async function invokeLegacyRpc(
     else if (plan.kind === 'workspace-list') value = await workspaceValue(gateway, options.signal)
     else if (plan.kind === 'session-history') value = await historyValue(gateway, plan.request, options.signal)
     else if (plan.kind === 'session-models') value = await sessionModelsValue(gateway, plan.request, options.signal)
+    else if (plan.kind === 'session-select-model') value = await selectModelValue(gateway, plan.request, options.signal)
     else if (plan.kind === 'permission-command') value = await permissionCommandValue(gateway, plan, options.signal,
       (sessionId, signal) => historyValue(gateway, { sessionId, maxMessages: 1 }, signal), options.flushPermission)
     else {

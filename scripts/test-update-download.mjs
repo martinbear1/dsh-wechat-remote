@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { gzipSync } from 'node:zlib'
 import { createHash } from 'node:crypto'
-import { downloadRelease, downloadNpmRelease, pluginFromInstaller, boundedFetch, DownloadUnavailableError } from '../lib/update-download.js'
+import { downloadRelease, downloadNpmRelease, downloadNativeRelease, pluginFromInstaller, boundedFetch, DownloadUnavailableError } from '../lib/update-download.js'
 import { validateCatalog } from '../lib/update-policy.js'
 
 function pack(entries) {
@@ -25,11 +25,112 @@ const release = { version:'1.7.9', channel:'stable', dsh:['0.1.5-rc.1'], platfor
   npmInstaller:{ version:'1.7.10',url:'https://registry.npmjs.org/dsh-wechat-remote/-/dsh-wechat-remote-1.7.10.tgz', ...digest(installer) } }
 const catalog = r => ({ schemaVersion:1,revision:'test',issuedAt:1,expiresAt:1000,releases:[r],blocked:[],retiredDsh:[] })
 
+function nativeFixture() {
+  const files = [['package/package.json', JSON.stringify({ name: 'dsh-wechat-remote', version: '1.7.9', dsh: { bundle: { patch: './cordis.patch.yml' } } })],
+    ['package/assets/plugin.tgz', plugin], ['package/assets/release.json', JSON.stringify({ version: '1.7.9', catalog: catalog(release) })],
+    ['package/native/lib/index.js', ''], ['package/native/lib/client.js', ''], ['package/cordis.patch.yml', '']]
+  const archive = pack(files)
+  const native = { ...release, npmInstaller: { version: '1.7.9', url: 'https://registry.npmjs.org/dsh-wechat-remote/-/dsh-wechat-remote-1.7.9.tgz', ...digest(archive) } }
+  return { files, archive, native }
+}
+
+test('Desktop retains and audits the complete native bundle, never the CLI core or installer hotfix with another version', async () => {
+  const { files, archive, native } = nativeFixture()
+  assert.deepEqual(await downloadNativeRelease(native, async () => new Response(archive)), archive)
+  await assert.rejects(downloadNativeRelease(release, async () => assert.fail('mismatched version')))
+  await assert.rejects(downloadNativeRelease(native, async () => new Response(Buffer.alloc(archive.length))))
+  const withScript = pack([[files[0][0], JSON.stringify({ name: 'dsh-wechat-remote', version: '1.7.9', scripts: { postinstall: 'bad' } })], ...files.slice(1)])
+  await assert.rejects(downloadNativeRelease({ ...native, npmInstaller: { ...native.npmInstaller, ...digest(withScript) } }, async () => new Response(withScript)))
+})
+
+test('Desktop active transfer budget exceeds a minute but stays bounded across redirects; explicit deadlines are preserved', async t => {
+  const { archive, native } = nativeFixture()
+  let now = 1000, calls = 0
+  t.mock.method(Date, 'now', () => now)
+  assert.deepEqual(await downloadNativeRelease(native, async url => {
+    calls++
+    if (calls === 1) {
+      now += 70000
+      return new Response(null, { status: 302, headers: { location: url } })
+    }
+    return new Response(archive)
+  }), archive)
+  assert.equal(calls, 2)
+  calls = 0
+  await assert.rejects(downloadNativeRelease(native, async url => {
+    calls++; now += 310000
+    return new Response(null, { status: 302, headers: { location: url } })
+  }), DownloadUnavailableError)
+  assert.equal(calls, 2)
+  calls = 0
+  await assert.rejects(downloadNativeRelease(native, async url => {
+    calls++; now += 51
+    return new Response(null, { status: 302, headers: { location: url } })
+  }, { timeoutMs: 50 }), DownloadUnavailableError)
+  assert.equal(calls, 1)
+})
+
+test('Desktop longer total budget still rejects stalled bodies promptly without retrying', async () => {
+  const { native } = nativeFixture()
+  let calls = 0
+  await assert.rejects(downloadNativeRelease(native, async (url, { signal }) => {
+    calls++
+    return new Response(new ReadableStream({ start(controller) {
+      signal.addEventListener('abort', () => controller.error(signal.reason), { once: true })
+    } }))
+  }, { idleTimeoutMs: 20 }), error => error instanceof DownloadUnavailableError && /没有进展/.test(error.cause?.message))
+  assert.equal(calls, 1)
+})
+
 test('GitHub succeeds without requesting npm; installer hotfix version may differ', async () => {
   const calls=[]
   assert.deepEqual(await downloadRelease(release, async url => { calls.push(url); return new Response(plugin) }),plugin)
   assert.deepEqual(calls,[release.asset.url])
   assert.deepEqual(pluginFromInstaller(installer,release),plugin)
+})
+
+test('Web and CLI compatibility downloads allow active transfers beyond sixty seconds on either source', async t => {
+  let now = 1000
+  t.mock.method(Date, 'now', () => now)
+  for (const route of ['github', 'fallback', 'npm']) {
+    let calls = 0
+    const fetcher = async url => {
+      calls++
+      if (route === 'fallback' && calls === 1) return new Response(null, { status: 503 })
+      if (url === release.asset.url ? calls === 1 : calls === (route === 'fallback' ? 2 : 1)) {
+        now += 70000
+        return new Response(null, { status: 302, headers: { location: url } })
+      }
+      return new Response(url === release.asset.url ? plugin : installer)
+    }
+    const result = route === 'npm' ? await downloadNpmRelease(release, fetcher) : await downloadRelease(release, fetcher)
+    assert.deepEqual(result, plugin)
+    assert.equal(calls, route === 'fallback' ? 3 : 2)
+  }
+})
+
+test('artifact defaults distinguish response, stalled transfer and bounded source budgets; catalog stays short', async t => {
+  const delays = [], original = globalThis.setTimeout
+  t.mock.method(globalThis, 'setTimeout', (fn, delay, ...args) => {
+    delays.push(delay)
+    return original(fn, delay, ...args)
+  })
+  await downloadNpmRelease(release, async () => new Response(installer))
+  assert(delays.some(value => value > 590000 && value <= 600000))
+  assert(delays.includes(30000)); assert(delays.includes(60000))
+  delays.length = 0
+  await boundedFetch('https://relay.xyxfood.xyz/v1/update-policy', 256 * 1024, async () => new Response('{}'))
+  assert(delays.every(value => value <= 15000), 'small metadata never inherits long artifact wait')
+})
+
+test('longer Web download budgets remain shared and fallback cannot restart the overall deadline', async t => {
+  let now = 1000, calls = 0
+  t.mock.method(Date, 'now', () => now)
+  await assert.rejects(downloadRelease(release, async url => {
+    calls++; now += 310000
+    return new Response(null, { status: 302, headers: { location: url } })
+  }), DownloadUnavailableError)
+  assert.equal(calls, 4, 'each source gets at most ten minutes, twenty shared, even across redirects')
 })
 test('transport and HTTP failures switch once and return identical audited bytes', async () => {
   for (const fail of [() => { throw new TypeError('fetch failed') }, () => new Response(null,{status:503}), () => new Response(null,{status:404}),

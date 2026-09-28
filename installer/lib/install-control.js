@@ -710,10 +710,29 @@ function presentationProjection(key, raw) {
   }
   return { key: `agent.${name}.v1`, value };
 }
-function withPresentationProjections(block) {
+function legacyPermissionValue(value, catalog) {
+  const selection = object(value), source = object(catalog);
+  if (Array.isArray(selection.options)) return value;
+  if (typeof selection.currentValue !== "string" || !Array.isArray(source.options)) return value;
+  const seen = /* @__PURE__ */ new Set();
+  const options = [];
+  for (const raw of source.options) {
+    const option = object(raw);
+    if (typeof option.value !== "string" || !option.value || seen.has(option.value) || typeof option.name !== "string") return value;
+    seen.add(option.value);
+    options.push({
+      value: option.value,
+      name: option.name,
+      ...typeof option.description === "string" ? { description: option.description } : {}
+    });
+  }
+  return { ...selection, options };
+}
+function withPresentationProjections(block, permissionCatalog) {
   const source = object(block);
   if (!source.values) return block;
   const values = { ...object(source.values) };
+  if (Object.hasOwn(values, "permissions")) values.permissions = legacyPermissionValue(values.permissions, permissionCatalog);
   for (const [key, value] of Object.entries(values)) {
     const projected = presentationProjection(key, value);
     if (projected) values[projected.key] = projected.value;
@@ -800,6 +819,94 @@ async function invokeHostRemote(ctx, gateway, request) {
   return projectedSubagentCatalog(parent, projection, listing?.items);
 }
 
+// src/legacy-model-identity.ts
+var LEGACY_MODEL_FORMAT = "legacy-provider-model-v1";
+var NATIVE_MODEL_FORMAT = "native-v1";
+var separator = " \xB7 ";
+function record2(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+function failure(message) {
+  throw Object.assign(new Error(message), { code: "adapter/model-identity-invalid" });
+}
+function modelIdentityFormat(request) {
+  const format = request.modelIdentity ?? LEGACY_MODEL_FORMAT;
+  if (format !== LEGACY_MODEL_FORMAT && format !== NATIVE_MODEL_FORMAT) {
+    failure("\u4E0D\u652F\u6301\u6B64\u6A21\u578B\u6807\u8BC6\u683C\u5F0F\uFF1B\u672A\u66F4\u6539\u6A21\u578B");
+  }
+  return format;
+}
+function component(value) {
+  return value.replace(/%/g, "%25").replace(/·/g, "%B7").replace(/[\u0000-\u001f\u007f]/g, (char) => "%" + char.charCodeAt(0).toString(16).padStart(2, "0").toUpperCase());
+}
+function legacyModelAlias(provider, model) {
+  return component(provider) + separator + component(model);
+}
+function groupsOf(catalog) {
+  const groups = record2(catalog)?.groups;
+  if (!Array.isArray(groups)) failure("\u4E3B\u673A\u6A21\u578B\u76EE\u5F55\u65E0\u6548\uFF1B\u8BF7\u5237\u65B0\u6A21\u578B\u5217\u8868");
+  const providers = /* @__PURE__ */ new Set();
+  for (const candidate of groups) {
+    const group = record2(candidate);
+    if (!group || typeof group.id !== "string" || !group.id || providers.has(group.id) || !Array.isArray(group.models)) {
+      failure("\u4E3B\u673A\u63D0\u4F9B\u65B9\u76EE\u5F55\u65E0\u6548\uFF1B\u8BF7\u5237\u65B0\u6A21\u578B\u5217\u8868");
+    }
+    providers.add(group.id);
+    const models = /* @__PURE__ */ new Set();
+    for (const candidate2 of group.models) {
+      const model = record2(candidate2);
+      if (!model || typeof model.id !== "string" || !model.id || models.has(model.id)) {
+        failure("\u4E3B\u673A\u6A21\u578B\u76EE\u5F55\u5305\u542B\u65E0\u6548\u6216\u91CD\u590D\u6807\u8BC6\uFF1B\u672A\u731C\u6D4B\u6A21\u578B");
+      }
+      models.add(model.id);
+    }
+  }
+  return groups;
+}
+function legacyModelSelection(value) {
+  const selection = record2(value);
+  if (!selection || typeof selection.provider !== "string" || typeof selection.model !== "string") return value;
+  return { ...selection, model: legacyModelAlias(selection.provider, selection.model), nativeModel: selection.model };
+}
+function presentModelCatalog(catalog, current, format) {
+  const groups = groupsOf(catalog);
+  const aliases = format === LEGACY_MODEL_FORMAT && groups.length > 1;
+  const selection = (value) => {
+    const selected = record2(value);
+    const missingProvider = groups.length === 1 && selected && selected.provider !== groups[0].id;
+    return format === LEGACY_MODEL_FORMAT && (aliases || missingProvider) ? legacyModelSelection(value) : value;
+  };
+  return {
+    ...catalog,
+    groups: aliases ? groups.map((group) => ({ ...group, models: group.models.map((model) => ({
+      ...model,
+      id: legacyModelAlias(group.id, model.id),
+      name: `${group.name || group.id}${separator}${model.name || model.id}`,
+      nativeModel: model.id
+    })) })) : groups,
+    default: selection(catalog.default),
+    current: selection(current),
+    // Per-response negotiation (not OS/version guessing or global state).
+    // A future Mini requests native-v1 and MUST verify this acknowledgement.
+    modelIdentity: { version: 1, format, aliases, supportedFormats: [LEGACY_MODEL_FORMAT, NATIVE_MODEL_FORMAT] }
+  };
+}
+function needsModelAliasResolution(request) {
+  return modelIdentityFormat(request) === LEGACY_MODEL_FORMAT && typeof request.model === "string" && request.model.includes(separator);
+}
+function resolveModelAlias(catalog, request) {
+  const groups = groupsOf(catalog);
+  const group = groups.find((group2) => group2.id === request.provider);
+  if (!group || typeof request.model !== "string") failure("\u8BE5\u63D0\u4F9B\u65B9\u5DF2\u4E0D\u53EF\u7528\uFF1B\u8BF7\u5237\u65B0\u6A21\u578B\u5217\u8868\u540E\u91CD\u65B0\u9009\u62E9");
+  const models = group.models;
+  const raw = models.find((model) => model.id === request.model);
+  const aliased = models.find((model) => legacyModelAlias(group.id, model.id) === request.model);
+  if (raw && aliased && raw.id !== aliased.id) failure("\u6A21\u578B\u6807\u8BC6\u6709\u6B67\u4E49\uFF1B\u8BF7\u5237\u65B0\u6A21\u578B\u5217\u8868\u540E\u91CD\u65B0\u9009\u62E9");
+  if (aliased) return { model: aliased.id, aliased: true };
+  if (raw) return { model: raw.id, aliased: false };
+  failure("\u6A21\u578B\u6216\u63D0\u4F9B\u65B9\u5DF2\u53D8\u5316\uFF1B\u8BF7\u5237\u65B0\u6A21\u578B\u5217\u8868\u540E\u91CD\u65B0\u9009\u62E9\uFF0C\u672A\u66F4\u6539\u6A21\u578B");
+}
+
 // src/dsh-protocol-compat.ts
 var SINGLE_REQUEST_METHODS = /* @__PURE__ */ new Set([
   "session.attachment",
@@ -809,7 +916,6 @@ var SINGLE_REQUEST_METHODS = /* @__PURE__ */ new Set([
   "session.openWorkspacePath",
   "session.rename",
   "session.search",
-  "session.selectModel",
   "session.updateQueue",
   "workspace.archiveSession",
   "workspace.create",
@@ -878,6 +984,7 @@ function planLegacyRpc(request) {
   if (method === "session.models") {
     return { kind: "session-models", request: payload };
   }
+  if (method === "session.selectModel") return { kind: "session-select-model", request: payload };
   if (method === "session.prompt") {
     const parts = Array.isArray(payload.content) ? payload.content : [];
     const first = recordOf(parts[0]);
@@ -999,9 +1106,50 @@ function planLegacyRpc(request) {
 function resolveTypertGateway(ctx) {
   const candidate = ctx.get("typertGateway");
   if (!candidate || typeof candidate.invoke !== "function" || typeof candidate.stream !== "function") return null;
+  const query = ctx.get("sessionQuery");
+  const agents = ctx.get("agents");
   return {
+    permissionCatalog: () => {
+      try {
+        const service = ctx.get("permissionPresets");
+        return typeof service?.catalog === "function" ? service.catalog() : void 0;
+      } catch {
+        return void 0;
+      }
+    },
+    ...typeof agents?.get === "function" ? { canFollowSession: (id) => Boolean(agents.get(id)) } : {},
+    ...typeof query?.observeSession === "function" ? { readSnapshot: async (address, maxMessages, signal) => {
+      const id = address.kind === "session" ? address.sessionId : address.childSessionId;
+      const observation = await query.observeSession(id, { signal, projectionMode: "all" });
+      try {
+        signal.throwIfAborted();
+        const cursor = observation.cursor;
+        if (!Number.isSafeInteger(cursor) || cursor < -1) throw new Error("DSH \u53EA\u8BFB\u4F1A\u8BDD\u5FEB\u7167\u65E0\u6548");
+        const page = recordOf(await invokeHostRemote(ctx, candidate, {
+          namespace: "session",
+          method: "page",
+          args: { request: { address, throughSeq: cursor, maxMessages } },
+          signal
+        }));
+        return {
+          type: "snapshot",
+          header: observation.header,
+          cursor,
+          records: page?.records,
+          hasMore: page?.hasMore === true,
+          projections: observation.projections ?? { asOfSeq: cursor, values: {} }
+        };
+      } finally {
+        observation[Symbol.dispose]();
+      }
+    } } : {},
     wireStream: candidate.wireStream ? { open: (endpoint, payload, signal) => openHostEvents(candidate, endpoint, payload, signal, ctx) } : void 0,
-    invoke: (request) => invokeHostRemote(ctx, candidate, request),
+    invoke: (request) => {
+      if (request.namespace === "commands" && request.method === "list" && typeof agents?.get === "function" && !agents.get(String(request.args.agentId))) {
+        return Promise.reject(Object.assign(new Error("\u6B64\u4F1A\u8BDD\u5C1A\u672A\u5728\u5F53\u524D\u8282\u70B9\u6FC0\u6D3B\uFF0C\u6682\u4E0D\u52A0\u8F7D\u547D\u4EE4\u5EFA\u8BAE\uFF1B\u5386\u53F2\u4ECD\u53EF\u67E5\u770B"), { code: "session/agent-unavailable" }));
+      }
+      return invokeHostRemote(ctx, candidate, request);
+    },
     stream: (request) => candidate.stream(request),
     commandAttachmentField: () => {
       const registry = ctx.get("typert");
@@ -1039,8 +1187,8 @@ function errorResult(error) {
 }
 function historyEvents(records) {
   if (!Array.isArray(records)) return [];
-  return records.flatMap((record2) => {
-    const row = recordOf(record2);
+  return records.flatMap((record3) => {
+    const row = recordOf(record3);
     const event = recordOf(row?.event);
     if (row?.type === "event" && event) return [{ event }];
     if (row?.type !== "chunks" || !event) return [];
@@ -1081,13 +1229,19 @@ function unpackChunkRow(event) {
   }).filter((item) => typeof item.type === "string");
 }
 async function firstStreamFrame(gateway, namespace, method, args, signal) {
-  const iterable = await gateway.stream({ namespace, method, args, signal });
+  const request = recordOf(args.request);
+  if (namespace === "session" && method === "follow" && gateway.readSnapshot && request?.address) {
+    return gateway.readSnapshot(request.address, Number(request.maxMessages) || 8, signal);
+  }
+  const opening = new AbortController();
+  const iterable = await gateway.stream({ namespace, method, args, signal: AbortSignal.any([signal, opening.signal]) });
   const iterator = iterable[Symbol.asyncIterator]();
   try {
     const first = await iterator.next();
     if (first.done) throw new Error(`${namespace}/${method} ended before its baseline`);
     return first.value;
   } finally {
+    opening.abort();
     await iterator.return?.();
   }
 }
@@ -1142,7 +1296,7 @@ function createHistoryPageReader(gateway, sessionId, signal) {
       return {
         events: historyEvents(first.records),
         hasMore: first.hasMore === true,
-        projections: withPresentationProjections(first.projections),
+        projections: withPresentationProjections(first.projections, gateway.permissionCatalog?.()),
         historyEndSeq: first.cursor
       };
     }
@@ -1150,7 +1304,7 @@ function createHistoryPageReader(gateway, sessionId, signal) {
     return {
       ...page,
       ...latest ? {
-        projections: withPresentationProjections(first.projections),
+        projections: withPresentationProjections(first.projections, gateway.permissionCatalog?.()),
         historyEndSeq: first.cursor
       } : {}
     };
@@ -1194,6 +1348,7 @@ async function permissionCommandValue(gateway, plan, signal, readHistory, flushP
   return plan.nativeReceipt ? command : { accepted: true, command: true, permission: current, commandId: command?.commandId };
 }
 async function sessionModelsValue(gateway, request, signal) {
+  const format = modelIdentityFormat(request);
   const sessionId = typeof request.sessionId === "string" ? request.sessionId : "";
   if (!sessionId) throw new Error("session.models requires sessionId");
   const address = await resolveDshSessionAddress(gateway, sessionId, signal);
@@ -1212,7 +1367,23 @@ async function sessionModelsValue(gateway, request, signal) {
   }
   const current = selection?.next ?? selection?.lastUsed ?? catalog.default;
   if (!recordOf(current)) throw new Error("DSH returned no usable model selection");
-  return { ...catalog, current };
+  return presentModelCatalog(catalog, current, format);
+}
+async function selectModelValue(gateway, request, signal) {
+  signal.throwIfAborted();
+  modelIdentityFormat(request);
+  const { modelIdentity: _format, ...native } = request;
+  let aliased = false;
+  if (needsModelAliasResolution(request)) {
+    const catalog = await gateway.invoke({ namespace: "session", method: "modelCatalog", args: {}, signal });
+    const resolved = resolveModelAlias(catalog, request);
+    native.model = resolved.model;
+    aliased = resolved.aliased;
+  }
+  signal.throwIfAborted();
+  const result = await gateway.invoke({ namespace: "session", method: "selectModel", args: { request: native }, signal });
+  const receipt = recordOf(result);
+  return aliased && receipt && recordOf(receipt.selected) ? { ...receipt, selected: legacyModelSelection(receipt.selected) } : result;
 }
 async function invokeLegacyRpc(gateway, request, options) {
   let result;
@@ -1223,6 +1394,7 @@ async function invokeLegacyRpc(gateway, request, options) {
     else if (plan.kind === "workspace-list") value = await workspaceValue(gateway, options.signal);
     else if (plan.kind === "session-history") value = await historyValue(gateway, plan.request, options.signal);
     else if (plan.kind === "session-models") value = await sessionModelsValue(gateway, plan.request, options.signal);
+    else if (plan.kind === "session-select-model") value = await selectModelValue(gateway, plan.request, options.signal);
     else if (plan.kind === "permission-command") value = await permissionCommandValue(
       gateway,
       plan,
@@ -1242,8 +1414,8 @@ async function invokeLegacyRpc(gateway, request, options) {
           });
           break;
         } catch (error) {
-          const failure = recordOf(error);
-          if (request.method !== "session.list" || attempt >= 2 || failure?.code !== "SESSION_QUERY_PERSISTENCE_FAILED" || typeof failure.message !== "string" || !/ENOENT.*scandir.*[\\/]\.dsh-mkdir-[^\\/]+$/.test(failure.message)) throw error;
+          const failure2 = recordOf(error);
+          if (request.method !== "session.list" || attempt >= 2 || failure2?.code !== "SESSION_QUERY_PERSISTENCE_FAILED" || typeof failure2.message !== "string" || !/ENOENT.*scandir.*[\\/]\.dsh-mkdir-[^\\/]+$/.test(failure2.message)) throw error;
           await delay(25 * (attempt + 1), void 0, { signal: options.signal });
         }
       }

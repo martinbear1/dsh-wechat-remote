@@ -133,12 +133,18 @@ export class DshCompatibilityApi implements DshCompatibilityTransport {
         // an invalid/failed permission command as ordinary model text.
         return reply ? response(200, reply) : this.nativeRequest('session.prompt', request.body, signal)
       }
-      this.realtime.subscribeSession(legacy.payload.sessionId)
-      const reply = await invokeLegacyRpc(gateway, legacy, {
-        signal: AbortSignal.any([request.signal, AbortSignal.timeout(objectRpcBudget(legacy.method, legacy.payload) ?? 90_000)]),
-        describeHost: () => ({ cwd: process.cwd() }),
-        flushPermission: sessionId => this.flushPermission(sessionId),
-      })
+      // 配合临时占用误报规避：先记录手机操作，再订阅/派发，finally 中释放。
+      // 这只供通知分类使用；真实 RPC 返回值和失败不改写，也不接管原生会话。
+      const releaseRequest = this.realtime.trackSessionRequest(legacy)
+      let reply
+      try {
+        this.realtime.subscribeSession(legacy.payload.sessionId)
+        reply = await invokeLegacyRpc(gateway, legacy, {
+          signal: AbortSignal.any([request.signal, AbortSignal.timeout(objectRpcBudget(legacy.method, legacy.payload) ?? 90_000)]),
+          describeHost: () => ({ cwd: process.cwd() }),
+          flushPermission: sessionId => this.flushPermission(sessionId),
+        })
+      } finally { releaseRequest() }
       if (legacy.method === 'session.create' && reply.result.ok) {
         const value = reply.result.value as { readonly sessionId?: unknown } | null
         this.realtime.subscribeSession(value?.sessionId)

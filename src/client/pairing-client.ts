@@ -12,9 +12,12 @@ export interface GateRuntimeInfo {
 export interface HarnessRemoteHostDescription {
   computerName: string
   agentName: string
+  agentInstanceId?: string
+  agentVersion?: string
+  pluginVersion?: string
   gate?: GateRuntimeInfo
 }
-export type CallPairingManagement = (endpoint: 'status' | 'pair-code') => Promise<unknown>
+export type CallPairingManagement = (endpoint: 'status' | 'pair-code' | 'companion-decision' | 'update-check' | 'update-start' | 'update-status', payload?: { offerId: string; action: 'approve' | 'later' } | { ticket: string }) => Promise<unknown>
 
 export async function resolvePairingClient(
   describeHost: () => Promise<HarnessRemoteHostDescription>,
@@ -29,7 +32,8 @@ export async function resolvePairingClient(
     ? `http://127.0.0.1:${port}` : null
   if (runtime.management === 'authenticated-rpc') {
     return { host, runtime, localOrigin: desktop ? null : localOrigin,
-      status: () => callManagement('status'), pairCode: () => callManagement('pair-code') }
+      status: () => callManagement('status'), pairCode: () => callManagement('pair-code'),
+      decide: (offerId: string, action: 'approve' | 'later') => callManagement('companion-decision', { offerId, action }) }
   }
   // COMPAT: old Web hosts still use their explicitly described local door.
   // An absent/failed description never authorizes trying port 3093.
@@ -41,5 +45,10 @@ export async function resolvePairingClient(
     return response.json()
   }
   return { host, runtime, localOrigin,
-    status: () => read('/gate/status'), pairCode: () => read('/pair/code') }
+    status: () => read('/gate/status'), pairCode: () => read('/pair/code'),
+    decide: async (offerId: string, action: 'approve' | 'later') => {
+      const response = await fetchImpl(localOrigin + '/gate/companion/decision', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ offerId, action }) })
+      if (!response.ok) throw new Error('更新通知已变化，请刷新后重试')
+      return response.json()
+    } }
 }

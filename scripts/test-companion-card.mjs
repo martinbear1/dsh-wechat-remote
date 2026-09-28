@@ -34,3 +34,20 @@ test('waiting does not tell users to stop tasks; failure and restart are not suc
     assert.equal(rows.includes('两端插件已对齐'), state === 'complete')
   }
 })
+
+test('confirmation requires an explicit click; deferred offers can resume and pending decisions disable both controls', () => {
+  const decisions = []
+  for (const state of ['confirmation-required', 'deferred']) {
+    const before = decisions.length
+    const rows = flatten(card({ value: { state, message: 'Web 1.7.10 → 1.7.12-rc.6', offerId: 'offer' }, onDecide: action => decisions.push(action) }))
+    const buttons = rows.filter(n => n?.type === 'button')
+    assert.equal(buttons.length, 2)
+    assert(!rows.some(n => n?.type === 'progress'))
+    assert.equal(decisions.length, before, 'render does not approve')
+    buttons[1].props.onClick(); assert.equal(decisions.at(-1), 'later')
+    buttons[0].props.onClick(); assert.equal(decisions.at(-1), 'approve')
+    const busy = flatten(card({ value: { state, message: 'Web', offerId: 'offer' }, onDecide() {}, deciding: true }))
+    assert(busy.filter(n => n?.type === 'button').every(n => n.props.disabled === true))
+  }
+  assert(!flatten(card({ value: { state: 'confirmation-required', message: 'Web' }, onDecide() {} })).some(n => n?.type === 'button'))
+})

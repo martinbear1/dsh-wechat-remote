@@ -771,7 +771,7 @@ async function workerMain(filename) {
       return;
     }
     res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify(status));
+    res.end(JSON.stringify({ ...status, jobId: job.id }));
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   try {

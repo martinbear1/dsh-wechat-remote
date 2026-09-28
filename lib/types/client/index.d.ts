@@ -5,6 +5,33 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client';
+declare module '@deepseek-ai/dsh-client-ui-slots' {
+    interface SlotMap {
+        'plugins.bundle.activation': {
+            kind: 'keyed';
+            scope: 'root';
+            owner: {
+                readonly packageName: string;
+                readonly onDismiss: () => void;
+                readonly onOpenDetails: () => void;
+            };
+        };
+        'plugins.bundle.config': {
+            kind: 'keyed';
+            scope: 'root';
+            owner: {
+                readonly view: 'summary' | 'page';
+            };
+        };
+        'sidebar.footer.action': {
+            kind: 'list';
+            scope: 'root';
+            owner: {
+                wide: boolean;
+            };
+        };
+    }
+}
 /** Required services for the slot registration. */
 export declare const inject: string[];
 type HarnessRemoteClientContext = Context & {

@@ -43,7 +43,7 @@ export function pairingHttpHandler(channel: string, connection: PairingConnectio
     const pathname = new URL(req.url || '/', 'http://localhost').pathname
     const endpoint = pathname.slice(channel.length + 1)
     if (req.method !== 'POST' || !pathname.startsWith(channel + '/')
-        || !['status', 'pair-code'].includes(endpoint)) { reject(404); return }
+        || !['status', 'pair-code', 'companion-decision', 'update-check', 'update-start', 'update-status'].includes(endpoint)) { reject(404); return }
     if (req.headers['content-type']?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/json') {
       reject(415); return
     }

@@ -1,6 +1,12 @@
 import type { Context } from '@deepseek-ai/cordis';
+import { resolveDshSessionAddress } from './dsh-session-address.js';
 type JsonRecord = Record<string, unknown>;
 export interface TypertGatewayLike {
+    /** Public synchronous native metadata, not a session write or a guessed list. */
+    readonly permissionCatalog?: () => unknown;
+    /** Native query snapshots do not promote a cold session into a writer. */
+    readonly readSnapshot?: (address: Awaited<ReturnType<typeof resolveDshSessionAddress>>, maxMessages: number, signal: AbortSignal) => Promise<unknown>;
+    readonly canFollowSession?: (sessionId: string) => boolean;
     readonly commandAttachmentField?: () => 'images' | 'submittedAttachments';
     readonly wireStream?: {
         open(endpoint: string, payload: unknown, signal: AbortSignal): Promise<AsyncIterable<unknown>>;
@@ -53,6 +59,9 @@ type InvocationPlan = {
     readonly kind: 'workspace-list';
 } | {
     readonly kind: 'session-models';
+    readonly request: JsonRecord;
+} | {
+    readonly kind: 'session-select-model';
     readonly request: JsonRecord;
 } | {
     readonly kind: 'session-history';

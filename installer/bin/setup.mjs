@@ -265,7 +265,7 @@ export async function install(options = {}) {
     try {
       const home = resolveHome(options.home || process.env.DSH_HOME)
       const offer = offerCompanionUpdate(home, 'web', root, result.version)
-      if (offer) console.log('已通知同一数据目录下的 Desktop；由其原生插件管理器处理，未运行或不支持接收时请在 Desktop 插件页更新。')
+      if (offer) console.log('已发现 Desktop 插件可更新，尚未开始。请在 Desktop 的插件页或“设置 → 微信连接”确认；旧版不支持确认时，请使用其原生插件管理器更新。')
     } catch { console.log('Web 已完成安装；另一端未自动更新，仍可使用它自己的原生插件管理入口。') }
   }
   return result

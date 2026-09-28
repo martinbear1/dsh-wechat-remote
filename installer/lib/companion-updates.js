@@ -411,6 +411,7 @@ function resolveAgentProfileScope(modulePath, argv, dshHome) {
 // src/update-download.ts
 import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
+var artifactSourceTimeoutMs = 10 * 60 * 1e3;
 function verifyBytes(archive, expected) {
   if (!expected || archive.length !== expected.bytes || createHash("sha256").update(archive).digest("hex") !== expected.sha256) throw new Error("\u66F4\u65B0\u5305\u6821\u9A8C\u5931\u8D25\uFF0C\u672A\u4FEE\u6539\u5F53\u524D\u63D2\u4EF6");
 }
@@ -502,7 +503,7 @@ function recordResult(home, scope, offer, value) {
     if (last.id === offer.id && last.state === "complete" && !["complete", "recovering", "unavailable"].includes(value.state)) return false;
   } catch {
   }
-  writePrivateJsonAtomic(file, { id: offer.id, version: offer.version, ...value });
+  writePrivateJsonAtomic(file, { schema: 2, id: offer.id, version: offer.version, ...value });
   return true;
 }
 function companionTarget(home, scope) {
@@ -545,16 +546,16 @@ function offerCompanionUpdate(home, from, source, version) {
   const directory = root(home), file = path5.join(directory, `${to}.json`);
   try {
     const existing = read(file);
-    if (existing.from === from && existing.version === version && existing.previous === peer.version) return existing;
+    if (existing.schema === 2 && existing.from === from && existing.version === version && existing.previous === peer.version) return existing;
     if (versionPattern2.test(existing.version) && compareVersions(existing.version, version) > 0) return;
   } catch {
   }
-  const offer = { schema: 1, id: randomBytes2(16).toString("hex"), from, to, source, version, previous: peer.version };
+  const offer = { schema: 2, id: randomBytes2(16).toString("hex"), from, to, source, version, previous: peer.version };
   writePrivateJsonAtomic(file, offer);
   return offer;
 }
 function validateCompanionOffer(home, scope, offer) {
-  if (offer.schema !== 1 || !/^[a-f0-9]{32}$/.test(offer.id) || offer.to !== scope || offer.from !== (scope === "web" ? "desktop" : "web") || !versionPattern2.test(offer.version) || !versionPattern2.test(offer.previous) || compareVersions(offer.version, offer.previous) <= 0) throw new Error("\u8054\u52A8\u66F4\u65B0\u8BF7\u6C42\u65E0\u6548");
+  if (offer.schema !== 2 || !/^[a-f0-9]{32}$/.test(offer.id) || offer.to !== scope || offer.from !== (scope === "web" ? "desktop" : "web") || !versionPattern2.test(offer.version) || !versionPattern2.test(offer.previous) || compareVersions(offer.version, offer.previous) <= 0) throw new Error("\u8054\u52A8\u66F4\u65B0\u8BF7\u6C42\u65E0\u6548");
   const current = read(path5.join(root(home), `${scope}.json`));
   if (["schema", "id", "from", "to", "version", "previous", "source"].some((key) => current[key] !== offer[key])) {
     throw new Error("\u8054\u52A8\u66F4\u65B0\u8BF7\u6C42\u5DF2\u53D8\u5316\uFF0C\u672A\u6267\u884C\u65E7\u8BF7\u6C42");
@@ -565,6 +566,34 @@ function validateCompanionOffer(home, scope, offer) {
     if (target.version !== offer.version) checkedSource(offer.source, offer.version);
   } else if (scope !== "desktop" || offer.from !== "web") throw new Error("\u8054\u52A8\u5B89\u88C5\u6765\u6E90\u65E0\u6548");
   return target;
+}
+function decision(home, offer) {
+  try {
+    const value = read(path5.join(root(home), `decision-${offer.to}.json`));
+    return value.id === offer.id ? value.action : void 0;
+  } catch {
+    return;
+  }
+}
+function assertCompanionApproved(home, offer) {
+  validateCompanionOffer(home, offer.to, offer);
+  if (decision(home, offer) !== "approve") throw new Error("\u5C1A\u672A\u786E\u8BA4\u53E6\u4E00\u7AEF\u66F4\u65B0\uFF0C\u672A\u6267\u884C\u5B89\u88C5");
+}
+function decideCompanionOffer(home, offer, action) {
+  validateCompanionOffer(home, offer.to, offer);
+  if (!["approve", "later"].includes(action)) throw new Error("\u65E0\u6548\u7684\u66F4\u65B0\u9009\u62E9");
+  if (decision(home, offer) === "approve") return;
+  if (action === "approve") recordResult(home, offer.to, offer, pending());
+  writePrivateJsonAtomic(path5.join(root(home), `decision-${offer.to}.json`), { id: offer.id, action });
+}
+function confirmation(home, offer) {
+  const choice = decision(home, offer);
+  if (choice === "approve") return;
+  return {
+    state: choice === "later" ? "deferred" : "confirmation-required",
+    offerId: offer.id,
+    message: `${offer.to === "web" ? "Web" : "Desktop"} \u63D2\u4EF6\u53EF\u4ECE ${offer.previous} \u66F4\u65B0\u81F3 ${offer.version}\u3002\u786E\u8BA4\u540E\u4F1A\u7B49\u5F85\u4EFB\u52A1\u7A7A\u95F2\uFF0C\u66F4\u65B0\u65F6\u8FDE\u63A5\u5C06\u77ED\u6682\u65AD\u5F00\uFF1B\u4FDD\u7559\u539F\u914D\u5BF9\u548C\u4F1A\u8BDD\u3002\u5F53\u524D\u5C1A\u672A\u66F4\u65B0\u3002`
+  };
 }
 async function stageCompanionArchive(home, source, version) {
   const actual = checkedSource(source, version);
@@ -611,6 +640,8 @@ async function applyNativeCompanion(home, scope, runningVersion, offer, services
   }
   if (target.version === offer.version) return { state: "restart-required", message: "\u53E6\u4E00\u7AEF\u63D2\u4EF6\u5DF2\u5B89\u88C5\uFF0C\u91CD\u542F\u8BE5\u5E94\u7528\u540E\u751F\u6548\u3002" };
   if (runningVersion !== offer.previous) throw new Error("\u8FD0\u884C\u7248\u672C\u4E0E\u5B89\u88C5\u7248\u672C\u4E0D\u540C\uFF0C\u672A\u6267\u884C\u8054\u52A8\u66F4\u65B0");
+  const notice = confirmation(home, offer);
+  if (notice) return notice;
   const list = await services.list();
   services.signal?.throwIfAborted();
   if (!Array.isArray(list?.items) || list.items.some((row) => typeof row.running !== "boolean")) throw new Error("\u65E0\u6CD5\u786E\u8BA4\u53E6\u4E00\u7AEF\u7684\u4F1A\u8BDD\u72B6\u6001");
@@ -660,6 +691,8 @@ async function webInstallerRuntime(environment = process.env, electron = Boolean
 async function runWebInstaller(home, offer, progress = () => {
 }, signal) {
   signal?.throwIfAborted();
+  const notice = confirmation(home, offer);
+  if (notice) return notice;
   progress({ state: "preparing", message: "\u68C0\u6D4B\u5230 Web \u65E7\u63D2\u4EF6\uFF0C\u6B63\u5728\u51C6\u5907\u540C\u6B65\u5347\u7EA7\uFF1B\u539F\u914D\u5BF9\u548C\u4F1A\u8BDD\u5C06\u4FDD\u7559\u3002" });
   const target = validateCompanionOffer(home, "web", offer);
   if (target.owner !== "cli") return Promise.resolve(pending());
@@ -695,21 +728,29 @@ async function runWebInstaller(home, offer, progress = () => {
     child.once("exit", (code) => code === 0 ? resolve({ state: "restart-required", message: "Web \u63D2\u4EF6\u5DF2\u5B89\u88C5\uFF0C\u7B49\u5F85\u8BE5\u8282\u70B9\u542F\u52A8\u6216\u91CD\u65B0\u8FDE\u63A5\u786E\u8BA4\u3002" }) : code === 75 ? resolve({ state: "unavailable", message: "\u7B49\u5F85\u5DF2\u7ED3\u675F\uFF0CWeb \u4ECD\u6709\u4EFB\u52A1\uFF0C\u672C\u6B21\u672A\u66F4\u65B0\uFF1B\u4EFB\u52A1\u7ED3\u675F\u540E\u53EF\u4F7F\u7528\u539F\u5B89\u88C5\u547D\u4EE4\u5347\u7EA7\u3002" }) : reject(new Error(tail.trim() || "Web \u8054\u52A8\u66F4\u65B0\u672A\u5B8C\u6210\uFF1B\u539F\u6709\u8282\u70B9\u4FDD\u6301\u72EC\u7ACB\u3002")));
   });
 }
-function mountCompanionUpdates(ctx, version) {
+function mountCompanionUpdates(ctx, version, options = {}) {
   try {
-    return mount(ctx, version);
+    return mount(ctx, version, options);
   } catch {
-    return { status: () => ({ state: "unavailable", message: "\u8054\u52A8\u66F4\u65B0\u6682\u4E0D\u53EF\u7528\uFF0C\u4ECD\u53EF\u5206\u522B\u4F7F\u7528\u539F\u751F\u66F4\u65B0\u5165\u53E3\u3002" }), dispose() {
+    return { status: () => ({ state: "unavailable", message: "\u8054\u52A8\u66F4\u65B0\u6682\u4E0D\u53EF\u7528\uFF0C\u4ECD\u53EF\u5206\u522B\u4F7F\u7528\u539F\u751F\u66F4\u65B0\u5165\u53E3\u3002" }), decide() {
+      throw new Error("\u8054\u52A8\u66F4\u65B0\u4E0D\u53EF\u7528");
+    }, dispose() {
     } };
   }
 }
-function mount(ctx, version) {
+function mount(ctx, version, options) {
   const home = agentDshHome(ctx), scope = scopeOf(agentProfileScope(ctx));
   let status = { state: "idle", message: "" }, stopped = false, busy = false, recheck = false;
   const lifetime = new AbortController();
-  if (!scope) return { status: () => status, dispose() {
+  if (!scope) return { status: () => status, decide() {
+    throw new Error("\u5F53\u524D\u5B89\u88C5\u4E0D\u652F\u6301\u8054\u52A8\u66F4\u65B0");
+  }, dispose() {
   } };
   const directory = root(home), inbox = path5.join(directory, `${scope}.json`);
+  const ownChanged = () => {
+    const own = companionTarget(home, scope);
+    return own && own.version !== version;
+  };
   fs.mkdirSync(directory, { recursive: true, mode: 448 });
   const receipt = (offer, value) => {
     if (stopped) return;
@@ -720,7 +761,8 @@ function mount(ctx, version) {
     }
   };
   const check = async () => {
-    if (stopped) return;
+    if (stopped || ownChanged()) return;
+    if (options.isUpdating?.()) return;
     if (busy) {
       recheck = true;
       return;
@@ -734,6 +776,11 @@ function mount(ctx, version) {
       if (version === offer.version) {
         if (target.version !== version) throw new Error("\u78C1\u76D8\u5B89\u88C5\u5DF2\u53D8\u5316");
         receipt(offer, { state: "complete", message: "\u4E24\u7AEF\u63D2\u4EF6\u5DF2\u5BF9\u9F50\u3002" });
+        return;
+      }
+      const notice = confirmation(home, offer);
+      if (notice) {
+        receipt(offer, notice);
         return;
       }
       try {
@@ -778,8 +825,47 @@ function mount(ctx, version) {
   function existsInbox() {
     return fs.existsSync(inbox);
   }
+  let outboundBusy = false;
+  const checkOutbound = async () => {
+    if (stopped || ownChanged() || outboundBusy || options.isUpdating?.()) return;
+    let offer;
+    try {
+      offer = read(path5.join(directory, "web.json"));
+      if (scope !== "desktop" || offer.from !== scope || offer.version !== version) return;
+      const target = validateCompanionOffer(home, "web", offer);
+      if (target.owner !== "cli" || target.version === version) return;
+      const notice = confirmation(home, offer);
+      if (notice) {
+        recordResult(home, "web", offer, notice);
+        return;
+      }
+      if (compareVersions(offer.previous, "1.7.12-rc.6") >= 0) return;
+      try {
+        const last = read(path5.join(directory, "result-web.json"));
+        if (last.schema === 2 && last.id === offer.id && ["unavailable", "restart-required", "complete"].includes(last.state)) return;
+      } catch {
+      }
+    } catch {
+      return;
+    }
+    outboundBusy = true;
+    const report = (value) => {
+      try {
+        recordResult(home, "web", offer, value);
+      } catch {
+      }
+    };
+    try {
+      report(await runWebInstaller(home, offer, report, lifetime.signal));
+    } catch {
+      if (!stopped) report({ state: "unavailable", message: "Web \u8054\u52A8\u5B89\u88C5\u672A\u5B8C\u6210\uFF0C\u8BF7\u5728 Web \u539F\u751F\u5165\u53E3\u6838\u5BF9\uFF1BDesktop \u4E0D\u53D7\u5F71\u54CD\u3002" });
+    } finally {
+      outboundBusy = false;
+    }
+  };
   const watcher = fs.watch(directory, (_event, filename) => {
-    if (String(filename) === `${scope}.json`) void check();
+    if ([`${scope}.json`, `decision-${scope}.json`].includes(String(filename))) void check();
+    if (String(filename) === "decision-web.json") void checkOutbound();
   });
   watcher.on("error", () => {
     status = { state: "unavailable", message: "\u8054\u52A8\u66F4\u65B0\u901A\u77E5\u4E0D\u53EF\u7528\uFF0C\u4ECD\u53EF\u5206\u522B\u4F7F\u7528\u539F\u751F\u66F4\u65B0\u5165\u53E3\u3002" };
@@ -805,7 +891,7 @@ function mount(ctx, version) {
     throw error;
   }
   const kickoff = setImmediate(() => {
-    if (stopped) return;
+    if (stopped || ownChanged()) return;
     const source = path5.resolve(path5.dirname(fileURLToPath2(import.meta.url)), "../..");
     try {
       let packageName;
@@ -824,31 +910,25 @@ function mount(ctx, version) {
         if (previous?.version !== version) {
           const offer = offerCompanionUpdate(home, scope, packageName === native ? source : "", version);
           writePrivateJsonAtomic(seen, { version });
-          if (offer?.to === "web" && companionTarget(home, "web")?.owner === "cli" && compareVersions(offer.previous, "1.7.12-rc.4") < 0) {
-            const report = (value) => {
-              try {
-                recordResult(home, "web", offer, value);
-              } catch {
-              }
-            };
-            void runWebInstaller(home, offer, report, lifetime.signal).then(report).catch(() => {
-              report({ state: "unavailable", message: "Web \u8054\u52A8\u5B89\u88C5\u672A\u5B8C\u6210\uFF0C\u8BF7\u5728 Web \u4E2D\u4F7F\u7528\u539F\u6709\u5B89\u88C5\u547D\u4EE4\uFF1BDesktop \u4E0D\u53D7\u5F71\u54CD\u3002" });
-            });
-          }
         }
       }
     } catch {
     }
     void check();
+    void checkOutbound();
   });
-  return { status: () => {
+  const reportedStatus = () => {
     const to = scope === "web" ? "desktop" : "web";
     try {
       const offer = read(path5.join(directory, `${to}.json`));
       if (offer.from === scope && offer.version === version) {
         const peer = validateCompanionOffer(home, to, offer);
+        if (peer.version !== version) {
+          const notice = confirmation(home, offer);
+          if (notice) return notice;
+        }
         const last = read(path5.join(directory, `result-${to}.json`));
-        if (last.id === offer.id && ["pending", "busy", "preparing", "installing", "verifying", "recovering", "restart-required", "complete", "unavailable"].includes(last.state)) {
+        if (last.schema === 2 && last.id === offer.id && ["pending", "busy", "preparing", "installing", "verifying", "recovering", "restart-required", "complete", "unavailable"].includes(last.state)) {
           if (["complete", "restart-required"].includes(last.state) && peer.version !== version) {
             return { state: "unavailable", message: "\u53E6\u4E00\u7AEF\u7684\u5B89\u88C5\u5DF2\u53D8\u5316\uFF0C\u8BF7\u5728\u8BE5\u5E94\u7528\u5185\u6838\u5BF9\uFF1B\u5F53\u524D\u8282\u70B9\u4E0D\u53D7\u5F71\u54CD\u3002" };
           }
@@ -870,6 +950,36 @@ function mount(ctx, version) {
     } catch {
     }
     return status;
+  };
+  return { status: () => {
+    const own = companionTarget(home, scope), to = scope === "web" ? "desktop" : "web", peer = companionTarget(home, to);
+    const versions = { current: scope, running: version, installed: own?.version ?? null, peer: to, peerInstalled: peer?.version ?? null };
+    if (own && own.version !== version) return {
+      state: "self-restart-required",
+      versions,
+      message: `\u5F53\u524D ${scope === "desktop" ? "Desktop" : "Web"} \u5DF2\u5B89\u88C5 ${own.version}\uFF0C\u4ECD\u5728\u8FD0\u884C ${version}\u3002\u8BF7\u5728\u4EFB\u52A1\u7ED3\u675F\u540E\u91CD\u542F\u5F53\u524D\u5E94\u7528\uFF1B\u53E6\u4E00\u7AEF\u5C1A\u672A\u56E0\u6B64\u66F4\u65B0\u3002`
+    };
+    const result = reportedStatus();
+    if (result.state === "complete" && (!own || !peer || own.version !== peer.version || own.version !== version)) {
+      return { state: "unavailable", versions, message: "\u4E24\u7AEF\u7248\u672C\u6216\u542F\u7528\u72B6\u6001\u5DF2\u53D8\u5316\uFF0C\u65E7\u7684\u5B8C\u6210\u8BB0\u5F55\u4E0D\u518D\u4EE3\u8868\u5F53\u524D\u5DF2\u5BF9\u9F50\u3002\u8BF7\u5206\u522B\u6838\u5BF9\uFF0C\u4E0D\u4F1A\u81EA\u52A8\u8986\u76D6\u4EFB\u4F55\u4E00\u7AEF\u3002" };
+    }
+    return { ...result, versions };
+  }, decide(id, action) {
+    if (stopped) throw new Error("\u8FDE\u63A5\u670D\u52A1\u5DF2\u505C\u6B62");
+    if (ownChanged()) throw new Error("\u5F53\u524D\u5B89\u88C5\u7248\u672C\u5C1A\u672A\u751F\u6548\uFF0C\u8BF7\u91CD\u542F\u5F53\u524D\u5E94\u7528\u540E\u518D\u786E\u8BA4");
+    const to = scope === "web" ? "desktop" : "web";
+    const offers = [to, scope].flatMap((key) => {
+      try {
+        return [read(path5.join(directory, `${key}.json`))];
+      } catch {
+        return [];
+      }
+    });
+    const offer = offers.find((item) => item.id === id);
+    if (!offer) throw new Error("\u66F4\u65B0\u901A\u77E5\u5DF2\u8FC7\u671F\uFF0C\u8BF7\u5237\u65B0\u540E\u91CD\u8BD5");
+    decideCompanionOffer(home, offer, action);
+    void check();
+    void checkOutbound();
   }, dispose() {
     stopped = true;
     lifetime.abort();
@@ -880,7 +990,9 @@ function mount(ctx, version) {
 }
 export {
   applyNativeCompanion,
+  assertCompanionApproved,
   companionTarget,
+  decideCompanionOffer,
   mountCompanionUpdates,
   offerCompanionUpdate,
   stageCompanionArchive,

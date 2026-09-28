@@ -5,7 +5,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import ts from 'typescript'
 import { execFileSync } from 'node:child_process'
-import { planLegacyRpc, commandArguments } from '../lib/dsh-protocol-compat.js'
+import { planLegacyRpc, commandArguments, invokeLegacyRpc } from '../lib/dsh-protocol-compat.js'
 
 const source = process.env.HARNESS_DSH_SOURCE
 assert(source, 'HARNESS_DSH_SOURCE is required')
@@ -75,6 +75,15 @@ const examples = {
 }
 for (const [method, payload] of Object.entries(examples)) {
   const plan = planLegacyRpc({ type: 'client-request', rpcId: 'contract', method, payload })
+  if (plan.kind === 'session-select-model') {
+    const response = await invokeLegacyRpc({ async invoke(call) {
+      contract(call.namespace, call.method, call.args)
+      return { selected: call.args.request }
+    } }, { type: 'client-request', rpcId: 'contract', method, payload },
+    { signal: new AbortController().signal, describeHost: () => ({}) })
+    assert.equal(response.result.ok, true)
+    continue
+  }
   assert.equal(plan.kind, 'invoke', method)
   const args = method === 'commands/execute'
     ? commandArguments({ commandAttachmentField: () => 'submittedAttachments' }, plan.args) : plan.args

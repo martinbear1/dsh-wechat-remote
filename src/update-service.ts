@@ -16,14 +16,41 @@ import { currentHostManager } from './install-lifecycle.js'
 import { tightenPrivateFile, writePrivateJsonAtomic } from './secure-file.js'
 import { resolveInstallRuntime, verifyInstallRuntime } from './install-runtime.js'
 import { assertCliInstallOwner, ProfileOwnershipError } from './install-profile.js'
+import { PLUGIN_VERSION } from './plugin-version.js'
 
 const ownRoot = fileURLToPath(new URL('../', import.meta.url))
-const ownVersion = () => JSON.parse(fs.readFileSync(path.join(ownRoot, 'package.json'), 'utf8')).version as string
+const ownVersion = () => PLUGIN_VERSION
 // Two operator-only switches. Phone requests and release metadata cannot opt in.
 export function previewUpdatesEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return env.HARNESS_REMOTE_UPDATE_CHANNEL === 'preview' && Boolean(env.HARNESS_REMOTE_UPDATE_CATALOG)
 }
 interface UpdateJobReference { jobId: string; statusOrigin: string; statusToken: string }
+/** A nonterminal journal is historical evidence, not a worker heartbeat. */
+export async function confirmUpdateProgress(job: UpdateJobReference, webPort: number, fetchImpl: typeof fetch = fetch): Promise<unknown> {
+  if (!/^http:\/\/127\.0\.0\.1:\d+$/.test(job.statusOrigin) || !/^[a-f0-9]{32}$/.test(job.jobId)
+      || !/^[a-f0-9]{48}$/.test(job.statusToken)) throw new Error('Invalid update progress reference')
+  const response = await fetchImpl(job.statusOrigin + '/status', { redirect: 'error', signal: AbortSignal.timeout(1500),
+    headers: { Origin: `http://127.0.0.1:${webPort}`, Authorization: `Bearer ${job.statusToken}` } })
+  if (!response.ok) throw new Error('Worker unavailable')
+  // A reused port/process is not evidence for this transaction. Authentication
+  // and job identity must both match; no PID-based inference or lock removal.
+  const reader = response.body?.getReader()
+  if (!reader) throw new Error('Missing worker progress')
+  const chunks: Uint8Array[] = []; let length = 0
+  try {
+    for (;;) {
+      const part = await reader.read()
+      if (part.done) break
+      length += part.value.byteLength
+      if (length > 8192) { await reader.cancel(); throw new Error('Invalid worker progress') }
+      chunks.push(part.value)
+    }
+  } finally { reader.releaseLock() }
+  const value = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+  if (value.jobId !== job.jobId || typeof value.terminal !== 'boolean' || typeof value.message !== 'string'
+      || typeof value.phase !== 'string' || !Number.isFinite(value.progress)) throw new Error('Unconfirmed worker identity')
+  return value
+}
 export function updateAction(advice: UpdateAdvice, release: Release | undefined,
   eligible: { eligible: boolean; reason: string; manualInstallAllowed?: boolean }, occupied: boolean, ctx?: HostContext): {
     canInstall: boolean; mode: 'none' | 'automatic' | 'manual' | 'busy'; reason: string; manualCommand: string
@@ -152,14 +179,26 @@ export class PluginUpdateService {
     const scope = createHash('sha256').update(agentProfileScope(this.ctx)).digest('hex').slice(0, 24)
     return path.join(agentDshHome(this.ctx), 'harness-remote-updates', `profile-${scope}.json`)
   }
-  private recovery(): { activeJob: UpdateJobReference | null; lastResult: unknown } {
+  private async recovery(): Promise<{ activeJob: UpdateJobReference | null; lastResult: unknown; unresolvedJob?: boolean }> {
+    const unknown = () => ({ activeJob: null, unresolvedJob: true, lastResult: { phase: 'unknown', progress: 0, terminal: true,
+      message: '发现未完成或无法读取的更新记录，但无法确认更新程序仍在运行。请核对主机版本和更新记录；暂不重复安装，不删除配对、备份或更新锁。' } })
     try {
       const job = JSON.parse(fs.readFileSync(this.progressIndex(), 'utf8'))
       if (!/^[a-f0-9]{32}$/.test(job.jobId)) throw new Error('invalid progress index')
       const dir = path.join(agentDshHome(this.ctx), 'harness-remote-updates', job.jobId)
-      const result = JSON.parse(fs.readFileSync(path.join(dir, 'result.json'), 'utf8'))
-      return { activeJob: result.terminal ? null : job, lastResult: result }
-    } catch { return { activeJob: this.busy ? this.activeJob || null : null, lastResult: null } }
+      let result: any
+      try { result = JSON.parse(fs.readFileSync(path.join(dir, 'result.json'), 'utf8')) } catch { /* query the authenticated worker, not a missing/partial journal */ }
+      if (result?.terminal === true) return { activeJob: null, lastResult: { ...result, jobId: job.jobId } }
+      try {
+        const live = await confirmUpdateProgress(job, this.ports.web) as { terminal: boolean }
+        return { activeJob: live.terminal ? null : job, lastResult: live }
+      } catch {
+        return unknown()
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return unknown()
+      return { activeJob: this.busy ? this.activeJob || null : null, lastResult: null }
+    }
   }
   async check(force = false): Promise<UpdateAdvice> {
     if (this.checking) return this.checking
@@ -178,6 +217,11 @@ export class PluginUpdateService {
       return assessUpdate(this.catalog, this.current(), Date.now(), previewUpdatesEnabled())
     })().finally(() => { this.checking = undefined })
     return this.checking
+  }
+  async nativeRelease() {
+    const advice = await this.check(true)
+    return { advice, release: this.catalog?.releases.find(row => row.version === advice.targetVersion),
+      channel: previewUpdatesEnabled() ? 'preview' as const : 'stable' as const }
   }
   private eligibility(): { eligible: boolean; reason: string; manualInstallAllowed?: boolean; profile?: string; pnpm?: string; cli?: string } {
     try {
@@ -203,7 +247,10 @@ export class PluginUpdateService {
   private async begin(ticket: string): Promise<unknown> {
     if (this.isMaintaining()) throw new Error('当前实例正在验证或重启，请稍后重试')
     if (this.busy) return this.activeJob || { phase: 'preparing' }
-    if (this.recovery().activeJob) throw new Error('上次更新仍在进行或结果待确认，请先查看进度')
+    const recovered = await this.recovery()
+    if (this.isMaintaining()) throw new Error('当前实例正在验证或重启，请稍后重试')
+    if (this.busy) return this.activeJob || { phase: 'preparing' }
+    if (recovered.activeJob || recovered.unresolvedJob) throw new Error('上次更新仍在进行或结果待确认，请先查看进度')
     const plan = this.ticket
     if (!plan || plan.expiresAt <= Date.now() || ticket.length !== plan.value.length
         || !timingSafeEqual(Buffer.from(ticket), Buffer.from(plan.value))) throw new Error('更新确认已过期，请重新检查')
@@ -280,15 +327,15 @@ export class PluginUpdateService {
       if (req.method === 'GET' && req.url === '/gate/update/check') {
         const advice = await this.check(true)
         const release = this.catalog?.releases.find(r => r.version === advice.targetVersion)
-        const recovered = this.recovery()
+        const recovered = await this.recovery()
         const eligible = release ? this.eligibility() : { eligible: false, reason: '' }
-        const action = updateAction(advice, release, eligible, Boolean(this.busy || this.isMaintaining() || recovered.activeJob), this.ctx)
+        const action = updateAction(advice, release, eligible, Boolean(this.busy || this.isMaintaining() || recovered.activeJob || recovered.unresolvedJob), this.ctx)
         this.ticket = undefined
         if (action.canInstall) this.ticket = { value: randomBytes(24).toString('hex'), expiresAt: Date.now() + 120000, revision: advice.revision, release: release! }
         return json(200, { advice, ...action, channel: previewUpdatesEnabled() ? 'preview' : 'stable',
           ticket: action.canInstall ? this.ticket!.value : '', ...recovered })
       }
-      if (req.method === 'GET' && req.url === '/gate/update/status') return json(200, this.recovery())
+      if (req.method === 'GET' && req.url === '/gate/update/status') return json(200, await this.recovery())
       if (req.method === 'GET' && req.url?.startsWith('/gate/update/resume?')) {
         const query = new URL(req.url, 'http://localhost').searchParams
         const id = query.get('job') || ''

@@ -19,4 +19,7 @@ export declare function pluginFromInstaller(archive: Buffer, release: Release): 
 export declare function auditNativeArchive(archive: Buffer, version: string): void;
 /** Also used by the publication gate to verify the alternate independently. */
 export declare function downloadNpmRelease(release: Release, fetcher?: typeof fetch, options?: DownloadOptions): Promise<Buffer>;
+/** Legacy archive-verification helper retained for packaging/diagnostics.
+ * Desktop self-update no longer calls this: its native manager owns transport. */
+export declare function downloadNativeRelease(release: Release, fetcher?: typeof fetch, options?: DownloadOptions): Promise<Buffer>;
 export declare function downloadRelease(release: Release, fetcher?: typeof fetch, options?: DownloadOptions): Promise<Buffer>;

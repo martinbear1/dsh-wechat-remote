@@ -13,12 +13,14 @@ import { fileURLToPath } from 'node:url'
 import { selectInstallTarget } from '../installer/bin/release-selection.mjs'
 import { nodeStorageDirectory } from '../lib/node-storage.js'
 import { gateStatePathForProfile } from '../lib/agent-metadata.js'
+import { PLUGIN_VERSION } from '../lib/plugin-version.js'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const pkg = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'))
 const name = pkg.name
 const fails = []
 const check = (ok, msg) => { if (!ok) fails.push(msg) }
+check(PLUGIN_VERSION === pkg.version, '编译运行版本与包版本不一致')
 
 // A preview must not advertise itself as a stable payload or a different
 // installer version. Historical tags keep their original manifests.
@@ -48,7 +50,8 @@ for (const legacy of ['@deepseek-ai/dsh-client-ui-pairing', '@harness-remote/dsh
 // Current Host describes its own pairing transport. Never guess Web's port.
 check(client.includes('settings.section'), 'lib/client.js 未注册官方 settings.section')
 check(client.includes('微信连接'), 'lib/client.js 设置导航文案不是「微信连接」')
-check(!client.includes('sidebar.footer.action'), 'lib/client.js 不应再占用侧边栏 footer')
+check(client.includes('sidebar.footer.action') && client.includes('pluginNavigation'), 'lib/client.js 缺少原生可选微信连接快捷入口')
+check(client.includes('plugins.bundle.config'), 'lib/client.js 缺少插件详情功能页')
 check(client.includes('wechatHost/describe'), 'lib/client.js 没有通过 DSH 原生 RPC 发现当前 profile 的本地门')
 check(!client.includes('/api/wechatHost.describe'), 'lib/client.js 残留错误的手写 Web API 地址')
 check(!client.includes('http://127.0.0.1:3093'), 'lib/client.js 不得盲试 Web 默认配对端口')

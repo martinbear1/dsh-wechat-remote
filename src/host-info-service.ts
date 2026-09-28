@@ -12,8 +12,9 @@ import { fileURLToPath } from 'node:url'
 
 import type { Context } from '@deepseek-ai/cordis'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
-import { loadAgentDescriptor, type AgentCapability } from './agent-metadata.js'
+import { loadAgentDescriptor, startupDirectory, type AgentCapability } from './agent-metadata.js'
 import type { HostPlatformDescriptor } from './host-platform.js'
+import { PLUGIN_VERSION } from './plugin-version.js'
 
 export interface WechatHostDescribeRequest {}
 
@@ -38,8 +39,10 @@ export interface WechatHostInfoConfig {
 }
 
 export interface WechatHostDescribeValue {
+  readonly startupDirectory: { path: string; usable: boolean }
   readonly computerName: string
   readonly pluginVersion: string
+  readonly installedPluginVersion?: string
   readonly hostArch: string
   readonly updateProtocolVersion: 1
   /** Additive v1 Agent-host identity; legacy clients safely ignore these fields. */
@@ -96,8 +99,10 @@ export class WechatHostInfoService extends TypertRemoteService {
     return {
       ok: true,
       value: {
+        startupDirectory: startupDirectory(this.ctx),
         computerName: hostname(),
-        pluginVersion: installedPluginVersion(),
+        pluginVersion: PLUGIN_VERSION,
+        installedPluginVersion: installedPluginVersion(),
         hostArch: process.arch,
         updateProtocolVersion: 1,
         descriptorVersion: descriptor.schemaVersion,

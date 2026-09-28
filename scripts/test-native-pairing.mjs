@@ -30,6 +30,7 @@ const { HostConnectionService, BrowserAuth, forwardWebRequest, authenticateWebHo
 async function host(id, late = false) {
   const ctx = new Context(), routes = new Map()
   let record, mounted, connection, mountError, calls = 0
+  const managementCalls = []
   const auth = await BrowserAuth.create(ctx, { modifyRecord: async (_key, modify) => {
     record = await modify(record) ?? record; return record
   } }, 1)
@@ -57,7 +58,10 @@ async function host(id, late = false) {
     owner.inject(['connection', 'webServer'], inner => {
       try {
         mounted = mountPairingManagement(inner, { status: () => ({ id }),
-          pairCode: async () => { calls++; return { ticket: id } }, unavailable: () => false })
+          pairCode: async () => { calls++; return { ticket: id } }, unavailable: () => false,
+          companionDecision: (offer, action) => managementCalls.push(['decision', offer, action]),
+          updateCheck: async () => ({ host: id }), updateStatus: async () => ({ host: id }),
+          updateStart: ticket => { managementCalls.push(['update', ticket]); return { host: id } } })
       } catch (error) { mountError = error; throw error }
       const current = mounted
       return () => current.dispose()
@@ -84,7 +88,7 @@ async function host(id, late = false) {
   if (mountError) throw mountError
   assert(mounted, 'native mount must occur')
   const origin = 'http://127.0.0.1:' + server.address().port
-  return { origin, routes, mounted, get calls() { return calls },
+  return { origin, routes, mounted, managementCalls, get calls() { return calls },
     cookie: () => authenticateWebHost(auth.authenticatedUrl(origin)),
     async reload() {
       const before = mounted
@@ -98,7 +102,7 @@ async function host(id, late = false) {
     async close() { await fiber.dispose(); await provider.dispose(); await webProvider.dispose(); await new Promise(resolve => server.close(resolve)); await ctx.fiber.dispose() } }
 }
 const web = await host('web'), desktop = await host('desktop', true)
-const body = endpoint => JSON.stringify({ type: 'client-request', rpcId: 'fixture', method: endpoint, payload: {} })
+const body = (endpoint, payload = {}) => JSON.stringify({ type: 'client-request', rpcId: 'fixture', method: endpoint, payload })
 try {
   const cookies = await Promise.all([web.cookie(), desktop.cookie()])
   const post = (target, cookie, origin) => fetch(target.origin + '/wechat-remote-management/pair-code', {
@@ -140,6 +144,16 @@ try {
   assert.equal((await forwarded.json()).result.value.ticket, 'desktop')
   assert.equal(web.calls, 1, 'Desktop shell never contacts Web')
   assert.equal(desktop.calls, 1)
+  for (const [method, payload] of [['companion-decision', { offerId: 'a'.repeat(32), action: 'later' }], ['update-check', {}], ['update-start', { ticket: 'a'.repeat(48) }], ['update-status', {}]]) {
+    const url = desktop.origin + '/wechat-remote-management/' + method
+    const wrong = await fetch(url, { method: 'POST', headers: { cookie: cookies[0], origin: desktop.origin, 'content-type': 'application/json' }, body: body(method, payload) })
+    assert.equal(wrong.status, 401, 'another host cookie cannot control updates')
+    const nativeRequest = new Request('dsh-app://app/wechat-remote-management/' + method, { method: 'POST', headers: { origin: 'dsh-app://app', 'content-type': 'application/json' }, body: body(method, payload) })
+    const response = await forwardWebRequest(nativeRequest, desktop.origin, cookies[1])
+    assert.equal(response.status, 200); assert.equal((await response.json()).result.ok, true)
+  }
+  assert.deepEqual(desktop.managementCalls.map(row => row[0]), ['decision', 'update'])
+  assert.deepEqual(web.managementCalls, [], 'Desktop management actions never reach Web')
   await web.reload()
   assert.equal((await post(web, cookies[0])).status, 200, 'service reload preserves browser authentication')
   await desktop.mounted.dispose()

@@ -16,8 +16,10 @@ type Scope = 'web' | 'desktop'
 const core = '@harness-remote/dsh-wechat-remote', native = 'dsh-wechat-remote'
 const versionPattern = /^\d+\.\d+\.\d+(?:-[\w.-]+)?$/
 type Target = { owner: 'cli' | 'native'; version: string }
-interface Offer { schema: 1; id: string; from: Scope; to: Scope; version: string; previous: string; source: string }
-export type CompanionResult = { state: 'idle' | 'pending' | 'busy' | 'preparing' | 'installing' | 'verifying' | 'recovering' | 'restart-required' | 'complete' | 'unavailable'; message: string }
+interface Offer { schema: 2; id: string; from: Scope; to: Scope; version: string; previous: string; source: string }
+export type CompanionResult = { state: 'idle' | 'confirmation-required' | 'deferred' | 'pending' | 'busy' | 'preparing' | 'installing' | 'verifying' | 'recovering' | 'restart-required' | 'self-restart-required' | 'complete' | 'unavailable'; message: string; offerId?: string;
+  versions?: { current: Scope; running: string; installed: string | null; peer: Scope; peerInstalled: string | null } }
+interface Coordinator { status(): CompanionResult; decide(id: string, action: 'approve' | 'later'): void; dispose(): void }
 const pending = (): CompanionResult => ({ state: 'pending', message: '另一端将在其原生更新入口可用时处理；当前节点不受影响。' })
 function scopeOf(value: string): Scope | undefined {
   return value === 'desktop' ? 'desktop' : value === 'web' || value === 'default' ? 'web' : undefined
@@ -33,7 +35,7 @@ function recordResult(home: string, scope: Scope, offer: Offer, value: Companion
     if (last.id === offer.id && last.state === 'complete'
         && !['complete', 'recovering', 'unavailable'].includes(value.state)) return false
   } catch { /* first receipt */ }
-  writePrivateJsonAtomic(file, { id: offer.id, version: offer.version, ...value })
+  writePrivateJsonAtomic(file, { schema: 2, id: offer.id, version: offer.version, ...value })
   return true
 }
 /** Only already enabled installations participate. Do not re-enable a plugin,
@@ -77,15 +79,17 @@ export function offerCompanionUpdate(home: string, from: Scope, source: string, 
   const directory = root(home), file = path.join(directory, `${to}.json`)
   try {
     const existing = read(file)
-    if (existing.from === from && existing.version === version && existing.previous === peer.version) return existing
+    if (existing.schema === 2 && existing.from === from && existing.version === version && existing.previous === peer.version) return existing
     if (versionPattern.test(existing.version) && compareVersions(existing.version, version) > 0) return
   } catch { /* first offer */ }
-  const offer: Offer = { schema: 1, id: randomBytes(16).toString('hex'), from, to, source, version, previous: peer.version }
+  // Older receivers reject schema 2: they must not act before the new UI's
+  // explicit confirmation. Never publish a schema-1 automatic-update offer.
+  const offer: Offer = { schema: 2, id: randomBytes(16).toString('hex'), from, to, source, version, previous: peer.version }
   writePrivateJsonAtomic(file, offer)
   return offer
 }
 export function validateCompanionOffer(home: string, scope: Scope, offer: Offer): Target {
-  if (offer.schema !== 1 || !/^[a-f0-9]{32}$/.test(offer.id) || offer.to !== scope
+  if (offer.schema !== 2 || !/^[a-f0-9]{32}$/.test(offer.id) || offer.to !== scope
       || offer.from !== (scope === 'web' ? 'desktop' : 'web') || !versionPattern.test(offer.version)
       || !versionPattern.test(offer.previous) || compareVersions(offer.version, offer.previous) <= 0) throw new Error('联动更新请求无效')
   const current = read(path.join(root(home), `${scope}.json`))
@@ -98,6 +102,28 @@ export function validateCompanionOffer(home: string, scope: Scope, offer: Offer)
     if (target.version !== offer.version) checkedSource(offer.source, offer.version)
   } else if (scope !== 'desktop' || offer.from !== 'web') throw new Error('联动安装来源无效')
   return target
+}
+function decision(home: string, offer: Offer): string | undefined {
+  try { const value = read(path.join(root(home), `decision-${offer.to}.json`)); return value.id === offer.id ? value.action : undefined } catch { return }
+}
+export function assertCompanionApproved(home: string, offer: Offer): void {
+  validateCompanionOffer(home, offer.to, offer)
+  if (decision(home, offer) !== 'approve') throw new Error('尚未确认另一端更新，未执行安装')
+}
+export function decideCompanionOffer(home: string, offer: Offer, action: 'approve' | 'later'): void {
+  validateCompanionOffer(home, offer.to, offer)
+  if (!['approve', 'later'].includes(action)) throw new Error('无效的更新选择')
+  // Approval is tied to the exact immutable offer; a new version/source never
+  // inherits it. Once admitted, "later" cannot cancel a transaction mid-write.
+  if (decision(home, offer) === 'approve') return
+  if (action === 'approve') recordResult(home, offer.to, offer, pending())
+  writePrivateJsonAtomic(path.join(root(home), `decision-${offer.to}.json`), { id: offer.id, action })
+}
+function confirmation(home: string, offer: Offer): CompanionResult | undefined {
+  const choice = decision(home, offer)
+  if (choice === 'approve') return
+  return { state: choice === 'later' ? 'deferred' : 'confirmation-required', offerId: offer.id,
+    message: `${offer.to === 'web' ? 'Web' : 'Desktop'} 插件可从 ${offer.previous} 更新至 ${offer.version}。确认后会等待任务空闲，更新时连接将短暂断开；保留原配对和会话。当前尚未更新。` }
 }
 /** Never hand a peer's live directory to pnpm: local folder installs can link
  * the two profiles. Install a verified, immutable tarball kept outside both
@@ -146,6 +172,8 @@ export async function applyNativeCompanion(home: string, scope: Scope, runningVe
   }
   if (target.version === offer.version) return { state: 'restart-required', message: '另一端插件已安装，重启该应用后生效。' }
   if (runningVersion !== offer.previous) throw new Error('运行版本与安装版本不同，未执行联动更新')
+  const notice = confirmation(home, offer)
+  if (notice) return notice
   const list = await services.list()
   services.signal?.throwIfAborted()
   if (!Array.isArray(list?.items) || list.items.some(row => typeof row.running !== 'boolean')) throw new Error('无法确认另一端的会话状态')
@@ -207,6 +235,8 @@ export async function webInstallerRuntime(environment: NodeJS.ProcessEnv = proce
 }
 async function runWebInstaller(home: string, offer: Offer, progress: (value: CompanionResult) => void = () => {}, signal?: AbortSignal): Promise<CompanionResult> {
   signal?.throwIfAborted()
+  const notice = confirmation(home, offer)
+  if (notice) return notice
   progress({ state: 'preparing', message: '检测到 Web 旧插件，正在准备同步升级；原配对和会话将保留。' })
   const target = validateCompanionOffer(home, 'web', offer)
   if (target.owner !== 'cli') return Promise.resolve(pending())
@@ -245,19 +275,20 @@ async function runWebInstaller(home: string, offer: Offer, progress: (value: Com
 /** No service daemon and no polling scanner: one fiber-owned file watcher plus
  * native agent-idle events. Old peers without this receiver keep their native
  * manual entry; an enabled legacy Web can use its existing one-line installer. */
-export function mountCompanionUpdates(ctx: any, version: string): { status(): CompanionResult; dispose(): void } {
-  try { return mount(ctx, version) } catch {
+export function mountCompanionUpdates(ctx: any, version: string, options: { isUpdating?(): boolean } = {}): Coordinator {
+  try { return mount(ctx, version, options) } catch {
     // Coordination is optional. Its filesystem failure must not prevent
     // pairing, authentication or the host's ordinary plugin manager.
-    return { status: () => ({ state: 'unavailable', message: '联动更新暂不可用，仍可分别使用原生更新入口。' }), dispose() {} }
+    return { status: () => ({ state: 'unavailable', message: '联动更新暂不可用，仍可分别使用原生更新入口。' }), decide() { throw new Error('联动更新不可用') }, dispose() {} }
   }
 }
-function mount(ctx: any, version: string): { status(): CompanionResult; dispose(): void } {
+function mount(ctx: any, version: string, options: { isUpdating?(): boolean }): Coordinator {
   const home = agentDshHome(ctx), scope = scopeOf(agentProfileScope(ctx))
   let status: CompanionResult = { state: 'idle', message: '' }, stopped = false, busy = false, recheck = false
   const lifetime = new AbortController()
-  if (!scope) return { status: () => status, dispose() {} }
+  if (!scope) return { status: () => status, decide() { throw new Error('当前安装不支持联动更新') }, dispose() {} }
   const directory = root(home), inbox = path.join(directory, `${scope}.json`)
+  const ownChanged = () => { const own = companionTarget(home, scope); return own && own.version !== version }
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 })
   const receipt = (offer: Offer, value: CompanionResult) => {
     if (stopped) return
@@ -267,7 +298,8 @@ function mount(ctx: any, version: string): { status(): CompanionResult; dispose(
     catch { status = { state: 'unavailable', message: '联动更新结果无法保存，请在该节点的原生插件管理页核对。' } }
   }
   const check = async () => {
-    if (stopped) return
+    if (stopped || ownChanged()) return
+    if (options.isUpdating?.()) return
     if (busy) { recheck = true; return }
     if (!existsInbox()) return
     busy = true
@@ -279,6 +311,8 @@ function mount(ctx: any, version: string): { status(): CompanionResult; dispose(
         if (target.version !== version) throw new Error('磁盘安装已变化')
         receipt(offer!, { state: 'complete', message: '两端插件已对齐。' }); return
       }
+      const notice = confirmation(home, offer!)
+      if (notice) { receipt(offer!, notice); return }
       try {
         const last = read(path.join(directory, `result-${scope}.json`))
         if (last.id === offer!.id && ['unavailable', 'complete'].includes(last.state)) { status = last; return }
@@ -304,7 +338,32 @@ function mount(ctx: any, version: string): { status(): CompanionResult; dispose(
     }
   }
   function existsInbox() { return fs.existsSync(inbox) }
-  const watcher = fs.watch(directory, (_event, filename) => { if (String(filename) === `${scope}.json`) void check() })
+  let outboundBusy = false
+  const checkOutbound = async () => {
+    if (stopped || ownChanged() || outboundBusy || options.isUpdating?.()) return
+    let offer: Offer
+    try {
+      offer = read(path.join(directory, 'web.json'))
+      if (scope !== 'desktop' || offer.from !== scope || offer.version !== version) return
+      const target = validateCompanionOffer(home, 'web', offer)
+      if (target.owner !== 'cli' || target.version === version) return
+      const notice = confirmation(home, offer)
+      if (notice) { recordResult(home, 'web', offer, notice); return }
+      // Updated receivers own their own transaction. Only legacy Web needs
+      // the source host to invoke the existing guarded Web installer.
+      if (compareVersions(offer.previous, '1.7.12-rc.6') >= 0) return
+      try { const last = read(path.join(directory, 'result-web.json')); if (last.schema === 2 && last.id === offer.id && ['unavailable', 'restart-required', 'complete'].includes(last.state)) return } catch {}
+    } catch { return }
+    outboundBusy = true
+    const report = (value: CompanionResult) => { try { recordResult(home, 'web', offer, value) } catch {} }
+    try { report(await runWebInstaller(home, offer, report, lifetime.signal)) }
+    catch { if (!stopped) report({ state: 'unavailable', message: 'Web 联动安装未完成，请在 Web 原生入口核对；Desktop 不受影响。' }) }
+    finally { outboundBusy = false }
+  }
+  const watcher = fs.watch(directory, (_event, filename) => {
+    if ([`${scope}.json`, `decision-${scope}.json`].includes(String(filename))) void check()
+    if (String(filename) === 'decision-web.json') void checkOutbound()
+  })
   watcher.on('error', () => { status = { state: 'unavailable', message: '联动更新通知不可用，仍可分别使用原生更新入口。' } })
   const cleanups: (() => void)[] = []
   try {
@@ -317,7 +376,7 @@ function mount(ctx: any, version: string): { status(): CompanionResult; dispose(
     if (dependency?.dispose) cleanups.push(() => { void Promise.resolve(dependency.dispose()).catch(() => {}) })
   } catch (error) { stopped = true; lifetime.abort(); watcher.close(); cleanups.forEach(fn => fn()); throw error }
   const kickoff = setImmediate(() => {
-    if (stopped) return
+    if (stopped || ownChanged()) return
     // Only the native wrapper carries the full installer. The ordinary Web
     // core never invents an npm source or broadcasts incomplete package bytes.
     const source = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
@@ -332,23 +391,13 @@ function mount(ctx: any, version: string): { status(): CompanionResult; dispose(
         if (previous?.version !== version) {
           const offer = offerCompanionUpdate(home, scope, packageName === native ? source : '', version)
           writePrivateJsonAtomic(seen, { version })
-          // Pre-coordination Web versions cannot receive an inbox. Their own
-          // installer can still carry out the authorized, guarded transaction.
-          if (offer?.to === 'web' && companionTarget(home, 'web')?.owner === 'cli'
-              && compareVersions(offer.previous, '1.7.12-rc.4') < 0) {
-            const report = (value: CompanionResult) => {
-              try { recordResult(home, 'web', offer, value) } catch {}
-            }
-            void runWebInstaller(home, offer, report, lifetime.signal).then(report).catch(() => {
-              report({ state: 'unavailable', message: 'Web 联动安装未完成，请在 Web 中使用原有安装命令；Desktop 不受影响。' })
-            })
-          }
         }
       }
     } catch { /* core-only install has no wrapper; explicit installer publishes */ }
     void check()
+    void checkOutbound()
   })
-  return { status: () => {
+  const reportedStatus = (): CompanionResult => {
     // Report a peer outcome to the initiating host, without mistaking this
     // host's successful upgrade for completion on the peer.
     const to = scope === 'web' ? 'desktop' : 'web'
@@ -356,8 +405,12 @@ function mount(ctx: any, version: string): { status(): CompanionResult; dispose(
       const offer = read(path.join(directory, `${to}.json`))
       if (offer.from === scope && offer.version === version) {
         const peer = validateCompanionOffer(home, to, offer)
+        if (peer.version !== version) {
+          const notice = confirmation(home, offer)
+          if (notice) return notice
+        }
         const last = read(path.join(directory, `result-${to}.json`))
-        if (last.id === offer.id && ['pending', 'busy', 'preparing', 'installing', 'verifying', 'recovering', 'restart-required', 'complete', 'unavailable'].includes(last.state)) {
+        if (last.schema === 2 && last.id === offer.id && ['pending', 'busy', 'preparing', 'installing', 'verifying', 'recovering', 'restart-required', 'complete', 'unavailable'].includes(last.state)) {
           if (['complete', 'restart-required'].includes(last.state) && peer.version !== version) {
             return { state: 'unavailable', message: '另一端的安装已变化，请在该应用内核对；当前节点不受影响。' }
           }
@@ -374,5 +427,25 @@ function mount(ctx: any, version: string): { status(): CompanionResult; dispose(
       }
     } catch {}
     return status
+  }
+  return { status: () => {
+    const own = companionTarget(home, scope), to = scope === 'web' ? 'desktop' : 'web', peer = companionTarget(home, to)
+    const versions = { current: scope, running: version, installed: own?.version ?? null, peer: to, peerInstalled: peer?.version ?? null } as const
+    if (own && own.version !== version) return { state: 'self-restart-required', versions,
+      message: `当前 ${scope === 'desktop' ? 'Desktop' : 'Web'} 已安装 ${own.version}，仍在运行 ${version}。请在任务结束后重启当前应用；另一端尚未因此更新。` }
+    const result = reportedStatus()
+    if (result.state === 'complete' && (!own || !peer || own.version !== peer.version || own.version !== version)) {
+      return { state: 'unavailable', versions, message: '两端版本或启用状态已变化，旧的完成记录不再代表当前已对齐。请分别核对，不会自动覆盖任何一端。' }
+    }
+    return { ...result, versions }
+  }, decide(id, action) {
+    if (stopped) throw new Error('连接服务已停止')
+    if (ownChanged()) throw new Error('当前安装版本尚未生效，请重启当前应用后再确认')
+    const to = scope === 'web' ? 'desktop' : 'web'
+    const offers = [to, scope].flatMap(key => { try { return [read(path.join(directory, `${key}.json`))] } catch { return [] } })
+    const offer = offers.find(item => item.id === id)
+    if (!offer) throw new Error('更新通知已过期，请刷新后重试')
+    decideCompanionOffer(home, offer, action)
+    void check(); void checkOutbound()
   }, dispose() { stopped = true; lifetime.abort(); clearImmediate(kickoff); watcher.close(); cleanups.forEach(fn => fn()) } }
 }

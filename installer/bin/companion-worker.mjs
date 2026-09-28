@@ -4,7 +4,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { install } from './setup.mjs'
-import { companionTarget, validateCompanionOffer } from '../lib/companion-updates.js'
+import { companionTarget, validateCompanionOffer, assertCompanionApproved } from '../lib/companion-updates.js'
 import { compareVersions } from '../lib/update-policy.js'
 const root = fileURLToPath(new URL('../', import.meta.url))
 const [home, version, previous, offerId] = process.argv.slice(2)
@@ -21,6 +21,7 @@ try {
   if (!offerId || offer.id !== offerId || offer.version !== version || offer.previous !== previous
     || fs.realpathSync(offer.source) !== fs.realpathSync(root)) throw Error('联动更新请求或来源已变化，未执行旧请求')
   const assertTarget = () => {
+    assertCompanionApproved(home, offer)
     const current = validateCompanionOffer(home, 'web', offer)
     if (current?.owner !== 'cli' || ![previous, version].includes(current.version)) throw Error('Web 安装归属或版本已变化，未覆盖')
   }

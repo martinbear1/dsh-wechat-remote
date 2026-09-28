@@ -10,6 +10,14 @@ import { adapterDshHome } from './dsh-runtime.js'
 import { dshProfileFacts, hostRuntimeVersion, type HostContext } from './dsh-host-context.js'
 import { nodeStorageDirectory } from './node-storage.js'
 
+/** Describe a launch cwd, never rename it into a native Workspace. */
+export function startupDirectory(ctx?: HostContext, cwd = process.cwd()): { path: string; usable: boolean } {
+  const normalized = path.resolve(cwd), home = path.resolve(agentDshHome(ctx))
+  const relative = path.relative(home, normalized)
+  const insideHome = relative === '' || (!relative.startsWith('..' + path.sep) && relative !== '..' && !path.isAbsolute(relative))
+  return { path: normalized, usable: !insideHome && !normalized.split(/[\\/]+/).some(part => part.toLowerCase() === 'node_modules') }
+}
+
 export interface AgentCapability {
   readonly id: string
   readonly version: number

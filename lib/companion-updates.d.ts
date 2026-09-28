@@ -4,7 +4,7 @@ type Target = {
     version: string;
 };
 interface Offer {
-    schema: 1;
+    schema: 2;
     id: string;
     from: Scope;
     to: Scope;
@@ -13,9 +13,22 @@ interface Offer {
     source: string;
 }
 export type CompanionResult = {
-    state: 'idle' | 'pending' | 'busy' | 'preparing' | 'installing' | 'verifying' | 'recovering' | 'restart-required' | 'complete' | 'unavailable';
+    state: 'idle' | 'confirmation-required' | 'deferred' | 'pending' | 'busy' | 'preparing' | 'installing' | 'verifying' | 'recovering' | 'restart-required' | 'self-restart-required' | 'complete' | 'unavailable';
     message: string;
+    offerId?: string;
+    versions?: {
+        current: Scope;
+        running: string;
+        installed: string | null;
+        peer: Scope;
+        peerInstalled: string | null;
+    };
 };
+interface Coordinator {
+    status(): CompanionResult;
+    decide(id: string, action: 'approve' | 'later'): void;
+    dispose(): void;
+}
 /** Only already enabled installations participate. Do not re-enable a plugin,
  * create another profile, downgrade, or guess which mixed owner to replace. */
 export declare function companionTarget(home: string, scope: Scope): Target | undefined;
@@ -24,6 +37,8 @@ export declare function companionTarget(home: string, scope: Scope): Target | un
  * offer instead of becoming an unwanted automatic re-upgrade. */
 export declare function offerCompanionUpdate(home: string, from: Scope, source: string, version: string): Offer | undefined;
 export declare function validateCompanionOffer(home: string, scope: Scope, offer: Offer): Target;
+export declare function assertCompanionApproved(home: string, offer: Offer): void;
+export declare function decideCompanionOffer(home: string, offer: Offer, action: 'approve' | 'later'): void;
 /** Never hand a peer's live directory to pnpm: local folder installs can link
  * the two profiles. Install a verified, immutable tarball kept outside both
  * profiles, so updating/removing the source cannot break the recipient. */
@@ -53,8 +68,7 @@ export declare function webInstallerRuntime(environment?: NodeJS.ProcessEnv, ele
 /** No service daemon and no polling scanner: one fiber-owned file watcher plus
  * native agent-idle events. Old peers without this receiver keep their native
  * manual entry; an enabled legacy Web can use its existing one-line installer. */
-export declare function mountCompanionUpdates(ctx: any, version: string): {
-    status(): CompanionResult;
-    dispose(): void;
-};
+export declare function mountCompanionUpdates(ctx: any, version: string, options?: {
+    isUpdating?(): boolean;
+}): Coordinator;
 export {};

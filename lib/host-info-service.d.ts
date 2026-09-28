@@ -22,8 +22,13 @@ export interface WechatHostInfoConfig {
     readonly gateRuntime?: () => WechatGateRuntimeInfo;
 }
 export interface WechatHostDescribeValue {
+    readonly startupDirectory: {
+        path: string;
+        usable: boolean;
+    };
     readonly computerName: string;
     readonly pluginVersion: string;
+    readonly installedPluginVersion?: string;
     readonly hostArch: string;
     readonly updateProtocolVersion: 1;
     /** Additive v1 Agent-host identity; legacy clients safely ignore these fields. */

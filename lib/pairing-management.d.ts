@@ -7,6 +7,10 @@ export interface PairingOperations {
     status(): unknown;
     pairCode(): Promise<unknown>;
     unavailable(): boolean;
+    companionDecision?(id: string, action: 'approve' | 'later'): void;
+    updateCheck?(): Promise<unknown>;
+    updateStart?(ticket: string): unknown;
+    updateStatus?(): Promise<unknown>;
 }
 /** Old Connection implementations only checked browser origin. They must keep
  * the existing local door, never expose a new management channel without auth. */

@@ -1,5 +1,10 @@
 import { type HostPlatformDescriptor } from './host-platform.js';
 import { type HostContext } from './dsh-host-context.js';
+/** Describe a launch cwd, never rename it into a native Workspace. */
+export declare function startupDirectory(ctx?: HostContext, cwd?: string): {
+    path: string;
+    usable: boolean;
+};
 export interface AgentCapability {
     readonly id: string;
     readonly version: number;

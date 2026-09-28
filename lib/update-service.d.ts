@@ -3,6 +3,13 @@ import type { Context } from '@deepseek-ai/cordis';
 import { type HostContext } from './dsh-host-context.js';
 import { type RuntimeVersion, type UpdateAdvice, type Release } from './update-policy.js';
 export declare function previewUpdatesEnabled(env?: NodeJS.ProcessEnv): boolean;
+interface UpdateJobReference {
+    jobId: string;
+    statusOrigin: string;
+    statusToken: string;
+}
+/** A nonterminal journal is historical evidence, not a worker heartbeat. */
+export declare function confirmUpdateProgress(job: UpdateJobReference, webPort: number, fetchImpl?: typeof fetch): Promise<unknown>;
 export declare function updateAction(advice: UpdateAdvice, release: Release | undefined, eligible: {
     eligible: boolean;
     reason: string;
@@ -47,8 +54,14 @@ export declare class PluginUpdateService {
     private progressIndex;
     private recovery;
     check(force?: boolean): Promise<UpdateAdvice>;
+    nativeRelease(): Promise<{
+        advice: UpdateAdvice;
+        release: Release | undefined;
+        channel: "stable" | "preview";
+    }>;
     private eligibility;
     private begin;
     handle(req: IncomingMessage, res: ServerResponse): Promise<void>;
     dispose(): void;
 }
+export {};

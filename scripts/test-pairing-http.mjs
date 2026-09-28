@@ -2,6 +2,28 @@ import assert from 'node:assert/strict'
 import { createServer, request } from 'node:http'
 import { test } from 'node:test'
 import { pairingHttpHandler } from '../lib/pairing-http.js'
+import { createPairingHandler } from '../lib/pairing-management.js'
+
+test('operator wire reaches companion and native update operations; auth and exact payload remain required', async () => {
+  const calls = []
+  const handler = createPairingHandler({ unavailable: () => false, status: () => ({}), pairCode: async () => ({}),
+    companionDecision: (...args) => calls.push(['decision', ...args]),
+    updateCheck: async () => { calls.push(['check']); return {} }, updateStart: ticket => { calls.push(['start', ticket]); return {} }, updateStatus: async () => ({ phase: 'idle' }) })
+  const server = createServer(pairingHttpHandler('/manage', { admit() {}, requestRejection: req => req.headers.authorization === 'fixture-only' ? undefined : 401 }, handler.call))
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  const origin = 'http://127.0.0.1:' + server.address().port
+  const post = (method, payload = {}, auth = 'fixture-only') => fetch(origin + '/manage/' + method, { method: 'POST', headers: { authorization: auth, 'content-type': 'application/json' }, body: JSON.stringify({ type: 'client-request', rpcId: 'fixture', method, payload }) })
+  try {
+    assert.equal((await post('update-start', { ticket: 'a'.repeat(48) }, '')).status, 401)
+    for (const [method, payload] of [['companion-decision', { offerId: 'a'.repeat(32), action: 'later' }], ['update-check', {}], ['update-start', { ticket: 'a'.repeat(48) }], ['update-status', {}]]) {
+      const response = await post(method, payload); assert.equal(response.status, 200); assert.equal((await response.json()).result.ok, true)
+    }
+    assert.equal((await (await post('update-start', { ticket: 'a'.repeat(48), source: 'arbitrary' })).json()).result.ok, false)
+    assert.equal((await (await post('update-check', { profile: 'web' })).json()).result.ok, false)
+    assert.equal((await post('run-shell')).status, 404)
+    assert.deepEqual(calls.map(row => row[0]), ['decision', 'check', 'start'])
+  } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)) }
+})
 
 test('small management wire is bounded, abort-safe and never parses unauthorized bodies', async () => {
   let calls = 0

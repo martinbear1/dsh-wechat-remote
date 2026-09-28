@@ -7430,8 +7430,20 @@ async function waitForJson(filename, accept, timeout = 2e4) {
   throw error;
 }
 
+// installer/lib/update-session-verification.js
+async function verifySessionService(read, previouslyReadable) {
+  const items = (await read("session.list"))?.items;
+  if (!Array.isArray(items) || items.some((item) => !item || typeof item.sessionId !== "string" || !item.sessionId || typeof item.running !== "boolean") || new Set(items.map((item) => item.sessionId)).size !== items.length) {
+    throw new Error("\u4E3B\u673A\u4F1A\u8BDD\u670D\u52A1\u8FD4\u56DE\u4E86\u65E0\u6548\u7684\u4F1A\u8BDD\u5217\u8868");
+  }
+  const visible = new Set(items.map((item) => item.sessionId));
+  for (const sessionId of new Set(previouslyReadable)) {
+    if (visible.has(sessionId)) await read("session.history", { sessionId, maxMessages: 1 });
+  }
+}
+
 // installer/bin/native-recovery.mjs
-async function verifyNativeRestore(job, start, sessionIds, readableIds) {
+async function verifyNativeRestore(job, start, readableIds) {
   const directory = path2.join(job.home, "harness-remote-updates", randomBytes2(16).toString("hex"));
   fs2.mkdirSync(directory, { mode: 448 });
   fs2.writeFileSync(path2.join(directory, "package.json"), '{"type":"module"}\n', { mode: 384 });
@@ -7455,11 +7467,7 @@ async function verifyNativeRestore(job, start, sessionIds, readableIds) {
     if (host.pid !== ref.pid || host.home !== job.home || host.profile !== job.profile || host.cli !== job.cli || host.dshVersion !== job.dshVersion || host.pluginVersion !== job.previousVersion) {
       throw new Error("\u6062\u590D\u540E\u7684 DSH \u8EAB\u4EFD\u4E0D\u5339\u914D\u3002");
     }
-    const items = (await request("read", { method: "session.list" })).items;
-    if (!Array.isArray(items) || JSON.stringify(items.map((s) => s.sessionId).sort()) !== JSON.stringify(sessionIds)) {
-      throw new Error("\u6062\u590D\u540E\u7684\u4F1A\u8BDD\u5217\u8868\u4E0D\u4E00\u81F4\u3002");
-    }
-    for (const sessionId of readableIds) await request("read", { method: "session.history", payload: { sessionId, maxMessages: 1 } });
+    await verifySessionService((method, payload) => request("read", { method, payload }), readableIds);
   } finally {
     try {
       remove();

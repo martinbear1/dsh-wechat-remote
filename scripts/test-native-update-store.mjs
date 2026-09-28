@@ -83,3 +83,102 @@ test('new client plus pre-update backend reports unsupported runtime, not networ
   assert.deepEqual(calls, ['update-check', 'status'])
   b.store.dispose()
 })
+
+const settle = () => new Promise(resolve => setImmediate(resolve))
+const completeCheck = reason => ({ ...check(), canInstall: false, ticket: '', reason,
+  status: { phase: 'complete', message: 'Desktop 插件已更新并生效。', targetVersion: '1.7.12' } })
+
+test('companion invalidation rechecks both shared views without submitting an installation', async () => {
+  let busy = true, reads = 0
+  const b = bench(async endpoint => {
+    assert.equal(endpoint, 'update-check', 'automatic invalidation is read-only')
+    reads++; return completeCheck(busy ? '正在处理插件更新，请等待完成' : '')
+  })
+  const a = b.store.subscribe(() => {}), c = b.store.subscribe(() => {})
+  try {
+    await b.store.refresh(); busy = false
+    b.store.invalidateCheck(); await settle()
+    assert.equal(b.store.getSnapshot().check.reason, '')
+    assert.equal(b.store.getSnapshot().status.phase, 'complete')
+    assert.equal(reads, 2); assert.equal(b.timers.size, 0)
+  } finally { a(); c(); b.store.dispose() }
+})
+
+test('late check cannot restore a busy hint or ticket; repeated invalidations coalesce', async () => {
+  let release, reads = 0
+  const b = bench(async endpoint => {
+    assert.equal(endpoint, 'update-check')
+    if (++reads === 1) return new Promise(resolve => { release = resolve })
+    return completeCheck('')
+  })
+  const off = b.store.subscribe(() => {}), stale = b.store.refresh(), seen = []
+  const other = b.store.subscribe(() => seen.push(b.store.getSnapshot().check))
+  try {
+    b.store.invalidateCheck(); b.store.invalidateCheck()
+    release({ ...check(), reason: 'old busy hint' }); await stale; await settle()
+    assert.equal(reads, 2)
+    assert(seen.every(value => !value || value.reason !== 'old busy hint'))
+    assert.equal(b.store.getSnapshot().check.reason, '')
+    assert.equal(b.store.getSnapshot().check.ticket, '')
+  } finally { off(); other(); b.store.dispose() }
+})
+
+test('hidden view remembers invalidation until reopened, with no background check loop', async () => {
+  let reads = 0
+  const b = bench(async endpoint => { assert.equal(endpoint, 'update-check'); reads++; return completeCheck('') })
+  const off = b.store.subscribe(() => {}); await b.store.refresh(); off()
+  b.store.invalidateCheck(); b.store.invalidateCheck(); await settle()
+  assert.equal(reads, 1); assert.equal(b.timers.size, 0)
+  const again = b.store.subscribe(() => {})
+  await b.store.refresh(); assert.equal(reads, 2)
+  again(); b.store.dispose()
+})
+
+test('failed revalidation reports unavailable instead of inventing success or retrying forever', async () => {
+  let fail = false, reads = 0
+  const b = bench(async endpoint => {
+    if (endpoint === 'status') return { plugin: { runningVersion: '1.7.12' } }
+    assert.equal(endpoint, 'update-check'); reads++
+    if (fail) throw Error('offline')
+    return completeCheck('busy')
+  })
+  const off = b.store.subscribe(() => {})
+  try {
+    await b.store.refresh(); fail = true; b.store.invalidateCheck(); await settle()
+    assert.equal(b.store.getSnapshot().check, null)
+    assert.match(b.store.getSnapshot().error, /检查未完成/)
+    await settle(); assert.equal(reads, 2); assert.equal(b.timers.size, 0)
+  } finally { off(); b.store.dispose() }
+})
+
+test('disposal fences late check success/failure and never starts a follow-up read', async () => {
+  for (const fail of [false, true]) {
+    let release, reads = 0
+    const b = bench(async endpoint => {
+      assert.equal(endpoint, 'update-check'); reads++
+      return new Promise((resolve, reject) => { release = () => fail ? reject(Error('offline')) : resolve(check()) })
+    })
+    const off = b.store.subscribe(() => {}), pending = b.store.refresh()
+    b.store.invalidateCheck(); b.store.dispose(); release(); await pending; await settle()
+    assert.equal(reads, 1); assert.equal(b.store.getSnapshot().check, null)
+    assert.equal(b.timers.size, 0); off()
+  }
+})
+
+test('companion invalidation waits for an accepted native job, then rechecks without resubmitting', async () => {
+  let reads = 0, installs = 0, releaseStart, phase = 'installing'
+  const b = bench(async endpoint => {
+    if (endpoint === 'update-check') { reads++; return reads === 1 ? check() : completeCheck('') }
+    if (endpoint === 'update-start') { installs++; return new Promise(resolve => { releaseStart = resolve }) }
+    assert.equal(endpoint, 'update-status'); return { phase }
+  })
+  const off = b.store.subscribe(() => {})
+  try {
+    await b.store.refresh(); const starting = b.store.install()
+    b.store.invalidateCheck(); releaseStart({ phase }); await starting; await settle()
+    assert.equal(reads, 1); assert.equal(installs, 1)
+    phase = 'restart-required'; await b.tick(); assert.equal(reads, 1)
+    phase = 'complete'; await b.tick(); await settle()
+    assert.equal(reads, 2); assert.equal(installs, 1); assert.equal(b.timers.size, 0)
+  } finally { off(); b.store.dispose() }
+})

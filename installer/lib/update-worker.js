@@ -86,6 +86,18 @@ function publishPrivateJson(file, value, replace) {
   }
 }
 
+// src/update-session-verification.ts
+async function verifySessionService(read, previouslyReadable) {
+  const items = (await read("session.list"))?.items;
+  if (!Array.isArray(items) || items.some((item) => !item || typeof item.sessionId !== "string" || !item.sessionId || typeof item.running !== "boolean") || new Set(items.map((item) => item.sessionId)).size !== items.length) {
+    throw new Error("\u4E3B\u673A\u4F1A\u8BDD\u670D\u52A1\u8FD4\u56DE\u4E86\u65E0\u6548\u7684\u4F1A\u8BDD\u5217\u8868");
+  }
+  const visible = new Set(items.map((item) => item.sessionId));
+  for (const sessionId of new Set(previouslyReadable)) {
+    if (visible.has(sessionId)) await read("session.history", { sessionId, maxMessages: 1 });
+  }
+}
+
 // src/install-profile.ts
 import fs from "node:fs";
 import path from "node:path";
@@ -669,9 +681,7 @@ async function executeUpdate(job, progress, quiesce) {
     await healthy(job, job.targetVersion);
     await verifyFence(job);
     assertPreserved(before, durableSnapshot(job));
-    const after = (await rpc(job, "session.list")).items.map((s) => s.sessionId).sort();
-    if (JSON.stringify(after) !== JSON.stringify(sessionIds)) throw new Error("\u91CD\u542F\u540E\u4F1A\u8BDD\u5217\u8868\u4E0D\u4E00\u81F4");
-    for (const id of readableIds) await rpc(job, "session.history", { sessionId: id, maxMessages: 1 });
+    await verifySessionService((method, payload) => rpc(job, method, payload), readableIds);
     writePrivateJsonAtomic(path4.join(job.directory, "verification-complete.json"), { id: job.id });
     return { phase: "complete", progress: 100, message: "\u63D2\u4EF6\u66F4\u65B0\u5B8C\u6210\uFF0CDSH \u5DF2\u6062\u590D\uFF1B\u539F\u8282\u70B9\u65E0\u9700\u91CD\u65B0\u914D\u5BF9\u3002", terminal: true, ok: true };
   } catch (error) {
@@ -713,7 +723,7 @@ async function executeUpdate(job, progress, quiesce) {
         }
         if (job.previousVersion === "0.0.0" || preexistingFailure) {
           const recovery = await import(pathToFileURL(path4.join(job.directory, "native-recovery.js")).href);
-          await recovery.verifyNativeRestore(job, () => start(job), sessionIds, readableIds);
+          await recovery.verifyNativeRestore(job, () => start(job), readableIds);
         } else {
           start(job);
           await healthy(job, job.previousVersion);
@@ -865,6 +875,7 @@ if (process.argv[1] && path4.resolve(process.argv[1]) === fileURLToPath(import.m
   });
 }
 export {
+  assertPreserved,
   captureCandidateLock,
   control,
   durableSnapshot,

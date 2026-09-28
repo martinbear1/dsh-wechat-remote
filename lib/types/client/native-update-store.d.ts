@@ -24,11 +24,18 @@ export declare class NativeUpdateStore {
     private reading?;
     private timer?;
     private disposed;
+    private checkRevision;
+    private checkInvalidated;
     constructor(call: CallPairingManagement);
     getSnapshot: () => Snapshot;
     private patch;
     subscribe: (listener: () => void) => () => void;
     private active;
+    /** Companion activity changes admission, not this node's install result.
+     * Keep real job progress; invalidate its cached check/ticket and read again.
+     * Never turn a status transition into an install, approval or blind retry. */
+    invalidateCheck: () => void;
+    private refreshInvalidatedCheck;
     refresh: () => Promise<void>;
     install: () => Promise<void>;
     private poll;

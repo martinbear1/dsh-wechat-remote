@@ -22,6 +22,12 @@ export interface PageSnapshot {
 const initial = (): PageSnapshot => ({ loadState: 'loading', qrState: 'idle', status: null, host: null,
   runtime: null, localOrigin: null, qr: null, error: null, decisionError: null, deciding: false })
 
+// Match native update admission in gate-runtime. Progress within the same busy
+// interval must not repeatedly fetch the catalog; missing status is not proof
+// that an update finished.
+const companionBusy = (status: GateStatus | null): boolean | undefined => status?.companionUpdate?.state
+  ? ['preparing', 'installing', 'verifying', 'recovering'].includes(status.companionUpdate.state) : undefined
+
 export class RemotePageStore {
   updates?: WebUpdateStore
   nativeUpdates?: NativeUpdateStore
@@ -78,6 +84,11 @@ export class RemotePageStore {
         if (status.companionUpdate?.state === 'complete' && !status.plugin) status.companionUpdate = {
           state: 'unverified', message: '当前连接服务尚未提供运行版本核验，不能确认两端已对齐。若刚安装插件，请在任务结束后退出并重新打开当前应用；无需重新配对。' }
         if (generation !== this.generation) return
+        const wasBusy = companionBusy(this.value.status), busy = companionBusy(status)
+        // The companion card polls separately from the native update card.
+        // Without invalidation the latter can keep a cached "update busy"
+        // reason forever even though both runtimes are already aligned.
+        if (busy !== undefined && busy !== wasBusy) this.nativeUpdates?.invalidateCheck()
         this.patch({ status, runtime: status.gate ?? client.runtime, loadState: 'ready', error: null,
           ...(this.value.qr && this.value.qr.expiresAt <= Date.now() ? { qrState: 'expired' as const, qr: null } : {}) })
       } catch { this.patch({ loadState: 'error', error: '连接服务暂未就绪。请确认 DSH 正在运行，然后重试。' }) }

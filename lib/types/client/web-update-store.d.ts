@@ -45,7 +45,6 @@ export interface UpdateSnapshot {
 }
 export declare class WebUpdateStore {
     readonly origin: string;
-    private fetcher;
     private value;
     private listeners;
     private reading?;
@@ -55,6 +54,7 @@ export declare class WebUpdateStore {
     private timer?;
     private pollGeneration;
     private recovering;
+    private fetcher;
     constructor(origin: string, fetcher?: typeof fetch);
     getSnapshot: () => UpdateSnapshot;
     subscribe: (listener: () => void) => (() => void);

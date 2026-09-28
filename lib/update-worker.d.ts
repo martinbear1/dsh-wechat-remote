@@ -36,6 +36,7 @@ export declare function releaseOwnedUpdateLock(lock: string, id: string): void;
 export declare function validateJob(job: UpdateJob): void;
 export declare function control(job: UpdateJob, operation: string, input?: unknown): Promise<any>;
 export declare function durableSnapshot(job: UpdateJob): Record<string, string>;
+export declare function assertPreserved(before: Record<string, string>, after: Record<string, string>): void;
 /** Legacy grants acquire an owner only inside this verified, backed-up upgrade.
  * A later actual identity replacement still invalidates the old grants normally.
  */

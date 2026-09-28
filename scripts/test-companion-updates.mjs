@@ -47,6 +47,37 @@ test('offers only update an existing enabled peer, never install/enable/downgrad
   assert.equal(companionTarget(f.home, 'desktop'), undefined)
 })
 
+test('CLI enriches an unapproved npm-only offer without inheriting stale decisions', async t => {
+  const f = fixture(t); f.target('desktop')
+  const old = propose(f.home, 'web', '', next)
+  decideCompanionOffer(f.home, old, 'later')
+  const enriched = propose(f.home, 'web', f.source, next)
+  assert.notEqual(enriched.id, old.id)
+  assert.equal(enriched.source, fs.realpathSync(f.source))
+  assert.throws(() => decideCompanionOffer(f.home, old, 'approve'), /已变化/)
+  const services = { list: async () => assert.fail(), install: async () => assert.fail() }
+  assert.equal((await applyNativeCompanion(f.home, 'desktop', '1.7.10', enriched, services)).state, 'confirmation-required')
+  assert.equal(propose(f.home, 'web', '', next).id, enriched.id, 'late core offer cannot discard local source')
+  assert.equal(propose(f.home, 'web', f.source, next).id, enriched.id)
+  decideCompanionOffer(f.home, enriched, 'approve')
+  const calls = [], archive = path.join(f.home, 'immutable.tgz')
+  const result = await applyNativeCompanion(f.home, 'desktop', '1.7.10', enriched, {
+    list: async () => ({ items: [] }), stage: async (_home, source) => { assert.equal(source, enriched.source); return archive },
+    install: async spec => { calls.push(spec); f.target('desktop', native, next); return { application: 'restart-required', bundle: native } },
+  })
+  assert.equal(result.state, 'restart-required'); assert.deepEqual(calls, [archive])
+})
+
+test('source enrichment cannot replace approved work or admit invalid installer bytes', t => {
+  const f = fixture(t); f.target('desktop')
+  const old = propose(f.home, 'web', '', next)
+  decideCompanionOffer(f.home, old, 'approve')
+  assert.equal(propose(f.home, 'web', f.source, next).id, old.id)
+  fs.writeFileSync(path.join(f.source, 'assets/plugin.tgz'), 'tampered')
+  assert.throws(() => propose(f.home, 'web', f.source, next), /校验失败/)
+  assert.equal(propose(f.home, 'web', '', next).id, old.id)
+})
+
 for (const from of ['web', 'desktop']) {
   const to = from === 'web' ? 'desktop' : 'web'
   for (const scenario of ['host-absent', 'host-without-plugin', 'disabled-plugin', 'same-version', 'newer-version', 'mixed-owners', 'old-enabled-plugin']) {

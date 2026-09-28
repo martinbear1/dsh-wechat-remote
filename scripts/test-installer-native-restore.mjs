@@ -14,12 +14,14 @@ for (const previousVersion of ['0.0.0', '1.7.9']) {
     fs.writeFileSync(path.join(directory, 'install-control.js'), '// synthetic fixture')
     const original = '[]\n'; fs.writeFileSync(path.join(profile, 'cordis.patch.yml'), original)
     const job = { home, profile, directory, previousVersion, cli: 'verified-cli', dshVersion: '0.1.7-rc.1' }
-    let reportedVersion = previousVersion, ready, closed = 0
+    let reportedVersion = previousVersion, ready, closed = 0, malformed = false, historyFailed = false
     const server = http.createServer(async (req, res) => {
-      for await (const _ of req) {}
+      let text = ''; for await (const chunk of req) text += chunk
+      const request = JSON.parse(text || '{}')
       res.setHeader('content-type', 'application/json')
       const value = req.url === '/describe' ? { ...job, pid: process.pid, pluginVersion: reportedVersion }
-        : req.url === '/read' ? { items: [{ sessionId: 'original-session', running: false }] } : {}
+        : req.url === '/read' && request.method === 'session.list' ? { items: malformed ? null : [{ sessionId: 'original-session', running: false }] } : {}
+      if (req.url === '/read' && request.method === 'session.history' && historyFailed) res.statusCode = 503
       if (req.url === '/close') closed++
       res.end(JSON.stringify(value))
     })
@@ -32,13 +34,17 @@ for (const previousVersion of ['0.0.0', '1.7.9']) {
     }
     try {
       fs.mkdirSync(path.join(home, 'harness-remote-updates'))
-      await verifyNativeRestore(job, start, ['original-session'], [])
+      await verifyNativeRestore(job, start, ['original-session'])
       assert.equal(fs.readFileSync(path.join(profile, 'cordis.patch.yml'), 'utf8'), original)
       reportedVersion = 'different-version'
-      await assert.rejects(verifyNativeRestore(job, start, ['original-session'], []), /身份不匹配/)
+      await assert.rejects(verifyNativeRestore(job, start, ['original-session']), /身份不匹配/)
       reportedVersion = previousVersion
-      await assert.rejects(verifyNativeRestore(job, start, ['missing-session'], []), /列表不一致/)
-      assert.equal(closed, 3)
+      await verifyNativeRestore(job, start, ['no-longer-visible', 'original-session'])
+      malformed = true
+      await assert.rejects(verifyNativeRestore(job, start, ['original-session']), /无效的会话列表/)
+      malformed = false; historyFailed = true
+      await assert.rejects(verifyNativeRestore(job, start, ['original-session']), /恢复检查未通过/)
+      assert.equal(closed, 5)
       assert.equal(fs.readFileSync(path.join(profile, 'cordis.patch.yml'), 'utf8'), original)
     } finally {
       server.closeAllConnections(); await new Promise(resolve => server.close(resolve))

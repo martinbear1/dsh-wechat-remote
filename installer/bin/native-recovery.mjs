@@ -5,8 +5,9 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { randomBytes } from 'node:crypto'
 import { attachControl, waitForJson } from './native-control.mjs'
+import { verifySessionService } from '../lib/update-session-verification.js'
 
-export async function verifyNativeRestore(job, start, sessionIds, readableIds) {
+export async function verifyNativeRestore(job, start, readableIds) {
   const directory = path.join(job.home, 'harness-remote-updates', randomBytes(16).toString('hex'))
   fs.mkdirSync(directory, { mode: 0o700 })
   fs.writeFileSync(path.join(directory, 'package.json'), '{"type":"module"}\n', { mode: 0o600 })
@@ -32,11 +33,7 @@ export async function verifyNativeRestore(job, start, sessionIds, readableIds) {
       || host.cli !== job.cli || host.dshVersion !== job.dshVersion || host.pluginVersion !== job.previousVersion) {
       throw new Error('恢复后的 DSH 身份不匹配。')
     }
-    const items = (await request('read', { method: 'session.list' })).items
-    if (!Array.isArray(items) || JSON.stringify(items.map(s => s.sessionId).sort()) !== JSON.stringify(sessionIds)) {
-      throw new Error('恢复后的会话列表不一致。')
-    }
-    for (const sessionId of readableIds) await request('read', { method: 'session.history', payload: { sessionId, maxMessages: 1 } })
+    await verifySessionService((method, payload) => request('read', { method, payload }), readableIds)
   } finally {
     try { remove() }
     finally { if (ref) { try { await request('close') } catch {} } }

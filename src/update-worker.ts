@@ -6,6 +6,7 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { createHash, createPublicKey, randomBytes } from 'node:crypto'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { writePrivateJsonAtomic } from './secure-file.js'
+import { verifySessionService } from './update-session-verification.js'
 import { installProfile, backupProfile, NativeInstallError, assertCliInstallOwner } from './install-profile.js'
 import { INSTALL_PNPM_VERSION, pinInstallRuntime } from './install-runtime.js'
 import { validateManager, startManagedHost, stopManagedHost, finishUpdateWorker, type HostManager } from './install-lifecycle.js'
@@ -114,7 +115,7 @@ export function durableSnapshot(job: UpdateJob): Record<string, string> {
   }
   return result
 }
-function assertPreserved(before: Record<string, string>, after: Record<string, string>): void {
+export function assertPreserved(before: Record<string, string>, after: Record<string, string>): void {
   for (const [key, hash] of Object.entries(before)) if (after[key] !== hash) throw new Error('升级后数据校验不一致；停止自动操作并保留备份')
 }
 /** Legacy grants acquire an owner only inside this verified, backed-up upgrade.
@@ -317,9 +318,7 @@ export async function executeUpdate(job: UpdateJob, progress: (p: UpdateProgress
     await healthy(job, job.targetVersion)
     await verifyFence(job)
     assertPreserved(before, durableSnapshot(job))
-    const after = (await rpc(job, 'session.list')).items.map((s: any) => s.sessionId).sort()
-    if (JSON.stringify(after) !== JSON.stringify(sessionIds)) throw new Error('重启后会话列表不一致')
-    for (const id of readableIds) await rpc(job, 'session.history', { sessionId: id, maxMessages: 1 })
+    await verifySessionService((method, payload) => rpc(job, method, payload), readableIds)
     writePrivateJsonAtomic(path.join(job.directory, 'verification-complete.json'), { id: job.id })
     return { phase: 'complete', progress: 100, message: '插件更新完成，DSH 已恢复；原节点无需重新配对。', terminal: true, ok: true }
   } catch (error) {
@@ -351,7 +350,7 @@ export async function executeUpdate(job: UpdateJob, progress: (p: UpdateProgress
           // Do not demand healthy plugin RPC from a baseline that was already
           // broken. Still verify native identity, sessions and durable hashes.
           const recovery = await import(pathToFileURL(path.join(job.directory, 'native-recovery.js')).href)
-          await recovery.verifyNativeRestore(job, () => start(job), sessionIds, readableIds)
+          await recovery.verifyNativeRestore(job, () => start(job), readableIds)
         } else { start(job); await healthy(job, job.previousVersion) }
         assertPreserved(before, durableSnapshot(job)); rollback = true
         writePrivateJsonAtomic(path.join(job.directory, 'verification-complete.json'), { id: job.id })

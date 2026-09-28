@@ -546,7 +546,9 @@ function offerCompanionUpdate(home, from, source, version) {
   const directory = root(home), file = path5.join(directory, `${to}.json`);
   try {
     const existing = read(file);
-    if (existing.schema === 2 && existing.from === from && existing.version === version && existing.previous === peer.version) return existing;
+    if (existing.schema === 2 && existing.from === from && existing.version === version && existing.previous === peer.version) {
+      if (!source || existing.source || decision(home, existing) === "approve") return existing;
+    }
     if (versionPattern2.test(existing.version) && compareVersions(existing.version, version) > 0) return;
   } catch {
   }

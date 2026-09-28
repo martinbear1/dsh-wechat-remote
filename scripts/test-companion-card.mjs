@@ -51,3 +51,12 @@ test('confirmation requires an explicit click; deferred offers can resume and pe
   }
   assert(!flatten(card({ value: { state: 'confirmation-required', message: 'Web' }, onDecide() {} })).some(n => n?.type === 'button'))
 })
+
+test('the same confirmation names its destination without reversing direction on the receiving host', () => {
+  for (const current of ['desktop', 'web']) {
+    const rows = flatten(card({ value: { state: 'confirmation-required', message: 'Desktop 插件可更新',
+      versions: { current, running: '1.7.12', installed: '1.7.12', peer: current === 'web' ? 'desktop' : 'web', peerInstalled: '1.7.13' } } }))
+    assert.equal(rows.find(n => n?.type === 'strong').props.children, '是否更新下方指定端的插件？')
+    assert(rows.includes('Desktop 插件可更新'))
+  }
+})

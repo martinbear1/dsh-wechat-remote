@@ -14,7 +14,14 @@ export class WebUpdateStore {
   private timer?: ReturnType<typeof setTimeout>
   private pollGeneration = 0
   private recovering = false
-  constructor(readonly origin: string, private fetcher: typeof fetch = fetch) {}
+  private fetcher: typeof fetch
+  constructor(readonly origin: string, fetcher: typeof fetch = globalThis.fetch) {
+    // Browser fetch checks its Window receiver. Storing it unbound and calling
+    // this.fetcher() uses the store as `this`, which Node/arrow mocks tolerate
+    // but Chromium rejects. Bind once for check/start/poll/recovery alike;
+    // endpoints, credentials and native update admission remain unchanged.
+    this.fetcher = fetcher.bind(globalThis)
+  }
   getSnapshot = (): UpdateSnapshot => this.value
   subscribe = (listener: () => void): (() => void) => {
     if (this.disposed) return () => {}

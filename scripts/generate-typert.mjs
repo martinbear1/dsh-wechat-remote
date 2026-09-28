@@ -38,6 +38,7 @@ try {
     'update-policy.ts',
     'update-download.ts',
     'update-worker.ts',
+    'update-session-verification.ts',
     'update-service.ts',
     'native-update-service.ts',
     'plugin-version.ts',

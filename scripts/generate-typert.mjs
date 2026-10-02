@@ -56,6 +56,11 @@ try {
     'history-record-presentation.ts',
     'tool-record-presentation.ts',
     'tool-result-compat.ts',
+    'human-tools/protocol.ts',
+    'human-tools/core.ts',
+    'human-tools/store.ts',
+    'human-tools/dsh.ts',
+    'human-tools/service.ts',
     'history-turn-evidence.ts',
     'history-read-budget.ts',
     'history-archive.ts',
@@ -95,6 +100,7 @@ try {
     'secure-lan.ts',
   ]
   for (const file of hostSources) {
+    mkdirSync(path.dirname(path.join(packageRoot, 'src', file)), { recursive: true })
     copyFileSync(path.join(root, 'src', file), path.join(packageRoot, 'src', file))
   }
   for (const file of [
@@ -104,7 +110,10 @@ try {
     'attachment-service.d.ts',
     'agent-resources.d.ts',
     'agent-inputs.d.ts',
+    'human-tools/service.d.ts',
+    'human-tools/protocol.d.ts',
   ]) {
+    mkdirSync(path.dirname(path.join(packageRoot, 'lib', file)), { recursive: true })
     copyFileSync(path.join(root, 'lib', file), path.join(packageRoot, 'lib', file))
   }
   const protocolPackage = path.join(root, 'node_modules', '@deepseek-ai', 'dsh-typert-protocol')

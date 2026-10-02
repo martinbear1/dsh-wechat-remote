@@ -1,4 +1,5 @@
 import { presentToolResult } from './tool-result-compat.js'
+import { humanSurface } from './human-tools/protocol.js'
 type Row = Record<string, any>
 
 // Metadata consumed by native ui-tool / ui-cordis's central cards. Unknown
@@ -23,6 +24,8 @@ export function toolRecordPresentation<T extends Row>(entry: T): T {
   const selected = fields(meta, ['path', 'offset', 'lines', 'totalLines', 'lang', 'diffs',
     'shape', 'files', 'paths', 'truncated', 'total', 'answer', 'sources', 'url', 'statusCode',
     'pluginId', 'packageId', 'pluginRunId']) as Row
+  const surface = humanSurface(meta.humanSurface)
+  if (surface) selected.humanSurface = surface
   if (Object.hasOwn(selected, 'lines')) selected.lines = rows(selected.lines, ['number', 'text'])
   if (Object.hasOwn(selected, 'diffs')) selected.diffs = rows(selected.diffs, ['path', 'oldText', 'newText'])
   if (Object.hasOwn(selected, 'sources')) selected.sources = rows(selected.sources, ['url', 'title', 'snippet', 'publishedAt'])

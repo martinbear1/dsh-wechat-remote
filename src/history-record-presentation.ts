@@ -2,6 +2,7 @@
  * tool invocation, file-read authority, or dump of arbitrary metadata. */
 import { toolRecordPresentation } from './tool-record-presentation.js'
 import { toolResultFailed } from './tool-result-compat.js'
+import { humanSurface } from './human-tools/protocol.js'
 
 type Row = Record<string, any>
 export interface DetailPart {
@@ -132,8 +133,14 @@ export function historyRecordPreview(entry: Row): Row {
         arguments: clipped(prose(data.arguments)), ...(event.type === 'tool/ptc-dispatch' ? { content: content(data.content) } : {}) }
       break
     case 'tool/call': summary = { ...common, name: data.name, arguments: clipped(prose(data.arguments)) }; break
-    case 'tool/result': summary = { ...common, message: message(data.message),
-      ...(data.error ? { error: { ...pick(data.error, ['name', 'code']), message: clipped(data.error.message, 400) } } : {}) }; break
+    case 'tool/result': {
+      // The versioned action contract is identity, not prose. Preserve it when
+      // bounding a large result, without removing the native error semantics.
+      const surface = humanSurface(data.meta?.humanSurface)
+      summary = { ...common, message: message(data.message), ...(surface ? { meta: { humanSurface: surface } } : {}),
+        ...(data.error ? { error: { ...pick(data.error, ['name', 'code']), message: clipped(data.error.message, 400) } } : {}) }
+      break
+    }
     case 'assistant/message': case 'assistant/attempt': summary = { ...common, message: message(data.message) }; break
     case 'user/message': summary = { ...common, ...message(data) }; break
     case 'compaction/summary': summary = { ...common, compactionId: data.compactionId, summary: content(data.summary) }; break

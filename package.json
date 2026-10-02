@@ -1,6 +1,6 @@
 {
   "name": "@harness-remote/dsh-wechat-remote",
-  "version": "1.7.13",
+  "version": "1.7.14-rc.1",
   "description": "Agent远程管理助手：支持 Windows、macOS 与 Linux 上的 DeepSeek Harness，提供微信配对、安全局域网直连及端到端加密公网连接",
   "private": true,
   "license": "MIT",
@@ -55,6 +55,14 @@
       "types": "./lib/public-relay-agent.d.ts",
       "default": "./lib/public-relay-agent.js"
     },
+    "./human-tools": {
+      "types": "./lib/human-tools/service.d.ts",
+      "default": "./lib/human-tools/service.js"
+    },
+    "./human-tools/protocol": {
+      "types": "./lib/human-tools/protocol.d.ts",
+      "default": "./lib/human-tools/protocol.js"
+    },
     "./e2ee": {
       "types": "./lib/e2ee-session.d.ts",
       "default": "./lib/e2ee-session.js"
@@ -95,8 +103,9 @@
     "bundle": "tsc -p tsconfig.json && node scripts/clean-client-types.mjs && tsc -p tsconfig.client.json && node scripts/build-client.mjs && node scripts/generate-typert.mjs",
     "verify": "node scripts/verify.mjs && node scripts/check-public-tree.mjs && npm run verify:pack",
     "verify:pack": "node --test scripts/test-packed-plugin.mjs && node scripts/verify-packed-plugin.mjs",
-    "test": "npm run test:notifications && npm run test:lifecycle && npm run test:client && npm run test:attachment && npm run test:directory && npm run test:host-platform && npm run test:history && npm run test:gate-ports && npm run test:dsh-runtime && npm run test:dsh-protocol-compat && npm run test:dsh-realtime-compat && npm run test:dsh-compatibility-api && npm run test:public-relay && npm run test:updates && npm run test:native-update",
+    "test": "npm run test:human-tools && npm run test:notifications && npm run test:lifecycle && npm run test:client && npm run test:attachment && npm run test:directory && npm run test:host-platform && npm run test:history && npm run test:gate-ports && npm run test:dsh-runtime && npm run test:dsh-protocol-compat && npm run test:dsh-realtime-compat && npm run test:dsh-compatibility-api && npm run test:public-relay && npm run test:updates && npm run test:native-update",
     "test:native-update": "node --test scripts/test-native-update.mjs scripts/test-native-update-store.mjs",
+    "test:human-tools": "node --test scripts/test-human-tools.mjs",
     "test:lifecycle": "node scripts/test-gate-state.mjs && node scripts/test-secure-lan.mjs && node scripts/test-lifecycle.mjs",
     "test:notifications": "node --test scripts/test-task-notifications.mjs",
     "test:client": "node scripts/test-client-bundle.mjs && node --test scripts/test-pairing-management.mjs scripts/test-pairing-http.mjs scripts/test-companion-card.mjs scripts/test-shared-page.mjs scripts/test-web-update-store.mjs",
@@ -137,6 +146,7 @@
     "zod"
   ],
   "peerDependencies": {
+    "@deepseek-ai/dsh-llm": ">=0.1.1-rc.2",
     "@deepseek-ai/cordis": ">=4.0.1",
     "@deepseek-ai/dsh-client-connection": ">=0.1.0-rc.5",
     "@deepseek-ai/dsh-client-runtime": ">=0.1.0-rc.5",
@@ -148,6 +158,7 @@
     "react": "^18.2.0"
   },
   "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-llm": { "optional": true },
     "@deepseek-ai/cordis": {
       "optional": true
     },
@@ -177,6 +188,10 @@
     }
   },
   "devDependencies": {
+    "@deepseek-ai/dsh-tools": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-agent": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-session": "0.1.1-rc.2",
+    "@deepseek-ai/dsh-llm": "0.1.1-rc.2",
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-client-connection": "0.1.1-rc.2",
     "@deepseek-ai/dsh-client-runtime": "0.1.1-rc.2",
@@ -196,6 +211,8 @@
     "typescript": "^5.8.3"
   },
   "files": [
+    "lib/human-tools/*.js",
+    "lib/human-tools/*.d.ts",
     "lib/task-notifications.js",
     "lib/task-notifications.d.ts",
     "lib/install-*.js",

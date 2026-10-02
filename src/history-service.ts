@@ -27,6 +27,9 @@ import { HistoryReadBudget } from './history-read-budget.js'
 import { HistoryRecords } from './history-records.js'
 import { HistoryTurnEvidence, type HistoryTurnFacets } from './history-turn-evidence.js'
 import { resolveDshSessionAddress } from './dsh-session-address.js'
+import { HUMAN_TOOL_NAME, HUMAN_MEMBERS_TOOL_NAME, HUMAN_REMIND_TOOL_NAME,
+  humanSurface, object as isHumanRecord } from './human-tools/protocol.js'
+import type { HumanToolsService } from './human-tools/service.js'
 
 const DEFAULT_PAGE_MESSAGES = 8
 const MAX_PAGE_MESSAGES = 30
@@ -160,6 +163,18 @@ export class WechatHistoryService extends TypertRemoteService {
   /** Host-only presentation shared by history and realtime peers.
    * Not a Remote: identity is issued here, and detail() rechecks access. */
   presentRecord(sessionId: string, original: HistoryEntry, displayed: HistoryEntry = original, call?: HistoryEntry): HistoryEntry {
+    // Native Code Mode intentionally omits sub-tool presentationMeta. Resolve
+    // this one opt-in card from the authoritative tool-execution ledger by the
+    // *outer* call identity, identically for history and live events. No text
+    // parsing, session scans, native-log mutation or second streaming format.
+    if (original.event?.type === 'tool/result') {
+      const message = original.event.data?.message
+      const source = isHumanRecord(message) && isHumanRecord(message.source) ? message.source : undefined
+      const service = this.hostContext.get('humanTools') as { present(scope: string, callId: string): unknown } | undefined
+      const surface = source?.kind === 'tool' && typeof source.callId === 'string' ? service?.present(sessionId, source.callId) : undefined
+      if (surface) displayed = { ...displayed, event: { ...displayed.event,
+        data: { ...displayed.event?.data, meta: { ...(isHumanRecord(displayed.event?.data?.meta) ? displayed.event.data.meta : {}), humanSurface: surface } } } }
+    }
     return this.records.present(sessionId, original, displayed, call)
   }
 
@@ -177,7 +192,20 @@ export class WechatHistoryService extends TypertRemoteService {
     try {
       release = await this.reads.acquire(signal)
       const usage = await nativeTurnUsage()
-      const built = await buildBoundedHistoryWindow(request, this.createPageReader(request.sessionId, signal), signal,
+      const read = this.createPageReader(request.sessionId, signal)
+      const humanTools = this.hostContext.get('humanTools') as HumanToolsService | undefined
+      // A cold Code Mode history may arrive before the optional ledger loads.
+      // Wait once at the fetch/projection boundary, on this read's existing
+      // cancellation/deadline. Default-off users keep the original reader;
+      // ordinary pages and Direct results with complete metadata never wait.
+      const fetchPage: FetchPage = typeof humanTools?.prepareProjection !== 'function' ? read : async (payload, pageSignal) => {
+        const page = await read(payload, pageSignal)
+        if (page.ok && Array.isArray(page.value?.events) && needsHumanProjection(page.value.events)) {
+          await humanTools.prepareProjection(pageSignal)
+        }
+        return page
+      }
+      const built = await buildBoundedHistoryWindow(request, fetchPage, signal,
         usage, (original, displayed, call) => this.presentRecord(request.sessionId, original, displayed, call),
         entries => this.turnEvidence.accept(request.sessionId, entries, usage))
       signal.throwIfAborted()
@@ -368,6 +396,30 @@ export class WechatHistoryService extends TypertRemoteService {
       request.end(body)
     })
   }
+}
+
+function needsHumanProjection(entries: readonly HistoryEntry[]): boolean {
+  const names = new Set([HUMAN_TOOL_NAME, HUMAN_MEMBERS_TOOL_NAME, HUMAN_REMIND_TOOL_NAME])
+  const calls = new Set<string>()
+  for (const entry of entries) {
+    const event = entry.event, data = event?.data
+    if (!data || !names.has(String(data.name))) continue
+    const callId = event?.type === 'tool/call' ? data.callId
+      : ['tool/code-dispatch', 'tool/ptc-dispatch'].includes(String(event?.type)) ? data.rootCallId : undefined
+    if (typeof callId === 'string') calls.add(callId)
+  }
+  // Only native call/dispatch identity can justify waiting for optional state.
+  // A result alone (or arbitrary prose/metadata naming a tool) cannot identify
+  // a human action. Partial pages remain readable; the ordinary synchronous
+  // projection can recover their card once the shared ledger is ready.
+  return entries.some(entry => {
+    if (entry.event?.type !== 'tool/result') return false
+    const data = entry.event.data, message = data?.message
+    if (!isHumanRecord(message) || !isHumanRecord(message.source)
+      || message.source.kind !== 'tool' || typeof message.source.callId !== 'string'
+      || !calls.has(message.source.callId)) return false
+    return !humanSurface(isHumanRecord(data?.meta) ? data.meta.humanSurface : undefined)
+  })
 }
 
 function inlineArchive(payloadJson: string, archive: Uint8Array): WechatHistoryWindowResult {

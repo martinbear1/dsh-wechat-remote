@@ -1,6 +1,6 @@
 import { type HumanTaskRef, type HumanWorkflowDraftRef } from '../human-tools/protocol.js';
 import { type WorkflowDataStore, type WorkflowScope } from './data.js';
-import type { WorkflowTransport } from './transport.js';
+import { type WorkflowTransport } from './transport.js';
 import { ReceiverKeyring } from './receiver-keyring.js';
 import { SubmissionReceiver } from './receiver.js';
 import type { AutomationSnapshot, AutomationSubmission } from './automation-types.js';
@@ -63,6 +63,35 @@ export declare class WorkflowLifecycle {
     query(scope: WorkflowScope, taskRef: HumanTaskRef, signal: AbortSignal, offset?: number, roundId?: string): Promise<unknown>;
     prepare(scope: WorkflowScope, taskRef: HumanTaskRef, kind: HumanWorkflowDraftRef['kind'], expectedRevision: number, content: Record<string, unknown>, idempotencyKey: string, signal: AbortSignal): Promise<LifecycleDraft>;
     preview(scope: WorkflowScope, taskRef: HumanTaskRef, ref: HumanWorkflowDraftRef, signal: AbortSignal): Promise<unknown>;
+    private receipt;
+    receiptStatus(scope: WorkflowScope, taskRef: HumanTaskRef, signal: AbortSignal, offset?: number): Promise<{
+        schema: string;
+        taskRef: HumanTaskRef;
+        asOf: unknown;
+        items: {
+            retryable: boolean;
+            errorCode?: string | undefined;
+            message?: string | undefined;
+            submissionId: string;
+            submissionVersion: number;
+            roundId: string;
+            state: string;
+            revision: number;
+        }[];
+        nextOffset: unknown;
+    }>;
+    retryReceipt(scope: WorkflowScope, taskRef: HumanTaskRef, input: {
+        submissionId: string;
+        submissionVersion: number;
+        expectedRevision: number;
+    }, signal: AbortSignal): Promise<{
+        schema: string;
+        taskRef: HumanTaskRef;
+        submissionId: string;
+        submissionVersion: number;
+        revision: number;
+        state: string;
+    }>;
     /** One hook on the existing node sync loop. Bounded round-robin scan, not a
      * task poller. Failed receivers remain retryable; neither events nor ACKs
      * call a model, create sessions or restore stopped Agents. */

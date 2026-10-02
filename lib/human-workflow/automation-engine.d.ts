@@ -26,6 +26,29 @@ export declare class WorkflowAutomation {
     private policy;
     capability(): import("./automation-types.js").AutomationCapability;
     policies(scope: WorkflowScope): AutomationPolicy[];
+    private validateRecipients;
+    propose(scope: WorkflowScope, taskRef: HumanTaskRef, input: {
+        config: unknown;
+        expectedRevision: number;
+    }, signal: AbortSignal): Promise<{
+        message: string;
+        digest: string;
+        proposalId: string;
+        config: AutomationConfig;
+        expectedRevision: number;
+        createdAt: number;
+        schema: string;
+    }>;
+    proposals(scope: WorkflowScope, taskRef: HumanTaskRef, signal: AbortSignal): Promise<{
+        schema: string;
+        proposals: {
+            proposalId: string;
+            digest: string;
+            expectedRevision: number;
+            createdAt: number;
+            config: AutomationConfig;
+        }[];
+    }>;
     preview(scope: WorkflowScope, taskRef: HumanTaskRef, input: {
         config: unknown;
         expectedRevision: number;
@@ -35,6 +58,7 @@ export declare class WorkflowAutomation {
         digest: string;
         expectedRevision: number;
     }, signal: AbortSignal): Promise<AutomationPolicy>;
+    private eligible;
     pause(scope: WorkflowScope, taskRef: HumanTaskRef, expectedRevision: number, signal: AbortSignal): Promise<AutomationPolicy>;
     private stopSession;
     private block;

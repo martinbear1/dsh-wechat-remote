@@ -3,8 +3,9 @@ import type { WorkflowDataStore, WorkflowScope } from './data.js'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 
 export interface AutomationConfig {
-  trigger: 'per-submission'; roundId: string; instructions: string; existing: 'new-only' | 'include-existing'
+  trigger: 'manual' | 'per-submission' | 'all-recipients'; roundId: string; instructions: string; existing: 'new-only' | 'include-existing'
   allowSessionResume: boolean; maxRuns: number; timeoutSeconds: number; concurrency: 1
+  recipientRefs?: string[]
 }
 export interface AutomationCapability { supported: boolean; reason?: string }
 export interface AutomationProcessor {
@@ -15,9 +16,11 @@ export interface AutomationInspection { processor: AutomationProcessor; sessionS
 export interface AutomationSubmission {
   id: string; version: number; roundId: string; state: string; delivery: string; acceptedAt: number | null
   values: Record<string, string | number | boolean>
+  participantRef?: string
 }
 export interface AutomationSnapshot {
   bindingKey: string; asOf: number; revision: number; rounds: Record<string, unknown>[]; submissions: AutomationSubmission[]; nextOffset: number | null
+  participants?: { participantRef: string }[]
 }
 /** All calls recheck current signed cloud authority. ready also verifies the
  * exact local committed ciphertext before any image job is admitted. */
@@ -31,7 +34,9 @@ export interface AutomationPolicy {
   state: 'active' | 'paused' | 'exhausted' | 'blocked'; config: AutomationConfig; processor: AutomationProcessor
   approvedAt: number; updatedAt: number; reason?: string; usedRuns: number
   bindingKey: string; acceptanceCutoff: number; sessionSeq: number
+  batch?: { formedAt: number; selections: { submissionId: string; submissionVersion: number; participantRef: string }[] }
 }
+export interface AutomationProposal { proposalId: string; digest: string; scope: WorkflowScope; taskRef: HumanTaskRef; expectedRevision: number; createdAt: number; config: AutomationConfig }
 export interface AutomationPreview {
   schema: 'human.automation.preview.v1'; previewId: string; digest: string; expectedRevision: number; expiresAt: number
   scope: WorkflowScope; taskRef: HumanTaskRef; config: AutomationConfig; processor: AutomationProcessor

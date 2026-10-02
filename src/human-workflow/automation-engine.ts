@@ -2,21 +2,27 @@ import { randomBytes } from 'node:crypto'
 import { humanTaskRef, humanWorkflowDraftRef, sameTaskRef, type HumanTaskRef } from '../human-tools/protocol.js'
 import { assertScope, bounded, copy, exact, fail, identifier, plain, revision, row, sameScope, scopeValid, StateQueue, version, type WorkflowScope } from './data.js'
 import { canonicalSubmission, sha256 } from './submission-crypto.js'
-import type { AutomationConfig, AutomationOptions, AutomationPolicy, AutomationPreview, AutomationProcessor, AutomationRun, AutomationSnapshot } from './automation-types.js'
+import type { AutomationConfig, AutomationOptions, AutomationPolicy, AutomationPreview, AutomationProcessor, AutomationRun, AutomationSnapshot, AutomationProposal, AutomationSubmission } from './automation-types.js'
+import { WORKFLOW_LONG_TERM_BYTES } from './archive-store.js'
 export type * from './automation-types.js'
 
-interface Ledger { schema: 'human.automation.ledger.v1'; nodeId: string; policies: AutomationPolicy[]; previews: AutomationPreview[]; runs: AutomationRun[] }
+interface Ledger { schema: 'human.automation.ledger.v1'; nodeId: string; policies: AutomationPolicy[]; previews: AutomationPreview[]; runs: AutomationRun[]; proposals?: AutomationProposal[] }
 const digest = (value: unknown) => sha256(canonicalSubmission(value))
 const taskKey = (scope: WorkflowScope, taskRef: HumanTaskRef) => digest([scope, taskRef])
 const signalNone = () => new AbortController().signal
 const runStates = ['queued', 'dispatching', 'running', 'succeeded', 'failed', 'cancelled', 'unknown']
-function denied(cause: unknown): boolean { return /revoked|forbidden|not_found|not-found|generation|scope|identity|account|unauthori|binding|permission/.test(String((cause as { code?: string })?.code ?? '')) }
+function denied(cause: unknown): boolean { return /revoked|forbidden|not_found|not-found|generation|scope|identity|account|unauthori|binding|permission|recipients-invalid|authority-changed/.test(String((cause as { code?: string })?.code ?? '')) }
 export function automationConfig(value: unknown): AutomationConfig {
-  if (!row(value) || !exact(value, ['trigger', 'roundId', 'instructions', 'existing', 'allowSessionResume', 'maxRuns', 'timeoutSeconds', 'concurrency'])
-    || value.trigger !== 'per-submission' || !identifier(value.roundId) || !plain(value.instructions, 4000)
+  if (!row(value) || !exact(value, ['trigger', 'roundId', 'instructions', 'existing', 'allowSessionResume', 'maxRuns', 'timeoutSeconds', 'concurrency'], ['recipientRefs'])
+    || !['manual', 'per-submission', 'all-recipients'].includes(String(value.trigger)) || !identifier(value.roundId) || !plain(value.instructions, 4000)
     || !['new-only', 'include-existing'].includes(String(value.existing)) || typeof value.allowSessionResume !== 'boolean'
     || !version(value.maxRuns) || value.maxRuns > 100 || !version(value.timeoutSeconds) || value.timeoutSeconds < 30 || value.timeoutSeconds > 600
-    || value.concurrency !== 1) throw fail('automation-config-invalid', '自动处理配置无效；仅支持指定轮次、逐份处理、并发 1')
+    || value.concurrency !== 1) throw fail('automation-config-invalid', '处理规则无效；请选择手动、逐份或指定名单到齐，并发固定为 1')
+  if (value.trigger === 'all-recipients') {
+    if (!Array.isArray(value.recipientRefs) || !value.recipientRefs.length || value.recipientRefs.length > 100
+      || value.recipientRefs.some(id => typeof id !== 'string' || !/^[A-Za-z0-9_-]{24,96}$/.test(id)) || new Set(value.recipientRefs).size !== value.recipientRefs.length
+      || value.maxRuns < value.recipientRefs.length) throw fail('automation-config-invalid', '名单须为 1..100 个已知参与者；处理次数须覆盖完整名单')
+  } else if (value.recipientRefs !== undefined) throw fail('automation-config-invalid', '只有名单到齐规则可携带指定名单')
   return copy(value) as unknown as AutomationConfig
 }
 function processorValid(value: unknown): value is AutomationProcessor {
@@ -29,15 +35,21 @@ function scopeTask(value: Record<string, unknown>, nodeId: string): boolean { re
 const policyKeys = ['schema', 'scope', 'taskRef', 'revision', 'policyVersion', 'state', 'config', 'processor', 'approvedAt', 'updatedAt', 'usedRuns', 'bindingKey', 'acceptanceCutoff', 'sessionSeq']
 function validateLedger(raw: unknown, nodeId: string): Ledger {
   const bad = () => fail('automation-store-invalid', '自动处理账本损坏；已停止自动运行，原手动能力不受影响')
-  if (!row(raw) || !exact(raw, ['schema', 'nodeId', 'policies', 'previews', 'runs']) || raw.schema !== 'human.automation.ledger.v1' || raw.nodeId !== nodeId
-    || !Array.isArray(raw.policies) || raw.policies.length > 128 || !Array.isArray(raw.previews) || raw.previews.length > 128 || !Array.isArray(raw.runs) || raw.runs.length > 1000) throw bad()
+  if (!row(raw) || !exact(raw, ['schema', 'nodeId', 'policies', 'previews', 'runs'], ['proposals']) || raw.schema !== 'human.automation.ledger.v1' || raw.nodeId !== nodeId
+    || !Array.isArray(raw.policies) || raw.policies.length > 128 || !Array.isArray(raw.previews) || raw.previews.length > 128 || !Array.isArray(raw.runs) || raw.runs.length > 10000) throw bad()
   const policies = new Set<string>(), ids = new Set<string>(), runIds = new Set<string>()
   for (const p of raw.policies) {
-    if (!row(p) || !exact(p, policyKeys, ['reason']) || p.schema !== 'human.automation.policy.v1' || !scopeTask(p, nodeId)
+    if (!row(p) || !exact(p, policyKeys, ['reason', 'batch']) || p.schema !== 'human.automation.policy.v1' || !scopeTask(p, nodeId)
       || !version(p.revision) || !version(p.policyVersion) || !['active', 'paused', 'exhausted', 'blocked'].includes(String(p.state)) || !processorValid(p.processor)
       || ![p.approvedAt, p.updatedAt, p.usedRuns, p.acceptanceCutoff, p.sessionSeq].every(revision) || !/^[a-f0-9]{64}$/.test(String(p.bindingKey))
       || p.reason !== undefined && !plain(p.reason, 256)) throw bad()
-    automationConfig(p.config); const key = taskKey(p.scope as unknown as WorkflowScope, p.taskRef as unknown as HumanTaskRef)
+    const config = automationConfig(p.config)
+    if (p.batch !== undefined && (!row(p.batch) || !exact(p.batch, ['formedAt', 'selections']) || !revision(p.batch.formedAt)
+      || config.trigger !== 'all-recipients' || !Array.isArray(p.batch.selections) || p.batch.selections.length !== config.recipientRefs!.length
+      || p.batch.selections.some(s => !row(s) || !exact(s, ['submissionId', 'submissionVersion', 'participantRef']) || !identifier(s.submissionId)
+        || !version(s.submissionVersion) || typeof s.participantRef !== 'string' || !config.recipientRefs!.includes(s.participantRef))
+      || new Set(p.batch.selections.map(s => (s as { participantRef: string }).participantRef)).size !== p.batch.selections.length)) throw bad()
+    const key = taskKey(p.scope as unknown as WorkflowScope, p.taskRef as unknown as HumanTaskRef)
     if (policies.has(key)) throw bad(); policies.add(key)
   }
   for (const r of raw.runs) {
@@ -54,7 +66,15 @@ function validateLedger(raw: unknown, nodeId: string): Ledger {
   // discards them so a stale browser cannot approve an old native fingerprint.
   for (const p of raw.previews) if (!row(p) || p.schema !== 'human.automation.preview.v1' || !scopeTask(p, nodeId) || !plain(p.previewId, 64)
     || !/^[a-f0-9]{64}$/.test(String(p.digest)) || !revision(p.expiresAt)) throw bad()
-  bounded(raw); return copy(raw) as unknown as Ledger
+  if (raw.proposals !== undefined) {
+    if (!Array.isArray(raw.proposals) || raw.proposals.length > 128) throw bad()
+    for (const p of raw.proposals) {
+      if (!row(p) || !exact(p, ['proposalId', 'digest', 'scope', 'taskRef', 'expectedRevision', 'createdAt', 'config']) || !scopeTask(p, nodeId)
+        || !/^[a-f0-9]{32}$/.test(String(p.proposalId)) || !revision(p.createdAt) || !revision(p.expectedRevision)) throw bad()
+      automationConfig(p.config); const { digest: expected, ...payload } = p; if (expected !== digest(payload)) throw bad()
+    }
+  }
+  bounded(raw, WORKFLOW_LONG_TERM_BYTES); return copy(raw) as unknown as Ledger
 }
 export function automationPolicyView(policy: AutomationPolicy | null): unknown {
   if (!policy) return null
@@ -84,7 +104,7 @@ export class WorkflowAutomation {
       const p = ledger.policies.find(p => sameScope(p.scope, run.scope) && sameTaskRef(p.taskRef, run.taskRef))
       if (p?.state === 'active') { p.state = 'paused'; p.reason = run.reason; p.revision++ }
     }
-    const runtime = new WorkflowAutomation(options, new StateQueue(options.store, ledger))
+    const runtime = new WorkflowAutomation(options, new StateQueue(options.store, ledger, WORKFLOW_LONG_TERM_BYTES))
     // Commit the recovery disposition before subscribing to native events.
     if (raw !== undefined) await options.store.save(ledger)
     runtime.unsubscribe = options.native.onStop(sessionId => {
@@ -101,16 +121,46 @@ export class WorkflowAutomation {
     catch { return { supported: false, reason: '自动处理账本已关闭或不可用；手动群任务仍可使用' } }
   }
   policies(scope: WorkflowScope) { this.active(signalNone()); assertScope(scope, this.options.nodeId); return copy(this.state.current().policies.filter(p => sameScope(p.scope, scope))) }
+  private validateRecipients(config: AutomationConfig, snapshot: AutomationSnapshot) {
+    if (config.trigger === 'all-recipients' && config.recipientRefs!.some(ref => !snapshot.participants?.some(p => p.participantRef === ref)))
+      throw fail('automation-recipients-invalid', '名单必须来自当前任务真实参与者；不能猜测成员或使用其他任务名单')
+  }
+  async propose(scope: WorkflowScope, taskRef: HumanTaskRef, input: { config: unknown; expectedRevision: number }, signal: AbortSignal) {
+    const active = this.active(signal); assertScope(scope, this.options.nodeId)
+    if (!humanTaskRef(taskRef) || !revision(input.expectedRevision)) throw fail('automation-input-invalid', '处理规则引用无效')
+    const config = automationConfig(input.config), snapshot = await this.options.authority.inspect(scope, taskRef, active)
+    this.validateRecipients(config, snapshot)
+    if (!snapshot.rounds.some(r => r.id === config.roundId)) throw fail('automation-unavailable', '当前任务没有指定轮次')
+    const payload = { proposalId: this.id(), scope: copy(scope), taskRef: copy(taskRef), config, expectedRevision: input.expectedRevision, createdAt: this.now() }
+    const proposal = { ...payload, digest: digest(payload) }
+    return this.state.update(next => {
+      this.active(active)
+      if ((this.policy(scope, taskRef)?.revision ?? 0) !== input.expectedRevision) throw fail('automation-version-conflict', '当前规则已变化，请先读取')
+      next.proposals = (next.proposals ?? []).filter(p => !sameScope(p.scope, scope) || !sameTaskRef(p.taskRef, taskRef)).slice(-127)
+      next.proposals.push(proposal)
+      const { scope: _scope, taskRef: _task, ...view } = proposal
+      return { schema: 'human.automation.proposal.v1', ...view, message: '仅为待审核规则；请主人在当前会话群任务管理中预览批准。尚未启用或暂停任何自动处理。' }
+    }, active)
+  }
+  async proposals(scope: WorkflowScope, taskRef: HumanTaskRef, signal: AbortSignal) {
+    const active = this.active(signal); await this.options.authority.inspect(scope, taskRef, active); this.active(active)
+    return { schema: 'human.automation.proposals.v1', proposals: copy((this.state.current().proposals ?? [])
+      .filter(p => sameScope(p.scope, scope) && sameTaskRef(p.taskRef, taskRef)).map(({ scope, taskRef, ...view }) => view)) }
+  }
   async preview(scope: WorkflowScope, taskRef: HumanTaskRef, input: { config: unknown; expectedRevision: number }, signal: AbortSignal): Promise<AutomationPreview> {
     const active = this.active(signal); assertScope(scope, this.options.nodeId)
     if (!humanTaskRef(taskRef) || !revision(input.expectedRevision)) throw fail('automation-input-invalid', '自动处理任务或版本无效')
     const config = automationConfig(input.config), capability = this.capability()
     if (!capability.supported) throw fail('automation-unsupported', capability.reason || '宿主不支持受控自动处理')
     const [snapshot, native] = await Promise.all([this.options.authority.inspect(scope, taskRef, active), this.options.native.inspect(scope, active)])
+    this.validateRecipients(config, snapshot)
     if (native.archived || !processorValid(native.processor) || !snapshot.rounds.some(r => r.id === config.roundId)) throw fail('automation-unavailable', '指定轮次或原生会话不可用')
     const payload = { schema: 'human.automation.preview.v1' as const, previewId: this.id(), expectedRevision: input.expectedRevision, expiresAt: this.now() + 300_000,
       scope: copy(scope), taskRef: copy(taskRef), config, processor: native.processor, capability, warnings: ['自动处理只生成本地分析和待审核反馈，不自动发布、订正或催交。',
-        '次数和协作式超时不是 token 或费用上限；取消后已发生费用不撤销。', ...(config.allowSessionResume ? ['批准后可通过原生接口恢复冷会话；手工停止仍会暂停策略。'] : ['会话不在运行环境时等待主人打开；不会自动恢复。'])], asOf: snapshot.asOf, bindingKey: snapshot.bindingKey }
+        '次数和协作式超时不是 token 或费用上限；取消后已发生费用不撤销。',
+        ...(config.trigger === 'all-recipients' ? ['指定名单到齐且收件完成后，一次冻结各人最新版本并逐份处理；不是跨成员一次模型汇总，后续重交不会再触发。'] : []),
+        ...(config.trigger === 'manual' ? ['此规则批准后关闭自动处理，等待手动操作。'] : []),
+        ...(config.allowSessionResume ? ['批准后可通过原生接口恢复冷会话；手工停止仍会暂停策略。'] : ['会话不在运行环境时等待主人打开；不会自动恢复。'])], asOf: snapshot.asOf, bindingKey: snapshot.bindingKey }
     const preview = { ...payload, digest: digest(payload) }
     return this.state.update(next => {
       if ((this.policy(scope, taskRef)?.revision ?? 0) !== input.expectedRevision) throw fail('automation-version-conflict', '策略已变化，请重新预览')
@@ -122,6 +172,7 @@ export class WorkflowAutomation {
     const active = this.active(signal), preview = this.state.current().previews.find(p => sameScope(p.scope, scope) && sameTaskRef(p.taskRef, taskRef) && p.previewId === input.previewId)
     if (!preview || preview.digest !== input.digest || preview.expectedRevision !== input.expectedRevision || preview.expiresAt <= this.now()) throw fail('automation-preview-expired', '自动处理预览已失效，请重新核对')
     const [snapshot, native] = await Promise.all([this.options.authority.inspect(scope, taskRef, active), this.options.native.inspect(scope, active)])
+    this.validateRecipients(preview.config, snapshot)
     if (snapshot.bindingKey !== preview.bindingKey || native.processor.fingerprint !== preview.processor.fingerprint || native.archived
       || !snapshot.rounds.some(r => r.id === preview.config.roundId) || !revision(snapshot.asOf)) throw fail('automation-preview-changed', '任务授权或原生配置已变化，请重新预览')
     const policy = await this.state.update(next => {
@@ -129,14 +180,58 @@ export class WorkflowAutomation {
       if ((previous?.revision ?? 0) !== input.expectedRevision || !next.previews.some(p => p.previewId === input.previewId) || preview.expiresAt <= this.now()) throw fail('automation-version-conflict', '策略已变化，请重新预览')
       if (!previous && next.policies.length >= 128) throw fail('automation-capacity', '自动处理策略数量已达上限')
       const value: AutomationPolicy = { schema: 'human.automation.policy.v1', scope: copy(scope), taskRef: copy(taskRef), revision: input.expectedRevision + 1,
-        policyVersion: (previous?.policyVersion ?? 0) + 1, state: 'active', config: copy(preview.config), processor: copy(preview.processor), approvedAt: this.now(), updatedAt: this.now(),
+        policyVersion: (previous?.policyVersion ?? 0) + 1, state: preview.config.trigger === 'manual' ? 'paused' : 'active', config: copy(preview.config), processor: copy(preview.processor), approvedAt: this.now(), updatedAt: this.now(),
         usedRuns: 0, bindingKey: snapshot.bindingKey, acceptanceCutoff: snapshot.asOf, sessionSeq: native.sessionSeq }
       if (previous) next.policies[next.policies.indexOf(previous)] = value; else next.policies.push(value)
       next.previews = next.previews.filter(p => p.previewId !== input.previewId)
+      next.proposals = next.proposals?.filter(p => !sameScope(p.scope, scope) || !sameTaskRef(p.taskRef, taskRef))
       for (const run of next.runs) if (sameScope(run.scope, scope) && sameTaskRef(run.taskRef, taskRef) && run.state === 'queued') { run.state = 'cancelled'; run.reason = '策略版本已替换'; run.updatedAt = this.now() }
       return value
     }, active)
-    this.halted.delete(taskKey(scope, taskRef)); return policy
+    this.halted.delete(taskKey(scope, taskRef))
+    if (policy.config.trigger === 'manual' && this.activeRun?.key === taskKey(scope, taskRef)) this.activeRun.abort.abort(fail('automation-paused', '主人已批准手动规则'))
+    return policy
+  }
+  private async eligible(policy: AutomationPolicy, initial: AutomationSnapshot, signal: AbortSignal): Promise<AutomationSubmission[]> {
+    const matches = (s: AutomationSubmission) => s.state === 'accepted' && s.roundId === policy.config.roundId && s.acceptedAt !== null
+      && (policy.config.existing === 'include-existing' || s.acceptedAt > policy.acceptanceCutoff)
+    if (policy.config.trigger === 'manual') return []
+    if (policy.config.trigger === 'per-submission') return initial.submissions.filter(matches)
+    const active = AbortSignal.any([signal, AbortSignal.timeout(30_000)])
+    this.validateRecipients(policy.config, initial)
+    if (policy.batch) {
+      const selected: AutomationSubmission[] = []
+      for (const selection of policy.batch.selections) {
+        const snapshot = await this.options.authority.inspect(policy.scope, policy.taskRef, active, { submissionId: selection.submissionId })
+        if (snapshot.bindingKey !== policy.bindingKey) throw fail('automation-authority-changed', '名单授权已变化')
+        const s = snapshot.submissions.find(s => s.id === selection.submissionId && s.version === selection.submissionVersion && s.participantRef === selection.participantRef && matches(s))
+        if (!s) throw fail('automation-authority-changed', '已冻结的提交版本不再可用；不会用新提交替换')
+        selected.push(s)
+      }
+      return selected
+    }
+    // A complete, stable-revision snapshot is required. Partial pages, a
+    // concurrent submission, or a time/size bound never mean "everyone in".
+    let page = initial; const submissions = [...initial.submissions], offsets = new Set<number>()
+    while (page.nextOffset !== null) {
+      if (!revision(page.nextOffset) || offsets.has(page.nextOffset) || submissions.length >= 1000) throw fail('automation-roster-incomplete', '无法在有界查询内核对全部名单，未触发处理')
+      offsets.add(page.nextOffset)
+      page = await this.options.authority.inspect(policy.scope, policy.taskRef, active, { offset: page.nextOffset })
+      if (page.revision !== initial.revision || page.bindingKey !== initial.bindingKey) return []
+      submissions.push(...page.submissions)
+    }
+    const selected: AutomationSubmission[] = []
+    for (const ref of policy.config.recipientRefs!) {
+      const latest = submissions.filter(s => s.participantRef === ref && matches(s)).sort((a, b) => b.version - a.version)[0]
+      if (!latest || !await this.options.authority.ready(policy.scope, policy.taskRef, latest, active)) return []
+      selected.push(latest)
+    }
+    await this.state.update(next => {
+      const p = next.policies.find(p => sameScope(p.scope, policy.scope) && sameTaskRef(p.taskRef, policy.taskRef))!
+      if (p.state !== 'active' || p.policyVersion !== policy.policyVersion || p.bindingKey !== policy.bindingKey || p.batch) throw fail('automation-version-conflict', '规则在核对名单期间变化')
+      p.batch = { formedAt: initial.asOf, selections: selected.map(s => ({ submissionId: s.id, submissionVersion: s.version, participantRef: s.participantRef! })) }
+    }, active)
+    return selected
   }
   async pause(scope: WorkflowScope, taskRef: HumanTaskRef, expectedRevision: number, signal: AbortSignal): Promise<AutomationPolicy> {
     const active = this.active(signal), key = taskKey(scope, taskRef)
@@ -174,24 +269,25 @@ export class WorkflowAutomation {
       const { scope, taskRef } = original, key = taskKey(scope, taskRef), p = this.policy(scope, taskRef)!
       if (p.state !== 'active' || this.halted.has(key)) continue
       try {
-        const snapshot = await this.options.authority.inspect(scope, taskRef, signal, { offset: this.offsets.get(key) ?? 0 })
+        const snapshot = await this.options.authority.inspect(scope, taskRef, signal, { offset: p.config.trigger === 'all-recipients' ? 0 : this.offsets.get(key) ?? 0 })
         if (snapshot.bindingKey !== p.bindingKey) { await this.block(scope, taskRef, '任务账号绑定已变化，旧策略不再有效'); continue }
         const native = await this.options.native.inspect(scope, signal)
         if (native.archived || native.stoppedAtSeq > p.sessionSeq || native.processor.fingerprint !== p.processor.fingerprint) { await this.block(scope, taskRef, '原生会话、模型、预设或权限已变化，请重新批准'); continue }
         this.offsets.set(key, snapshot.nextOffset ?? 0)
-        const eligible = snapshot.submissions.filter(s => s.state === 'accepted' && s.roundId === p.config.roundId && s.acceptedAt !== null
-          && (p.config.existing === 'include-existing' || s.acceptedAt > p.acceptanceCutoff))
+        const eligible = await this.eligible(p, snapshot, signal)
         for (const submission of eligible) {
           const previous = this.state.current().runs.find(r => sameScope(r.scope, scope) && sameTaskRef(r.taskRef, taskRef) && r.submissionId === submission.id && r.submissionVersion === submission.version)
           if (previous && (previous.state !== 'cancelled' || previous.messageId !== undefined)) continue
           if (!await this.options.authority.ready(scope, taskRef, submission, signal)) continue
           await this.state.update(next => {
+            const currentPolicy = next.policies.find(v => sameScope(v.scope, scope) && sameTaskRef(v.taskRef, taskRef))
+            if (!currentPolicy || currentPolicy.state !== 'active' || currentPolicy.policyVersion !== p.policyVersion || currentPolicy.bindingKey !== p.bindingKey) return
             if (previous) {
               const r = next.runs.find(r => r.id === previous.id)!
               if (r.state === 'cancelled' && r.messageId === undefined) { r.state = 'queued'; r.policyVersion = p.policyVersion; delete r.reason; r.updatedAt = this.now() }
               return
             }
-            if (next.runs.length >= 1000) throw fail('automation-capacity', '自动处理执行账本已达上限')
+            if (next.runs.length >= 10000) throw fail('automation-capacity', '自动处理执行与归档已达 10000 条上限；不会删除防重依据或重试未知执行')
             next.runs.push({ id: this.id(), scope: copy(scope), taskRef: copy(taskRef), submissionId: submission.id, submissionVersion: submission.version,
               roundId: submission.roundId, policyVersion: p.policyVersion, state: 'queued', createdAt: this.now(), updatedAt: this.now() })
           }, signal)
@@ -199,6 +295,14 @@ export class WorkflowAutomation {
         if (native.busy || !native.live && !p.config.allowSessionResume) continue
         const queued = this.state.current().runs.filter(r => r.state === 'queued' && sameScope(r.scope, scope) && sameTaskRef(r.taskRef, taskRef) && r.policyVersion === p.policyVersion)
         for (const run of queued) { if (dispatched >= 4 || this.halted.has(key) || this.policy(scope, taskRef)?.state !== 'active') break; await this.execute(copy(run), copy(this.policy(scope, taskRef)!), signal); dispatched++ }
+        if (p.config.trigger === 'all-recipients') await this.state.update(next => {
+          const current = next.policies.find(v => sameScope(v.scope, scope) && sameTaskRef(v.taskRef, taskRef))!
+          if (current.policyVersion === p.policyVersion && current.state === 'active' && current.batch && current.batch.selections.every(s => next.runs.some(r => sameScope(r.scope, scope)
+            && sameTaskRef(r.taskRef, taskRef) && r.submissionId === s.submissionId && r.submissionVersion === s.submissionVersion
+            && r.messageId !== undefined && ['succeeded', 'failed', 'cancelled'].includes(r.state)))) {
+            current.state = 'exhausted'; current.reason = '本次名单到齐批次已处理；后续提交须重新预览批准'; current.revision++; current.updatedAt = this.now()
+          }
+        }, signal)
       } catch (cause) {
         signal.throwIfAborted(); this.options.authority.assertIdentity()
         const code = (cause as { code?: string })?.code ?? ''
@@ -214,6 +318,8 @@ export class WorkflowAutomation {
     if (!p || p.state !== 'active' || p.policyVersion !== policy.policyVersion || this.halted.has(taskKey(run.scope, run.taskRef))) throw fail('automation-paused', '此自动处理授权已停止')
     const [snapshot, native] = await Promise.all([this.options.authority.inspect(run.scope, run.taskRef, signal, { submissionId: run.submissionId }), this.options.native.inspect(run.scope, signal)])
     const submission = snapshot.submissions.find(s => s.id === run.submissionId && s.version === run.submissionVersion && s.roundId === run.roundId && s.state === 'accepted')
+    if (policy.config.trigger === 'manual' || policy.config.trigger === 'all-recipients' && !policy.batch?.selections.some(s => s.submissionId === run.submissionId
+      && s.submissionVersion === run.submissionVersion && s.participantRef === submission?.participantRef)) throw fail('automation-authority-changed', '提交不属于本次已批准并冻结的批次')
     if (snapshot.bindingKey !== policy.bindingKey || !submission || native.archived || native.stoppedAtSeq > policy.sessionSeq || native.processor.fingerprint !== policy.processor.fingerprint)
       throw fail('automation-authority-changed', '当前任务、提交版本或原生配置与批准内容不符')
     if (!await this.options.authority.ready(run.scope, run.taskRef, submission, signal)) throw fail('automation-receipt-missing', '提交尚无完整持久收件')

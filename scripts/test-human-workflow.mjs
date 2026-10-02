@@ -102,7 +102,7 @@ test('automatic capability follows native availability but mode activation never
   const capability = manifest.capabilities.find(item => item.id === 'automation.run')
   assert.equal(capability.status, 'available')
   assert.equal(capability.ownerApproval, true)
-  assert.deepEqual(capability.tools, [], 'job-closed tools are not granted to ordinary Agent contexts')
+  assert.deepEqual(capability.tools, ['human_automation_rules', 'human_automation_propose'], 'only rule proposal tools are granted to ordinary Agent contexts')
   const mode = modePackage(); mode.requiredCapabilities.push('automation.run')
   assert.equal(validateModePackage(mode, manifest).ok, true)
   assert.equal(mode.automation, 'manual')

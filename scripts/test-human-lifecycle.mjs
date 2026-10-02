@@ -95,6 +95,35 @@ test('durable encrypted receipt precedes ACK; lost ACK reload retries only confi
   } finally { await restored.close() }
 })
 
+test('receipt-only renewal after expired download validates original and acknowledges without another ticket or download', async t => {
+  const f = await fixture(t), ack = f.options.ack
+  f.options.ack = async () => { throw new Error('offline before ACK') }
+  await assert.rejects(f.receiver.receive(scope, taskRef, bindingKey, f.sealed.delivery, signal))
+  const dirs = await readdir(f.root), receiptPath = path.join(f.root, dirs.find(n => /^[a-f0-9]{64}$/.test(n)), 'receipt.json')
+  assert.equal(JSON.parse(await readFile(receiptPath, 'utf8')).claimId, f.sealed.delivery.claimId)
+  f.options.ack = ack; await f.receiver.close(); const receiver = await SubmissionReceiver.open(f.options)
+  try {
+    let claims = 0
+    const claim = async proof => { claims++; assert.deepEqual(proof, { claimId: f.sealed.delivery.claimId, version: 1,
+      cipherDigest: f.sealed.envelope.cipherDigest, manifestDigest: f.sealed.envelope.manifestDigest })
+      return { delivery: { ...proof, submissionId: f.sealed.context.submissionId, state: 'receipt-only', leaseExpiresAt: Date.now() + 60000 } } }
+    assert.equal(await receiver.recoverReceipt(scope, taskRef, bindingKey, f.sealed.context.submissionId, 1, claim, signal), true)
+    assert.equal(claims, 1); assert.equal(f.downloads, 1); assert.equal(f.acks, 1)
+    await writeFile(path.join(f.root, dirs[0], 'payload.box'), Buffer.alloc(f.sealed.cipher.length))
+    await assert.rejects(receiver.recoverReceipt(scope, taskRef, bindingKey, f.sealed.context.submissionId, 1, claim, signal), { code: 'submission-integrity-invalid' })
+    assert.equal(claims, 1)
+  } finally { await receiver.close() }
+})
+
+test('old receipt without claim proof and changed lease cannot forge receipt-only authority', async t => {
+  const f = await fixture(t); await f.receiver.receive(scope, taskRef, bindingKey, f.sealed.delivery, signal)
+  const claim = async proof => ({ delivery: { ...proof, claimId: 'other', submissionId: f.sealed.context.submissionId, state: 'receipt-only', leaseExpiresAt: Date.now() + 60000 } })
+  await assert.rejects(f.receiver.recoverReceipt(scope, taskRef, bindingKey, f.sealed.context.submissionId, 1, claim, signal), { code: 'receiver-ack-invalid' })
+  const receiptPath = path.join(f.root, (await readdir(f.root))[0], 'receipt.json'), legacy = JSON.parse(await readFile(receiptPath, 'utf8')); delete legacy.claimId
+  await writeFile(receiptPath, JSON.stringify(legacy))
+  assert.equal(await f.receiver.recoverReceipt(scope, taskRef, bindingKey, f.sealed.context.submissionId, 1, () => { throw new Error('must not call') }, signal), false)
+})
+
 test('corrupt/missing retained object, different manifest and unauthorized binding never ACK', async t => {
   const f = await fixture(t), received = await f.receiver.receive(scope, taskRef, bindingKey, f.sealed.delivery, signal)
   await writeFile(path.join(f.root, received.artifactRef, 'payload.box'), Buffer.alloc(f.sealed.cipher.length))
@@ -151,22 +180,45 @@ test('signed download only accepts fixed HTTPS same-object origins, no redirects
 async function lifecycleFixture(t, options = {}) {
   const keys = await ReceiverKeyring.open(memory(), scope.nodeId), claims = [], received = [], offsets = []
   const tasks = [taskRef, { ...taskRef, taskId: 'u'.repeat(24) }].map(ref => ({ taskRef: ref, origin: { scope: scope.sessionId, sessionGeneration: scope.sessionGeneration }, lifecycleRevision: 1 }))
-  const entries = Array.from({ length: 30 }, (_, index) => ({ id: String(index).padStart(24, '0'), state: 'accepted', delivery: 'pending', version: 1, values: { name: '甲' } }))
+  const entries = Array.from({ length: 30 }, (_, index) => ({ id: String(index).padStart(24, '0'), state: 'accepted', delivery: 'pending', version: 1, roundId: 'r'.repeat(24), values: { name: '甲' } }))
   const transport = { nodeId: scope.nodeId, assertIdentity() {}, async request(operation, input, active) {
     active.throwIfAborted()
     if (operation === 'receiver-key') return { binding, bindingKey, key: input.key }
     if (operation === 'lifecycle') {
       const offset = input.offset ?? 0; offsets.push([input.taskRef.taskId, offset])
-      return { binding, bindingKey, taskRef: input.taskRef, origin: tasks[0].origin, revision: 1, rounds: [], participants: [], drafts: [],
+      return { binding, bindingKey, taskRef: input.taskRef, origin: tasks[0].origin, revision: 1, asOf: 100, rounds: [], participants: [], drafts: [],
         submissions: entries.slice(offset, offset + 20), nextOffset: offset + 20 < entries.length ? offset + 20 : null, ...options.page }
     }
-    assert.equal(operation, 'objects/claim'); claims.push([input.taskRef.taskId, input.submissionId]); return { delivery: { submissionId: input.submissionId } }
+    assert.equal(operation, 'objects/claim'); claims.push([input.taskRef.taskId, input.submissionId]); await options.onClaim?.(input); return { delivery: { submissionId: input.submissionId } }
   } }
   const receiver = { async receive(_scope, _taskRef, _bindingKey, delivery, active) { active.throwIfAborted(); received.push(delivery.submissionId); await options.onReceive?.(active) } }
-  const runtime = await WorkflowLifecycle.open({ transport, receiver, keys, store: memory(), ...(options.now ? { now: options.now } : {}) })
+  const settings = { transport, receiver, keys, store: options.store ?? memory(), ...(options.now ? { now: options.now } : {}) }
+  const runtime = await WorkflowLifecycle.open(settings)
   t.after(async () => { await runtime.close(); await keys.close() })
-  return { runtime, tasks, claims, received, offsets }
+  return { runtime, tasks, claims, received, offsets, settings }
 }
+
+test('expired ticket parks durable intent; only explicit owner CAS retry rotates requestId and never starts an Agent', async t => {
+  const requestIds = [], disk = memory()
+  const entry = { id: 's'.repeat(24), roundId: 'r'.repeat(24), state: 'accepted', delivery: 'pending', version: 1, values: {} }
+  let expires = true
+  const f = await lifecycleFixture(t, { store: disk, page: { submissions: [entry], nextOffset: null }, onClaim(input) {
+    requestIds.push(input.requestId); if (expires) throw Object.assign(new Error('provider secret should not escape'), { code: 'download_ticket_expired' })
+  } })
+  await f.runtime.synced(binding, [f.tasks[0]], signal); await f.runtime.synced(binding, [f.tasks[0]], signal)
+  assert.equal(requestIds.length, 1)
+  const status = await f.runtime.receiptStatus(scope, taskRef, signal)
+  assert.equal(status.items[0].state, 'blocked'); assert.equal(status.items[0].retryable, true)
+  assert(!JSON.stringify(status).includes('provider secret'))
+  await f.runtime.close(); const restored = await WorkflowLifecycle.open(f.settings)
+  t.after(() => restored.close()); await restored.synced(binding, [f.tasks[0]], signal); assert.equal(requestIds.length, 1)
+  const request = { submissionId: entry.id, submissionVersion: 1, expectedRevision: status.items[0].revision }
+  const result = await restored.retryReceipt(scope, taskRef, request, signal); assert.equal(result.state, 'pending')
+  await assert.rejects(restored.retryReceipt(scope, taskRef, request, signal), { code: 'receipt-version-conflict' })
+  expires = false; await restored.synced(binding, [f.tasks[0]], signal)
+  assert.equal(requestIds.length, 2); assert.notEqual(requestIds[0], requestIds[1]); assert.equal(disk.value.receipts[0].state, 'received')
+  await assert.rejects(restored.receiptStatus(scope, taskRef, signal, -1), { code: 'lifecycle-query-invalid' })
+})
 
 test('background receiver limits each sync to four attempts, resumes mid-page and rotates across tasks without invoking an Agent', async t => {
   const f = await lifecycleFixture(t)

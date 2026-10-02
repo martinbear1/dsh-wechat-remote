@@ -1,170 +1,115 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
+import { readFile, mkdtemp, rm } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 import { transform } from 'esbuild'
-
+import { AssistantSessionIntents } from '../lib/assistant-presets/session-intents.js'
+import { WorkflowFileStore } from '../lib/human-workflow/persistence.js'
 const source = await readFile(new URL('../src/client/assistant-navigation.ts', import.meta.url), 'utf8')
 const { code } = await transform(source, { loader: 'ts', format: 'esm', target: 'es2022' })
 const { nativeAssistantNavigation } = await import('data:text/javascript;base64,' + Buffer.from(code).toString('base64'))
-const presetId = 'assistant_teacher_test'
-const receipt = (id = presetId, sessionId = 'session-new') => ({ ok: true, value: { sessionId, agentPreset: id } })
-const deferred = () => {
-  let resolve, reject
-  return { promise: new Promise((yes, no) => { resolve = yes; reject = no }), resolve, reject }
+const presetId = 'assistant_teacher_test', signal = new AbortController().signal
+function deferred() { let resolve; return { promise: new Promise(done => { resolve = done }), resolve } }
+async function fixture(t) {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'assistant-intent-')), calls = [], native = new Map(), workspace = { path: 'C:/work', sessionIds: [] }
+  let valid = true
+  const options = { nodeId: 'node_assistant_test', store: new WorkflowFileStore(path.join(directory, 'intents.json')),
+    assertIdentity() { if (!valid) throw Object.assign(new Error('revoked'), { code: 'binding_revoked' }) }, installed: () => true, supported: () => true,
+    workspace: id => id === 'workspace_a' ? workspace : undefined,
+    inspect: async id => { calls.push(['inspect', id]); if (!native.has(id)) throw new Error('native not found C:/private/path'); return structuredClone(native.get(id)) } }
+  let journal = await AssistantSessionIntents.open(options)
+  const navigation = new AbortController(), services = {
+    'remote.session': { create: async request => { calls.push(['create', request]); native.set(request.sessionId, { meta: { id: request.sessionId, agentPreset: request.agentPreset, createdAt: 100, cwd: workspace.path }, events: [] }); workspace.sessionIds.push(request.sessionId); return { ok: true, value: request } } },
+    sessions: { refresh: async () => calls.push(['refresh']) }, uiWorkspace: { openSession: id => calls.push(['open', id]) },
+    layout: { beginNavigation: () => navigation.signal }, configForms: { developerTools: { enabled: { getSnapshot: () => true } } },
+  }
+  const call = (method, request) => method === 'assistantSessionPrepare' ? journal.prepare(request, signal) : journal.status(request, signal)
+  let controller = nativeAssistantNavigation(name => services[name], call)
+  t.after(async () => { await journal.close(); await rm(directory, { recursive: true, force: true }) })
+  return { calls, services, navigation, native, options, workspace, get journal() { return journal }, get controller() { return controller }, revoke() { valid = false },
+    async reopen() { await journal.close(); journal = await AssistantSessionIntents.open(options); controller = nativeAssistantNavigation(name => services[name], call) } }
 }
-function fixture() {
-  const calls = [], navigation = new AbortController()
-  const services = {
-    'remote.session': { create: async request => { calls.push(['create', request]); return receipt() } },
-    sessions: { refresh: async () => { calls.push(['refresh']) } },
-    uiWorkspace: { openSession: id => { calls.push(['openSession', id]) } },
-    layout: { beginNavigation: () => { calls.push(['beginNavigation']); return navigation.signal } },
-    configForms: { developerTools: { enabled: { getSnapshot: () => true } } },
-  }
-  const controller = nativeAssistantNavigation(name => services[name])
-  return { services, calls, navigation, controller }
-}
-
-test('native start uses atomic preset create, refresh, and public navigation without other mutations', async () => {
-  const f = fixture()
-  await f.controller.start(presetId)
-  assert.deepEqual(f.calls, [['beginNavigation'], ['create', { agentPreset: presetId }], ['refresh'], ['openSession', 'session-new']])
-  await f.controller.start(presetId)
-  assert.deepEqual(f.calls.at(-1), ['openSession', 'session-new'])
-  assert.equal(f.calls.filter(call => call[0] === 'create').length, 1)
+test('native create uses journaled explicit ID/preset; restart only opens confirmed session', async t => {
+  const f = await fixture(t); await f.controller.start(presetId)
+  const request = f.calls.find(c => c[0] === 'create')[1]
+  assert.equal(request.agentPreset, presetId); assert.match(request.sessionId, /^session-[a-f0-9-]{36}$/)
+  assert.deepEqual(Object.keys(request).sort(), ['agentPreset', 'sessionId'])
+  await f.reopen(); await f.controller.start(presetId)
+  assert.equal(f.calls.filter(c => c[0] === 'create').length, 1); assert.deepEqual(f.calls.at(-1), ['open', request.sessionId])
 })
-
-test('old native API or disabled native picker fails closed before any create', async () => {
-  for (const missing of ['remote.session', 'sessions', 'uiWorkspace', 'layout', 'configForms']) {
-    const f = fixture()
-    delete f.services[missing]
-    await assert.rejects(f.controller.start(presetId), /原生界面未提供/)
-    assert.deepEqual(f.calls, [])
-  }
-  const f = fixture()
-  f.services.configForms.developerTools.enabled.getSnapshot = () => false
-  await assert.rejects(f.controller.start(presetId), /原生工作模式选择尚未启用/)
-  assert.deepEqual(f.calls, [])
+test('explicit new intent creates a second independent instance, repeated old CAS does not create a third', async t => {
+  const f = await fixture(t); await f.controller.start(presetId)
+  const first = await f.journal.status({ presetId }, signal)
+  await f.controller.start(presetId, signal, true)
+  assert.equal(f.calls.filter(c => c[0] === 'create').length, 2)
+  const replay = await f.journal.prepare({ presetId, previousAttemptId: first.attemptId }, signal)
+  assert.equal(replay.dispatch, false); assert.notEqual(replay.attemptId, first.attemptId)
 })
-
-test('invalid preset and already departed page cannot dispatch', async () => {
-  const f = fixture(), page = new AbortController()
-  await assert.rejects(f.controller.start('../other'), /身份无效/)
-  page.abort()
-  await f.controller.start(presetId, page.signal)
-  assert.deepEqual(f.calls, [])
+test('lost native response reconciles committed native identity without a second create', async t => {
+  const f = await fixture(t), create = f.services['remote.session'].create
+  f.services['remote.session'].create = async request => { await create(request); throw new Error('lost response') }
+  await assert.rejects(f.controller.start(presetId), /lost response/); await f.reopen(); await f.controller.start(presetId)
+  assert.equal(f.calls.filter(c => c[0] === 'create').length, 1)
 })
-
-test('concurrent clicks dispatch only one native creation', async () => {
-  const f = fixture(), gate = deferred()
-  f.services['remote.session'].create = request => { f.calls.push(['create', request]); return gate.promise }
-  const pending = f.controller.start(presetId)
-  await f.controller.start(presetId)
-  await f.controller.start('assistant_other')
-  gate.resolve(receipt())
-  await pending
-  assert.equal(f.calls.filter(call => call[0] === 'create').length, 1)
-})
-
-test('lost native response remains unknown after reconnect and cannot replay', async () => {
-  const f = fixture()
-  f.services['remote.session'].create = async request => { f.calls.push(['create', request]); throw new Error('response lost') }
-  await assert.rejects(f.controller.start(presetId), /response lost/)
-  f.controller.reset()
+test('crash after prepare but before native create stays unknown; read-only selector recovers intent', async t => {
+  const f = await fixture(t), intent = await f.journal.prepare({ presetId }, signal)
+  assert.equal(intent.dispatch, true); await f.reopen()
+  const status = await f.journal.status({ presetId }, signal)
+  assert.equal(status.attemptId, intent.attemptId); assert.equal(status.state, 'unknown'); assert.equal(status.dispatch, false)
+  assert(!JSON.stringify(status).includes('private/path'))
   await assert.rejects(f.controller.start(presetId), /不会自动再次创建/)
-  assert.equal(f.calls.filter(call => call[0] === 'create').length, 1)
-  assert.equal(f.calls.filter(call => call[0] === 'openSession').length, 0)
+  assert.equal(f.calls.filter(c => c[0] === 'create').length, 0)
 })
-
-test('connection reset fences late creation and does not erase its unknown attempt', async () => {
-  const f = fixture(), gate = deferred()
-  f.services['remote.session'].create = request => { f.calls.push(['create', request]); return gate.promise }
-  const pending = f.controller.start(presetId)
-  f.controller.reset()
-  gate.resolve(receipt())
+test('read-only missing selector writes no intent, concurrent prepares release exactly one dispatch permission', async t => {
+  const f = await fixture(t)
+  assert.equal((await f.journal.status({ presetId }, signal)).state, 'none')
+  assert.equal(await f.options.store.load(), undefined)
+  const results = await Promise.all([f.journal.prepare({ presetId }, signal), f.journal.prepare({ presetId }, signal)])
+  assert.equal(results.filter(r => r.dispatch).length, 1); assert.equal(results[0].attemptId, results[1].attemptId)
+})
+test('workspace membership, generation and preset substitution never confirm another identity', async t => {
+  const f = await fixture(t), intent = await f.journal.prepare({ presetId, workspaceId: 'workspace_a' }, signal)
+  await f.services['remote.session'].create({ agentPreset: presetId, sessionId: intent.sessionId })
+  assert.equal((await f.journal.status({ attemptId: intent.attemptId }, signal)).state, 'created')
+  for (const change of [h => { h.meta.createdAt++ }, h => { h.meta.agentPreset = 'different' }, h => { h.meta.cwd = 'C:/other' }]) {
+    const original = f.native.get(intent.sessionId); const changed = structuredClone(original); change(changed); f.native.set(intent.sessionId, changed)
+    assert.equal((await f.journal.status({ attemptId: intent.attemptId }, signal)).state, 'conflict'); f.native.set(intent.sessionId, original)
+  }
+  f.workspace.sessionIds.length = 0
+  assert.equal((await f.journal.status({ attemptId: intent.attemptId }, signal)).state, 'conflict')
+})
+test('native interface or journal unsupported rejects before create; baseline original UI is untouched', async t => {
+  const f = await fixture(t)
+  for (const name of ['remote.session', 'sessions', 'uiWorkspace', 'layout', 'configForms']) {
+    const saved = f.services[name]; delete f.services[name]; await assert.rejects(f.controller.start(presetId), /原生界面未提供/); f.services[name] = saved
+  }
+  const legacy = nativeAssistantNavigation(name => f.services[name]); await assert.rejects(legacy.start(presetId), /原生界面未提供/)
+  assert.equal(f.calls.filter(c => c[0] === 'create').length, 0)
+})
+test('concurrent clicks, connection reset and page departure never repeat late native work', async t => {
+  const f = await fixture(t), gate = deferred(), entered = deferred(), create = f.services['remote.session'].create
+  f.services['remote.session'].create = async request => { entered.resolve(); await gate.promise; return create(request) }
+  const pending = f.controller.start(presetId); await entered.promise
+  await f.controller.start(presetId); f.controller.reset(); gate.resolve()
   await assert.rejects(pending, /导航或连接已变化/)
-  await assert.rejects(f.controller.start(presetId), /不会自动再次创建/)
-  assert.deepEqual(f.calls.map(call => call[0]), ['beginNavigation', 'create'])
+  assert.equal(f.calls.filter(c => c[0] === 'open').length, 0)
+  await f.controller.start(presetId); assert.equal(f.calls.filter(c => c[0] === 'create').length, 1)
 })
-
-test('reset removes old node session addresses while retaining non-replay protection', async () => {
-  const f = fixture()
-  await f.controller.start(presetId)
-  f.calls.length = 0
-  f.controller.reset()
-  await assert.rejects(f.controller.start(presetId), /不会自动再次创建/)
-  assert.deepEqual(f.calls, [])
+test('wrong native response ID is not opened and revoked node cannot release a journal result', async t => {
+  const f = await fixture(t)
+  f.services['remote.session'].create = async request => ({ ok: true, value: { ...request, sessionId: 'other' } })
+  await assert.rejects(f.controller.start(presetId), /未确认指定助手身份/)
+  assert.equal(f.calls.filter(c => c[0] === 'open').length, 0)
+  f.revoke(); await assert.rejects(f.journal.status({ presetId }, signal), { code: 'binding_revoked' })
 })
-
-test('native reply must acknowledge the exact requested preset and a session address', async () => {
-  for (const result of [receipt('other'), receipt(presetId, ''), { ok: true, value: { sessionId: 'session-new' } }, { ok: true, value: { agentPreset: presetId } }, { ok: false }]) {
-    const f = fixture()
-    f.services['remote.session'].create = async request => { f.calls.push(['create', request]); return result }
-    await assert.rejects(f.controller.start(presetId), /未确认指定助手身份/)
-    await assert.rejects(f.controller.start(presetId), /不会自动再次创建/)
-    assert.deepEqual(f.calls.map(call => call[0]), ['beginNavigation', 'create'])
-  }
-})
-
-test('refresh failure keeps confirmed session and never creates a replacement on retry', async () => {
-  const f = fixture()
-  f.services.sessions.refresh = async () => { throw new Error('refresh failed') }
-  await assert.rejects(f.controller.start(presetId), /refresh failed/)
-  await f.controller.start(presetId)
-  assert.equal(f.calls.filter(call => call[0] === 'create').length, 1)
-  assert.deepEqual(f.calls.at(-1), ['openSession', 'session-new'])
-})
-
-test('leaving the page during creation suppresses refresh and late navigation', async () => {
-  const f = fixture(), page = new AbortController(), gate = deferred()
-  f.services['remote.session'].create = request => { f.calls.push(['create', request]); return gate.promise }
-  const pending = f.controller.start(presetId, page.signal)
-  page.abort()
-  gate.resolve(receipt())
-  await assert.rejects(pending, /导航或连接已变化/)
-  assert.deepEqual(f.calls.map(call => call[0]), ['beginNavigation', 'create'])
-  await assert.rejects(f.controller.start(presetId), /不会自动再次创建/)
-})
-
-test('page departure or another native navigation during refresh suppresses late opening', async () => {
-  for (const cause of ['page', 'navigation', 'reset']) {
-    const f = fixture(), page = new AbortController(), gate = deferred(), refreshed = deferred()
-    f.services.sessions.refresh = () => { f.calls.push(['refresh']); refreshed.resolve(); return gate.promise }
-    const pending = f.controller.start(presetId, page.signal)
-    await refreshed.promise
-    if (cause === 'page') page.abort()
-    else if (cause === 'navigation') f.navigation.abort()
-    else f.controller.reset()
-    gate.resolve()
-    await pending
-    assert.equal(f.calls.filter(call => call[0] === 'openSession').length, 0, cause)
-    if (cause === 'reset') await assert.rejects(f.controller.start(presetId), /不会自动再次创建/)
-  }
-})
-
-test('beginNavigation failure does not leave the entry permanently busy', async () => {
-  const f = fixture(), begin = f.services.layout.beginNavigation
-  f.services.layout.beginNavigation = () => { throw new Error('layout unavailable') }
-  await assert.rejects(f.controller.start(presetId), /layout unavailable/)
-  f.services.layout.beginNavigation = begin
-  await f.controller.start(presetId)
-  assert.equal(f.calls.filter(call => call[0] === 'create').length, 1)
-})
-
-test('old connection completion cannot unlock a new connection creation', async () => {
-  const f = fixture(), oldGate = deferred(), newGate = deferred()
-  f.services['remote.session'].create = request => {
-    f.calls.push(['create', request])
-    return request.agentPreset === presetId ? oldGate.promise : newGate.promise
-  }
-  const oldPending = f.controller.start(presetId)
-  f.controller.reset()
-  const newPending = f.controller.start('assistant_other')
-  oldGate.resolve(receipt())
-  await assert.rejects(oldPending, /导航或连接已变化/)
-  await f.controller.start('assistant_third')
-  assert.equal(f.calls.filter(call => call[0] === 'create').length, 2)
-  newGate.resolve(receipt('assistant_other', 'session-other'))
-  await newPending
-  assert.deepEqual(f.calls.filter(call => call[0] === 'openSession'), [['openSession', 'session-other']])
+test('different profile/node refuses another durable journal and close drains a pending save', async t => {
+  const f = await fixture(t); await f.journal.prepare({ presetId }, signal)
+  await assert.rejects(AssistantSessionIntents.open({ ...f.options, nodeId: 'other_node' }), { code: 'assistant-session-store-invalid' })
+  const gate = deferred(), entered = deferred(), saved = f.options.store.save.bind(f.options.store)
+  f.options.store.save = async value => { entered.resolve(); await gate.promise; await saved(value) }
+  const operation = f.journal.prepare({ presetId: 'second' }, signal); await entered.promise
+  let closed = false; const closing = f.journal.close().then(() => { closed = true }); await Promise.resolve(); assert.equal(closed, false)
+  gate.resolve(); await assert.rejects(operation); await closing
+  assert.equal((await f.options.store.load()).intents.length, 2)
 })

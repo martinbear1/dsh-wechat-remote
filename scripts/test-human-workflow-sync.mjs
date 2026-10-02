@@ -272,6 +272,15 @@ test('transport sanitizes server errors and bounds response body', async () => {
   const oversized = new WorkflowHttpTransport('https://relay.example', () => identity, async () => new Response('x'.repeat(2 * 1024 * 1024 + 1)))
   await assert.rejects(oversized.request('sync', {}, signal()), /过大/)
 })
+
+test('attachment quota and ticket errors expose only safe fixed messages and never masquerade as revocation', async () => {
+  const pair = generateKeyPairSync('ed25519'), identity = { nodeId, privateKeyPem: pair.privateKey.export({ type: 'pkcs8', format: 'pem' }) }
+  for (const [code, status] of [['download_ticket_expired', 409], ['attachment_download_quota', 429], ['usage_ledger_capacity', 429], ['metering_unavailable', 503]]) {
+    const client = new WorkflowHttpTransport('https://relay.example', () => identity, async () => new Response(JSON.stringify({ error: { code, message: 'secret C:/private/token', balance: 'private' } }), { status }))
+    await assert.rejects(client.request('objects/claim', {}, signal()), cause => cause.code === code && cause.code !== 'binding_revoked'
+      && !/secret|private|token/.test(cause.message) && cause.message !== '群任务服务暂不可用')
+  }
+})
 test('empty or HTML authentication failures clear the replica instead of returning stale facts', async () => {
   for (const body of [null, 'Forbidden']) for (const status of [401, 403]) {
     const pair = generateKeyPairSync('ed25519'), identity = { nodeId, privateKeyPem: pair.privateKey.export({ type: 'pkcs8', format: 'pem' }) }

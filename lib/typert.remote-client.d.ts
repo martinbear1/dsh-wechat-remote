@@ -7,7 +7,7 @@ import type { WechatAttachmentBatchRequest, WechatAttachmentBatchResult } from '
 import type { WechatDirectoryCreateRequest, WechatDirectoryCreateResult, WechatDirectoryListRequest, WechatDirectoryListResult, WechatDirectoryRootsRequest, WechatDirectoryRootsResult } from '@harness-remote/dsh-wechat-remote/directory'
 import type { WechatHistoryWindowRequest, WechatHistoryWindowResult } from '@harness-remote/dsh-wechat-remote/history'
 import type { WechatHostDescribeRequest, WechatHostDescribeResult } from '@harness-remote/dsh-wechat-remote/host-info'
-import type { AssistantDraftRequest, AssistantInstallRequest, AssistantVersionRequest, AutomationApproveRequest, AutomationPauseRequest, AutomationPreviewRequest, AutomationStatusRequest, HumanResult, ModeApprovalRequest, ModeVersionRequest } from '@harness-remote/dsh-wechat-remote/human-tools'
+import type { AssistantDraftRequest, AssistantInstallRequest, AssistantVersionRequest, AutomationApproveRequest, AutomationPauseRequest, AutomationPreviewRequest, AutomationStatusRequest, AutomationTaskRequest, HumanResult, ModeApprovalRequest, ModeVersionRequest } from '@harness-remote/dsh-wechat-remote/human-tools'
 import type { HumanAckWireRequest, HumanActionRequest } from '@harness-remote/dsh-wechat-remote/human-tools/protocol'
 import type { ResourceResult } from '@harness-remote/dsh-wechat-remote/resources'
 
@@ -31,11 +31,14 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     assistantDraft: (request: AssistantDraftRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     assistantInstall: (request: AssistantInstallRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     assistantPreview: (request: AssistantVersionRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
+    assistantSessionPrepare: (request: { presetId: string; workspaceId?: string; previousAttemptId?: string; }, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
+    assistantSessionStatus: (request: { attemptId: string; } | { presetId: string; workspaceId?: string; }, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     assistantStatus: (request: AssistantVersionRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     automationApprove: (request: AutomationApproveRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     automationList: (request: { scope: string; offset?: number; }, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     automationPause: (request: AutomationPauseRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     automationPreview: (request: AutomationPreviewRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
+    automationProposals: (request: AutomationTaskRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     automationStatus: (request: AutomationStatusRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     capabilities: (request: { scope: string; }, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     claim: (request: HumanActionRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
@@ -46,6 +49,8 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     sourceGrant: (request: HumanActionRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     status: (request: { scope: string; surfaceId: string; }, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     workflowDraft: (request: HumanActionRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
+    workflowReceiptRetry: (request: AutomationTaskRequest & { submissionId: string; submissionVersion: number; expectedRevision: number; }, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
+    workflowReceiptStatus: (request: AutomationTaskRequest & { offset?: number; }, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
   }
   interface TypertRemoteNamespace$7765636861744174746163686d656e74 {
     prepareBatch: (request: WechatAttachmentBatchRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatAttachmentBatchResult>>
@@ -78,11 +83,14 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'humanTools/assistantDraft': (request: AssistantDraftRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     'humanTools/assistantInstall': (request: AssistantInstallRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     'humanTools/assistantPreview': (request: AssistantVersionRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
+    'humanTools/assistantSessionPrepare': (request: { presetId: string; workspaceId?: string; previousAttemptId?: string; }, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
+    'humanTools/assistantSessionStatus': (request: { attemptId: string; } | { presetId: string; workspaceId?: string; }, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     'humanTools/assistantStatus': (request: AssistantVersionRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     'humanTools/automationApprove': (request: AutomationApproveRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     'humanTools/automationList': (request: { scope: string; offset?: number; }, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     'humanTools/automationPause': (request: AutomationPauseRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     'humanTools/automationPreview': (request: AutomationPreviewRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
+    'humanTools/automationProposals': (request: AutomationTaskRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     'humanTools/automationStatus': (request: AutomationStatusRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     'humanTools/capabilities': (request: { scope: string; }, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     'humanTools/claim': (request: HumanActionRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
@@ -93,6 +101,8 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'humanTools/sourceGrant': (request: HumanActionRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     'humanTools/status': (request: { scope: string; surfaceId: string; }, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     'humanTools/workflowDraft': (request: HumanActionRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
+    'humanTools/workflowReceiptRetry': (request: AutomationTaskRequest & { submissionId: string; submissionVersion: number; expectedRevision: number; }, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
+    'humanTools/workflowReceiptStatus': (request: AutomationTaskRequest & { offset?: number; }, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     'wechatAttachment/prepareBatch': (request: WechatAttachmentBatchRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatAttachmentBatchResult>>
     'wechatDirectory/create': (request: WechatDirectoryCreateRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatDirectoryCreateResult>>
     'wechatDirectory/list': (request: WechatDirectoryListRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatDirectoryListResult>>

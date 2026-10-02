@@ -2,7 +2,7 @@ import type { HumanTaskRef, HumanWorkflowDraftRef } from '../human-tools/protoco
 import type { WorkflowDataStore, WorkflowScope } from './data.js';
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools';
 export interface AutomationConfig {
-    trigger: 'per-submission';
+    trigger: 'manual' | 'per-submission' | 'all-recipients';
     roundId: string;
     instructions: string;
     existing: 'new-only' | 'include-existing';
@@ -10,6 +10,7 @@ export interface AutomationConfig {
     maxRuns: number;
     timeoutSeconds: number;
     concurrency: 1;
+    recipientRefs?: string[];
 }
 export interface AutomationCapability {
     supported: boolean;
@@ -40,6 +41,7 @@ export interface AutomationSubmission {
     delivery: string;
     acceptedAt: number | null;
     values: Record<string, string | number | boolean>;
+    participantRef?: string;
 }
 export interface AutomationSnapshot {
     bindingKey: string;
@@ -48,6 +50,9 @@ export interface AutomationSnapshot {
     rounds: Record<string, unknown>[];
     submissions: AutomationSubmission[];
     nextOffset: number | null;
+    participants?: {
+        participantRef: string;
+    }[];
 }
 /** All calls recheck current signed cloud authority. ready also verifies the
  * exact local committed ciphertext before any image job is admitted. */
@@ -75,6 +80,23 @@ export interface AutomationPolicy {
     bindingKey: string;
     acceptanceCutoff: number;
     sessionSeq: number;
+    batch?: {
+        formedAt: number;
+        selections: {
+            submissionId: string;
+            submissionVersion: number;
+            participantRef: string;
+        }[];
+    };
+}
+export interface AutomationProposal {
+    proposalId: string;
+    digest: string;
+    scope: WorkflowScope;
+    taskRef: HumanTaskRef;
+    expectedRevision: number;
+    createdAt: number;
+    config: AutomationConfig;
 }
 export interface AutomationPreview {
     schema: 'human.automation.preview.v1';

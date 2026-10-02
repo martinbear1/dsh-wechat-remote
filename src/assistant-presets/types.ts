@@ -7,6 +7,7 @@ export interface NativeAssistantCapability {
   reason?: string
   basePresets: { id: string; name: string }[]
   creatorPresetId?: string
+  defaultPresetId?: string
 }
 export interface NativeAssistantPreview {
   schema: 'assistant.native.preview.v1'

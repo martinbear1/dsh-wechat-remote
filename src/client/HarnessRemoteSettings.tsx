@@ -17,7 +17,7 @@ export interface HarnessRemoteSettingsProps {
   callManagement: CallPairingManagement
   store?: RemotePageStore
   assistants?: AssistantStore
-  startAssistant?: (presetId: string, lifetime?: AbortSignal) => Promise<void>
+  startAssistant?: (presetId: string, lifetime?: AbortSignal, newIntent?: boolean) => Promise<void>
 }
 
 function StatusDot({ ok, busy = false }: { ok: boolean; busy?: boolean }): JSX.Element {

@@ -5,6 +5,7 @@ export interface WorkflowTransport {
     assertIdentity(): void;
     request(operation: WorkflowOperation, body: Record<string, unknown>, signal: AbortSignal): Promise<unknown>;
 }
+export declare function workflowErrorMessage(code: string): string;
 /** Uses the paired node's existing identity, never owner credentials. No
  * redirects, arbitrary endpoints, model-provided URLs or plaintext fallback. */
 export declare class WorkflowHttpTransport implements WorkflowTransport {

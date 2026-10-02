@@ -1,10 +1,12 @@
 import { humanTaskRef, humanWorkflowDraftRef, sameTaskRef, type HumanTaskRef, type HumanWorkflowDraftRef } from '../human-tools/protocol.js'
 import { assertScope, bounded, copy, exact, fail, plain, revision, row, sameScope, scopeValid, StateQueue, version, type WorkflowDataStore, type WorkflowScope } from './data.js'
-import type { WorkflowTransport } from './transport.js'
+import { workflowErrorMessage, type WorkflowTransport } from './transport.js'
+import { randomBytes } from 'node:crypto'
 import { ReceiverKeyring } from './receiver-keyring.js'
 import { SubmissionReceiver } from './receiver.js'
 import { canonicalSubmission, sha256 } from './submission-crypto.js'
 import type { AutomationSnapshot, AutomationSubmission } from './automation-types.js'
+import { WORKFLOW_LONG_TERM_BYTES } from './archive-store.js'
 
 export interface NodeBinding { schema: 'human.node.binding.v1'; nodeId: string; ownerSubject: string; accountInstance: string; generation: string }
 export function receiverBinding(value: unknown, nodeId: string): { binding: NodeBinding; bindingKey: string } {
@@ -18,7 +20,10 @@ export interface LifecycleDraft {
   expiresAt: number; state: 'draft' | 'published'; result?: unknown
 }
 interface Analysis { scope: WorkflowScope; taskRef: HumanTaskRef; submissionId: string; submissionVersion: number; revision: number; text: string; updatedAt: number }
-interface Ledger { schema: 'human.lifecycle.local.v1'; nodeId: string; analyses: Analysis[] }
+interface ReceiptAttempt { scope: WorkflowScope; taskRef: HumanTaskRef; submissionId: string; submissionVersion: number
+  revision: number; requestId: string; state: 'pending' | 'received' | 'blocked'; errorCode?: string; updatedAt: number }
+interface Ledger { schema: 'human.lifecycle.local.v1'; nodeId: string; analyses: Analysis[]; receipts?: ReceiptAttempt[] }
+const receiptBlockedCodes = new Set(['download_ticket_expired', 'attachment_download_quota', 'usage_ledger_capacity', 'metering_unavailable', 'receiver-capacity'])
 export interface LifecycleOptions {
   transport: WorkflowTransport; keys: ReceiverKeyring; receiver?: SubmissionReceiver; store: WorkflowDataStore
   now?: () => number
@@ -49,8 +54,8 @@ export class WorkflowLifecycle {
     const raw = await options.store.load(), nodeId = options.transport.nodeId
     let ledger: Ledger = { schema: 'human.lifecycle.local.v1', nodeId, analyses: [] }
     if (raw !== undefined) {
-      if (!row(raw) || !exact(raw, ['schema', 'nodeId', 'analyses']) || raw.schema !== ledger.schema || raw.nodeId !== nodeId
-        || !Array.isArray(raw.analyses) || raw.analyses.length > 256) throw fail('lifecycle-store-invalid', '任务处理账本无效')
+      if (!row(raw) || !exact(raw, ['schema', 'nodeId', 'analyses'], ['receipts']) || raw.schema !== ledger.schema || raw.nodeId !== nodeId
+        || !Array.isArray(raw.analyses) || raw.analyses.length > 2048) throw fail('lifecycle-store-invalid', '任务处理账本无效')
       const ids = new Set<string>()
       for (const entry of raw.analyses) {
         if (!row(entry) || !exact(entry, ['scope', 'taskRef', 'submissionId', 'submissionVersion', 'revision', 'text', 'updatedAt'])
@@ -59,8 +64,21 @@ export class WorkflowLifecycle {
         const key = canonicalSubmission([entry.scope, entry.submissionId]); if (ids.has(key)) throw fail('lifecycle-store-invalid', '任务分析记录重复'); ids.add(key)
       }
       ledger = copy(raw) as unknown as Ledger
+      if (raw.receipts !== undefined) {
+        if (!Array.isArray(raw.receipts) || raw.receipts.length > 4096) throw fail('lifecycle-store-invalid', '收件意图账本无效')
+        const receipts = new Set<string>()
+        for (const r of raw.receipts) {
+          if (!row(r) || !exact(r, ['scope', 'taskRef', 'submissionId', 'submissionVersion', 'revision', 'requestId', 'state', 'updatedAt'], ['errorCode'])
+            || !scopeValid(r.scope) || r.scope.nodeId !== nodeId || !humanTaskRef(r.taskRef) || !plain(r.submissionId, 128) || !version(r.submissionVersion)
+            || !version(r.revision) || !/^[a-f0-9]{64}$/.test(String(r.requestId)) || !['pending', 'received', 'blocked'].includes(String(r.state))
+            || !revision(r.updatedAt) || r.errorCode !== undefined && !receiptBlockedCodes.has(String(r.errorCode))) throw fail('lifecycle-store-invalid', '收件意图账本无效')
+          const key = canonicalSubmission([r.scope, r.taskRef, r.submissionId, r.submissionVersion])
+          if (receipts.has(key)) throw fail('lifecycle-store-invalid', '收件意图重复'); receipts.add(key)
+        }
+      }
     }
-    return new WorkflowLifecycle(options, new StateQueue(options.store, ledger))
+    bounded(ledger, WORKFLOW_LONG_TERM_BYTES)
+    return new WorkflowLifecycle(options, new StateQueue(options.store, ledger, WORKFLOW_LONG_TERM_BYTES))
   }
   private active(signal: AbortSignal): AbortSignal { this.options.transport.assertIdentity(); this.lifetime.signal.throwIfAborted(); return AbortSignal.any([signal, this.lifetime.signal]) }
   async prepareInitial(signal: AbortSignal, requiresImage: boolean): Promise<void> {
@@ -139,6 +157,46 @@ export class WorkflowLifecycle {
     if (!draft) throw fail('lifecycle-draft-unavailable', '原任务方案已不可用；不能替换成其他版本')
     return { schema: 'human.workflow.preview.v1', ref: copy(ref), taskRef: copy(taskRef), draft }
   }
+  private receipt(scope: WorkflowScope, taskRef: HumanTaskRef, submissionId: string, submissionVersion: number) {
+    return this.state.current().receipts?.find(r => sameScope(r.scope, scope) && sameTaskRef(r.taskRef, taskRef)
+      && r.submissionId === submissionId && r.submissionVersion === submissionVersion)
+  }
+  async receiptStatus(scope: WorkflowScope, taskRef: HumanTaskRef, signal: AbortSignal, offset = 0) {
+    if (!revision(offset) || offset > 10000) throw fail('lifecycle-query-invalid', '收件分页位置无效')
+    const active = this.active(signal), page = await this.get(scope, taskRef, active, { offset, limit: 20 })
+    const items = []
+    for (const item of page.submissions as Record<string, unknown>[]) {
+      if (!plain(item.id, 128) || !version(item.version) || !plain(item.roundId, 128)) throw fail('lifecycle-response-invalid', '收件列表无效')
+      const r = this.receipt(scope, taskRef, item.id, item.version)
+      let state = item.delivery === 'not-required' ? 'not-required' : item.delivery === 'expired' ? 'blocked' : r?.state ?? 'pending', errorCode = r?.errorCode
+      if (item.delivery === 'expired') errorCode = 'submission-expired'
+      if (item.delivery === 'received') {
+        try {
+          const original = await this.options.receiver?.read(scope, item.id, String(page.bindingKey), active)
+          if (!original || original.manifest.context.version !== item.version || !sameTaskRef(original.manifest.context.taskRef, taskRef)) throw fail('submission-not-received', '收件不可用')
+          state = 'received'; errorCode = undefined
+        }
+        catch { this.active(active); state = 'blocked'; errorCode = 'submission-not-received' }
+      }
+      items.push({ submissionId: item.id, submissionVersion: item.version, roundId: item.roundId, state, revision: r?.revision ?? 0,
+        ...(errorCode ? { errorCode, message: workflowErrorMessage(errorCode) } : {}), retryable: state === 'blocked' && item.delivery === 'pending' && !!errorCode && receiptBlockedCodes.has(errorCode) })
+    }
+    return { schema: 'human.workflow.receipts.v1', taskRef: copy(taskRef), asOf: page.asOf, items, nextOffset: page.nextOffset }
+  }
+  async retryReceipt(scope: WorkflowScope, taskRef: HumanTaskRef, input: { submissionId: string; submissionVersion: number; expectedRevision: number }, signal: AbortSignal) {
+    const active = this.active(signal)
+    if (!plain(input.submissionId, 128) || !version(input.submissionVersion) || !revision(input.expectedRevision)) throw fail('lifecycle-query-invalid', '收件重试引用无效')
+    const page = await this.get(scope, taskRef, active, { submissionId: input.submissionId })
+    const item = (page.submissions as Record<string, unknown>[]).find(s => s.id === input.submissionId && s.version === input.submissionVersion)
+    if (!item || item.state !== 'accepted' || item.delivery !== 'pending') throw fail('receipt-retry-unavailable', '该提交无需或不能重新申请下载；请核对原始收件')
+    return this.state.update(next => {
+      this.active(active)
+      const r = next.receipts?.find(r => sameScope(r.scope, scope) && sameTaskRef(r.taskRef, taskRef) && r.submissionId === input.submissionId && r.submissionVersion === input.submissionVersion)
+      if (!r || r.revision !== input.expectedRevision || r.state !== 'blocked' || !r.errorCode || !receiptBlockedCodes.has(r.errorCode)) throw fail('receipt-version-conflict', '收件状态已变化；请先刷新核对，不会重复申请下载')
+      r.requestId = randomBytes(32).toString('hex'); r.revision++; r.state = 'pending'; delete r.errorCode; r.updatedAt = (this.options.now ?? Date.now)()
+      return { schema: 'human.workflow.receipt-retry.v1', taskRef: copy(taskRef), submissionId: r.submissionId, submissionVersion: r.submissionVersion, revision: r.revision, state: 'pending' }
+    }, active)
+  }
   /** One hook on the existing node sync loop. Bounded round-robin scan, not a
    * task poller. Failed receivers remain retryable; neither events nor ACKs
    * call a model, create sessions or restore stopped Agents. */
@@ -167,12 +225,36 @@ export class WorkflowLifecycle {
             // Resume the next item, not the next page, when this tick's finite
             // budget is exhausted. Failed items are revisited on the next lap.
             this.offsets.set(taskRef.taskId, index + 1 === items.length ? (typeof page.nextOffset === 'number' ? page.nextOffset : 0) : offset + index + 1)
-            if (!plain(item.id, 128) || item.state !== 'accepted' || item.delivery !== 'pending') continue
+            if (!plain(item.id, 128) || !version(item.version) || !(item.state === 'accepted' && item.delivery === 'pending' || item.state === 'expired' && item.delivery === 'expired')) continue
+            let intent = this.receipt(scope, taskRef, item.id, item.version)
+            if (intent?.state === 'blocked') continue
+            if (!intent) intent = await this.state.update(next => {
+              this.active(active); next.receipts ??= []
+              if (next.receipts.length >= 4096) throw fail('lifecycle-capacity', '收件意图已达容量上限，未删除旧记录')
+              const r: ReceiptAttempt = { scope: copy(scope), taskRef: copy(taskRef), submissionId: String(item.id), submissionVersion: Number(item.version), revision: 1,
+                requestId: sha256(canonicalSubmission([scope, taskRef, item.id])), state: 'pending', updatedAt: now() }
+              next.receipts.push(r); return r
+            }, active)
             attempts++
-            const claimed = await this.options.transport.request('objects/claim', { scope: scope.sessionId, sessionGeneration: scope.sessionGeneration,
-              taskRef, submissionId: item.id, requestId: sha256(canonicalSubmission([scope, taskRef, item.id])) }, active)
-            if (!row(claimed)) throw fail('receiver-claim-invalid', '收件租约响应无效')
-            await this.options.receiver.receive(scope, taskRef, String(page.bindingKey), claimed.delivery, active)
+            try {
+            const claim = (receipt?: unknown) => this.options.transport.request('objects/claim', { scope: scope.sessionId, sessionGeneration: scope.sessionGeneration,
+              taskRef, submissionId: item.id, requestId: intent!.requestId, ...(receipt ? { receipt } : {}) }, active)
+            const recovered = typeof this.options.receiver.recoverReceipt === 'function' && await this.options.receiver.recoverReceipt(scope, taskRef, String(page.bindingKey), item.id, item.version, claim, active)
+            if (!recovered) {
+              if (item.delivery === 'expired') continue // only durable-original ACK may recover an expired object
+              const claimed = await claim()
+              if (!row(claimed)) throw fail('receiver-claim-invalid', '收件租约响应无效')
+              await this.options.receiver.receive(scope, taskRef, String(page.bindingKey), claimed.delivery, active)
+            }
+            await this.state.update(next => { const r = next.receipts!.find(r => r.requestId === intent!.requestId)!; r.state = 'received'; r.updatedAt = now() }, active)
+            } catch (cause) {
+              const code = String((cause as { code?: string })?.code ?? '')
+              if (receiptBlockedCodes.has(code)) await this.state.update(next => {
+                const r = next.receipts!.find(r => r.requestId === intent!.requestId)!
+                r.state = 'blocked'; r.errorCode = code; r.revision++; r.updatedAt = now()
+              }, active)
+              else throw cause
+            }
           }
           if (!items.length) this.offsets.set(taskRef.taskId, typeof page.nextOffset === 'number' ? page.nextOffset : 0)
         } catch {
@@ -204,7 +286,8 @@ export class WorkflowLifecycle {
         || s.acceptedAt !== null && !revision(s.acceptedAt) || !row(s.values)) throw fail('automation-authority-invalid', '提交授权记录无效')
       return copy(s) as unknown as AutomationSubmission
     })
-    return { bindingKey: String(page.bindingKey), asOf: page.asOf, revision: Number(page.revision), rounds: copy(page.rounds as Record<string, unknown>[]), submissions, nextOffset: page.nextOffset as number | null }
+    return { bindingKey: String(page.bindingKey), asOf: page.asOf, revision: Number(page.revision), rounds: copy(page.rounds as Record<string, unknown>[]), submissions,
+      participants: (page.participants as Record<string, unknown>[]).filter(p => plain(p.participantRef, 128)).map(p => ({ participantRef: String(p.participantRef) })), nextOffset: page.nextOffset as number | null }
   }
   async readyAutomation(scope: WorkflowScope, taskRef: HumanTaskRef, submission: AutomationSubmission, signal: AbortSignal): Promise<boolean> {
     if (submission.state !== 'accepted') return false
@@ -224,7 +307,7 @@ export class WorkflowLifecycle {
       this.options.transport.assertIdentity()
       const previous = ledger.analyses.find(entry => sameScope(entry.scope, scope) && entry.submissionId === input.submissionId)
       if ((previous?.revision ?? 0) !== input.expectedRevision) throw fail('lifecycle-version-conflict', '分析版本已变化')
-      if (!previous && ledger.analyses.length >= 256) throw fail('lifecycle-capacity', '本地分析数量达到上限')
+      if (!previous && ledger.analyses.length >= 2048) throw fail('lifecycle-capacity', '本地分析和归档已达到 2048 份上限；不会自动删除历史')
       const next: Analysis = { scope: copy(scope), taskRef: copy(taskRef), submissionId: input.submissionId, submissionVersion: input.submissionVersion,
         revision: input.expectedRevision + 1, text: input.text, updatedAt: (this.options.now ?? Date.now)() }
       if (previous) ledger.analyses[ledger.analyses.indexOf(previous)] = next; else ledger.analyses.push(next)

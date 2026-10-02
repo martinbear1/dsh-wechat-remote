@@ -1,5 +1,5 @@
 /** Owner UI state. No raw preset files, installation scripts or model calls. */
-export type AssistantMethod = 'assistantCatalog' | 'assistantDraft' | 'assistantPreview' | 'assistantInstall' | 'assistantStatus';
+export type AssistantMethod = 'assistantCatalog' | 'assistantDraft' | 'assistantPreview' | 'assistantInstall' | 'assistantStatus' | 'assistantSessionPrepare' | 'assistantSessionStatus';
 export type AssistantCall = (method: AssistantMethod, request: Record<string, unknown>) => Promise<any>;
 export interface AssistantUiState {
     catalog: any;

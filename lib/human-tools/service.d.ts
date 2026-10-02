@@ -13,6 +13,7 @@ export interface HumanToolsConfig {
         native?: NativeAssistantAdapter;
         registryStore?: WorkflowDataStore;
         businessStore?: WorkflowDataStore;
+        sessionIntentStore?: WorkflowDataStore;
     };
     readonly workflow?: {
         transport: WorkflowTransport;
@@ -98,6 +99,15 @@ export declare class HumanToolsService extends TypertRemoteService {
         scope: string;
         offset?: number;
     }, signal: AbortSignal): Promise<HumanResult>;
+    workflowReceiptStatus(request: AutomationTaskRequest & {
+        offset?: number;
+    }, signal: AbortSignal): Promise<HumanResult>;
+    automationProposals(request: AutomationTaskRequest, signal: AbortSignal): Promise<HumanResult>;
+    workflowReceiptRetry(request: AutomationTaskRequest & {
+        submissionId: string;
+        submissionVersion: number;
+        expectedRevision: number;
+    }, signal: AbortSignal): Promise<HumanResult>;
     automationPreview(request: AutomationPreviewRequest, signal: AbortSignal): Promise<HumanResult>;
     automationApprove(request: AutomationApproveRequest, signal: AbortSignal): Promise<HumanResult>;
     automationPause(request: AutomationPauseRequest, signal: AbortSignal): Promise<HumanResult>;
@@ -110,6 +120,17 @@ export declare class HumanToolsService extends TypertRemoteService {
     assistantPreview(request: AssistantVersionRequest, signal: AbortSignal): Promise<HumanResult>;
     assistantInstall(request: AssistantInstallRequest, signal: AbortSignal): Promise<HumanResult>;
     assistantStatus(request: AssistantVersionRequest, signal: AbortSignal): Promise<HumanResult>;
+    assistantSessionPrepare(request: {
+        presetId: string;
+        workspaceId?: string;
+        previousAttemptId?: string;
+    }, signal: AbortSignal): Promise<HumanResult>;
+    assistantSessionStatus(request: {
+        attemptId: string;
+    } | {
+        presetId: string;
+        workspaceId?: string;
+    }, signal: AbortSignal): Promise<HumanResult>;
     private use;
     private result;
     /** Synchronous bounded lookup used identically by history and live projection. */

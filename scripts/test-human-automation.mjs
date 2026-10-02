@@ -1,6 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { WorkflowAutomation } from '../lib/human-workflow/automation-engine.js'
+import { automationProposalTools } from '../lib/human-workflow/automation-proposal-tools.js'
+import { assertSupportedJsonSchema } from '@deepseek-ai/dsh-tools'
 
 const signal = new AbortController().signal
 const scope = { nodeId: 'node_automation_fixture', sessionId: 'automation_session', sessionGeneration: '100' }
@@ -17,7 +19,9 @@ async function fixture(t, options = {}) {
   let stop, identity = true, sequence = 0
   const authority = { assertIdentity() { if (!identity) throw Object.assign(new Error('revoked'), { code: 'binding_revoked' }) },
     async inspect(_scope, _task, _signal, extra = {}) { authority.assertIdentity(); if (view.error) throw view.error; if (options.inspect) await options.inspect(extra)
-      return { bindingKey: view.bindingKey, asOf: view.now, revision: 2, rounds: [{ id: config.roundId, title: '本轮', closesAt: null }], submissions: view.submissions.filter(s => !extra.submissionId || s.id === extra.submissionId), nextOffset: null }
+      const filtered = view.submissions.filter(s => !extra.submissionId || s.id === extra.submissionId), offset = extra.offset ?? 0, limit = view.pageSize ?? filtered.length
+      return { bindingKey: view.bindingKey, asOf: view.now, revision: view.revision ?? 2, rounds: [{ id: config.roundId, title: '本轮', closesAt: null }],
+        participants: view.participants ?? [], submissions: filtered.slice(offset, offset + limit), nextOffset: offset + limit < filtered.length ? offset + limit : null }
     }, async ready(...args) { if (options.ready) return options.ready(...args); return view.ready } }
   const native = { probe: () => ({ supported: true }), async inspect() { return structuredClone(view.native) }, createMessage: run => ({ id: `message_${run.id}`, message: { id: `message_${run.id}` } }),
     async run(request, runSignal) { stats.calls++; if (options.run) return options.run(request, runSignal)
@@ -118,4 +122,75 @@ test('corrupt ledger and another profile/node fail closed', async t => {
   await assert.rejects(fixture(t, { store: store(raw) }), { code: 'automation-store-invalid' })
   const bad = h.state.value; bad.policies[0].unexpected = true
   await assert.rejects(fixture(t, { store: store(bad) }), { code: 'automation-store-invalid' })
+})
+
+test('real proposal tool schemas save editable drafts only, owner preview/approve is still necessary', async t => {
+  const f = await fixture(t), agent = { id: scope.sessionId, session: { id: scope.sessionId, header: { id: scope.sessionId, createdAt: 100 } } }
+  const tools = automationProposalTools({ nodeId: scope.nodeId, runtime: f.runtime, assertAgent: exec => assert.equal(exec.agent, agent) })
+  for (const tool of tools) { assertSupportedJsonSchema(tool.parameters); assertSupportedJsonSchema(tool.output.schema) }
+  assert.deepEqual(tools.map(t => t.name), ['human_automation_propose', 'human_automation_rules'])
+  const exec = { agent, signal, callId: 'call', rootCallId: 'call' }
+  const draft = await tools[0].execute({ taskRef, config, expectedRevision: 0 }, exec)
+  f.view.submissions = [submission()]; await f.runtime.drive(); assert.equal(f.stats.calls, 0)
+  const edited = await tools[0].execute({ taskRef, config: { ...config, instructions: '主人讨论后修改工作要求' }, expectedRevision: 0 }, exec)
+  assert.notEqual(draft.digest, edited.digest)
+  assert.equal((await f.runtime.proposals(scope, taskRef, signal)).proposals.length, 1)
+  await f.approve({ instructions: edited.config.instructions }); await f.runtime.drive(); assert.equal(f.stats.calls, 1)
+  await assert.rejects(tools[0].execute({ taskRef, config, expectedRevision: 0 }, exec), { code: 'automation-version-conflict' })
+  await assert.rejects(f.runtime.propose(scope, taskRef, { config: { ...config, trigger: 'arbitrary-code' }, expectedRevision: 1 }, signal), { code: 'automation-config-invalid' })
+})
+
+test('manual proposal does not pause existing policy until owner approves; then no further dispatch', async t => {
+  const f = await fixture(t); await f.approve()
+  const proposed = await f.runtime.propose(scope, taskRef, { config: { ...config, trigger: 'manual' }, expectedRevision: 1 }, signal)
+  assert.equal(f.runtime.policies(scope)[0].state, 'active')
+  await f.approve(proposed.config, 1); assert.equal(f.runtime.policies(scope)[0].state, 'paused')
+  f.view.submissions = [submission()]; await f.runtime.drive(); assert.equal(f.stats.calls, 0)
+})
+
+test('21-person roster requires complete stable cross-page snapshot, freezes latest versions and never retriggers', async t => {
+  const f = await fixture(t), refs = Array.from({ length: 21 }, (_, i) => `participant_${i}`.padEnd(24, '_'))
+  f.view.participants = refs.map(participantRef => ({ participantRef })); f.view.pageSize = 20
+  await f.approve({ trigger: 'all-recipients', recipientRefs: refs, maxRuns: 30 })
+  f.view.submissions = refs.slice(0, 20).map((participantRef, i) => ({ ...submission(`submission_${i}`.padEnd(24, '_')), participantRef }))
+  await f.runtime.drive(); assert.equal(f.stats.calls, 0); assert.equal(f.runtime.policies(scope)[0].batch, undefined)
+  f.view.submissions.push({ ...submission('last_submission'.padEnd(24, '_')), participantRef: refs[20] })
+  f.view.submissions.push({ ...submission('latest_submission'.padEnd(24, '_')), version: 2, participantRef: refs[0] })
+  f.view.ready = false; await f.runtime.drive(); assert.equal(f.stats.calls, 0); f.view.ready = true
+  await f.runtime.drive(); assert.equal(f.stats.calls, 4)
+  const policy = f.runtime.policies(scope)[0]; assert.equal(policy.batch.selections.length, 21)
+  assert.equal(policy.batch.selections.find(s => s.participantRef === refs[0]).submissionVersion, 2)
+  for (let n = 0; n < 6; n++) await f.runtime.drive()
+  assert.equal(f.stats.calls, 21); assert.equal(f.runtime.policies(scope)[0].state, 'exhausted')
+  f.view.submissions.push({ ...submission('new_after_batch'.padEnd(24, '_')), version: 3, participantRef: refs[0] })
+  await f.runtime.drive(); assert.equal(f.stats.calls, 21)
+  const reloaded = await fixture(t, { store: store(f.state.value) }); reloaded.view.participants = f.view.participants; reloaded.view.submissions = f.view.submissions
+  await reloaded.runtime.drive(); assert.equal(reloaded.stats.calls, 0)
+})
+
+test('roster revision race, invented participant, new-only old submission and insufficient budget fail closed', async t => {
+  let h
+  h = await fixture(t, { inspect: async extra => { if (extra.offset) h.view.revision = 3 } })
+  const refs = ['a'.repeat(24), 'b'.repeat(24)]; h.view.participants = refs.map(participantRef => ({ participantRef }))
+  await assert.rejects(h.approve({ trigger: 'all-recipients', recipientRefs: ['x'.repeat(24)] }), { code: 'automation-recipients-invalid' })
+  await assert.rejects(h.approve({ trigger: 'all-recipients', recipientRefs: refs, maxRuns: 1 }), { code: 'automation-config-invalid' })
+  await h.approve({ trigger: 'all-recipients', recipientRefs: refs }); h.view.pageSize = 1
+  h.view.submissions = refs.map((participantRef, i) => ({ ...submission(String(i).repeat(24), i ? 1100 : 999), participantRef }))
+  await h.runtime.drive(); assert.equal(h.stats.calls, 0); assert.equal(h.runtime.policies(scope)[0].batch, undefined)
+  await h.runtime.drive(); assert.equal(h.stats.calls, 0) // old submission still excluded
+})
+
+test('proposal tool withholds late result after genuine cancellation or session-generation change', async t => {
+  for (const kind of ['cancel', 'generation']) {
+    const f = await fixture(t), gate = deferred(), entered = deferred(), save = f.state.save
+    f.state.save = async value => { entered.resolve(); await gate.promise; await save(value) }
+    const controller = new AbortController(), agent = { id: scope.sessionId, session: { id: scope.sessionId, header: { id: scope.sessionId, createdAt: 100 } } }
+    const tool = automationProposalTools({ nodeId: scope.nodeId, runtime: f.runtime, assertAgent() {} })[0]
+    const operation = tool.execute({ taskRef, config, expectedRevision: 0 }, { agent, signal: controller.signal })
+    await entered.promise
+    if (kind === 'cancel') controller.abort(); else agent.session.header.createdAt = 200
+    gate.resolve(); await assert.rejects(operation)
+    assert.equal(f.state.value.proposals[0].scope.sessionGeneration, '100', 'saved draft stays bound to old real generation')
+    assert.equal(f.runtime.policies(scope).length, 0); assert.equal(f.stats.calls, 0)
+  }
 })

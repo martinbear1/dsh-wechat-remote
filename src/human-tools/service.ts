@@ -11,6 +11,7 @@ import { registerHumanContext, dshHumanToolsAvailable, humanShareTool, humanMemb
 import { object, humanTaskRef, type HumanTaskRef, type HumanAckWireRequest, type HumanActionRequest, type HumanSurface } from './protocol.js'
 import { createCapabilityManifest } from '../human-workflow/capabilities.js'
 import { WorkflowFileStore } from '../human-workflow/persistence.js'
+import { WorkflowArchiveStore, WORKFLOW_LONG_TERM_BYTES } from '../human-workflow/archive-store.js'
 import { ModeRegistry } from '../human-workflow/mode-package.js'
 import { WorkflowRecords } from '../human-workflow/workflow-records.js'
 import { humanWorkflowTools, registerHumanWorkflowContext } from '../human-workflow/dsh-tools.js'
@@ -22,6 +23,7 @@ import { registerHumanWorkflowSkill } from '../human-workflow/dsh-skill.js'
 import { AssistantRegistry } from '../assistant-presets/registry.js'
 import { createNativeAssistantAdapter } from '../assistant-presets/native-adapter.js'
 import type { NativeAssistantAdapter } from '../assistant-presets/types.js'
+import { AssistantSessionIntents } from '../assistant-presets/session-intents.js'
 import { AssistantBusinessRecords } from '../assistant-presets/business.js'
 import { assistantTools, registerAssistantContext, nativeComposedPreset } from '../assistant-presets/tools.js'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
@@ -33,10 +35,11 @@ import { lifecycleTools } from '../human-workflow/lifecycle-tools.js'
 import { WorkflowAutomation, automationPolicyView, automationPreviewView } from '../human-workflow/automation-engine.js'
 import { createNativeAutomationAdapter, installNativeAutomationGate } from '../human-workflow/automation-native.js'
 import { automationTools } from '../human-workflow/automation-tools.js'
+import { automationProposalTools } from '../human-workflow/automation-proposal-tools.js'
 import type { AutomationConfig, NativeAutomationAdapter } from '../human-workflow/automation-types.js'
 
 export interface HumanToolsConfig { readonly enabled?: boolean; readonly store?: HumanStore
-  readonly assistants?: false | { native?: NativeAssistantAdapter; registryStore?: WorkflowDataStore; businessStore?: WorkflowDataStore }
+  readonly assistants?: false | { native?: NativeAssistantAdapter; registryStore?: WorkflowDataStore; businessStore?: WorkflowDataStore; sessionIntentStore?: WorkflowDataStore }
   readonly workflow?: { transport: WorkflowTransport; modeStore?: WorkflowDataStore; recordStore?: WorkflowDataStore; replicaStore?: WorkflowDataStore
     lifecycleStore?: WorkflowDataStore; receiverKeyStore?: WorkflowDataStore; receiverRoot?: string
     automationStore?: WorkflowDataStore; automationNative?: NativeAutomationAdapter } }
@@ -59,7 +62,7 @@ export class HumanToolsService extends TypertRemoteService {
   private readonly lifetime = new AbortController()
   private unregister?: () => void
   private workflow?: { transport: WorkflowTransport; modes: ModeRegistry; records: WorkflowRecords; replica: WorkflowReplica }
-  private assistants?: { registry: AssistantRegistry; business: AssistantBusinessRecords; native: NativeAssistantAdapter }
+  private assistants?: { registry: AssistantRegistry; business: AssistantBusinessRecords; native: NativeAssistantAdapter; sessionIntents?: AssistantSessionIntents }
   private lifecycle?: { runtime: WorkflowLifecycle; keys: ReceiverKeyring; receiver?: SubmissionReceiver; unsubscribe(): void }
   private automation?: WorkflowAutomation
   private automationReason = '宿主尚不支持受控原生自动处理；手动群任务仍可使用'
@@ -96,7 +99,10 @@ export class HumanToolsService extends TypertRemoteService {
         transport.assertIdentity()
         if (!/^[A-Za-z0-9_-]{16,128}$/.test(transport.nodeId)) throw fail('workflow-node-invalid', '节点身份无效')
         const file = (kind: string) => new WorkflowFileStore(path.join(path.dirname(defaultGateStatePath(this.host)), `human-workflow-${transport.nodeId}-${kind}.json`),
-          kind === 'facts' ? REPLICA_MAX_BYTES : undefined)
+          kind === 'facts' ? REPLICA_MAX_BYTES : ['automation', 'lifecycle'].includes(kind) ? WORKFLOW_LONG_TERM_BYTES : undefined)
+        const archival = (kind: 'automation' | 'lifecycle') => WorkflowArchiveStore.open({ index: file(kind),
+          root: path.join(path.dirname(defaultGateStatePath(this.host)), `human-workflow-${transport.nodeId}-${kind}-archive`),
+          nodeId: transport.nodeId, kind: kind === 'automation' ? 'runs' : 'analyses' })
         const replica = await WorkflowReplica.open(config.workflow.replicaStore || file('facts'), transport)
         let modes: ModeRegistry | undefined, records: WorkflowRecords | undefined
         try {
@@ -124,7 +130,7 @@ export class HumanToolsService extends TypertRemoteService {
                   taskRef, submissionId: delivery.submissionId, claimId: delivery.claimId, version: delivery.version,
                   manifestDigest: delivery.envelope.manifestDigest, cipherDigest: delivery.envelope.cipherDigest }, signal) })
             }
-            runtime = await WorkflowLifecycle.open({ transport, keys, receiver, store: config.workflow.lifecycleStore || file('lifecycle') })
+            runtime = await WorkflowLifecycle.open({ transport, keys, receiver, store: config.workflow.lifecycleStore || await archival('lifecycle') })
             this.lifetime.signal.throwIfAborted(); transport.assertIdentity()
             const current = runtime
             this.lifecycle = { runtime, keys, receiver, unsubscribe: replica.onSynchronized((binding, tasks) => {
@@ -133,11 +139,15 @@ export class HumanToolsService extends TypertRemoteService {
             const nativeAutomation = config.workflow.automationNative || createNativeAutomationAdapter(this.host)
             if (nativeAutomation.probe().supported) {
               try {
-                this.automation = await WorkflowAutomation.open({ nodeId: transport.nodeId, store: config.workflow.automationStore || file('automation'), native: nativeAutomation,
+                this.automation = await WorkflowAutomation.open({ nodeId: transport.nodeId, store: config.workflow.automationStore || await archival('automation'), native: nativeAutomation,
                   authority: { assertIdentity: () => transport.assertIdentity(), inspect: (scope, task, signal, extra) => current.inspectAutomation(scope, task, signal, extra),
                     ready: (scope, task, submission, signal) => current.readyAutomation(scope, task, submission, signal) },
                   tools: (run, policy, authorize, saved) => automationTools({ lifecycle: current, core, run, policy, authorize, saved,
                     ...(receiver && attachments ? { saveImage: (data, mediaType) => attachments.saveImage({ data, mediaType }) } : {}) }) })
+                for (const tool of automationProposalTools({ nodeId: transport.nodeId, runtime: this.automation, assertAgent: exec => {
+                  this.lifetime.signal.throwIfAborted(); transport.assertIdentity()
+                  if (!exec.agent || (this.host.get('agents') as any)?.get(String(exec.agent.id)) !== exec.agent) throw fail('workflow-scope-invalid', '不是当前原生 Agent')
+                } })) unregisterTools.push((this.host.get('tools') as ToolRuntime).register(tool))
               } catch { this.automationReason = '自动处理账本或原生适配不可用；已停止自动运行，手动群任务仍可使用'; await nativeAutomation.close() }
             } else { this.automationReason = nativeAutomation.probe().reason || this.automationReason; await nativeAutomation.close() }
             for (const tool of lifecycleTools({ nodeId: transport.nodeId, lifecycle: runtime, core,
@@ -175,6 +185,24 @@ export class HumanToolsService extends TypertRemoteService {
               })
               this.lifetime.signal.throwIfAborted(); transport.assertIdentity()
               this.assistants = { registry, business, native }
+              // Isolate optional launch-journal failure from existing assistant
+              // tools. The special launch entry then fails closed, not native UI.
+              try {
+                const get = (name: string): any => this.host.get(name as never)
+                this.assistants.sessionIntents = await AssistantSessionIntents.open({ nodeId: transport.nodeId,
+                  store: assistantConfig.sessionIntentStore || file('assistant-session-intents'), assertIdentity: () => transport.assertIdentity(),
+                  installed: async presetId => {
+                    if (registry!.installedForPreset(presetId)) return true
+                    const presets = get('agentPresets')
+                    if (presets?.defaultId !== presetId || typeof presets?.resolve !== 'function') return false
+                    const resolved = await presets.resolve(presetId)
+                    return row(resolved) && resolved.id === presetId && resolved.broken === undefined && presets.defaultId === presetId
+                  },
+                  supported: () => typeof get('sessionController')?.inspect === 'function' && typeof get('sessionController')?.create === 'function'
+                    && typeof get('agentPresets')?.readDocument === 'function',
+                  inspect: (id, signal) => get('sessionController').inspect(id, signal), workspace: id => get('workspaceRegistry')?.get(id) })
+              } catch { /* Never fall back to unjournaled automatic creation. */ }
+              this.lifetime.signal.throwIfAborted(); transport.assertIdentity()
               const assistantOptions = { nodeId: transport.nodeId, registry, business, assertIdentity: () => transport.assertIdentity(),
                 composedPreset: (agent: Parameters<typeof nativeComposedPreset>[1]) => nativeComposedPreset(this.host, agent) }
               for (const tool of assistantTools(assistantOptions)) unregisterTools.push((this.host.get('tools') as ToolRuntime).register(tool))
@@ -225,6 +253,29 @@ export class HumanToolsService extends TypertRemoteService {
         asOf: page.freshness.asOf, freshness: fresh ? 'online' : 'cached', tasks, nextOffset: page.nextOffset }
     })
   }
+  @Remote('workflowReceiptStatus')
+  async workflowReceiptStatus(request: AutomationTaskRequest & { offset?: number }, signal: AbortSignal): Promise<HumanResult> {
+    return this.result(async () => {
+      const scope = await this.workflowScope(request.scope, signal)
+      if (!this.lifecycle) throw fail('receiver-unavailable', '此节点尚未提供持久收件')
+      return this.lifecycle.runtime.receiptStatus(scope, request.taskRef, AbortSignal.any([signal, this.lifetime.signal]), request.offset)
+    })
+  }
+  @Remote('automationProposals')
+  async automationProposals(request: AutomationTaskRequest, signal: AbortSignal): Promise<HumanResult> {
+    return this.result(async () => {
+      const { scope, runtime, active } = await this.automationScope(request, signal)
+      return runtime.proposals(scope, request.taskRef, active)
+    })
+  }
+  @Remote('workflowReceiptRetry')
+  async workflowReceiptRetry(request: AutomationTaskRequest & { submissionId: string; submissionVersion: number; expectedRevision: number }, signal: AbortSignal): Promise<HumanResult> {
+    return this.result(async () => {
+      const scope = await this.workflowScope(request.scope, signal)
+      if (!this.lifecycle) throw fail('receiver-unavailable', '此节点尚未提供持久收件')
+      return this.lifecycle.runtime.retryReceipt(scope, request.taskRef, request, AbortSignal.any([signal, this.lifetime.signal]))
+    })
+  }
   @Remote('automationPreview')
   async automationPreview(request: AutomationPreviewRequest, signal: AbortSignal): Promise<HumanResult> {
     return this.result(async () => { const { scope, runtime, active } = await this.automationScope(request, signal)
@@ -263,7 +314,7 @@ export class HumanToolsService extends TypertRemoteService {
   private async closeAssistants() {
     const assistants = this.assistants
     if (!assistants) return
-    await Promise.all([assistants.native.close(), assistants.registry.close(), assistants.business.close()])
+    await Promise.all([assistants.native.close(), assistants.registry.close(), assistants.business.close(), assistants.sessionIntents?.close()])
   }
   private async assistantRegistry(signal: AbortSignal) {
     await this.use(signal)
@@ -294,6 +345,22 @@ export class HumanToolsService extends TypertRemoteService {
   @Remote('assistantStatus')
   async assistantStatus(request: AssistantVersionRequest, signal: AbortSignal): Promise<HumanResult> {
     return this.result(async () => (await this.assistantRegistry(signal)).status(request, AbortSignal.any([signal, this.lifetime.signal])))
+  }
+  @Remote('assistantSessionPrepare')
+  async assistantSessionPrepare(request: { presetId: string; workspaceId?: string; previousAttemptId?: string }, signal: AbortSignal): Promise<HumanResult> {
+    return this.result(async () => {
+      await this.assistantRegistry(signal)
+      if (!this.assistants?.sessionIntents) throw fail('assistant-session-unavailable', '此节点无法持久核对新建会话；请使用 DSH 原生新会话入口')
+      return this.assistants.sessionIntents.prepare(request, AbortSignal.any([signal, this.lifetime.signal]))
+    })
+  }
+  @Remote('assistantSessionStatus')
+  async assistantSessionStatus(request: { attemptId: string } | { presetId: string; workspaceId?: string }, signal: AbortSignal): Promise<HumanResult> {
+    return this.result(async () => {
+      await this.assistantRegistry(signal)
+      if (!this.assistants?.sessionIntents) throw fail('assistant-session-unavailable', '此节点无法持久核对新建会话；请使用 DSH 原生会话列表')
+      return this.assistants.sessionIntents.status(request, AbortSignal.any([signal, this.lifetime.signal]))
+    })
   }
   private async use(signal: AbortSignal): Promise<HumanToolsCore> {
     signal.throwIfAborted()

@@ -196,6 +196,8 @@ class Adapter implements NativeAssistantAdapter {
       }
       const creator = roster.find(item => item.id === 'cordis' && item.broken === undefined)
       return { supported: basePresets.length > 0, ...(basePresets.length ? {} : { reason: '没有可安全派生的原生基础预设' }), basePresets,
+        ...(typeof env.presets.defaultId === 'string' && /^[a-z][a-z0-9_-]{0,63}$/.test(env.presets.defaultId)
+          && roster.some(item => item.id === env.presets.defaultId && item.broken === undefined) ? { defaultPresetId: env.presets.defaultId } : {}),
         ...(creator ? { creatorPresetId: 'cordis' } : {}) }
     } catch (cause) { return { supported: false, basePresets: [], reason: cause instanceof NativeAdapterError
       ? cause.message : '原生预设能力不可用，请在宿主核对配置' } }

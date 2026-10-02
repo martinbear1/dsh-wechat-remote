@@ -27,7 +27,7 @@ const catalog: WorkflowCapability[] = [
   { id: 'workflow.records', version: 1, status: 'available', description: '持久保存会话内计划和分析引用；不改写参与者事实。', tools: ['human_workflow_save', 'human_workflow_get', 'human_workflow_list'], ownerApproval: false },
   { id: 'submission.receive', version: 1, status: 'blocked', description: '独立离线公钥加密图片，校验后持久收件；用原生图片引用供当前模型读取。', tools: ['human_submission_image'], ownerApproval: false, reason: '需要原生图片存储/解码和任务收件服务。' },
   { id: 'result.private', version: 1, status: 'blocked', description: '个人结果经主人核对发布，服务端按提交者 ACL 返回；云端可读明文结果。', tools: ['human_task_prepare_review'], ownerApproval: true, reason: '需要任务生命周期服务。' },
-  { id: 'automation.run', version: 1, status: 'blocked', description: '主人另行批准指定任务轮次、次数和时限后，逐份生成本地分析和待审核反馈。模式启用不等于自动处理授权；不自动发布、订正或催交。', tools: [], ownerApproval: true, reason: '需要可核对的原生运行接口和持久自动处理账本。' },
+  { id: 'automation.run', version: 1, status: 'blocked', description: 'Agent 可提议手动、逐份或指定名单到齐规则，主人精确预览批准后才生效。到齐规则一次冻结版本并逐份分析，不是跨成员汇总；不自动发布、订正或催交。', tools: ['human_automation_rules', 'human_automation_propose'], ownerApproval: true, reason: '需要可核对的原生运行接口和持久自动处理账本。' },
 ]
 export function createCapabilityManifest(nodeId: string, availability: CapabilityAvailability = {}): CapabilityManifest {
   if (!identifier(nodeId)) throw fail('workflow-scope-invalid', '节点标识无效')

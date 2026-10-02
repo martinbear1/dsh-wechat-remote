@@ -27,9 +27,10 @@ export declare function bounded(value: unknown, maxBytes?: number): void;
 export declare class StateQueue<T> {
     private readonly store;
     private state;
+    private maxBytes;
     private tail;
     private stopped;
-    constructor(store: WorkflowDataStore, state: T);
+    constructor(store: WorkflowDataStore, state: T, maxBytes?: number);
     current(): T;
     private available;
     close(): Promise<void>;

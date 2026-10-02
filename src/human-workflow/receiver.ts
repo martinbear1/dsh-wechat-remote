@@ -10,6 +10,7 @@ import { canonicalSubmission, decryptSubmission, sha256, submissionAnswers, subm
 interface Receipt {
   schema: 'human.receiver.receipt.v1'; nodeId: string; origin: WorkflowScope; context: SubmissionContext
   envelope: SubmissionEnvelope; manifest: SubmissionManifest; receivedAt: number; acked: boolean
+  claimId?: string
 }
 export interface ReceiverDelivery {
   claimId: string; leaseExpiresAt: number; submissionId: string; version: number
@@ -63,9 +64,10 @@ export class SubmissionReceiver {
     if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 64 * 1024) throw fail('receiver-store-invalid', '持久收件记录无效')
     let raw: unknown
     try { raw = JSON.parse(await readFile(file, 'utf8')) } catch { throw fail('receiver-store-invalid', '持久收件记录不可读取') }
-    if (!row(raw) || !exact(raw, ['schema', 'nodeId', 'origin', 'context', 'envelope', 'manifest', 'receivedAt', 'acked'])
+    if (!row(raw) || !exact(raw, ['schema', 'nodeId', 'origin', 'context', 'envelope', 'manifest', 'receivedAt', 'acked'], ['claimId'])
       || raw.schema !== 'human.receiver.receipt.v1' || raw.nodeId !== this.options.nodeId || !scopeValid(raw.origin)
-      || raw.origin.nodeId !== this.options.nodeId || !Number.isSafeInteger(raw.receivedAt) || Number(raw.receivedAt) < 0 || typeof raw.acked !== 'boolean')
+      || raw.origin.nodeId !== this.options.nodeId || !Number.isSafeInteger(raw.receivedAt) || Number(raw.receivedAt) < 0 || typeof raw.acked !== 'boolean'
+      || raw.claimId !== undefined && !identifier(raw.claimId))
       throw fail('receiver-store-invalid', '持久收件记录不属于此节点')
     const context = submissionContext(raw.context), envelope = submissionEnvelope(raw.envelope), manifest = submissionManifest(raw.manifest)
     if (envelope.keyId !== context.keyId || canonicalSubmission(manifest.context) !== canonicalSubmission(context)) throw fail('receiver-store-invalid', '持久收件关联无效')
@@ -141,21 +143,58 @@ export class SubmissionReceiver {
         await mkdir(stage, { mode: 0o700 }); await this.directory(stageName)
         await writeNew(path.join(stage, 'payload.box'), cipher)
         receipt = { schema: 'human.receiver.receipt.v1', nodeId: this.options.nodeId, origin: copy(origin), context, envelope,
-          manifest: decoded.manifest, receivedAt: (this.options.now ?? Date.now)(), acked: false }
+          manifest: decoded.manifest, receivedAt: (this.options.now ?? Date.now)(), acked: false, claimId: delivery.claimId }
         await writeNew(path.join(stage, 'receipt.json'), JSON.stringify(receipt)); await syncDirectory(stage)
         this.check(active); await rename(stage, destination); await syncDirectory(this.root)
       }
       this.check(active)
+      if (receipt.claimId !== delivery.claimId) { receipt.claimId = delivery.claimId; await this.saveReceipt(destination, receipt) }
       // The disk receipt is authoritative before this network operation. A
       // lost response repeats only ACK, never download, model run, or publish.
       const answer = await this.options.ack(origin, taskRef, delivery, active); this.check(active)
       if (!row(answer) || !row(answer.delivery) || answer.delivery.state !== 'received' || answer.delivery.submissionId !== context.submissionId
         || answer.delivery.version !== context.version || answer.delivery.manifestDigest !== envelope.manifestDigest
         || answer.delivery.cipherDigest !== envelope.cipherDigest) throw fail('receiver-ack-invalid', '云端尚未确认持久收件回执')
-      const temporary = path.join(destination, `receipt.json.${randomBytes(12).toString('hex')}.tmp`)
-      await writeNew(temporary, JSON.stringify({ ...receipt, acked: true })); await rename(temporary, path.join(destination, 'receipt.json')); await syncDirectory(destination)
+      await this.saveReceipt(destination, { ...receipt, acked: true })
       this.check(active)
       return { submissionId: context.submissionId, version: context.version, state: 'received', artifactRef: name }
+    })
+  }
+  private async saveReceipt(destination: string, receipt: Receipt) {
+    const temporary = path.join(destination, `receipt.json.${randomBytes(12).toString('hex')}.tmp`)
+    await writeNew(temporary, JSON.stringify(receipt)); await rename(temporary, path.join(destination, 'receipt.json')); await syncDirectory(destination)
+  }
+  /** Restore only ACK authority from a complete local original, never a new
+   * download ticket. Older receipts without claimId remain compatible but do
+   * not invent proof. All bytes and bound fields are verified before the call. */
+  recoverReceipt(origin: WorkflowScope, taskRef: HumanTaskRef, bindingKey: string, submissionId: string, version: number,
+    claim: (proof: { claimId: string; version: number; manifestDigest: string; cipherDigest: string }) => Promise<unknown>, signal: AbortSignal): Promise<boolean> {
+    return this.serial(async () => {
+      this.check(signal); assertScope(origin, this.options.nodeId)
+      for (const name of await readdir(this.root)) {
+        if (!/^[a-f0-9]{64}$/.test(name)) continue
+        const dir = await this.directory(name), receipt = await this.readReceipt(dir), context = receipt.context
+        if (context.submissionId !== submissionId || context.version !== version || context.bindingKey !== bindingKey
+          || !sameScope(receipt.origin, origin) || !sameTaskRef(context.taskRef, taskRef)) continue
+        if (!receipt.claimId) return false
+        await this.verified(dir, receipt); this.check(signal)
+        const proof = { claimId: receipt.claimId, version, manifestDigest: receipt.envelope.manifestDigest, cipherDigest: receipt.envelope.cipherDigest }
+        const result = await claim(proof); this.check(signal)
+        if (!row(result) || !row(result.delivery)) throw fail('receiver-ack-invalid', '持久收件恢复结果无效')
+        const delivery = result.delivery
+        if (delivery.submissionId !== submissionId || delivery.version !== version || delivery.manifestDigest !== proof.manifestDigest || delivery.cipherDigest !== proof.cipherDigest)
+          throw fail('receiver-ack-invalid', '持久收件恢复版本不符')
+        if (delivery.state !== 'received') {
+          if (delivery.state !== 'receipt-only' || delivery.claimId !== proof.claimId || !Number.isSafeInteger(delivery.leaseExpiresAt)
+            || Number(delivery.leaseExpiresAt) <= (this.options.now ?? Date.now)() || delivery.download !== undefined) throw fail('receiver-ack-invalid', '持久收件恢复租约无效')
+          const answer = await this.options.ack(origin, taskRef, { claimId: proof.claimId, leaseExpiresAt: Number(delivery.leaseExpiresAt), submissionId, version,
+            context, envelope: receipt.envelope, values: receipt.manifest.answers, download: undefined }, signal)
+          if (!row(answer) || !row(answer.delivery) || answer.delivery.state !== 'received' || answer.delivery.submissionId !== submissionId || answer.delivery.version !== version
+            || answer.delivery.manifestDigest !== proof.manifestDigest || answer.delivery.cipherDigest !== proof.cipherDigest) throw fail('receiver-ack-invalid', '云端尚未确认持久收件恢复')
+        }
+        this.check(signal); await this.saveReceipt(dir, { ...receipt, acked: true }); return true
+      }
+      return false
     })
   }
   read(origin: WorkflowScope, submissionId: string, bindingKey: string, signal: AbortSignal) {

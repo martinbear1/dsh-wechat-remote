@@ -3,16 +3,16 @@ import type { AssistantStore } from './assistant-store.js'
 import styles from './HarnessRemoteSettings.module.css'
 
 /** Registered inside the plugin's official Settings slot, never a shell patch. */
-export function AssistantPresetsPanel({ store, start }: { store: AssistantStore; start?: (presetId: string, lifetime?: AbortSignal) => Promise<void> }): JSX.Element {
+export function AssistantPresetsPanel({ store, start }: { store: AssistantStore; start?: (presetId: string, lifetime?: AbortSignal, newIntent?: boolean) => Promise<void> }): JSX.Element {
   const { catalog, preview, busy, message, error } = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
   const [launching, setLaunching] = useState(false), [launchError, setLaunchError] = useState('')
   const lifecycle = useRef<AbortController>()
   useEffect(() => { const controller = new AbortController(); lifecycle.current = controller; return () => controller.abort() }, [])
-  const open = async (presetId: string) => {
+  const open = async (presetId: string, newIntent = false) => {
     if (!start || launching || !lifecycle.current || lifecycle.current.signal.aborted) return
     const signal = lifecycle.current.signal
     setLaunching(true); setLaunchError('')
-    try { await start(presetId, signal) } catch (e) { if (!signal.aborted) setLaunchError(e instanceof Error ? e.message : '请检查原生会话列表') }
+    try { await start(presetId, signal, newIntent) } catch (e) { if (!signal.aborted) setLaunchError(e instanceof Error ? e.message : '请检查原生会话列表') }
     finally { if (!signal.aborted) setLaunching(false) }
   }
   return <section className={styles.companionCard} aria-label="工作助手">
@@ -37,10 +37,11 @@ export function AssistantPresetsPanel({ store, start }: { store: AssistantStore;
       <p>{item.name} · 第 {item.version} 版 · {item.state === 'installed' ? '已生效' : item.state === 'draft' ? '待确认' : '待核对'}</p>
       {item.state === 'draft' ? <button type="button" disabled={busy} onClick={() => void store.preview(item.id, item.version)}>预览</button>
         : <button type="button" disabled={busy} onClick={() => void store.verify(item.id, item.version)}>核对安装状态</button>}
-      {item.state === 'installed' && start ? <button type="button" disabled={busy || launching} onClick={() => void open(item.presetId)}>开始使用此助手</button> : null}
+      {item.state === 'installed' && start ? <><button type="button" disabled={busy || launching} onClick={() => void open(item.presetId)}>开始或打开已创建会话</button>
+        <button type="button" disabled={busy || launching} onClick={() => void open(item.presetId, true)}>另开独立工作会话</button></> : null}
     </div>)}
     {message ? <p role="status">{message}</p> : null}
     {error || launchError ? <p role="alert">{error || launchError}</p> : null}
-    <small>此入口首次创建会话，重复点击返回刚创建的会话。如需另一个工作实例，可在 DSH 新会话中选择同一预设。不会改动默认模式或已有会话。</small>
+    <small>普通入口跨重启核对并打开已创建会话；明确选择“另开独立工作会话”才另建实例。结果未知时只核对，不自动重建。不会改动默认模式或已有会话。</small>
   </section>
 }

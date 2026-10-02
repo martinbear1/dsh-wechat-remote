@@ -68,7 +68,7 @@ export function apply(ctx: HarnessRemoteClientContext): void {
 
   const store = new RemotePageStore(describeHost, callManagement)
   let connectionGeneration = 0
-  const assistants = new AssistantStore(async (method, request) => {
+  const assistantCall: import('./assistant-store.js').AssistantCall = async (method, request) => {
     const generation = connectionGeneration
     const response = await ctx.connection.rpc.call('/api', `humanTools/${method}`, { args: { request } })
     if (generation !== connectionGeneration) throw new Error('电脑连接已变化，请重新查看助手目录')
@@ -77,8 +77,9 @@ export function apply(ctx: HarnessRemoteClientContext): void {
     if (!result?.ok || typeof result.valueJson !== 'string' || result.valueJson.length > 256 * 1024)
       throw new Error(result?.error?.message || '此节点尚未提供助手能力')
     return JSON.parse(result.valueJson)
-  })
-  const assistantNavigation = nativeAssistantNavigation(name => ctx.get(name))
+  }
+  const assistants = new AssistantStore(assistantCall)
+  const assistantNavigation = nativeAssistantNavigation(name => ctx.get(name), assistantCall)
   ctx.effect(() => {
     const remove = ctx.on('connection/reset', () => { connectionGeneration++; assistants.reset(); assistantNavigation.reset() })
     return () => { connectionGeneration++; remove(); assistants.dispose(); assistantNavigation.reset() }

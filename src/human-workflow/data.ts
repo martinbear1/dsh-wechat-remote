@@ -35,7 +35,7 @@ export function bounded(value: unknown, maxBytes = 2 * 1024 * 1024): void {
 export class StateQueue<T> {
   private tail: Promise<unknown> = Promise.resolve()
   private stopped = false
-  constructor(private readonly store: WorkflowDataStore, private state: T) {}
+  constructor(private readonly store: WorkflowDataStore, private state: T, private maxBytes = 2 * 1024 * 1024) {}
   current(): T { this.available(); return this.state }
   private available(): void { if (this.stopped) throw fail('workflow-disabled', '工作流功能已关闭') }
   close(): Promise<void> { this.stopped = true; return this.tail.then(() => {}) }
@@ -43,7 +43,7 @@ export class StateQueue<T> {
     const result = this.tail.then(async () => {
       this.available(); signal.throwIfAborted()
       const next = copy(this.state), result = change(next)
-      bounded(next); signal.throwIfAborted()
+      bounded(next, this.maxBytes); signal.throwIfAborted()
       try { await this.store.save(next) } catch (cause) { this.stopped = true; throw cause }
       this.state = next
       this.available(); signal.throwIfAborted()

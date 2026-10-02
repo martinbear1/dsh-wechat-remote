@@ -43,6 +43,16 @@ export declare class SubmissionReceiver {
     private recover;
     private capacity;
     receive(origin: WorkflowScope, taskRef: HumanTaskRef, bindingKey: string, raw: unknown, signal: AbortSignal): Promise<unknown>;
+    private saveReceipt;
+    /** Restore only ACK authority from a complete local original, never a new
+     * download ticket. Older receipts without claimId remain compatible but do
+     * not invent proof. All bytes and bound fields are verified before the call. */
+    recoverReceipt(origin: WorkflowScope, taskRef: HumanTaskRef, bindingKey: string, submissionId: string, version: number, claim: (proof: {
+        claimId: string;
+        version: number;
+        manifestDigest: string;
+        cipherDigest: string;
+    }) => Promise<unknown>, signal: AbortSignal): Promise<boolean>;
     read(origin: WorkflowScope, submissionId: string, bindingKey: string, signal: AbortSignal): Promise<{
         artifactRef: string;
         receivedAt: number;

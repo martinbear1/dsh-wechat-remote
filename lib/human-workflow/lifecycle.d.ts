@@ -3,6 +3,7 @@ import { type WorkflowDataStore, type WorkflowScope } from './data.js';
 import type { WorkflowTransport } from './transport.js';
 import { ReceiverKeyring } from './receiver-keyring.js';
 import { SubmissionReceiver } from './receiver.js';
+import type { AutomationSnapshot, AutomationSubmission } from './automation-types.js';
 export interface NodeBinding {
     schema: 'human.node.binding.v1';
     nodeId: string;
@@ -72,6 +73,13 @@ export declare class WorkflowLifecycle {
         manifest: import("./submission-crypto.js").SubmissionManifest;
         image: Uint8Array;
     }>;
+    /** Fresh signed authority for automatic work. This is intentionally not the
+     * local replica and not a timestamp supplied by the phone or workstation. */
+    inspectAutomation(scope: WorkflowScope, taskRef: HumanTaskRef, signal: AbortSignal, extra?: {
+        offset?: number;
+        submissionId?: string;
+    }): Promise<AutomationSnapshot>;
+    readyAutomation(scope: WorkflowScope, taskRef: HumanTaskRef, submission: AutomationSubmission, signal: AbortSignal): Promise<boolean>;
     saveAnalysis(scope: WorkflowScope, taskRef: HumanTaskRef, input: {
         submissionId: string;
         submissionVersion: number;

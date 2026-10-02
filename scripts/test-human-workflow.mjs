@@ -97,6 +97,20 @@ test('fixed data language rejects executable/render/network extensions and enfor
   assert.equal(modeDigest(parsed), modeDigest(Object.fromEntries(Object.entries(parsed).reverse())), 'digest is content/key-order stable')
 })
 
+test('automatic capability follows native availability but mode activation never grants execution or job tools', () => {
+  const manifest = createCapabilityManifest(scope.nodeId, { 'automation.run': { status: 'available' } })
+  const capability = manifest.capabilities.find(item => item.id === 'automation.run')
+  assert.equal(capability.status, 'available')
+  assert.equal(capability.ownerApproval, true)
+  assert.deepEqual(capability.tools, [], 'job-closed tools are not granted to ordinary Agent contexts')
+  const mode = modePackage(); mode.requiredCapabilities.push('automation.run')
+  assert.equal(validateModePackage(mode, manifest).ok, true)
+  assert.equal(mode.automation, 'manual')
+  mode.allowedTools.push('human_automation_save')
+  assert.equal(validateModePackage(mode, manifest).ok, false)
+  assert.equal(createCapabilityManifest(scope.nodeId).capabilities.find(item => item.id === 'automation.run').status, 'blocked')
+})
+
 test('draft -> preview -> exact owner approval, CAS and single-purpose preview are enforced', async () => {
   const f = await fixture(), draft = await f.modes.draft(scope, { package: modePackage() }, signal), ref = reference(draft)
   assert.equal(f.modes.list(scope).activation.mode, null)

@@ -557,7 +557,7 @@ test('cold Code Mode history waits for the single ledger initialization and incl
 })
 
 test('lifecycle draft tools retain the same cold history initialization barrier', async t => {
-  for (const name of ['human_task_create', 'human_task_prepare_round', 'human_task_prepare_review', 'human_task_prepare_reminder']) {
+  for (const name of ['human_task_create', 'human_task_prepare_round', 'human_task_prepare_review', 'human_task_prepare_reminder', 'human_automation_save']) {
     await t.test(name, async t => {
       const cold = await coldProjection(t), fetched = deferred()
       const entries = humanProjectionEntries()

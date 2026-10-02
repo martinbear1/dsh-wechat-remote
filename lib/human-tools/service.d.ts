@@ -1,10 +1,11 @@
 import type { Context } from '@deepseek-ai/cordis';
 import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol';
 import { type HumanStore } from './core.js';
-import { type HumanAckWireRequest, type HumanActionRequest, type HumanSurface } from './protocol.js';
+import { type HumanTaskRef, type HumanAckWireRequest, type HumanActionRequest, type HumanSurface } from './protocol.js';
 import { type WorkflowDataStore } from '../human-workflow/data.js';
 import type { WorkflowTransport } from '../human-workflow/transport.js';
 import type { NativeAssistantAdapter } from '../assistant-presets/types.js';
+import type { AutomationConfig, NativeAutomationAdapter } from '../human-workflow/automation-types.js';
 export interface HumanToolsConfig {
     readonly enabled?: boolean;
     readonly store?: HumanStore;
@@ -21,7 +22,28 @@ export interface HumanToolsConfig {
         lifecycleStore?: WorkflowDataStore;
         receiverKeyStore?: WorkflowDataStore;
         receiverRoot?: string;
+        automationStore?: WorkflowDataStore;
+        automationNative?: NativeAutomationAdapter;
     };
+}
+export interface AutomationTaskRequest {
+    scope: string;
+    taskRef: HumanTaskRef;
+}
+export interface AutomationPreviewRequest extends AutomationTaskRequest {
+    config: AutomationConfig;
+    expectedRevision: number;
+}
+export interface AutomationApproveRequest extends AutomationTaskRequest {
+    previewId: string;
+    digest: string;
+    expectedRevision: number;
+}
+export interface AutomationPauseRequest extends AutomationTaskRequest {
+    expectedRevision: number;
+}
+export interface AutomationStatusRequest extends AutomationTaskRequest {
+    cursor?: string;
 }
 export interface ModeVersionRequest {
     scope: string;
@@ -66,9 +88,20 @@ export declare class HumanToolsService extends TypertRemoteService {
     private workflow?;
     private assistants?;
     private lifecycle?;
+    private automation?;
+    private automationReason;
     constructor(host: Context, config?: HumanToolsConfig);
     private initialize;
     private closeLifecycle;
+    private automationScope;
+    automationList(request: {
+        scope: string;
+        offset?: number;
+    }, signal: AbortSignal): Promise<HumanResult>;
+    automationPreview(request: AutomationPreviewRequest, signal: AbortSignal): Promise<HumanResult>;
+    automationApprove(request: AutomationApproveRequest, signal: AbortSignal): Promise<HumanResult>;
+    automationPause(request: AutomationPauseRequest, signal: AbortSignal): Promise<HumanResult>;
+    automationStatus(request: AutomationStatusRequest, signal: AbortSignal): Promise<HumanResult>;
     workflowDraft(request: HumanActionRequest, signal: AbortSignal): Promise<HumanResult>;
     private closeAssistants;
     private assistantRegistry;

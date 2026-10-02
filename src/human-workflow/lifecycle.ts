@@ -4,6 +4,7 @@ import type { WorkflowTransport } from './transport.js'
 import { ReceiverKeyring } from './receiver-keyring.js'
 import { SubmissionReceiver } from './receiver.js'
 import { canonicalSubmission, sha256 } from './submission-crypto.js'
+import type { AutomationSnapshot, AutomationSubmission } from './automation-types.js'
 
 export interface NodeBinding { schema: 'human.node.binding.v1'; nodeId: string; ownerSubject: string; accountInstance: string; generation: string }
 export function receiverBinding(value: unknown, nodeId: string): { binding: NodeBinding; bindingKey: string } {
@@ -192,6 +193,25 @@ export class WorkflowLifecycle {
     const result = await this.options.receiver.read(scope, submissionId, String(page.bindingKey), this.active(signal))
     if (!sameTaskRef(result.manifest.context.taskRef, taskRef) || item.version !== result.manifest.context.version) throw fail('submission-unavailable', '提交版本已变化')
     return result
+  }
+  /** Fresh signed authority for automatic work. This is intentionally not the
+   * local replica and not a timestamp supplied by the phone or workstation. */
+  async inspectAutomation(scope: WorkflowScope, taskRef: HumanTaskRef, signal: AbortSignal, extra: { offset?: number; submissionId?: string } = {}): Promise<AutomationSnapshot> {
+    const page = await this.get(scope, taskRef, signal, { ...extra, limit: 20 })
+    if (!revision(page.asOf) || !plain(page.bindingKey, 64)) throw fail('automation-authority-unavailable', '服务端尚不提供新鲜自动处理授权时间')
+    const submissions: AutomationSubmission[] = (page.submissions as Record<string, unknown>[]).map(s => {
+      if (!plain(s.id, 128) || !plain(s.roundId, 128) || !version(s.version) || !plain(s.state, 32) || !plain(s.delivery, 32)
+        || s.acceptedAt !== null && !revision(s.acceptedAt) || !row(s.values)) throw fail('automation-authority-invalid', '提交授权记录无效')
+      return copy(s) as unknown as AutomationSubmission
+    })
+    return { bindingKey: String(page.bindingKey), asOf: page.asOf, revision: Number(page.revision), rounds: copy(page.rounds as Record<string, unknown>[]), submissions, nextOffset: page.nextOffset as number | null }
+  }
+  async readyAutomation(scope: WorkflowScope, taskRef: HumanTaskRef, submission: AutomationSubmission, signal: AbortSignal): Promise<boolean> {
+    if (submission.state !== 'accepted') return false
+    if (submission.delivery === 'not-required') return true
+    if (submission.delivery !== 'received') return false
+    const received = await this.readImage(scope, taskRef, submission.id, signal)
+    return received.manifest.context.version === submission.version && received.manifest.context.roundId === submission.roundId
   }
   async saveAnalysis(scope: WorkflowScope, taskRef: HumanTaskRef, input: { submissionId: string; submissionVersion: number; expectedRevision: number; text: string }, signal: AbortSignal) {
     const active = this.active(signal)

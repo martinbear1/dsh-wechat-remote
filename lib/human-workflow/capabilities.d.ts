@@ -24,7 +24,7 @@ export interface CapabilityManifest {
         bodyCharacters: 1000;
     };
 }
-export type CapabilityAvailability = Partial<Record<'surface.reading-confirmation' | 'action.select-members' | 'action.remind-selected-pending' | 'task.query' | 'recipient.query' | 'surface.form-collection' | 'task.lifecycle' | 'submission.receive' | 'result.private', {
+export type CapabilityAvailability = Partial<Record<'surface.reading-confirmation' | 'action.select-members' | 'action.remind-selected-pending' | 'task.query' | 'recipient.query' | 'surface.form-collection' | 'task.lifecycle' | 'submission.receive' | 'result.private' | 'automation.run', {
     status: CapabilityStatus;
     reason?: string;
 }>>;

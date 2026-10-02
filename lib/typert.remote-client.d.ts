@@ -7,7 +7,7 @@ import type { WechatAttachmentBatchRequest, WechatAttachmentBatchResult } from '
 import type { WechatDirectoryCreateRequest, WechatDirectoryCreateResult, WechatDirectoryListRequest, WechatDirectoryListResult, WechatDirectoryRootsRequest, WechatDirectoryRootsResult } from '@harness-remote/dsh-wechat-remote/directory'
 import type { WechatHistoryWindowRequest, WechatHistoryWindowResult } from '@harness-remote/dsh-wechat-remote/history'
 import type { WechatHostDescribeRequest, WechatHostDescribeResult } from '@harness-remote/dsh-wechat-remote/host-info'
-import type { AssistantDraftRequest, AssistantInstallRequest, AssistantVersionRequest, HumanResult, ModeApprovalRequest, ModeVersionRequest } from '@harness-remote/dsh-wechat-remote/human-tools'
+import type { AssistantDraftRequest, AssistantInstallRequest, AssistantVersionRequest, AutomationApproveRequest, AutomationPauseRequest, AutomationPreviewRequest, AutomationStatusRequest, HumanResult, ModeApprovalRequest, ModeVersionRequest } from '@harness-remote/dsh-wechat-remote/human-tools'
 import type { HumanAckWireRequest, HumanActionRequest } from '@harness-remote/dsh-wechat-remote/human-tools/protocol'
 import type { ResourceResult } from '@harness-remote/dsh-wechat-remote/resources'
 
@@ -32,6 +32,11 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     assistantInstall: (request: AssistantInstallRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     assistantPreview: (request: AssistantVersionRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     assistantStatus: (request: AssistantVersionRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
+    automationApprove: (request: AutomationApproveRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
+    automationList: (request: { scope: string; offset?: number; }, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
+    automationPause: (request: AutomationPauseRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
+    automationPreview: (request: AutomationPreviewRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
+    automationStatus: (request: AutomationStatusRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     capabilities: (request: { scope: string; }, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     claim: (request: HumanActionRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     modeApprove: (request: ModeApprovalRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
@@ -74,6 +79,11 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'humanTools/assistantInstall': (request: AssistantInstallRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     'humanTools/assistantPreview': (request: AssistantVersionRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     'humanTools/assistantStatus': (request: AssistantVersionRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
+    'humanTools/automationApprove': (request: AutomationApproveRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
+    'humanTools/automationList': (request: { scope: string; offset?: number; }, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
+    'humanTools/automationPause': (request: AutomationPauseRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
+    'humanTools/automationPreview': (request: AutomationPreviewRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
+    'humanTools/automationStatus': (request: AutomationStatusRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     'humanTools/capabilities': (request: { scope: string; }, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     'humanTools/claim': (request: HumanActionRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     'humanTools/modeApprove': (request: ModeApprovalRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>

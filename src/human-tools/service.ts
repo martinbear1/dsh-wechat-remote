@@ -8,7 +8,7 @@ import { defaultGateStatePath } from '../agent-metadata.js'
 import { HumanToolsCore, type HumanStore } from './core.js'
 import { HumanFileStore } from './store.js'
 import { registerHumanContext, dshHumanToolsAvailable, humanShareTool, humanMembersTool, humanRemindTool } from './dsh.js'
-import { object, type HumanAckWireRequest, type HumanActionRequest, type HumanSurface } from './protocol.js'
+import { object, humanTaskRef, type HumanTaskRef, type HumanAckWireRequest, type HumanActionRequest, type HumanSurface } from './protocol.js'
 import { createCapabilityManifest } from '../human-workflow/capabilities.js'
 import { WorkflowFileStore } from '../human-workflow/persistence.js'
 import { ModeRegistry } from '../human-workflow/mode-package.js'
@@ -30,11 +30,21 @@ import { SubmissionReceiver } from '../human-workflow/receiver.js'
 import { downloadSubmission } from '../human-workflow/receiver-download.js'
 import { WorkflowLifecycle } from '../human-workflow/lifecycle.js'
 import { lifecycleTools } from '../human-workflow/lifecycle-tools.js'
+import { WorkflowAutomation, automationPolicyView, automationPreviewView } from '../human-workflow/automation-engine.js'
+import { createNativeAutomationAdapter, installNativeAutomationGate } from '../human-workflow/automation-native.js'
+import { automationTools } from '../human-workflow/automation-tools.js'
+import type { AutomationConfig, NativeAutomationAdapter } from '../human-workflow/automation-types.js'
 
 export interface HumanToolsConfig { readonly enabled?: boolean; readonly store?: HumanStore
   readonly assistants?: false | { native?: NativeAssistantAdapter; registryStore?: WorkflowDataStore; businessStore?: WorkflowDataStore }
   readonly workflow?: { transport: WorkflowTransport; modeStore?: WorkflowDataStore; recordStore?: WorkflowDataStore; replicaStore?: WorkflowDataStore
-    lifecycleStore?: WorkflowDataStore; receiverKeyStore?: WorkflowDataStore; receiverRoot?: string } }
+    lifecycleStore?: WorkflowDataStore; receiverKeyStore?: WorkflowDataStore; receiverRoot?: string
+    automationStore?: WorkflowDataStore; automationNative?: NativeAutomationAdapter } }
+export interface AutomationTaskRequest { scope: string; taskRef: HumanTaskRef }
+export interface AutomationPreviewRequest extends AutomationTaskRequest { config: AutomationConfig; expectedRevision: number }
+export interface AutomationApproveRequest extends AutomationTaskRequest { previewId: string; digest: string; expectedRevision: number }
+export interface AutomationPauseRequest extends AutomationTaskRequest { expectedRevision: number }
+export interface AutomationStatusRequest extends AutomationTaskRequest { cursor?: string }
 export interface ModeVersionRequest { scope: string; id: string; version: number }
 export interface ModeApprovalRequest extends ModeVersionRequest { digest: string; previewId: string; expectedActivationVersion: number }
 export interface AssistantVersionRequest { id: string; version: number }
@@ -51,12 +61,20 @@ export class HumanToolsService extends TypertRemoteService {
   private workflow?: { transport: WorkflowTransport; modes: ModeRegistry; records: WorkflowRecords; replica: WorkflowReplica }
   private assistants?: { registry: AssistantRegistry; business: AssistantBusinessRecords; native: NativeAssistantAdapter }
   private lifecycle?: { runtime: WorkflowLifecycle; keys: ReceiverKeyring; receiver?: SubmissionReceiver; unsubscribe(): void }
+  private automation?: WorkflowAutomation
+  private automationReason = '宿主尚不支持受控原生自动处理；手动群任务仍可使用'
   constructor(private readonly host: Context, config: HumanToolsConfig = {}) {
     super(host, 'humanTools')
+    // Installed before optional/async initialization and retained when disabled:
+    // persisted plugin inbox input is never ambient permission to run again.
+    const removeAutomationGate = installNativeAutomationGate(host)
     host.effect(() => async () => {
       this.lifetime.abort(disabled())
       const drained = this.core?.close()
-      try { this.unregister?.() } finally { await Promise.all([drained, this.workflow?.modes.close(), this.workflow?.records.close(), this.workflow?.replica.close(), this.closeAssistants(), this.closeLifecycle()]) }
+      try { this.unregister?.() } finally {
+        try { await Promise.all([drained, this.workflow?.modes.close(), this.workflow?.records.close(), this.workflow?.replica.close(), this.closeAssistants(), this.closeLifecycle()]) }
+        finally { removeAutomationGate() }
+      }
     })
     if (!config.enabled) return
     this.ready = this.initialize(config)
@@ -83,6 +101,7 @@ export class HumanToolsService extends TypertRemoteService {
         let modes: ModeRegistry | undefined, records: WorkflowRecords | undefined
         try {
           const capabilities = () => { transport.assertIdentity(); return createCapabilityManifest(transport.nodeId, { 'task.query': { status: 'available' },
+            'automation.run': this.automation?.capability().supported ? { status: 'available' } : { status: 'blocked', reason: this.automationReason },
             ...(this.lifecycle ? { 'surface.form-collection': { status: 'available' as const }, 'task.lifecycle': { status: 'available' as const },
               'recipient.query': { status: 'available' as const }, 'result.private': { status: 'available' as const },
               ...(this.lifecycle.receiver ? { 'submission.receive': { status: 'available' as const } } : {}) } : {}) }) }
@@ -109,8 +128,18 @@ export class HumanToolsService extends TypertRemoteService {
             this.lifetime.signal.throwIfAborted(); transport.assertIdentity()
             const current = runtime
             this.lifecycle = { runtime, keys, receiver, unsubscribe: replica.onSynchronized((binding, tasks) => {
-              void current.synced(binding, tasks, this.lifetime.signal).catch(() => {})
+              void current.synced(binding, tasks, this.lifetime.signal).then(() => this.automation?.drive(this.lifetime.signal)).catch(() => {})
             }) }
+            const nativeAutomation = config.workflow.automationNative || createNativeAutomationAdapter(this.host)
+            if (nativeAutomation.probe().supported) {
+              try {
+                this.automation = await WorkflowAutomation.open({ nodeId: transport.nodeId, store: config.workflow.automationStore || file('automation'), native: nativeAutomation,
+                  authority: { assertIdentity: () => transport.assertIdentity(), inspect: (scope, task, signal, extra) => current.inspectAutomation(scope, task, signal, extra),
+                    ready: (scope, task, submission, signal) => current.readyAutomation(scope, task, submission, signal) },
+                  tools: (run, policy, authorize, saved) => automationTools({ lifecycle: current, core, run, policy, authorize, saved,
+                    ...(receiver && attachments ? { saveImage: (data, mediaType) => attachments.saveImage({ data, mediaType }) } : {}) }) })
+              } catch { this.automationReason = '自动处理账本或原生适配不可用；已停止自动运行，手动群任务仍可使用'; await nativeAutomation.close() }
+            } else { this.automationReason = nativeAutomation.probe().reason || this.automationReason; await nativeAutomation.close() }
             for (const tool of lifecycleTools({ nodeId: transport.nodeId, lifecycle: runtime, core,
               assertAgent: exec => {
                 this.lifetime.signal.throwIfAborted(); transport.assertIdentity()
@@ -165,7 +194,58 @@ export class HumanToolsService extends TypertRemoteService {
   }
   private async closeLifecycle() {
     const current = this.lifecycle; if (!current) return
-    current.unsubscribe(); await Promise.all([current.runtime.close(), current.receiver?.close()]); await current.keys.close()
+    current.unsubscribe(); await this.automation?.close(); await Promise.all([current.runtime.close(), current.receiver?.close()]); await current.keys.close()
+  }
+  private async automationScope(request: AutomationTaskRequest, signal: AbortSignal) {
+    const scope = await this.workflowScope(request.scope, signal)
+    if (!humanTaskRef(request.taskRef)) throw fail('automation-task-invalid', '自动处理任务引用无效')
+    if (!this.automation) throw fail('automation-unsupported', this.automationReason)
+    return { scope, runtime: this.automation, active: AbortSignal.any([signal, this.lifetime.signal]) }
+  }
+  @Remote('automationList')
+  async automationList(request: { scope: string; offset?: number }, signal: AbortSignal): Promise<HumanResult> {
+    return this.result(async () => {
+      const scope = await this.workflowScope(request.scope, signal), active = AbortSignal.any([signal, this.lifetime.signal])
+      if (request.offset !== undefined && (!Number.isSafeInteger(request.offset) || request.offset < 0 || request.offset > 10000)) throw fail('automation-offset-invalid', '任务分页位置无效')
+      const page = await this.workflow!.replica.query(scope, { limit: 20, offset: request.offset ?? 0 }, active)
+      if (!row(page) || !Array.isArray(page.records) || !row(page.freshness)) throw fail('automation-list-invalid', '任务列表不可用')
+      const tasks = []; let fresh = !!page.freshness.fresh
+      for (const value of page.records) {
+        if (!row(value) || !humanTaskRef(value.taskRef)) continue
+        let rounds: unknown[] = []
+        if (this.lifecycle) {
+          try { const current = await this.lifecycle.runtime.inspectAutomation(scope, value.taskRef as unknown as HumanTaskRef, active)
+            rounds = current.rounds.map(r => ({ id: r.id, title: r.title, closesAt: r.closesAt }))
+          } catch (cause) { if (/revoked|forbidden|account|generation|unauthori|binding/.test(String((cause as { code?: string })?.code))) throw cause; active.throwIfAborted(); fresh = false }
+        }
+        const policy = this.automation?.policies(scope).find(p => p.taskRef.taskId === (value.taskRef as HumanTaskRef).taskId)
+        tasks.push({ taskRef: value.taskRef, title: value.title, rounds, policy: automationPolicyView(policy ?? null) })
+      }
+      return { schema: 'human.automation.list.v1', capability: this.automation?.capability() || { supported: false, reason: this.automationReason },
+        asOf: page.freshness.asOf, freshness: fresh ? 'online' : 'cached', tasks, nextOffset: page.nextOffset }
+    })
+  }
+  @Remote('automationPreview')
+  async automationPreview(request: AutomationPreviewRequest, signal: AbortSignal): Promise<HumanResult> {
+    return this.result(async () => { const { scope, runtime, active } = await this.automationScope(request, signal)
+      return automationPreviewView(await runtime.preview(scope, request.taskRef, request, active)) })
+  }
+  @Remote('automationApprove')
+  async automationApprove(request: AutomationApproveRequest, signal: AbortSignal): Promise<HumanResult> {
+    return this.result(async () => { const { scope, runtime, active } = await this.automationScope(request, signal)
+      const policy = await runtime.approve(scope, request.taskRef, request, active)
+      void runtime.drive(this.lifetime.signal).catch(() => {})
+      return automationPolicyView(policy) })
+  }
+  @Remote('automationPause')
+  async automationPause(request: AutomationPauseRequest, signal: AbortSignal): Promise<HumanResult> {
+    return this.result(async () => { const { scope, runtime, active } = await this.automationScope(request, signal)
+      return automationPolicyView(await runtime.pause(scope, request.taskRef, request.expectedRevision, active)) })
+  }
+  @Remote('automationStatus')
+  async automationStatus(request: AutomationStatusRequest, signal: AbortSignal): Promise<HumanResult> {
+    return this.result(async () => { const { scope, runtime, active } = await this.automationScope(request, signal)
+      return runtime.status(scope, request.taskRef, active, request.cursor) })
   }
   @Remote('workflowDraft')
   async workflowDraft(request: HumanActionRequest, signal: AbortSignal): Promise<HumanResult> {

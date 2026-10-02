@@ -61,6 +61,19 @@ async function claimedShare(host) {
   unwrap(await host.service.claim(request, signal)); return request
 }
 
+test('automationList owner RPC bounds and forwards pagination without waking any Agent', async t => {
+  const host = await setup(t); unwrap(await host.service.capabilities({ scope: sessionId }, signal))
+  const offsets = []
+  host.service.workflow.replica.query = async (_scope, input) => { offsets.push(input.offset); return { records: [], freshness: { fresh: true, asOf: 123 }, nextOffset: 40 } }
+  const page = unwrap(await host.service.automationList({ scope: sessionId, offset: 20 }, signal))
+  assert.deepEqual(offsets, [20]); assert.equal(page.nextOffset, 40); assert.equal(page.capability.supported, false)
+  for (const offset of [-1, 10001, 0.5, '20', NaN]) {
+    const result = await host.service.automationList({ scope: sessionId, offset }, signal)
+    assert.equal(result.ok, false); assert.equal(result.error.code, 'automation-offset-invalid')
+  }
+  assert.deepEqual(offsets, [20])
+})
+
 test('owner source grant returns only after its cloud-expiry-plus-draft discovery horizon is durable and survives reload', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   const expiresAt = Date.now() + 5 * 60_000

@@ -9,8 +9,21 @@ import { HumanToolsCore, type HumanStore } from './core.js'
 import { HumanFileStore } from './store.js'
 import { registerHumanContext, dshHumanToolsAvailable, humanShareTool, humanMembersTool, humanRemindTool } from './dsh.js'
 import { object, type HumanAckWireRequest, type HumanActionRequest, type HumanSurface } from './protocol.js'
+import { createCapabilityManifest } from '../human-workflow/capabilities.js'
+import { WorkflowFileStore } from '../human-workflow/persistence.js'
+import { ModeRegistry } from '../human-workflow/mode-package.js'
+import { WorkflowRecords } from '../human-workflow/workflow-records.js'
+import { humanWorkflowTools, registerHumanWorkflowContext } from '../human-workflow/dsh-tools.js'
+import { WorkflowReplica, REPLICA_MAX_BYTES } from '../human-workflow/replica.js'
+import { workflowQueryTools } from '../human-workflow/query-tools.js'
+import { fail, row, type WorkflowDataStore, type WorkflowScope } from '../human-workflow/data.js'
+import type { WorkflowTransport } from '../human-workflow/transport.js'
+import { registerHumanWorkflowSkill } from '../human-workflow/dsh-skill.js'
 
-export interface HumanToolsConfig { readonly enabled?: boolean; readonly store?: HumanStore }
+export interface HumanToolsConfig { readonly enabled?: boolean; readonly store?: HumanStore
+  readonly workflow?: { transport: WorkflowTransport; modeStore?: WorkflowDataStore; recordStore?: WorkflowDataStore; replicaStore?: WorkflowDataStore } }
+export interface ModeVersionRequest { scope: string; id: string; version: number }
+export interface ModeApprovalRequest extends ModeVersionRequest { digest: string; previewId: string; expectedActivationVersion: number }
 export interface HumanResult { readonly ok: boolean; readonly valueJson?: string; readonly error?: { readonly code: string; readonly message: string } }
 /** Private owner RPC only. Never mount this namespace on a published/guest route. */
 export class HumanToolsService extends TypertRemoteService {
@@ -19,12 +32,13 @@ export class HumanToolsService extends TypertRemoteService {
   private ready?: Promise<void>
   private readonly lifetime = new AbortController()
   private unregister?: () => void
+  private workflow?: { transport: WorkflowTransport; modes: ModeRegistry; records: WorkflowRecords; replica: WorkflowReplica }
   constructor(private readonly host: Context, config: HumanToolsConfig = {}) {
     super(host, 'humanTools')
     host.effect(() => async () => {
       this.lifetime.abort(disabled())
       const drained = this.core?.close()
-      try { this.unregister?.() } finally { await drained }
+      try { this.unregister?.() } finally { await Promise.all([drained, this.workflow?.modes.close(), this.workflow?.records.close(), this.workflow?.replica.close()]) }
     })
     if (!config.enabled) return
     this.ready = this.initialize(config)
@@ -41,11 +55,45 @@ export class HumanToolsService extends TypertRemoteService {
     this.core = core
     const unregisterTools: (() => void)[] = []
     try {
+      if (config.workflow) {
+        const { transport } = config.workflow
+        transport.assertIdentity()
+        if (!/^[A-Za-z0-9_-]{16,128}$/.test(transport.nodeId)) throw fail('workflow-node-invalid', '节点身份无效')
+        const file = (kind: string) => new WorkflowFileStore(path.join(path.dirname(defaultGateStatePath(this.host)), `human-workflow-${transport.nodeId}-${kind}.json`),
+          kind === 'facts' ? REPLICA_MAX_BYTES : undefined)
+        const replica = await WorkflowReplica.open(config.workflow.replicaStore || file('facts'), transport)
+        let modes: ModeRegistry | undefined, records: WorkflowRecords | undefined
+        try {
+          const capabilities = () => { transport.assertIdentity(); return createCapabilityManifest(transport.nodeId, { 'task.query': { status: 'available' } }) }
+          modes = await ModeRegistry.open(config.workflow.modeStore || file('modes'),
+            { nodeId: transport.nodeId, capabilities, randomId: () => randomBytes(16).toString('hex') })
+          records = await WorkflowRecords.open(config.workflow.recordStore || file('records'),
+            { nodeId: transport.nodeId, modes, randomId: () => randomBytes(16).toString('hex'), validateReferences: (scope, refs) => replica.validateReferences(scope, refs) })
+          this.lifetime.signal.throwIfAborted(); transport.assertIdentity()
+          this.workflow = { transport, modes, records, replica }
+          const options = { nodeId: transport.nodeId, modes, records, capabilities,
+            prepareCard: (input: { scope: WorkflowScope; callId: string; rootCallId: string; title: string; body: string; sourceSurfaceId?: string }, signal: AbortSignal) => {
+              transport.assertIdentity()
+              return core.create({ scope: input.scope.sessionId, generation: input.scope.sessionGeneration, callId: input.callId,
+                rootCallId: input.rootCallId }, input.title, input.body, signal, input.sourceSurfaceId)
+            } }
+          for (const tool of [...humanWorkflowTools(options), ...workflowQueryTools(transport.nodeId, replica)]) {
+            const execute = tool.execute
+            unregisterTools.push((this.host.get('tools') as ToolRuntime).register({ ...tool, async execute(args, exec) {
+              transport.assertIdentity(); const result = await execute(args, exec); transport.assertIdentity(); return result
+            } }))
+          }
+          unregisterTools.push(registerHumanWorkflowContext(this.host, options))
+          const unregisterSkill = registerHumanWorkflowSkill(this.host)
+          if (unregisterSkill) unregisterTools.push(unregisterSkill)
+          replica.start()
+        } catch (cause) { await Promise.all([replica.close(), modes?.close(), records?.close()]); this.workflow = undefined; throw cause }
+      }
       for (const tool of [humanShareTool(core), humanMembersTool(core), humanRemindTool(core)])
         unregisterTools.push((this.host.get('tools') as ToolRuntime).register(tool))
       const unregisterContext = registerHumanContext(this.host, core)
       this.unregister = () => { unregisterContext(); unregisterTools.reverse().forEach(remove => remove()) }
-    } catch (cause) { unregisterTools.reverse().forEach(remove => remove()); core.close(); this.core = undefined; throw cause }
+    } catch (cause) { unregisterTools.reverse().forEach(remove => remove()); await Promise.all([core.close(), this.workflow?.modes.close(), this.workflow?.records.close(), this.workflow?.replica.close()]); this.core = undefined; this.workflow = undefined; throw cause }
   }
   private async use(signal: AbortSignal): Promise<HumanToolsCore> {
     signal.throwIfAborted()
@@ -53,10 +101,15 @@ export class HumanToolsService extends TypertRemoteService {
     await waitForReady(this.ready, AbortSignal.any([signal, this.lifetime.signal]))
     signal.throwIfAborted()
     if (this.lifetime.signal.aborted || !this.core) throw disabled()
+    this.workflow?.transport.assertIdentity()
     return this.core
   }
   private async result(operation: () => Promise<unknown>): Promise<HumanResult> {
-    try { return { ok: true, valueJson: JSON.stringify(await operation()) } }
+    try {
+      const value = await operation()
+      this.lifetime.signal.throwIfAborted(); this.workflow?.transport.assertIdentity()
+      return { ok: true, valueJson: JSON.stringify(value) }
+    }
     catch (cause) { return { ok: false, error: { code: typeof (cause as { code?: unknown })?.code === 'string'
       ? (cause as { code: string }).code : 'human-tools-unavailable', message: cause instanceof Error ? cause.message : '测试卡片不可用' } } }
   }
@@ -74,7 +127,51 @@ export class HumanToolsService extends TypertRemoteService {
   }
   @Remote('capabilities')
   async capabilities(request: { scope: string }, signal: AbortSignal): Promise<HumanResult> {
-    return this.result(async () => { await this.use(signal); return { schema: 'human.tools.v1', enabled: true, shareTest: true, members: true, remind: true } })
+    return this.result(async () => { await this.use(signal); return { schema: 'human.tools.v1', enabled: true, shareTest: true, members: true, remind: true,
+      ...(this.workflow ? { workflow: this.workflow.modes.manifest() } : {}) } })
+  }
+  @Remote('sourceGrant')
+  async sourceGrant(request: HumanActionRequest, signal: AbortSignal): Promise<HumanResult> {
+    return this.result(async () => {
+      const active = AbortSignal.any([signal, this.lifetime.signal]), core = await this.use(active)
+      if (!this.workflow) throw fail('workflow-unavailable', '此节点尚未连接群任务服务')
+      const source = core.grantSource(request), generation = await this.claimGeneration(request.scope, active)
+      core.assertGeneration(request.scope, request.surfaceId, generation)
+      const grant = await this.workflow.transport.request('grant', { scope: source.origin.scope, sessionGeneration: generation,
+        surfaceId: request.surfaceId, attemptId: request.attemptId, surface: source.surface }, active)
+      active.throwIfAborted(); this.workflow.transport.assertIdentity()
+      if (!row(grant) || grant.schema !== 'human.source.grant.v1' || typeof grant.sourceGrant !== 'string' || grant.sourceGrant.length > 4096
+        || !Number.isSafeInteger(grant.expiresAt) || Number(grant.expiresAt) <= Date.now()) throw fail('workflow-response-invalid', '任务来源凭证无效')
+      this.workflow.replica.discover()
+      return grant
+    })
+  }
+  private async workflowScope(scope: string, signal: AbortSignal): Promise<WorkflowScope> {
+    await this.use(signal)
+    if (!this.workflow) throw fail('workflow-unavailable', '此节点尚未启用群任务模式')
+    if (typeof scope !== 'string' || !scope.trim() || scope.length > 256) throw originUnavailable()
+    const sessionGeneration = await this.claimGeneration(scope, signal)
+    this.workflow.transport.assertIdentity(); signal.throwIfAborted(); this.lifetime.signal.throwIfAborted()
+    return { nodeId: this.workflow.transport.nodeId, sessionId: scope, sessionGeneration }
+  }
+  @Remote('modeList')
+  async modeList(request: { scope: string }, signal: AbortSignal): Promise<HumanResult> {
+    return this.result(async () => { const scope = await this.workflowScope(request.scope, signal); return this.workflow!.modes.list(scope) })
+  }
+  @Remote('modePreview')
+  async modePreview(request: ModeVersionRequest, signal: AbortSignal): Promise<HumanResult> {
+    return this.result(async () => { const scope = await this.workflowScope(request.scope, signal)
+      return this.workflow!.modes.preview(scope, { id: request.id, version: request.version }, AbortSignal.any([signal, this.lifetime.signal])) })
+  }
+  @Remote('modeApprove')
+  async modeApprove(request: ModeApprovalRequest, signal: AbortSignal): Promise<HumanResult> {
+    return this.result(async () => { const scope = await this.workflowScope(request.scope, signal), { scope: _scope, ...approval } = request
+      return this.workflow!.modes.approve(scope, approval, AbortSignal.any([signal, this.lifetime.signal])) })
+  }
+  @Remote('modeRollback')
+  async modeRollback(request: ModeApprovalRequest, signal: AbortSignal): Promise<HumanResult> {
+    return this.result(async () => { const scope = await this.workflowScope(request.scope, signal), { scope: _scope, ...approval } = request
+      return this.workflow!.modes.rollback(scope, approval, AbortSignal.any([signal, this.lifetime.signal])) })
   }
   @Remote('claim')
   async claim(request: HumanActionRequest, signal: AbortSignal): Promise<HumanResult> {

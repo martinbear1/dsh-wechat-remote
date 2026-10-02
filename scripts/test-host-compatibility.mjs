@@ -12,7 +12,7 @@ import { nativeInstallSessions, quiesceNativeHost } from '../lib/install-control
 test('final generated manifest exposes identical strict schemas to old and new loaders', () => {
   assert.equal(TYPERT.invocations.filter(i => i.namespace !== 'humanTools').length, 17)
   assert.deepEqual(TYPERT.invocations.filter(i => i.namespace === 'humanTools').map(i => i.method).sort(),
-    ['ack', 'capabilities', 'claim', 'status'])
+    ['ack', 'capabilities', 'claim', 'modeApprove', 'modeList', 'modePreview', 'modeRollback', 'sourceGrant', 'status'])
   for (const i of TYPERT.invocations) for (const c of [...i.parameters.map(p => p.codec), i.result, i.receiver?.codec]) {
     if (c?.mode !== 'strict') continue
     assert.equal(typeof c.create, 'function')

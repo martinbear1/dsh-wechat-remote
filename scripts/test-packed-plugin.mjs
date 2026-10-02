@@ -27,6 +27,17 @@ test('missing runtime helper fails even though the checkout could contain it', t
   fs.unlinkSync(path.join(f.root, 'lib/agent-http-proof.js'))
   assert.throws(() => inspectPackedPlugin(f.root), /missing packed file.*agent-http-proof\.js/)
 })
+test('nested workflow modules and declarations must both be in the packed closure', t => {
+  const f = fixture(t)
+  f.write('lib/index.js', "export { workflow } from './human-workflow/transport.js'")
+  f.write('lib/index.d.ts', '')
+  assert.throws(() => inspectPackedPlugin(f.root), /missing packed file.*transport\.js/)
+  f.write('lib/human-workflow/transport.js', 'export const workflow = true')
+  f.write('lib/index.d.ts', "export { Workflow } from './human-workflow/transport.js'")
+  assert.throws(() => inspectPackedPlugin(f.root), /missing packed file.*transport\.d\.ts/)
+  f.write('lib/human-workflow/transport.d.ts', 'export interface Workflow {}')
+  assert(inspectPackedPlugin(f.root).modules >= 4)
+})
 test('missing public declaration and deferred worker fail closed', t => {
   const f = fixture(t)
   fs.unlinkSync(path.join(f.root, 'lib/index.d.ts'))

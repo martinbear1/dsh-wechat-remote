@@ -48,6 +48,12 @@ export declare class HumanToolsCore {
     /** Adapter check only: generation comes from the actual host, never the RPC.
      * Delayed ACKs may still reconcile their old ledger without waking an Agent. */
     assertGeneration(scope: string, surfaceId: string, generation: string): void;
+    /** Re-sign only a persisted claim, including receipt reconciliation. This
+     * never claims, executes, retries or replaces an action by itself. */
+    grantSource(request: HumanActionRequest): {
+        surface: HumanSurface;
+        origin: HumanOrigin;
+    };
     create(origin: HumanOrigin, title: string, body: string, signal: AbortSignal, sourceSurfaceId?: string): Promise<HumanSurface>;
     private source;
     private publishedSource;

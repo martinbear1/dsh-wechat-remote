@@ -38,7 +38,7 @@ async function setup(t, options = {}) {
   const transport = { nodeId, assertIdentity() { if (identity !== nodeId) throw Object.assign(new Error('node identity changed'), { code: 'binding_revoked' }) },
     async request() { calls++; assert.fail('empty local mode operations must not contact task backend') } }
   const modeStore = options.modeStore || store(), recordStore = store(), replicaStore = store(), coreStore = store({ schemaVersion: 1, records: [] })
-  const config = { enabled: true, store: coreStore, workflow: { transport, modeStore, recordStore, replicaStore } }
+  const config = { enabled: true, assistants: false, store: coreStore, workflow: { transport, modeStore, recordStore, replicaStore } }
   let fiber = await ctx.plugin(HumanToolsService, config), service = ctx.get('humanTools'), sequence = 0
   t.after(async () => { await ctx.fiber.dispose() })
   async function run(name, args) {

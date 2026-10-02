@@ -4,9 +4,15 @@ import { type HumanStore } from './core.js';
 import { type HumanAckWireRequest, type HumanActionRequest, type HumanSurface } from './protocol.js';
 import { type WorkflowDataStore } from '../human-workflow/data.js';
 import type { WorkflowTransport } from '../human-workflow/transport.js';
+import type { NativeAssistantAdapter } from '../assistant-presets/types.js';
 export interface HumanToolsConfig {
     readonly enabled?: boolean;
     readonly store?: HumanStore;
+    readonly assistants?: false | {
+        native?: NativeAssistantAdapter;
+        registryStore?: WorkflowDataStore;
+        businessStore?: WorkflowDataStore;
+    };
     readonly workflow?: {
         transport: WorkflowTransport;
         modeStore?: WorkflowDataStore;
@@ -23,6 +29,20 @@ export interface ModeApprovalRequest extends ModeVersionRequest {
     digest: string;
     previewId: string;
     expectedActivationVersion: number;
+}
+export interface AssistantVersionRequest {
+    id: string;
+    version: number;
+}
+export interface AssistantInstallRequest extends AssistantVersionRequest {
+    digest: string;
+    previewId: string;
+}
+export interface AssistantDraftRequest {
+    templateId?: string;
+    definitionJson?: string;
+    id?: string;
+    expectedVersion?: number;
 }
 export interface HumanResult {
     readonly ok: boolean;
@@ -41,8 +61,16 @@ export declare class HumanToolsService extends TypertRemoteService {
     private readonly lifetime;
     private unregister?;
     private workflow?;
+    private assistants?;
     constructor(host: Context, config?: HumanToolsConfig);
     private initialize;
+    private closeAssistants;
+    private assistantRegistry;
+    assistantCatalog(request: {}, signal: AbortSignal): Promise<HumanResult>;
+    assistantDraft(request: AssistantDraftRequest, signal: AbortSignal): Promise<HumanResult>;
+    assistantPreview(request: AssistantVersionRequest, signal: AbortSignal): Promise<HumanResult>;
+    assistantInstall(request: AssistantInstallRequest, signal: AbortSignal): Promise<HumanResult>;
+    assistantStatus(request: AssistantVersionRequest, signal: AbortSignal): Promise<HumanResult>;
     private use;
     private result;
     /** Synchronous bounded lookup used identically by history and live projection. */

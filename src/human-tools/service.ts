@@ -19,11 +19,20 @@ import { workflowQueryTools } from '../human-workflow/query-tools.js'
 import { fail, row, type WorkflowDataStore, type WorkflowScope } from '../human-workflow/data.js'
 import type { WorkflowTransport } from '../human-workflow/transport.js'
 import { registerHumanWorkflowSkill } from '../human-workflow/dsh-skill.js'
+import { AssistantRegistry } from '../assistant-presets/registry.js'
+import { createNativeAssistantAdapter } from '../assistant-presets/native-adapter.js'
+import type { NativeAssistantAdapter } from '../assistant-presets/types.js'
+import { AssistantBusinessRecords } from '../assistant-presets/business.js'
+import { assistantTools, registerAssistantContext, nativeComposedPreset } from '../assistant-presets/tools.js'
 
 export interface HumanToolsConfig { readonly enabled?: boolean; readonly store?: HumanStore
+  readonly assistants?: false | { native?: NativeAssistantAdapter; registryStore?: WorkflowDataStore; businessStore?: WorkflowDataStore }
   readonly workflow?: { transport: WorkflowTransport; modeStore?: WorkflowDataStore; recordStore?: WorkflowDataStore; replicaStore?: WorkflowDataStore } }
 export interface ModeVersionRequest { scope: string; id: string; version: number }
 export interface ModeApprovalRequest extends ModeVersionRequest { digest: string; previewId: string; expectedActivationVersion: number }
+export interface AssistantVersionRequest { id: string; version: number }
+export interface AssistantInstallRequest extends AssistantVersionRequest { digest: string; previewId: string }
+export interface AssistantDraftRequest { templateId?: string; definitionJson?: string; id?: string; expectedVersion?: number }
 export interface HumanResult { readonly ok: boolean; readonly valueJson?: string; readonly error?: { readonly code: string; readonly message: string } }
 /** Private owner RPC only. Never mount this namespace on a published/guest route. */
 export class HumanToolsService extends TypertRemoteService {
@@ -33,12 +42,13 @@ export class HumanToolsService extends TypertRemoteService {
   private readonly lifetime = new AbortController()
   private unregister?: () => void
   private workflow?: { transport: WorkflowTransport; modes: ModeRegistry; records: WorkflowRecords; replica: WorkflowReplica }
+  private assistants?: { registry: AssistantRegistry; business: AssistantBusinessRecords; native: NativeAssistantAdapter }
   constructor(private readonly host: Context, config: HumanToolsConfig = {}) {
     super(host, 'humanTools')
     host.effect(() => async () => {
       this.lifetime.abort(disabled())
       const drained = this.core?.close()
-      try { this.unregister?.() } finally { await Promise.all([drained, this.workflow?.modes.close(), this.workflow?.records.close(), this.workflow?.replica.close()]) }
+      try { this.unregister?.() } finally { await Promise.all([drained, this.workflow?.modes.close(), this.workflow?.records.close(), this.workflow?.replica.close(), this.closeAssistants()]) }
     })
     if (!config.enabled) return
     this.ready = this.initialize(config)
@@ -86,6 +96,26 @@ export class HumanToolsService extends TypertRemoteService {
           unregisterTools.push(registerHumanWorkflowContext(this.host, options))
           const unregisterSkill = registerHumanWorkflowSkill(this.host)
           if (unregisterSkill) unregisterTools.push(unregisterSkill)
+          if (config.assistants !== false) {
+            const assistantConfig = config.assistants || {}, native = assistantConfig.native || createNativeAssistantAdapter(this.host)
+            let registry: AssistantRegistry | undefined, business: AssistantBusinessRecords | undefined
+            try {
+              registry = await AssistantRegistry.open(assistantConfig.registryStore || file('assistants'), {
+                nodeId: transport.nodeId, native, assertIdentity: () => transport.assertIdentity(),
+              })
+              business = await AssistantBusinessRecords.open(assistantConfig.businessStore || file('assistant-work'), {
+                nodeId: transport.nodeId, registry, assertIdentity: () => transport.assertIdentity(),
+              })
+              this.lifetime.signal.throwIfAborted(); transport.assertIdentity()
+              this.assistants = { registry, business, native }
+              const assistantOptions = { nodeId: transport.nodeId, registry, business, assertIdentity: () => transport.assertIdentity(),
+                composedPreset: (agent: Parameters<typeof nativeComposedPreset>[1]) => nativeComposedPreset(this.host, agent) }
+              for (const tool of assistantTools(assistantOptions)) unregisterTools.push((this.host.get('tools') as ToolRuntime).register(tool))
+              unregisterTools.push(registerAssistantContext(this.host, assistantOptions))
+            } catch (cause) {
+              await native.close(); await Promise.all([registry?.close(), business?.close()]); throw cause
+            }
+          }
           replica.start()
         } catch (cause) { await Promise.all([replica.close(), modes?.close(), records?.close()]); this.workflow = undefined; throw cause }
       }
@@ -93,7 +123,42 @@ export class HumanToolsService extends TypertRemoteService {
         unregisterTools.push((this.host.get('tools') as ToolRuntime).register(tool))
       const unregisterContext = registerHumanContext(this.host, core)
       this.unregister = () => { unregisterContext(); unregisterTools.reverse().forEach(remove => remove()) }
-    } catch (cause) { unregisterTools.reverse().forEach(remove => remove()); await Promise.all([core.close(), this.workflow?.modes.close(), this.workflow?.records.close(), this.workflow?.replica.close()]); this.core = undefined; this.workflow = undefined; throw cause }
+    } catch (cause) { unregisterTools.reverse().forEach(remove => remove()); await Promise.all([core.close(), this.workflow?.modes.close(), this.workflow?.records.close(), this.workflow?.replica.close(), this.closeAssistants()]); this.core = undefined; this.workflow = undefined; throw cause }
+  }
+  private async closeAssistants() {
+    const assistants = this.assistants
+    if (!assistants) return
+    await Promise.all([assistants.native.close(), assistants.registry.close(), assistants.business.close()])
+  }
+  private async assistantRegistry(signal: AbortSignal) {
+    await this.use(signal)
+    if (!this.assistants) throw fail('assistant-unavailable', '此节点尚未提供助手管理能力')
+    return this.assistants.registry
+  }
+  @Remote('assistantCatalog')
+  async assistantCatalog(request: {}, signal: AbortSignal): Promise<HumanResult> {
+    return this.result(async () => (await this.assistantRegistry(signal)).catalog(AbortSignal.any([signal, this.lifetime.signal])))
+  }
+  @Remote('assistantDraft')
+  async assistantDraft(request: AssistantDraftRequest, signal: AbortSignal): Promise<HumanResult> {
+    return this.result(async () => {
+      const registry = await this.assistantRegistry(signal), { definitionJson, ...input } = request
+      if (definitionJson !== undefined && (typeof definitionJson !== 'string' || Buffer.byteLength(definitionJson) > 24 * 1024))
+        throw fail('assistant-definition-invalid', '助手定义过大或无效')
+      return registry.draft({ ...input, ...(definitionJson === undefined ? {} : { definition: JSON.parse(definitionJson) }) }, AbortSignal.any([signal, this.lifetime.signal]))
+    })
+  }
+  @Remote('assistantPreview')
+  async assistantPreview(request: AssistantVersionRequest, signal: AbortSignal): Promise<HumanResult> {
+    return this.result(async () => (await this.assistantRegistry(signal)).preview(request, AbortSignal.any([signal, this.lifetime.signal])))
+  }
+  @Remote('assistantInstall')
+  async assistantInstall(request: AssistantInstallRequest, signal: AbortSignal): Promise<HumanResult> {
+    return this.result(async () => (await this.assistantRegistry(signal)).install(request, AbortSignal.any([signal, this.lifetime.signal])))
+  }
+  @Remote('assistantStatus')
+  async assistantStatus(request: AssistantVersionRequest, signal: AbortSignal): Promise<HumanResult> {
+    return this.result(async () => (await this.assistantRegistry(signal)).status(request, AbortSignal.any([signal, this.lifetime.signal])))
   }
   private async use(signal: AbortSignal): Promise<HumanToolsCore> {
     signal.throwIfAborted()

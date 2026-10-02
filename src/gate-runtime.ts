@@ -877,7 +877,9 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
         },
       })
       synchronizeLanIdentity(publicRelayGateway.agent.identity.nodeId)
-      if (process.env.HARNESS_REMOTE_HUMAN_TOOLS === '1') {
+      // Product capability, identical for every owner of this plugin version.
+      // An operator may disable it; cloud authorization is still mandatory.
+      if (process.env.HARNESS_REMOTE_HUMAN_TOOLS !== '0') {
         mountChild('human-tools', HumanToolsService, { enabled: true, workflow: {
           transport: new WorkflowHttpTransport(relayConfig.relayOrigin, () => {
             if (!publicRelayGateway) throw new Error('Node unavailable')

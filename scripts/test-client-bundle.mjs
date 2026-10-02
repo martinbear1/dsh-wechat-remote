@@ -86,6 +86,7 @@ let settingsComponent, sharedStore
 const nativeKeys = new Set()
 exports.apply({
   get() {},
+  on(name, listener) { assert.equal(name, 'connection/reset'); assert.equal(typeof listener, 'function'); return () => {} },
   inject(names, effect) { assert.deepEqual(Array.from(names), ['pluginNavigation', 'remote.pluginManager']); effect() },
   effect(fn) { return fn() },
   connection: {
@@ -168,6 +169,7 @@ assert.deepEqual(await describeHost(), {
 assert.deepEqual(await callManagement('status'), { profile: 'desktop' })
 const oldEntries = []
 exports.apply({
+  on() { return () => {} },
   get() {}, effect(fn) { return fn() }, connection: { rpc: { call() {} } },
   inject(names) { assert.deepEqual(Array.from(names), ['pluginNavigation', 'remote.pluginManager']) /* service absent: no shortcut */ },
   slots: {

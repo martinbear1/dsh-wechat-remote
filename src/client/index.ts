@@ -23,6 +23,8 @@ import {
   HarnessRemoteSettings,
   type HarnessRemoteHostDescription,
 } from './HarnessRemoteSettings.tsx'
+import { AssistantStore } from './assistant-store.js'
+import { nativeAssistantNavigation } from './assistant-navigation.js'
 
 /** Required services for the slot registration. */
 export const inject = ['slots', 'connection']
@@ -65,9 +67,25 @@ export function apply(ctx: HarnessRemoteClientContext): void {
   }
 
   const store = new RemotePageStore(describeHost, callManagement)
+  let connectionGeneration = 0
+  const assistants = new AssistantStore(async (method, request) => {
+    const generation = connectionGeneration
+    const response = await ctx.connection.rpc.call('/api', `humanTools/${method}`, { args: { request } })
+    if (generation !== connectionGeneration) throw new Error('电脑连接已变化，请重新查看助手目录')
+    if (!response.ok) throw new Error(response.error.message)
+    const result = response.value as { ok: boolean; valueJson?: string; error?: { message: string } }
+    if (!result?.ok || typeof result.valueJson !== 'string' || result.valueJson.length > 256 * 1024)
+      throw new Error(result?.error?.message || '此节点尚未提供助手能力')
+    return JSON.parse(result.valueJson)
+  })
+  const assistantNavigation = nativeAssistantNavigation(name => ctx.get(name))
+  ctx.effect(() => {
+    const remove = ctx.on('connection/reset', () => { connectionGeneration++; assistants.reset(); assistantNavigation.reset() })
+    return () => { connectionGeneration++; remove(); assistants.dispose(); assistantNavigation.reset() }
+  }, 'wechat assistant lifecycle')
   ctx.effect(() => () => store.dispose(), 'wechat shared page')
   const openPlugin = () => openPluginPage(name => ctx.get(name))
-  const injected = () => ({ describeHost, callManagement, store })
+  const injected = () => ({ describeHost, callManagement, store, assistants, startAssistant: assistantNavigation.start })
   ctx.slots.inject('settings.section', () =>
     ctx.slots.register(
       {

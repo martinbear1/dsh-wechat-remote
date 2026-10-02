@@ -18,6 +18,9 @@ export interface HumanToolsConfig {
         modeStore?: WorkflowDataStore;
         recordStore?: WorkflowDataStore;
         replicaStore?: WorkflowDataStore;
+        lifecycleStore?: WorkflowDataStore;
+        receiverKeyStore?: WorkflowDataStore;
+        receiverRoot?: string;
     };
 }
 export interface ModeVersionRequest {
@@ -62,8 +65,11 @@ export declare class HumanToolsService extends TypertRemoteService {
     private unregister?;
     private workflow?;
     private assistants?;
+    private lifecycle?;
     constructor(host: Context, config?: HumanToolsConfig);
     private initialize;
+    private closeLifecycle;
+    workflowDraft(request: HumanActionRequest, signal: AbortSignal): Promise<HumanResult>;
     private closeAssistants;
     private assistantRegistry;
     assistantCatalog(request: {}, signal: AbortSignal): Promise<HumanResult>;

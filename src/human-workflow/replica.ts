@@ -3,8 +3,13 @@ import type { WorkflowTransport } from './transport.js'
 
 interface Binding { schema: string; nodeId: string; ownerSubject: string; accountInstance: string; generation: string }
 interface Fact { kind: 'task' | 'participant'; key: string; value: Record<string, unknown> }
-interface ReplicaState { schema: 'human.replica.v1'; nodeId: string; binding: Binding | null; cursor: number; asOf: number; records: Fact[] }
+interface ReplicaState { schema: 'human.replica.v1'; nodeId: string; binding: Binding | null; cursor: number; asOf: number; records: Fact[]; discoveryUntil?: number }
 export const REPLICA_MAX_BYTES = 96 * 1024 * 1024 // 5,000 bounded facts of at most 16 KiB plus JSON/index overhead.
+// Product HTTP v1 contract: workflow-authority.js issues five-minute source
+// grants; protocol.js/store.js create a twenty-minute draft at redemption.
+// A grant redeemed at its last instant can therefore publish this much later.
+export const WORKFLOW_SOURCE_GRANT_TTL_MS = 5 * 60_000
+export const WORKFLOW_DRAFT_TTL_MS = 20 * 60_000
 const empty = (nodeId: string): ReplicaState => ({ schema: 'human.replica.v1', nodeId, binding: null, cursor: 0, asOf: 0, records: [] })
 const equalBinding = (a: Binding | null, b: Binding) => !!a && a.schema === b.schema && a.nodeId === b.nodeId
   && a.ownerSubject === b.ownerSubject && a.accountInstance === b.accountInstance && a.generation === b.generation
@@ -47,7 +52,9 @@ export class WorkflowReplica {
   private timer?: ReturnType<typeof setTimeout>
   private retry = 30_000
   private discoveryUntil = 0
+  private started = false
   private fresh = false
+  private synchronized?: (binding: unknown, tasks: readonly Record<string, unknown>[]) => void
   private constructor(private readonly store: WorkflowDataStore, private readonly transport: WorkflowTransport, private readonly now: () => number) {
     this.state = empty(transport.nodeId)
   }
@@ -55,10 +62,12 @@ export class WorkflowReplica {
     const replica = new WorkflowReplica(store, transport, now), loaded = await store.load()
     if (loaded !== undefined) {
       if (!row(loaded) || loaded.schema !== 'human.replica.v1' || loaded.nodeId !== transport.nodeId || !revision(loaded.cursor)
-        || !revision(loaded.asOf) || !Array.isArray(loaded.records) || loaded.records.length > 5000)
+        || !revision(loaded.asOf) || !Array.isArray(loaded.records) || loaded.records.length > 5000
+        || loaded.discoveryUntil !== undefined && !revision(loaded.discoveryUntil))
         throw fail('workflow-store-invalid', '任务缓存身份或格式无效')
       replica.state = { schema: 'human.replica.v1', nodeId: transport.nodeId, cursor: loaded.cursor, asOf: loaded.asOf,
-        binding: loaded.binding === null ? null : binding(loaded.binding, transport.nodeId), records: loaded.records.map(fact) }
+        binding: loaded.binding === null ? null : binding(loaded.binding, transport.nodeId), records: loaded.records.map(fact),
+        ...(loaded.discoveryUntil === undefined ? {} : { discoveryUntil: loaded.discoveryUntil }) }
       if (!replica.state.binding && replica.state.records.length) throw fail('workflow-store-invalid', '任务缓存缺少授权')
       if (replica.state.binding) replica.state.records.forEach(r => scopedFact(r, replica.state.binding!))
       if (new Set(replica.state.records.map(r => `${r.kind}:${r.key}`)).size !== replica.state.records.length)
@@ -67,11 +76,42 @@ export class WorkflowReplica {
     }
     return replica
   }
-  start(): void { if (this.state.records.length) this.schedule() }
+  start(): void {
+    if (this.started || this.lifetime.signal.aborted) return
+    this.started = true
+    // A first task may have been published while this node was offline, before
+    // any task fact reached its empty local ledger. Discover it without an
+    // Agent, then retain the existing task-backed polling/backoff policy.
+    this.discover()
+  }
+  onSynchronized(listener: (binding: unknown, tasks: readonly Record<string, unknown>[]) => void): () => void {
+    this.synchronized = listener
+    return () => { if (this.synchronized === listener) this.synchronized = undefined }
+  }
   discover(): void { this.discoveryUntil = this.now() + 5 * 60_000; this.schedule(1000) }
+  /** Persist BEFORE returning a source grant or acknowledging an uncertain
+   * share. Expiry alone never proves that no task was published while offline.
+   * Only a complete authoritative sync beyond this server-time horizon does. */
+  keepDiscovering(until: number, signal: AbortSignal): Promise<void> {
+    if (!revision(until)) return Promise.reject(fail('workflow-discovery-invalid', '任务发现期限无效'))
+    const result = this.tail.then(async () => {
+      const active = AbortSignal.any([signal, this.lifetime.signal]); active.throwIfAborted(); this.transport.assertIdentity()
+      if (this.state.discoveryUntil === undefined || until > this.state.discoveryUntil)
+        await this.save({ ...copy(this.state), discoveryUntil: until })
+      active.throwIfAborted(); this.transport.assertIdentity(); this.schedule(1000)
+    })
+    this.tail = result.catch(() => {}); return result
+  }
+  private needsDiscovery(): boolean {
+    return this.state.records.length > 0 || this.state.discoveryUntil !== undefined || this.discoveryUntil > this.now()
+  }
   private schedule(delay = this.retry): void {
-    if (this.lifetime.signal.aborted || this.timer || (!this.state.records.length && this.discoveryUntil <= this.now())) return
-    this.timer = setTimeout(() => { this.timer = undefined; void this.refresh(this.lifetime.signal).catch(() => {}).finally(() => this.schedule()) }, delay)
+    if (this.lifetime.signal.aborted || this.timer || !this.needsDiscovery()) return
+    this.timer = setTimeout(() => {
+      this.timer = undefined
+      if (this.lifetime.signal.aborted || !this.needsDiscovery()) return
+      void this.refresh(this.lifetime.signal).catch(() => {}).finally(() => this.schedule())
+    }, delay)
     this.timer.unref?.()
   }
   close(): Promise<void> {
@@ -94,8 +134,9 @@ export class WorkflowReplica {
     try { await this.store.save(next) } catch (cause) { this.state = empty(this.transport.nodeId); this.lifetime.abort(); throw cause }
     this.state = next; this.lifetime.signal.throwIfAborted(); this.transport.assertIdentity()
   }
-  private async clear(): Promise<void> {
-    this.fresh = false; this.state = empty(this.transport.nodeId)
+  private async clear(preserveDiscovery = false): Promise<void> {
+    const until = preserveDiscovery ? this.state.discoveryUntil : undefined
+    this.fresh = false; this.state = { ...empty(this.transport.nodeId), ...(until === undefined ? {} : { discoveryUntil: until }) }
     // Clear memory before I/O, so a failed disk write cannot expose revoked data.
     try { await this.store.save(this.state) } catch (cause) { this.lifetime.abort(); throw cause }
   }
@@ -110,10 +151,18 @@ export class WorkflowReplica {
           try { await this.events(active) }
           catch (cause) {
             if ((cause as { code?: string }).code !== 'snapshot_required') throw cause
-            await this.clear(); await this.snapshot(active)
+            await this.clear(true); await this.snapshot(active)
           }
         }
-        active.throwIfAborted(); this.transport.assertIdentity(); this.fresh = true; this.retry = 30_000
+        active.throwIfAborted(); this.transport.assertIdentity()
+        // Not on individual pages: a failed/partial snapshot or event scan can
+        // never retire an outstanding publication intent, even after expiry.
+        if (this.state.discoveryUntil !== undefined && this.state.asOf >= this.state.discoveryUntil) {
+          const { discoveryUntil: _until, ...confirmed } = this.state
+          await this.save(confirmed)
+        }
+        this.fresh = true; this.retry = 30_000
+        this.synchronized?.(copy(this.state.binding), copy(this.state.records.filter(record => record.kind === 'task').map(record => record.value)))
       } catch (cause) {
         this.retry = Math.min(this.retry * 2, 120_000)
         if ((cause as { code?: string }).code === 'binding_revoked') { await this.clear(); this.discoveryUntil = 0 }
@@ -141,7 +190,8 @@ export class WorkflowReplica {
       if (!p.hasMore) {
         if (p.nextOffset !== null || p.cursor !== p.watermark) throw fail('workflow-response-invalid', '任务快照结束位置无效')
         await this.save({ schema: 'human.replica.v1', nodeId: this.transport.nodeId, binding: p.binding, cursor: p.watermark,
-          asOf: p.asOf, records: [...records.values()] }); return
+          asOf: p.asOf, records: [...records.values()],
+          ...(this.state.discoveryUntil === undefined ? {} : { discoveryUntil: this.state.discoveryUntil }) }); return
       }
       if (!revision(p.nextOffset) || p.nextOffset !== records.size || !p.records.length)
         throw fail('workflow-response-invalid', '任务快照分页位置无效')

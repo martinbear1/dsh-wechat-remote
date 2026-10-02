@@ -1,6 +1,7 @@
-import { ATTEMPT_ID, HUMAN_ACTION, HUMAN_MEMBERS_ACTION, HUMAN_REMIND_ACTION, HUMAN_ID, humanSurface, humanTaskRef,
+import { ATTEMPT_ID, HUMAN_ACTION, HUMAN_MEMBERS_ACTION, HUMAN_REMIND_ACTION, HUMAN_WORKFLOW_ACTION, humanWorkflowDraftRef, HUMAN_ID, humanSurface, humanTaskRef,
   humanSelectionRef, humanMemberRefs, humanReminderTitle, humanReceiptData, sameTaskRef, sameSelectionRef, object, text,
-  type HumanAckRequest, type HumanAckWireRequest, type HumanActionRequest, type HumanReceipt, type HumanSurface, type HumanTaskRef } from './protocol.js'
+  type HumanAckRequest, type HumanAckWireRequest, type HumanActionRequest, type HumanReceipt, type HumanSurface, type HumanTaskRef, type HumanWorkflowDraftRef } from './protocol.js'
+import { humanInitialRound, type HumanInitialRound } from './form.js'
 
 /** Business core has no DSH, Cordis, WeChat, network or filesystem dependency. */
 export interface HumanOrigin {
@@ -116,6 +117,24 @@ export class HumanToolsCore {
     return this.createAction(origin, signal, () => ({ title, body,
       ...(sourceSurfaceId !== undefined ? { targetTaskRef: this.publishedSource(origin, sourceSurfaceId).taskRef } : {}), actions: [{ ...HUMAN_ACTION }] }))
   }
+  createCollection(origin: HumanOrigin, title: string, body: string, initialRound: HumanInitialRound, signal: AbortSignal, sourceSurfaceId?: string): Promise<HumanSurface> {
+    return this.createAction(origin, signal, () => {
+      if (!humanInitialRound(initialRound)) throw error('human-surface-invalid', '首轮收集表单无效')
+      return { title, body, initialRound: clone(initialRound), actions: [{ ...HUMAN_ACTION }],
+        ...(sourceSurfaceId === undefined ? {} : { targetTaskRef: this.publishedSource(origin, sourceSurfaceId).taskRef }) }
+    })
+  }
+  /** Internal caller has already obtained a cloud-validated draft scoped to
+   * this origin. The Surface stores only its immutable locator, never private
+   * evaluation text. Claiming this button is NOT approving/publishing it. */
+  createWorkflow(origin: HumanOrigin, taskRef: HumanTaskRef, draftRef: HumanWorkflowDraftRef, signal: AbortSignal): Promise<HumanSurface> {
+    return this.createAction(origin, signal, () => {
+      if (!humanTaskRef(taskRef) || !humanWorkflowDraftRef(draftRef)) throw error('human-surface-invalid', '工作流草稿引用无效')
+      return { title: draftRef.kind === 'round' ? '审核新一轮任务' : draftRef.kind === 'review' ? '审核个人反馈' : '审核任务提醒',
+        body: '方案尚未批准。请打开主人审核页核对准确内容、对象与版本后决定；此按钮本身不会发群消息。',
+        targetTaskRef: clone(taskRef), workflowRef: clone(draftRef), actions: [{ ...HUMAN_WORKFLOW_ACTION }] }
+    })
+  }
   private source(origin: HumanOrigin, sourceSurfaceId: string, actionId: string): HumanRecord {
     const source = this.record(this.ledger, origin.scope, sourceSurfaceId)
     if (source.origin.generation !== origin.generation) throw error('human-origin-conflict', '会话身份已变化，不能复用旧卡片')
@@ -166,6 +185,10 @@ export class HumanToolsCore {
         || !sameSelectionRef(existing.surface.selectionRef, prepared.selectionRef)
         || existing.surface.reminder?.title !== prepared.reminder?.title))
         throw error('human-target-conflict', '此工具调用已有不同目标或动作，未覆盖原卡片')
+      if (existing && JSON.stringify(existing.surface.workflowRef) !== JSON.stringify(prepared.workflowRef))
+        throw error('human-target-conflict', '此工具调用已有不同工作流草稿，未覆盖原审核卡')
+      if (existing && JSON.stringify(existing.surface.initialRound) !== JSON.stringify(prepared.initialRound))
+        throw error('human-target-conflict', '此工具调用已有不同首轮表单，未覆盖原卡')
       if (existing) return clone(this.record(this.ledger, origin.scope, existing.surface.id).surface)
       const next = clone(this.ledger)
       next.records = next.records.filter(row => row.createdAt + HUMAN_RETENTION_MS > this.now())

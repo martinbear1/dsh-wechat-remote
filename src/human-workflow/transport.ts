@@ -2,10 +2,11 @@ import { createAgentHttpProof } from '../agent-http-proof.js'
 import type { AgentIdentity } from '../public-relay-agent.js'
 import { fail, row } from './data.js'
 
+export type WorkflowOperation = 'grant' | 'sync' | 'receiver-key' | 'lifecycle' | 'objects/claim' | 'objects/ack'
 export interface WorkflowTransport {
   readonly nodeId: string
   assertIdentity(): void
-  request(operation: 'grant' | 'sync', body: Record<string, unknown>, signal: AbortSignal): Promise<unknown>
+  request(operation: WorkflowOperation, body: Record<string, unknown>, signal: AbortSignal): Promise<unknown>
 }
 /** Uses the paired node's existing identity, never owner credentials. No
  * redirects, arbitrary endpoints, model-provided URLs or plaintext fallback. */
@@ -22,8 +23,9 @@ export class WorkflowHttpTransport implements WorkflowTransport {
   assertIdentity(): void {
     if (this.identity().nodeId !== this.nodeId) throw fail('binding_revoked', '节点身份已变化，请重新连接')
   }
-  async request(operation: 'grant' | 'sync', body: Record<string, unknown>, signal: AbortSignal): Promise<unknown> {
+  async request(operation: WorkflowOperation, body: Record<string, unknown>, signal: AbortSignal): Promise<unknown> {
     this.assertIdentity(); signal.throwIfAborted()
+    if (!['grant', 'sync', 'receiver-key', 'lifecycle', 'objects/claim', 'objects/ack'].includes(operation)) throw fail('workflow-request-invalid', '群任务操作不受支持')
     const pathname = `/api/human-tasks/v1/node/${operation}`
     const serialized = JSON.stringify({ ...body, audience: 'human.workflow.node.v1' })
     if (Buffer.byteLength(serialized) > 16384) throw fail('workflow-request-invalid', '群任务请求过大')

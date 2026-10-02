@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { generateKeyPairSync, createHash, verify } from 'node:crypto'
-import { WorkflowReplica, REPLICA_MAX_BYTES } from '../lib/human-workflow/replica.js'
+import { WorkflowReplica, REPLICA_MAX_BYTES, WORKFLOW_DRAFT_TTL_MS, WORKFLOW_SOURCE_GRANT_TTL_MS } from '../lib/human-workflow/replica.js'
 import { WorkflowFileStore } from '../lib/human-workflow/persistence.js'
 import { mkdtemp, unlink, rmdir, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -22,6 +22,167 @@ const snap = (records, extra = {}) => ({ schema: 'human.workflow.sync.v1', mode:
 const events = (list = [], extra = {}) => ({ schema: 'human.workflow.sync.v1', mode: 'events', binding, cursor: 4, watermark: 4, events: list, hasMore: false, asOf: now, ...extra })
 const store = () => ({ data: undefined, writes: [], async load() { return structuredClone(this.data) }, async save(value) { this.data = structuredClone(value); this.writes.push(this.data) } })
 function transport(pages) { return { nodeId, assertIdentity() {}, async request(op, body) { assert.equal(op, 'sync'); const response = pages.shift(); if (response instanceof Error) throw response; return response ?? events() } } }
+
+test('startup discovers first offline-published task from an empty ledger after restart and continues the standard timer', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let clock = now, calls = 0
+  const tick = async ms => { clock += ms; t.mock.timers.tick(ms); await new Promise(resolve => setImmediate(resolve)) }
+  const disk = store(), original = await WorkflowReplica.open(disk, transport([]), () => clock)
+  original.discover(); await original.close() // Exit before first task reaches the local ledger.
+  assert.equal(disk.data, undefined)
+  const client = { nodeId, assertIdentity() {}, async request(op, input) {
+    calls++; assert.equal(op, 'sync')
+    return input.mode === 'snapshot' ? snap([{ ...task('first'), value: { ...task('first').value, lifecycleRevision: 1 } }]) : events([], { asOf: clock })
+  } }
+  const recovered = await WorkflowReplica.open(disk, client, () => clock), delivered = []
+  recovered.onSynchronized((_binding, tasks) => delivered.push(tasks))
+  t.after(() => recovered.close())
+  recovered.start(); recovered.start()
+  await tick(1000)
+  assert.equal(calls, 1); assert.equal(delivered[0][0].lifecycleRevision, 1)
+  assert.equal(disk.data.records[0].value.taskRef.taskId, 'first')
+  await tick(30_000); assert.equal(calls, 2, 'discovered tasks continue the standard existing timer')
+  await recovered.close(); recovered.start(); await tick(120_000)
+  assert.equal(calls, 2, 'disposed instance cannot restart or access the backend')
+})
+
+test('startup discovery is bounded for absent backend and stops immediately when unpaired or revoked', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let clock = now
+  const tick = async ms => { clock += ms; t.mock.timers.tick(ms); await new Promise(resolve => setImmediate(resolve)) }
+  for (const code of ['workflow-unavailable', 'binding_revoked']) {
+    let calls = 0
+    const disk = store(), replica = await WorkflowReplica.open(disk, { nodeId, assertIdentity() {}, async request(op) {
+      assert.equal(op, 'sync'); calls++; throw Object.assign(new Error('controlled unavailable'), { code })
+    } }, () => clock)
+    replica.start(); replica.start()
+    await tick(1000); await tick(60_000); await tick(120_000); await tick(120_000); await tick(3600_000)
+    assert.equal(calls, code === 'binding_revoked' ? 1 : 3)
+    replica.start(); await tick(3600_000)
+    assert.equal(calls, code === 'binding_revoked' ? 1 : 3, 'duplicate start cannot renew discovery forever')
+    if (code === 'binding_revoked') assert.deepEqual(disk.data.records, [])
+    await replica.close()
+  }
+})
+
+test('startup fences identity changes and unload aborts pending discovery without publishing stale tasks', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let calls = 0, valid = true, clock = now
+  const tick = async ms => { clock += ms; t.mock.timers.tick(ms); await new Promise(resolve => setImmediate(resolve)) }
+  const disk = store(), stale = await WorkflowReplica.open(disk, { nodeId,
+    assertIdentity() { if (!valid) throw Object.assign(new Error('changed identity'), { code: 'binding_revoked' }) },
+    async request() { calls++; return snap([task('stale')]) } }, () => clock)
+  stale.start(); valid = false; await tick(1000); await tick(120_000)
+  assert.equal(calls, 0); assert.deepEqual(disk.data.records, []); await stale.close()
+  let pendingSignal, released, published = 0
+  const pending = await WorkflowReplica.open(store(), { nodeId, assertIdentity() {}, async request(_op, _body, active) {
+    calls++; pendingSignal = active
+    await new Promise(resolve => { released = resolve })
+    return snap([task('late')], { expiresAt: clock + 60_000 })
+  } }, () => clock)
+  pending.onSynchronized(() => published++)
+  pending.start(); await tick(1000)
+  let closed = false
+  const closing = pending.close().then(() => { closed = true })
+  assert.equal(pendingSignal.aborted, true); assert.equal(closed, false)
+  released(); await closing
+  assert.equal(published, 0); await tick(3600_000); assert.equal(calls, 1)
+})
+
+test('grant intent survives restart and a first publication after five minutes but inside the full grant-plus-draft horizon', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let clock = now, published = false, calls = 0
+  const deadline = now + WORKFLOW_SOURCE_GRANT_TTL_MS + WORKFLOW_DRAFT_TTL_MS
+  const tick = async ms => { clock += ms; t.mock.timers.tick(ms); await new Promise(resolve => setImmediate(resolve)) }
+  const disk = store(), before = await WorkflowReplica.open(disk, transport([]), () => clock)
+  await before.keepDiscovering(deadline, signal()); await before.close()
+  assert.equal(disk.data.discoveryUntil, deadline); assert.deepEqual(disk.data.records, [])
+  const client = { nodeId, assertIdentity() {}, async request(_op, input) {
+    calls++
+    if (input.mode === 'snapshot') return snap([], { asOf: clock, expiresAt: clock + 300000 })
+    return published ? events([{ schema: 'human.workflow.event.v1', eventId: 'published-late', cursor: 5, aggregateVersion: 1, record: task('late') }],
+      { cursor: 5, watermark: 5, asOf: clock }) : events([], { asOf: clock })
+  } }
+  const after = await WorkflowReplica.open(disk, client, () => clock), observed = []
+  t.after(() => after.close()); after.onSynchronized((_binding, tasks) => observed.push(tasks)); after.start()
+  await tick(1000); await tick(6 * 60_000)
+  assert.equal(calls, 2, 'empty snapshot does not discard intent when the initial short window expires')
+  assert.equal(disk.data.discoveryUntil, deadline)
+  published = true; await tick(30_000)
+  assert.equal(calls, 3); assert.equal(observed.at(-1)[0].taskRef.taskId, 'late')
+})
+
+test('expired intent keeps one backed-off timer across long outage and restart until a complete server-time confirmation', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let clock = now, calls = 0, online = false, serverTime = now
+  const deadline = now + WORKFLOW_SOURCE_GRANT_TTL_MS + WORKFLOW_DRAFT_TTL_MS
+  const tick = async ms => { clock += ms; t.mock.timers.tick(ms); await new Promise(resolve => setImmediate(resolve)) }
+  const disk = store(), client = { nodeId, assertIdentity() {}, async request(_op, input) {
+    calls++; if (!online) throw Error('offline')
+    return input.mode === 'snapshot' ? snap([], { asOf: serverTime, expiresAt: clock + 300000 }) : events([], { asOf: serverTime })
+  } }
+  let replica = await WorkflowReplica.open(disk, client, () => clock)
+  t.after(() => replica.close())
+  await replica.keepDiscovering(deadline, signal()); replica.start(); await tick(1000)
+  await tick(60_000); await tick(120_000); await tick(2 * 3600_000)
+  assert.equal(calls, 4, 'long downtime never replays a burst of missed ticks')
+  assert.equal(disk.data.discoveryUntil, deadline)
+  await replica.close(); replica = await WorkflowReplica.open(disk, client, () => clock); replica.start()
+  await tick(1000); assert.equal(calls, 5)
+  online = true; serverTime = deadline - 1; await tick(60_000)
+  assert.equal(disk.data.discoveryUntil, deadline, 'local wall-clock expiry is not authoritative absence')
+  serverTime = deadline + 1; await tick(30_000)
+  assert.equal(disk.data.discoveryUntil, undefined)
+  await tick(6 * 60_000); const settledCalls = calls; await tick(3600_000)
+  assert.equal(calls, settledCalls, 'confirmed empty state becomes quiescent after its finite startup window')
+})
+
+test('partial event scans and snapshot rebuild failures cannot retire persisted discovery intent', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const deadline = now + 1000, disk = store(), rebuild = Object.assign(Error('rebuild'), { code: 'snapshot_required' })
+  const pages = [snap([], { asOf: now }), events([{ schema: 'human.workflow.event.v1', eventId: 'e5', cursor: 5,
+    aggregateVersion: 1, record: task('in-progress') }], { asOf: deadline + 1, cursor: 5, watermark: 6, hasMore: true }), Error('page two offline'),
+    rebuild, Error('snapshot offline'), snap([], { asOf: deadline + 2 })]
+  const replica = await WorkflowReplica.open(disk, transport(pages), () => now)
+  t.after(() => replica.close())
+  await replica.keepDiscovering(deadline, signal()); await replica.refresh(signal())
+  await assert.rejects(replica.refresh(signal()), /page two/)
+  assert.equal(disk.data.asOf, deadline + 1); assert.equal(disk.data.discoveryUntil, deadline)
+  await assert.rejects(replica.refresh(signal()), /snapshot offline/)
+  assert.equal(disk.data.binding, null); assert.equal(disk.data.discoveryUntil, deadline)
+  await replica.refresh(signal()); assert.equal(disk.data.discoveryUntil, undefined)
+})
+
+test('discovery remains backward compatible, coalesces deadlines and clears on revocation or binding replacement', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const disk = store(), revoked = Object.assign(Error('revoked'), { code: 'binding_revoked' })
+  disk.data = { schema: 'human.replica.v1', nodeId, binding: null, cursor: 0, asOf: 0, records: [] }
+  const replica = await WorkflowReplica.open(disk, transport([snap([]), revoked]), () => now)
+  await replica.keepDiscovering(now + 2000, signal()); const writes = disk.writes.length
+  await replica.keepDiscovering(now + 1000, signal()); assert.equal(disk.writes.length, writes)
+  await replica.refresh(signal()); await assert.rejects(replica.refresh(signal()), /revoked/)
+  assert.equal(disk.data.discoveryUntil, undefined); assert.equal(disk.data.binding, null); await replica.close()
+  const newer = { ...binding, generation: 'new-binding' }, again = await WorkflowReplica.open(disk,
+    transport([snap([]), events([], { binding: newer }), snap([], { binding: newer })]), () => now)
+  await again.keepDiscovering(now + 2000, signal()); await again.refresh(signal()); await again.refresh(signal())
+  assert.equal(disk.data.discoveryUntil, undefined); assert.equal(disk.data.binding.generation, newer.generation); await again.close()
+  disk.data.discoveryUntil = 'not-a-time'
+  await assert.rejects(WorkflowReplica.open(disk, transport([]), () => now), { code: 'workflow-store-invalid' })
+})
+
+test('pending discovery writes are drained on unload, but cancellation/identity change cannot return usable consent', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let release, entered, valid = true
+  const reached = new Promise(resolve => { entered = resolve }), disk = store(), save = disk.save.bind(disk)
+  disk.save = async value => { entered(); await new Promise(resolve => { release = resolve }); await save(value) }
+  const replica = await WorkflowReplica.open(disk, { nodeId, assertIdentity() { if (!valid) throw Object.assign(Error('revoked'), { code: 'binding_revoked' }) } }, () => now)
+  const write = replica.keepDiscovering(now + 1000, signal())
+  await reached; let closed = false; const closing = replica.close().then(() => { closed = true })
+  assert.equal(closed, false); valid = false; release()
+  await assert.rejects(write); await closing
+  assert.equal(disk.data.discoveryUntil, now + 1000)
+  await assert.rejects(replica.keepDiscovering(now + 2000, signal()))
+})
 test('snapshot commit is atomic across pages; task queries isolate sessions/generation/node and owner counts', async () => {
   const disk = store(), client = transport([snap([task('t1'), task('t2', 'other')], { hasMore: true, nextOffset: 2 }),
     snap([task('t3', 's1', 'old'), participant('t1', 'member'), participant('t1', 'owner', 'owner')])])

@@ -556,6 +556,28 @@ test('cold Code Mode history waits for the single ledger initialization and incl
   assert.equal(cold.loads(), 1, 'warm page reuses the resolved initialization')
 })
 
+test('lifecycle draft tools retain the same cold history initialization barrier', async t => {
+  for (const name of ['human_task_create', 'human_task_prepare_round', 'human_task_prepare_review', 'human_task_prepare_reminder']) {
+    await t.test(name, async t => {
+      const cold = await coldProjection(t), fetched = deferred()
+      const entries = humanProjectionEntries()
+      entries[0].event.data.name = name
+      const fixture = pageFixture(cold.host, entries, undefined, () => fetched.resolve())
+      let finished = false
+      const pending = fixture.history.page({ sessionId: origin.scope }, signal).finally(() => { finished = true })
+      await fetched.promise
+      await Promise.resolve()
+      assert.equal(finished, false, 'workflow approvals must not disappear on a cold first page')
+      cold.load.resolve(await cold.seed.store.load())
+      const response = await pending
+      assert.equal(response.ok, true, JSON.stringify(response))
+      assert.deepEqual(JSON.parse(response.value.payloadJson).events.at(-1).event.data.meta.humanSurface, cold.seed.surface)
+      assert.equal(cold.entered.length, 1)
+      assert.equal(fixture.reads(), 1)
+    })
+  }
+})
+
 test('aborting a waiting history reader releases its slot without cancelling shared initialization', async t => {
   const cold = await coldProjection(t), twoReads = deferred(), thirdRead = deferred()
   const fixture = pageFixture(cold.host, humanProjectionEntries(), undefined,

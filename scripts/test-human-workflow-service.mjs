@@ -36,15 +36,16 @@ async function setup(t, options = {}) {
   ctx.provide('agents', { get: id => id === agent.id ? agent : undefined }); ctx.on('session/flush', async () => {})
   let identity = nodeId, calls = 0
   const transport = { nodeId, assertIdentity() { if (identity !== nodeId) throw Object.assign(new Error('node identity changed'), { code: 'binding_revoked' }) },
-    async request() { calls++; assert.fail('empty local mode operations must not contact task backend') } }
+    async request(...args) { calls++; if (options.request) return options.request(...args); assert.fail('empty local mode operations must not contact task backend') } }
   const modeStore = options.modeStore || store(), recordStore = store(), replicaStore = store(), coreStore = store({ schemaVersion: 1, records: [] })
-  const config = { enabled: true, assistants: false, store: coreStore, workflow: { transport, modeStore, recordStore, replicaStore } }
+  const config = { enabled: true, assistants: false, store: coreStore, workflow: { transport, modeStore, recordStore, replicaStore,
+    receiverKeyStore: store(), lifecycleStore: store() } }
   let fiber = await ctx.plugin(HumanToolsService, config), service = ctx.get('humanTools'), sequence = 0
   t.after(async () => { await ctx.fiber.dispose() })
   async function run(name, args) {
     return tools.execute({ name, arguments: args, callId: `service_call_${++sequence}`, agent, signal })
   }
-  return { ctx, tools, session, agent, modeStore, recordStore, coreStore, transport, config,
+  return { ctx, tools, session, agent, modeStore, recordStore, coreStore, replicaStore, transport, config,
     get fiber() { return fiber }, get service() { return service }, get networkCalls() { return calls },
     rotate() { identity = 'node_' + 'b'.repeat(32) }, run,
     async draft() { const result = await run('human_mode_draft', { package: pkg() }); assert.equal(result.isError, false, JSON.stringify(result)); return JSON.parse(result.content[0].text) },
@@ -52,6 +53,58 @@ async function setup(t, options = {}) {
     async reload() { fiber = await ctx.plugin(HumanToolsService, config); service = ctx.get('humanTools'); return service },
   }
 }
+
+async function claimedShare(host) {
+  const card = await host.run('human_surface_share', { title: '发现回归', body: '完整源工具卡' })
+  assert.equal(card.isError, false)
+  const request = { scope: sessionId, surfaceId: card.meta.humanSurface.id, revision: 1, actionId: 'share', attemptId: 'share_discovery_attempt_01' }
+  unwrap(await host.service.claim(request, signal)); return request
+}
+
+test('owner source grant returns only after its cloud-expiry-plus-draft discovery horizon is durable and survives reload', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const expiresAt = Date.now() + 5 * 60_000
+  const host = await setup(t, { async request(operation) {
+    assert.equal(operation, 'grant'); return { schema: 'human.source.grant.v1', sourceGrant: 'signed-fixture-grant', expiresAt }
+  } })
+  unwrap(await host.service.capabilities({ scope: sessionId }, signal))
+  const request = await claimedShare(host), delayed = host.replicaStore.delayNext()
+  let answered = false
+  const pending = host.service.sourceGrant(request, signal).then(value => { answered = true; return value })
+  await delayed.started.promise; assert.equal(answered, false); delayed.release.resolve()
+  assert.equal(unwrap(await pending).expiresAt, expiresAt)
+  assert.equal(host.replicaStore.value.discoveryUntil, expiresAt + 20 * 60_000)
+  await host.fiber.dispose(); await host.reload(); unwrap(await host.service.capabilities({ scope: sessionId }, signal))
+  assert.equal(host.replicaStore.value.discoveryUntil, expiresAt + 20 * 60_000)
+  assert.equal(host.networkCalls, 1, 'reload does not return or replay an old publication grant')
+})
+
+for (const outcome of ['success', 'unknown']) test(`legacy ${outcome} share ACK persists read-only discovery without reissuing an action`, async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const host = await setup(t); unwrap(await host.service.capabilities({ scope: sessionId }, signal))
+  const request = await claimedShare(host), before = Date.now()
+  const ack = { ...request, outcome, ...(outcome === 'success' ? { taskRef: { schema: 'human.task.ref.v1', taskId: 't'.repeat(24), deliveryId: 'd'.repeat(24) } } : {}) }
+  const receipt = unwrap(await host.service.ack(ack, signal))
+  assert.equal(receipt.outcome, outcome)
+  assert(host.replicaStore.value.discoveryUntil >= before + 25 * 60_000)
+  const duplicate = unwrap(await host.service.ack(ack, signal))
+  assert.equal(duplicate.receiptId, receipt.receiptId); assert.equal(host.networkCalls, 0)
+})
+
+test('unload during discovery persistence keeps the intent but never releases the source grant', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const expiresAt = Date.now() + 5 * 60_000
+  const host = await setup(t, { async request() { return { schema: 'human.source.grant.v1', sourceGrant: 'signed-fixture-grant', expiresAt } } })
+  unwrap(await host.service.capabilities({ scope: sessionId }, signal))
+  const request = await claimedShare(host), delayed = host.replicaStore.delayNext()
+  const pending = host.service.sourceGrant(request, signal)
+  await delayed.started.promise
+  let disposed = false; const closing = host.fiber.dispose().then(() => { disposed = true })
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(disposed, false)
+  delayed.release.resolve(); await closing
+  assert.equal((await pending).ok, false)
+  assert.equal(host.replicaStore.value.discoveryUntil, expiresAt + 20 * 60_000)
+})
 
 for (const method of ['modePreview', 'modeApprove', 'modeRollback']) test(`${method} rejects a stale-node success when identity rotates during durable save`, async t => {
   const host = await setup(t)

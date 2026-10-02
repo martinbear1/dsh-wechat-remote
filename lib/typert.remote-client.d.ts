@@ -40,6 +40,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     modeRollback: (request: ModeApprovalRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     sourceGrant: (request: HumanActionRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     status: (request: { scope: string; surfaceId: string; }, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
+    workflowDraft: (request: HumanActionRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
   }
   interface TypertRemoteNamespace$7765636861744174746163686d656e74 {
     prepareBatch: (request: WechatAttachmentBatchRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatAttachmentBatchResult>>
@@ -81,6 +82,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'humanTools/modeRollback': (request: ModeApprovalRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     'humanTools/sourceGrant': (request: HumanActionRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     'humanTools/status': (request: { scope: string; surfaceId: string; }, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
+    'humanTools/workflowDraft': (request: HumanActionRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     'wechatAttachment/prepareBatch': (request: WechatAttachmentBatchRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatAttachmentBatchResult>>
     'wechatDirectory/create': (request: WechatDirectoryCreateRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatDirectoryCreateResult>>
     'wechatDirectory/list': (request: WechatDirectoryListRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatDirectoryListResult>>

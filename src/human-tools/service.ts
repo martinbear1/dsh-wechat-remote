@@ -14,7 +14,7 @@ import { WorkflowFileStore } from '../human-workflow/persistence.js'
 import { ModeRegistry } from '../human-workflow/mode-package.js'
 import { WorkflowRecords } from '../human-workflow/workflow-records.js'
 import { humanWorkflowTools, registerHumanWorkflowContext } from '../human-workflow/dsh-tools.js'
-import { WorkflowReplica, REPLICA_MAX_BYTES } from '../human-workflow/replica.js'
+import { WorkflowReplica, REPLICA_MAX_BYTES, WORKFLOW_DRAFT_TTL_MS, WORKFLOW_SOURCE_GRANT_TTL_MS } from '../human-workflow/replica.js'
 import { workflowQueryTools } from '../human-workflow/query-tools.js'
 import { fail, row, type WorkflowDataStore, type WorkflowScope } from '../human-workflow/data.js'
 import type { WorkflowTransport } from '../human-workflow/transport.js'
@@ -24,10 +24,17 @@ import { createNativeAssistantAdapter } from '../assistant-presets/native-adapte
 import type { NativeAssistantAdapter } from '../assistant-presets/types.js'
 import { AssistantBusinessRecords } from '../assistant-presets/business.js'
 import { assistantTools, registerAssistantContext, nativeComposedPreset } from '../assistant-presets/tools.js'
+import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
+import { ReceiverKeyring, ReceiverKeyFileStore } from '../human-workflow/receiver-keyring.js'
+import { SubmissionReceiver } from '../human-workflow/receiver.js'
+import { downloadSubmission } from '../human-workflow/receiver-download.js'
+import { WorkflowLifecycle } from '../human-workflow/lifecycle.js'
+import { lifecycleTools } from '../human-workflow/lifecycle-tools.js'
 
 export interface HumanToolsConfig { readonly enabled?: boolean; readonly store?: HumanStore
   readonly assistants?: false | { native?: NativeAssistantAdapter; registryStore?: WorkflowDataStore; businessStore?: WorkflowDataStore }
-  readonly workflow?: { transport: WorkflowTransport; modeStore?: WorkflowDataStore; recordStore?: WorkflowDataStore; replicaStore?: WorkflowDataStore } }
+  readonly workflow?: { transport: WorkflowTransport; modeStore?: WorkflowDataStore; recordStore?: WorkflowDataStore; replicaStore?: WorkflowDataStore
+    lifecycleStore?: WorkflowDataStore; receiverKeyStore?: WorkflowDataStore; receiverRoot?: string } }
 export interface ModeVersionRequest { scope: string; id: string; version: number }
 export interface ModeApprovalRequest extends ModeVersionRequest { digest: string; previewId: string; expectedActivationVersion: number }
 export interface AssistantVersionRequest { id: string; version: number }
@@ -43,12 +50,13 @@ export class HumanToolsService extends TypertRemoteService {
   private unregister?: () => void
   private workflow?: { transport: WorkflowTransport; modes: ModeRegistry; records: WorkflowRecords; replica: WorkflowReplica }
   private assistants?: { registry: AssistantRegistry; business: AssistantBusinessRecords; native: NativeAssistantAdapter }
+  private lifecycle?: { runtime: WorkflowLifecycle; keys: ReceiverKeyring; receiver?: SubmissionReceiver; unsubscribe(): void }
   constructor(private readonly host: Context, config: HumanToolsConfig = {}) {
     super(host, 'humanTools')
     host.effect(() => async () => {
       this.lifetime.abort(disabled())
       const drained = this.core?.close()
-      try { this.unregister?.() } finally { await Promise.all([drained, this.workflow?.modes.close(), this.workflow?.records.close(), this.workflow?.replica.close(), this.closeAssistants()]) }
+      try { this.unregister?.() } finally { await Promise.all([drained, this.workflow?.modes.close(), this.workflow?.records.close(), this.workflow?.replica.close(), this.closeAssistants(), this.closeLifecycle()]) }
     })
     if (!config.enabled) return
     this.ready = this.initialize(config)
@@ -74,13 +82,43 @@ export class HumanToolsService extends TypertRemoteService {
         const replica = await WorkflowReplica.open(config.workflow.replicaStore || file('facts'), transport)
         let modes: ModeRegistry | undefined, records: WorkflowRecords | undefined
         try {
-          const capabilities = () => { transport.assertIdentity(); return createCapabilityManifest(transport.nodeId, { 'task.query': { status: 'available' } }) }
+          const capabilities = () => { transport.assertIdentity(); return createCapabilityManifest(transport.nodeId, { 'task.query': { status: 'available' },
+            ...(this.lifecycle ? { 'surface.form-collection': { status: 'available' as const }, 'task.lifecycle': { status: 'available' as const },
+              'recipient.query': { status: 'available' as const }, 'result.private': { status: 'available' as const },
+              ...(this.lifecycle.receiver ? { 'submission.receive': { status: 'available' as const } } : {}) } : {}) }) }
           modes = await ModeRegistry.open(config.workflow.modeStore || file('modes'),
             { nodeId: transport.nodeId, capabilities, randomId: () => randomBytes(16).toString('hex') })
           records = await WorkflowRecords.open(config.workflow.recordStore || file('records'),
             { nodeId: transport.nodeId, modes, randomId: () => randomBytes(16).toString('hex'), validateReferences: (scope, refs) => replica.validateReferences(scope, refs) })
           this.lifetime.signal.throwIfAborted(); transport.assertIdentity()
           this.workflow = { transport, modes, records, replica }
+          const keyFile = path.join(path.dirname(defaultGateStatePath(this.host)), `human-workflow-${transport.nodeId}-receiver-keys.json`)
+          const keys = await ReceiverKeyring.open(config.workflow.receiverKeyStore || new ReceiverKeyFileStore(keyFile), transport.nodeId)
+          let receiver: SubmissionReceiver | undefined, runtime: WorkflowLifecycle | undefined
+          try {
+            const attachments = this.host.get('attachments') as AttachmentStore | undefined
+            if (typeof attachments?.validateImage === 'function' && typeof attachments?.saveImage === 'function') {
+              receiver = await SubmissionReceiver.open({ root: config.workflow.receiverRoot || path.join(path.dirname(keyFile), `human-workflow-${transport.nodeId}-received`),
+                nodeId: transport.nodeId, keys, assertIdentity: () => transport.assertIdentity(), download: downloadSubmission,
+                validateImage: (image, mediaType) => attachments.validateImage({ data: image, mediaType }),
+                ack: (origin, taskRef, delivery, signal) => transport.request('objects/ack', { scope: origin.sessionId, sessionGeneration: origin.sessionGeneration,
+                  taskRef, submissionId: delivery.submissionId, claimId: delivery.claimId, version: delivery.version,
+                  manifestDigest: delivery.envelope.manifestDigest, cipherDigest: delivery.envelope.cipherDigest }, signal) })
+            }
+            runtime = await WorkflowLifecycle.open({ transport, keys, receiver, store: config.workflow.lifecycleStore || file('lifecycle') })
+            this.lifetime.signal.throwIfAborted(); transport.assertIdentity()
+            const current = runtime
+            this.lifecycle = { runtime, keys, receiver, unsubscribe: replica.onSynchronized((binding, tasks) => {
+              void current.synced(binding, tasks, this.lifetime.signal).catch(() => {})
+            }) }
+            for (const tool of lifecycleTools({ nodeId: transport.nodeId, lifecycle: runtime, core,
+              assertAgent: exec => {
+                this.lifetime.signal.throwIfAborted(); transport.assertIdentity()
+                const agents = this.host.get('agents') as { get(id: string): unknown } | undefined
+                if (!exec.agent || agents?.get(String(exec.agent.id)) !== exec.agent) throw fail('workflow-scope-invalid', '调用者不是当前真实Agent')
+              }, ...(receiver && attachments ? { saveImage: (data: Uint8Array, mediaType: 'image/png' | 'image/jpeg') => attachments.saveImage({ data, mediaType }) } : {}) }))
+              unregisterTools.push((this.host.get('tools') as ToolRuntime).register(tool))
+          } catch (cause) { await Promise.all([runtime?.close(), receiver?.close()]); await keys.close(); throw cause }
           const options = { nodeId: transport.nodeId, modes, records, capabilities,
             prepareCard: (input: { scope: WorkflowScope; callId: string; rootCallId: string; title: string; body: string; sourceSurfaceId?: string }, signal: AbortSignal) => {
               transport.assertIdentity()
@@ -123,7 +161,24 @@ export class HumanToolsService extends TypertRemoteService {
         unregisterTools.push((this.host.get('tools') as ToolRuntime).register(tool))
       const unregisterContext = registerHumanContext(this.host, core)
       this.unregister = () => { unregisterContext(); unregisterTools.reverse().forEach(remove => remove()) }
-    } catch (cause) { unregisterTools.reverse().forEach(remove => remove()); await Promise.all([core.close(), this.workflow?.modes.close(), this.workflow?.records.close(), this.workflow?.replica.close(), this.closeAssistants()]); this.core = undefined; this.workflow = undefined; throw cause }
+    } catch (cause) { unregisterTools.reverse().forEach(remove => remove()); await Promise.all([core.close(), this.workflow?.modes.close(), this.workflow?.records.close(), this.workflow?.replica.close(), this.closeAssistants(), this.closeLifecycle()]); this.core = undefined; this.workflow = undefined; throw cause }
+  }
+  private async closeLifecycle() {
+    const current = this.lifecycle; if (!current) return
+    current.unsubscribe(); await Promise.all([current.runtime.close(), current.receiver?.close()]); await current.keys.close()
+  }
+  @Remote('workflowDraft')
+  async workflowDraft(request: HumanActionRequest, signal: AbortSignal): Promise<HumanResult> {
+    return this.result(async () => {
+      const active = AbortSignal.any([signal, this.lifetime.signal]), core = await this.use(active)
+      if (!this.lifecycle) throw fail('lifecycle-unavailable', '此节点尚未提供任务生命周期')
+      const source = core.grantSource(request), generation = await this.claimGeneration(request.scope, active)
+      core.assertGeneration(request.scope, request.surfaceId, generation)
+      if (source.surface.actions[0].id !== 'workflow-approve' || !source.surface.workflowRef || !source.surface.targetTaskRef)
+        throw fail('lifecycle-draft-invalid', '此按钮不是工作流审核入口')
+      return this.lifecycle.runtime.preview({ nodeId: this.workflow!.transport.nodeId, sessionId: source.origin.scope, sessionGeneration: generation },
+        source.surface.targetTaskRef, source.surface.workflowRef, active)
+    })
   }
   private async closeAssistants() {
     const assistants = this.assistants
@@ -207,7 +262,7 @@ export class HumanToolsService extends TypertRemoteService {
       active.throwIfAborted(); this.workflow.transport.assertIdentity()
       if (!row(grant) || grant.schema !== 'human.source.grant.v1' || typeof grant.sourceGrant !== 'string' || grant.sourceGrant.length > 4096
         || !Number.isSafeInteger(grant.expiresAt) || Number(grant.expiresAt) <= Date.now()) throw fail('workflow-response-invalid', '任务来源凭证无效')
-      this.workflow.replica.discover()
+      await this.workflow.replica.keepDiscovering(Number(grant.expiresAt) + WORKFLOW_DRAFT_TTL_MS, active)
       return grant
     })
   }
@@ -286,7 +341,16 @@ export class HumanToolsService extends TypertRemoteService {
   }
   @Remote('ack')
   async ack(request: HumanAckWireRequest, signal: AbortSignal): Promise<HumanResult> {
-    return this.result(async () => (await this.use(signal)).ack(request, signal))
+    return this.result(async () => {
+      const active = AbortSignal.any([signal, this.lifetime.signal]), receipt = await (await this.use(active)).ack(request, active)
+      if (this.workflow && request.actionId === 'share' && ['success', 'unknown'].includes(receipt.outcome)) {
+        // Also cover a late native result and pre-upgrade ledgers which never
+        // retained a grant intent. This is only read-only discovery, not replay.
+        // Authoritative sync time, never this local clock, decides retirement.
+        await this.workflow.replica.keepDiscovering(Date.now() + WORKFLOW_SOURCE_GRANT_TTL_MS + WORKFLOW_DRAFT_TTL_MS, active)
+      }
+      return receipt
+    })
   }
   @Remote('status')
   async status(request: { scope: string; surfaceId: string }, signal: AbortSignal): Promise<HumanResult> {

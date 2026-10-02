@@ -399,7 +399,8 @@ export class WechatHistoryService extends TypertRemoteService {
 }
 
 function needsHumanProjection(entries: readonly HistoryEntry[]): boolean {
-  const names = new Set([HUMAN_TOOL_NAME, HUMAN_MEMBERS_TOOL_NAME, HUMAN_REMIND_TOOL_NAME, 'human_mode_prepare_card'])
+  const names = new Set([HUMAN_TOOL_NAME, HUMAN_MEMBERS_TOOL_NAME, HUMAN_REMIND_TOOL_NAME, 'human_mode_prepare_card',
+    'human_task_create', 'human_task_prepare_round', 'human_task_prepare_review', 'human_task_prepare_reminder'])
   const calls = new Set<string>()
   for (const entry of entries) {
     const event = entry.event, data = event?.data

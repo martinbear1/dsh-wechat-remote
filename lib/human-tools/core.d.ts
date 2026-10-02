@@ -1,4 +1,5 @@
-import { type HumanAckRequest, type HumanAckWireRequest, type HumanActionRequest, type HumanReceipt, type HumanSurface } from './protocol.js';
+import { type HumanAckRequest, type HumanAckWireRequest, type HumanActionRequest, type HumanReceipt, type HumanSurface, type HumanTaskRef, type HumanWorkflowDraftRef } from './protocol.js';
+import { type HumanInitialRound } from './form.js';
 /** Business core has no DSH, Cordis, WeChat, network or filesystem dependency. */
 export interface HumanOrigin {
     readonly scope: string;
@@ -55,6 +56,11 @@ export declare class HumanToolsCore {
         origin: HumanOrigin;
     };
     create(origin: HumanOrigin, title: string, body: string, signal: AbortSignal, sourceSurfaceId?: string): Promise<HumanSurface>;
+    createCollection(origin: HumanOrigin, title: string, body: string, initialRound: HumanInitialRound, signal: AbortSignal, sourceSurfaceId?: string): Promise<HumanSurface>;
+    /** Internal caller has already obtained a cloud-validated draft scoped to
+     * this origin. The Surface stores only its immutable locator, never private
+     * evaluation text. Claiming this button is NOT approving/publishing it. */
+    createWorkflow(origin: HumanOrigin, taskRef: HumanTaskRef, draftRef: HumanWorkflowDraftRef, signal: AbortSignal): Promise<HumanSurface>;
     private source;
     private publishedSource;
     createMembers(origin: HumanOrigin, sourceSurfaceId: string, signal: AbortSignal): Promise<HumanSurface>;

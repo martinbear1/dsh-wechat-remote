@@ -1,4 +1,5 @@
 /** Agent-neutral, executable-code-free wire contract. No host/session authority is public. */
+import { type HumanInitialRound } from './form.js';
 export interface HumanSurface {
     readonly schemaVersion: 1;
     readonly kind: 'human.surface';
@@ -13,6 +14,8 @@ export interface HumanSurface {
         readonly title: string;
         readonly type: 'complete';
     };
+    readonly workflowRef?: HumanWorkflowDraftRef;
+    readonly initialRound?: HumanInitialRound;
     readonly actions: readonly [HumanAction];
 }
 export type HumanAction = {
@@ -27,7 +30,18 @@ export type HumanAction = {
     readonly id: 'remind';
     readonly type: 'wechat.remind';
     readonly label: '提醒已选未完成人员';
+} | {
+    readonly id: 'workflow-approve';
+    readonly type: 'workflow.approve';
+    readonly label: '审核任务方案';
 };
+export interface HumanWorkflowDraftRef {
+    readonly schema: 'human.lifecycle.draft.ref.v1';
+    readonly draftId: string;
+    readonly version: 1;
+    readonly digest: string;
+    readonly kind: 'round' | 'review' | 'reminder';
+}
 export type HumanOutcome = 'success' | 'cancelled' | 'failed' | 'unknown';
 export interface HumanActionRequest {
     readonly scope: string;
@@ -94,9 +108,15 @@ export declare const HUMAN_REMIND_ACTION: Readonly<{
     readonly type: "wechat.remind";
     readonly label: "提醒已选未完成人员";
 }>;
+export declare const HUMAN_WORKFLOW_ACTION: Readonly<{
+    readonly id: "workflow-approve";
+    readonly type: "workflow.approve";
+    readonly label: "审核任务方案";
+}>;
 export declare const HUMAN_ID: RegExp;
 export declare const ATTEMPT_ID: RegExp;
 export declare const TASK_REF_ID: RegExp;
+export declare function humanWorkflowDraftRef(value: unknown): HumanWorkflowDraftRef | undefined;
 export declare function humanTaskRef(value: unknown): HumanTaskRef | undefined;
 export declare function sameTaskRef(a: HumanTaskRef | undefined, b: HumanTaskRef | undefined): boolean;
 export declare function humanMemberRefs(value: unknown): value is readonly string[];

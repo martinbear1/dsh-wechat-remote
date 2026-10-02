@@ -1,4 +1,5 @@
 /** Agent-neutral, executable-code-free wire contract. No host/session authority is public. */
+import { humanInitialRound, type HumanInitialRound } from './form.js'
 export interface HumanSurface {
   readonly schemaVersion: 1
   readonly kind: 'human.surface'
@@ -10,11 +11,18 @@ export interface HumanSurface {
   readonly targetTaskRef?: HumanTaskRef
   readonly selectionRef?: HumanSelectionRef
   readonly reminder?: { readonly title: string; readonly type: 'complete' }
+  readonly workflowRef?: HumanWorkflowDraftRef
+  readonly initialRound?: HumanInitialRound
   readonly actions: readonly [HumanAction]
 }
 export type HumanAction = { readonly id: 'share'; readonly type: 'wechat.share'; readonly label: '发送群卡' | '发送测试卡片' }
   | { readonly id: 'select-members'; readonly type: 'wechat.select-members'; readonly label: '选择任务成员' }
   | { readonly id: 'remind'; readonly type: 'wechat.remind'; readonly label: '提醒已选未完成人员' }
+  | { readonly id: 'workflow-approve'; readonly type: 'workflow.approve'; readonly label: '审核任务方案' }
+export interface HumanWorkflowDraftRef {
+  readonly schema: 'human.lifecycle.draft.ref.v1'; readonly draftId: string; readonly version: 1
+  readonly digest: string; readonly kind: 'round' | 'review' | 'reminder'
+}
 export type HumanOutcome = 'success' | 'cancelled' | 'failed' | 'unknown'
 export interface HumanActionRequest {
   readonly scope: string
@@ -66,9 +74,16 @@ export const HUMAN_REMIND_TOOL_NAME = 'human_task_remind'
 export const HUMAN_ACTION = Object.freeze({ id: 'share', type: 'wechat.share', label: '发送群卡' } as const)
 export const HUMAN_MEMBERS_ACTION = Object.freeze({ id: 'select-members', type: 'wechat.select-members', label: '选择任务成员' } as const)
 export const HUMAN_REMIND_ACTION = Object.freeze({ id: 'remind', type: 'wechat.remind', label: '提醒已选未完成人员' } as const)
+export const HUMAN_WORKFLOW_ACTION = Object.freeze({ id: 'workflow-approve', type: 'workflow.approve', label: '审核任务方案' } as const)
 export const HUMAN_ID = /^[a-f0-9]{32}$/
 export const ATTEMPT_ID = /^[A-Za-z0-9_-]{16,80}$/
 export const TASK_REF_ID = /^[A-Za-z0-9_-]{24,64}(?![\s\S])/
+export function humanWorkflowDraftRef(value: unknown): HumanWorkflowDraftRef | undefined {
+  return object(value) && exactKeys(value, ['schema', 'draftId', 'version', 'digest', 'kind']) && value.schema === 'human.lifecycle.draft.ref.v1'
+    && typeof value.draftId === 'string' && TASK_REF_ID.test(value.draftId) && value.version === 1
+    && typeof value.digest === 'string' && /^[a-f0-9]{64}(?![\s\S])/.test(value.digest) && ['round', 'review', 'reminder'].includes(String(value.kind))
+    ? { schema: 'human.lifecycle.draft.ref.v1', draftId: value.draftId, version: 1, digest: value.digest, kind: value.kind as HumanWorkflowDraftRef['kind'] } : undefined
+}
 export function humanTaskRef(value: unknown): HumanTaskRef | undefined {
   return object(value) && exactKeys(value, ['schema', 'taskId', 'deliveryId']) && value.schema === 'human.task.ref.v1'
     && typeof value.taskId === 'string' && TASK_REF_ID.test(value.taskId)
@@ -119,7 +134,7 @@ export function exactKeys(value: Record<string, unknown>, keys: readonly string[
 /** Reject rather than coerce newer schemas, hidden fields, arbitrary routes and actions. */
 export function humanSurface(value: unknown): HumanSurface | undefined {
   if (!object(value) || !exactKeys(value, ['schemaVersion', 'kind', 'id', 'revision', 'title', 'body', 'actions',
-    ...['targetTaskRef', 'selectionRef', 'reminder'].filter(key => Object.hasOwn(value, key))])
+    ...['targetTaskRef', 'selectionRef', 'reminder', 'workflowRef', 'initialRound'].filter(key => Object.hasOwn(value, key))])
     || Object.hasOwn(value, 'targetTaskRef') && !humanTaskRef(value.targetTaskRef)
     || value.schemaVersion !== 1 || value.kind !== 'human.surface' || value.revision !== 1
     || typeof value.id !== 'string' || !HUMAN_ID.test(value.id) || !text(value.title, 80) || !text(value.body, 1000)
@@ -129,7 +144,10 @@ export function humanSurface(value: unknown): HumanSurface | undefined {
   const share = action.id === HUMAN_ACTION.id && action.type === HUMAN_ACTION.type && [HUMAN_ACTION.label, '发送测试卡片'].includes(action.label as string)
   const members = action.id === HUMAN_MEMBERS_ACTION.id && action.type === HUMAN_MEMBERS_ACTION.type && action.label === HUMAN_MEMBERS_ACTION.label
   const remind = action.id === HUMAN_REMIND_ACTION.id && action.type === HUMAN_REMIND_ACTION.type && action.label === HUMAN_REMIND_ACTION.label
-  if (!share && !members && !remind || !share && !value.targetTaskRef) return
+  const workflow = action.id === HUMAN_WORKFLOW_ACTION.id && action.type === HUMAN_WORKFLOW_ACTION.type && action.label === HUMAN_WORKFLOW_ACTION.label
+  if (!share && !members && !remind && !workflow || !share && !value.targetTaskRef) return
+  if (workflow ? !humanWorkflowDraftRef(value.workflowRef) : Object.hasOwn(value, 'workflowRef')) return
+  if (Object.hasOwn(value, 'initialRound') && (!share || !humanInitialRound(value.initialRound))) return
   if (!remind && (Object.hasOwn(value, 'selectionRef') || Object.hasOwn(value, 'reminder'))) return
   const selection = humanSelectionRef(value.selectionRef), target = humanTaskRef(value.targetTaskRef)
   if (remind && (!selection || !target || selection.taskId !== target.taskId || selection.deliveryId !== target.deliveryId
@@ -139,6 +157,8 @@ export function humanSurface(value: unknown): HumanSurface | undefined {
   // the old label after rc.13 ledgers/cards expire; no second execution route.
   return { schemaVersion: 1, kind: 'human.surface', id: value.id, revision: 1, title: value.title,
     body: value.body, ...(value.targetTaskRef ? { targetTaskRef: { ...humanTaskRef(value.targetTaskRef)! } } : {}),
+    ...(workflow ? { workflowRef: humanWorkflowDraftRef(value.workflowRef)! } : {}),
+    ...(value.initialRound ? { initialRound: humanInitialRound(value.initialRound)! } : {}),
     ...(remind ? { selectionRef: { ...selection!, memberRefs: [...selection!.memberRefs] }, reminder: { title: (value.reminder as { title: string }).title, type: 'complete' as const } } : {}),
     actions: [{ ...action } as HumanAction] }
 }

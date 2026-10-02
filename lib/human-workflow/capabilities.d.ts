@@ -1,5 +1,5 @@
 export type CapabilityStatus = 'available' | 'blocked' | 'planned';
-export declare const CAPABILITY_IDS: readonly ["surface.reading-confirmation", "action.select-members", "action.remind-selected-pending", "task.query", "recipient.query", "mode.packages", "workflow.records", "submission.receive", "result.private", "automation.run"];
+export declare const CAPABILITY_IDS: readonly ["surface.reading-confirmation", "action.select-members", "action.remind-selected-pending", "surface.form-collection", "task.lifecycle", "task.query", "recipient.query", "mode.packages", "workflow.records", "submission.receive", "result.private", "automation.run"];
 export type CapabilityId = typeof CAPABILITY_IDS[number];
 export interface WorkflowCapability {
     id: CapabilityId;
@@ -15,7 +15,7 @@ export interface CapabilityManifest {
     nodeId: string;
     version: 1;
     capabilities: WorkflowCapability[];
-    cardKinds: ['reading-confirmation'];
+    cardKinds: ('reading-confirmation' | 'form-collection')[];
     fieldKinds: ['short-text', 'long-text', 'choice', 'boolean', 'number'];
     limits: {
         fields: 12;
@@ -24,7 +24,7 @@ export interface CapabilityManifest {
         bodyCharacters: 1000;
     };
 }
-export type CapabilityAvailability = Partial<Record<'surface.reading-confirmation' | 'action.select-members' | 'action.remind-selected-pending' | 'task.query' | 'recipient.query', {
+export type CapabilityAvailability = Partial<Record<'surface.reading-confirmation' | 'action.select-members' | 'action.remind-selected-pending' | 'task.query' | 'recipient.query' | 'surface.form-collection' | 'task.lifecycle' | 'submission.receive' | 'result.private', {
     status: CapabilityStatus;
     reason?: string;
 }>>;

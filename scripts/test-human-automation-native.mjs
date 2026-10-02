@@ -70,7 +70,7 @@ async function setup(t, options = {}) {
   const run = { id: 'a'.repeat(32), scope, taskRef, submissionId: 's'.repeat(24), submissionVersion: 1 }
   const definitions = [{ name: 'human_automation_save', description: 'fixture save', parameters: { type: 'object', properties: {} }, output, async execute() { return { saved: true } } }]
   function request() { const message = adapter.createMessage(run, policy); return { run: { ...run, messageId: message.id }, policy, message: message.message, authorize: async () => {}, tools: definitions, claimed: async () => {} } }
-  return { ctx, tools, sessions, session, agent, adapter, scope, policy, run, host, controls, pre, call, request, emit, definitions }
+  return { ctx, tools, sessions, session, agent, adapter, scope, policy, run, host, services, controls, pre, call, request, emit, definitions }
 }
 
 test('real scoped ToolRuntime denies other tools and PTC inner calls; ordinary next turn regains original tools', async t => {
@@ -137,9 +137,33 @@ test('missing native guard/controller/preset capabilities never downgrade to unr
   const h = await setup(t)
   for (const missing of ['tools', 'sessionController', 'agentPresets']) {
     const partial = { get: name => name === missing ? undefined : h.host.get(name), on: h.host.on }, adapter = createNativeAutomationAdapter(partial)
-    assert.equal(adapter.probe().supported, false); await adapter.close()
+    assert.equal(adapter.probe().supported, false)
+    assert.equal((await adapter.run(h.request(), signal)).state, 'failed', 'actual admission cannot use missing guard/native APIs')
+    await adapter.close()
   }
   assert.equal(h.controls.followups, 0)
+})
+test('native capability is current, bounded, non-sensitive and never restores or runs an Agent', async t => {
+  const h = await setup(t), originals = { ...h.services }
+  for (const [name, expected] of [['sessionController', 'sessionController.inspect'], ['agentPresets', 'agentPresets.readDocument'],
+    ['permissionPresets', 'permissionPresets.resolve'], ['workspaceRegistry', 'workspaceRegistry.archivedSessionIds']]) {
+    delete h.services[name]
+    assert.equal(h.adapter.probe().supported, false); assert(h.adapter.probe().reason.includes(expected))
+    await assert.rejects(h.adapter.inspect(h.scope, signal), { code: 'automation-unsupported' })
+    h.services[name] = originals[name]
+    assert.deepEqual(h.adapter.probe(), { supported: true }, 'same adapter recovers, no reinstall or retry timer')
+  }
+  h.services.workspaceRegistry = { get archivedSessionIds() { throw new Error('C:/private/profile/SECRET-fake-token') } }
+  const blocked = h.adapter.probe()
+  assert.equal(blocked.reason, '宿主自动处理接口未就绪或不可用：workspaceRegistry.archivedSessionIds；手动群任务仍可使用')
+  h.services.workspaceRegistry = { archivedSessionIds: 'invalid' }; assert.equal(h.adapter.probe().supported, false)
+  h.services.workspaceRegistry = originals.workspaceRegistry
+  assert.equal(h.adapter.probe().supported, true)
+  const unexpected = createNativeAutomationAdapter({ get(name) { if (name === 'agentPresets') throw new Error('C:/private/profile/SECRET-fake-token'); return h.host.get(name) }, on: h.host.on })
+  assert(unexpected.probe().reason.includes('agentPresets.readDocument')); assert(!unexpected.probe().reason.includes('SECRET'))
+  assert(unexpected.probe().reason.length <= 1000); await unexpected.close()
+  assert.equal(h.controls.restores, 0); assert.equal(h.controls.followups, 0); assert.equal(h.controls.modelCalls, 0)
+  await h.adapter.close(); assert.equal(h.adapter.probe().supported, false, 'closed adapter cannot revive when services are ready')
 })
 test('without history seam only a newly witnessed real human turn passes; historical unknown and producer turns remain blocked', async t => {
   const h = await setup(t), human = humanMessage()

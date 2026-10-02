@@ -49,6 +49,10 @@ const COMPATIBLE_INLINE_ARCHIVE_MAX_BYTES = 384 * 1024
 // Opt-in pages bound presentation work and the first-screen transfer. The
 // legacy complete-turn contract remains unchanged for installed clients.
 const BOUNDED_PAGE_BYTES = 128 * 1024
+const MAX_BOUNDED_PAGE_BYTES = 2 * 1024 * 1024
+// Do not enlarge the client's shared archive decoder to accommodate a page.
+// Poorly compressible pages use plain JSON within the negotiated clear budget.
+const BOUNDED_PAGE_ARCHIVE_DESCRIPTOR_BYTES = 256 * 1024
 const BOUNDED_PAGE_EVENTS = 256
 
 interface HistoryEntry {
@@ -76,6 +80,8 @@ export interface WechatHistoryWindowRequest {
   readonly sessionId: string
   readonly beforeSeq?: number
   readonly maxMessages?: number
+  /** page() only: explicit clear JSON budget, 128 KiB..2 MiB; omitted stays 128 KiB. */
+  readonly pageBytes?: number
   /** Force compact JSON inline when the client's object data plane is unavailable. */
   readonly delivery?: 'auto' | 'inline'
   /** Additive capability: an inline retry may return the existing ZIP descriptor. */
@@ -211,9 +217,10 @@ export class WechatHistoryService extends TypertRemoteService {
       signal.throwIfAborted()
       if (!built.ok) return built
       const payloadJson = JSON.stringify(built.value)
-      return Buffer.byteLength(payloadJson) < this.snapshotThresholdBytes
-        ? { ok: true, value: { payloadJson } }
-        : inlineArchive(payloadJson, await archiveHistoryJsonAsync(payloadJson, signal))
+      if (Buffer.byteLength(payloadJson) < this.snapshotThresholdBytes) return { ok: true, value: { payloadJson } }
+      const zipped = inlineArchive(payloadJson, await archiveHistoryJsonAsync(payloadJson, signal))
+      return zipped.ok && Buffer.byteLength(zipped.value.snapshotJson!) <= BOUNDED_PAGE_ARCHIVE_DESCRIPTOR_BYTES
+        ? zipped : { ok: true, value: { payloadJson } }
     } catch (error) {
       signal.throwIfAborted()
       return { ok: false, error: { code: (error as { code?: string })?.code === 'history-busy' ? 'history-busy' : 'history-unavailable', message: messageOf(error) } }
@@ -562,6 +569,7 @@ export async function buildBoundedHistoryWindow(
 ): Promise<BuildHistoryWindowResult> {
   const validation = validateRequest(request)
   if (validation) return { ok: false, error: validation }
+  const pageBytes = request.pageBytes ?? BOUNDED_PAGE_BYTES
   signal.throwIfAborted()
   const response = await fetchPage({ sessionId: request.sessionId,
     maxMessages: request.maxMessages ?? DEFAULT_PAGE_MESSAGES,
@@ -623,7 +631,7 @@ export async function buildBoundedHistoryWindow(
       pages: 1, rawEvents: entries.length,
       coverage: { schema: 'wechat.history-page.v1', fromSeq: coverageFrom, throughSeq: to },
     }
-    if (next.length > BOUNDED_PAGE_EVENTS || Buffer.byteLength(JSON.stringify(candidate)) > BOUNDED_PAGE_BYTES) break
+    if (next.length > BOUNDED_PAGE_EVENTS || Buffer.byteLength(JSON.stringify(candidate)) > pageBytes) break
     accepted = candidate; selected = next; end = start
     signal.throwIfAborted()
   }
@@ -631,7 +639,7 @@ export async function buildBoundedHistoryWindow(
     const empty = { ...value, events: [], hasMore: value.hasMore === true,
       historyStartSeq: eventSeqOf(entries[0]), historyEndSeq: to, pages: 1, rawEvents: entries.length,
       coverage: { schema: 'wechat.history-page.v1', fromSeq: eventSeqOf(entries[0]), throughSeq: to } }
-    if (Buffer.byteLength(JSON.stringify(empty)) <= BOUNDED_PAGE_BYTES) return { ok: true, value: empty }
+    if (Buffer.byteLength(JSON.stringify(empty)) <= pageBytes) return { ok: true, value: empty }
   }
   return accepted ? { ok: true, value: accepted } : { ok: false, error: {
     code: 'history-unavailable', message: '原生历史分组或状态信息超过单页预算，请在电脑端查看',
@@ -678,6 +686,10 @@ function validateRequest(request: WechatHistoryWindowRequest): WechatHistoryWind
   }
   if (request.delivery !== undefined && request.delivery !== 'auto' && request.delivery !== 'inline') {
     return { code: 'invalid-history-request', message: '历史传输方式无效' }
+  }
+  if (request.pageBytes !== undefined && (!Number.isSafeInteger(request.pageBytes)
+    || request.pageBytes < BOUNDED_PAGE_BYTES || request.pageBytes > MAX_BOUNDED_PAGE_BYTES)) {
+    return { code: 'invalid-history-request', message: '历史分页字节预算无效' }
   }
   if (request.acceptInlineArchive !== undefined && typeof request.acceptInlineArchive !== 'boolean') {
     return { code: 'invalid-history-request', message: '历史传输能力无效' }

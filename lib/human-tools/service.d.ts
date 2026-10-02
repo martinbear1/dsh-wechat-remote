@@ -25,7 +25,14 @@ export interface HumanToolsConfig {
         receiverRoot?: string;
         automationStore?: WorkflowDataStore;
         automationNative?: NativeAutomationAdapter;
+        coverStore?: WorkflowDataStore;
     };
+}
+export interface CoverPreviewRequest {
+    scope: string;
+    surfaceId: string;
+    revision: 1;
+    requestId: string;
 }
 export interface AutomationTaskRequest {
     scope: string;
@@ -90,6 +97,7 @@ export declare class HumanToolsService extends TypertRemoteService {
     private assistants?;
     private lifecycle?;
     private automation?;
+    private covers?;
     private automationReason;
     constructor(host: Context, config?: HumanToolsConfig);
     private initialize;
@@ -113,6 +121,9 @@ export declare class HumanToolsService extends TypertRemoteService {
     automationPause(request: AutomationPauseRequest, signal: AbortSignal): Promise<HumanResult>;
     automationStatus(request: AutomationStatusRequest, signal: AbortSignal): Promise<HumanResult>;
     workflowDraft(request: HumanActionRequest, signal: AbortSignal): Promise<HumanResult>;
+    /** Owner-only read preview; never claims an action or approves publication.
+     * Resolve the asset from the durable Surface / exact cloud draft, not input. */
+    coverPreview(request: CoverPreviewRequest, signal: AbortSignal): Promise<HumanResult>;
     private closeAssistants;
     private assistantRegistry;
     assistantCatalog(request: {}, signal: AbortSignal): Promise<HumanResult>;

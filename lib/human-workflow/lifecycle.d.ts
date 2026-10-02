@@ -4,6 +4,7 @@ import { type WorkflowTransport } from './transport.js';
 import { ReceiverKeyring } from './receiver-keyring.js';
 import { SubmissionReceiver } from './receiver.js';
 import type { AutomationSnapshot, AutomationSubmission } from './automation-types.js';
+import { type HumanCardAsset } from '../human-tools/card-cover.js';
 export interface NodeBinding {
     schema: 'human.node.binding.v1';
     nodeId: string;
@@ -39,6 +40,7 @@ export interface LifecycleOptions {
     receiver?: SubmissionReceiver;
     store: WorkflowDataStore;
     now?: () => number;
+    coverAuthority?(scope: WorkflowScope, asset: HumanCardAsset): void;
 }
 export declare const RECEIVER_SYNC_MAX_FILES = 4;
 export declare const RECEIVER_SYNC_TIMEOUT_MS = 120000;

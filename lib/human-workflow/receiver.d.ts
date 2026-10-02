@@ -1,7 +1,7 @@
 import { type WorkflowScope } from './data.js';
 import { type HumanTaskRef } from '../human-tools/protocol.js';
 import { ReceiverKeyring } from './receiver-keyring.js';
-import { type SubmissionContext, type SubmissionEnvelope, type SubmissionManifest } from './submission-crypto.js';
+import { type SubmissionContext, type SubmissionEnvelope, type SubmissionManifest, type SubmissionAnswers } from './submission-crypto.js';
 export interface ReceiverDelivery {
     claimId: string;
     leaseExpiresAt: number;
@@ -9,7 +9,7 @@ export interface ReceiverDelivery {
     version: number;
     context: SubmissionContext;
     envelope: SubmissionEnvelope;
-    values: Record<string, string | number | boolean>;
+    values: SubmissionAnswers;
     download: unknown;
 }
 export interface ReceiverOptions {

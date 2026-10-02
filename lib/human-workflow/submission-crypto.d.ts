@@ -22,7 +22,7 @@ export interface SubmissionEnvelope {
     cipherDigest: string;
     manifestDigest: string;
 }
-export type SubmissionAnswers = Record<string, string | number | boolean>;
+export type SubmissionAnswers = Record<string, string | number | boolean | string[]>;
 export interface SubmissionManifest {
     schema: 'human.submission.manifest.v1';
     context: SubmissionContext;

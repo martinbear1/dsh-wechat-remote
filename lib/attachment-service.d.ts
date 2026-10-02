@@ -85,6 +85,12 @@ export declare class WechatAttachmentService extends TypertRemoteService {
     private prepareOne;
     private prepareFresh;
     private fetchNativeAttachment;
+    /** Internal adapter seam; retains native session-reference authorization.
+     * Reading for an owner is not permission to publish the bytes to a group. */
+    readSessionImage(sessionId: string, attachmentId: string, signal: AbortSignal): Promise<{
+        data: Uint8Array;
+        mediaType: string;
+    }>;
 }
 /** Pure native-contract validator used by regression tests. */
 export declare function decodeNativeAttachment(response: NativeAttachmentResponse, requested: WechatAttachmentInput): {

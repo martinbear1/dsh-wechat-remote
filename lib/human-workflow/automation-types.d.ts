@@ -1,6 +1,7 @@
 import type { HumanTaskRef, HumanWorkflowDraftRef } from '../human-tools/protocol.js';
 import type { WorkflowDataStore, WorkflowScope } from './data.js';
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools';
+import type { SubmissionAnswers } from './submission-crypto.js';
 export interface AutomationConfig {
     trigger: 'manual' | 'per-submission' | 'all-recipients';
     roundId: string;
@@ -40,7 +41,7 @@ export interface AutomationSubmission {
     state: string;
     delivery: string;
     acceptedAt: number | null;
-    values: Record<string, string | number | boolean>;
+    values: SubmissionAnswers;
     participantRef?: string;
 }
 export interface AutomationSnapshot {

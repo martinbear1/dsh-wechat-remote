@@ -7,6 +7,7 @@ import { mkdtemp, unlink, rmdir, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { WorkflowHttpTransport } from '../lib/human-workflow/transport.js'
+import { HUMAN_CARD_REQUEST_MAX_BYTES, HUMAN_LIFECYCLE_RESPONSE_MAX_BYTES } from '../lib/human-tools/capacity.js'
 import { registerHumanWorkflowSkill, HUMAN_WORKFLOW_SKILL } from '../lib/human-workflow/dsh-skill.js'
 import { Context } from '@deepseek-ai/cordis'
 import { SkillRegistry } from '@deepseek-ai/dsh-skill'
@@ -271,6 +272,29 @@ test('transport sanitizes server errors and bounds response body', async () => {
   await assert.rejects(revoked.request('sync', {}, signal()), e => e.code === 'binding_revoked' && !e.message.includes('secret-content'))
   const oversized = new WorkflowHttpTransport('https://relay.example', () => identity, async () => new Response('x'.repeat(2 * 1024 * 1024 + 1)))
   await assert.rejects(oversized.request('sync', {}, signal()), /过大/)
+})
+
+test('large card transport budgets include envelopes and do not loosen unrelated endpoints', async () => {
+  const pair = generateKeyPairSync('ed25519'), identity = { nodeId, privateKeyPem: pair.privateKey.export({ type: 'pkcs8', format: 'pem' }) }
+  let calls = 0
+  const client = new WorkflowHttpTransport('https://relay.example', () => identity, async (_url, options) => {
+    calls++; assert(Buffer.byteLength(options.body) <= HUMAN_CARD_REQUEST_MAX_BYTES)
+    return new Response('{"ok":true}')
+  })
+  const envelopeBytes = Buffer.byteLength(JSON.stringify({ data: '', audience: 'human.workflow.node.v1' }))
+  const exact = { data: 'a'.repeat(HUMAN_CARD_REQUEST_MAX_BYTES - envelopeBytes) }
+  for (const operation of ['grant', 'lifecycle']) {
+    await client.request(operation, exact, signal())
+    const before = calls
+    await assert.rejects(client.request(operation, { data: exact.data + 'a' }, signal()), { code: 'workflow-request-invalid' })
+    assert.equal(calls, before, 'oversized requests never leave the node')
+  }
+  await assert.rejects(client.request('sync', { data: 'a'.repeat(16384) }, signal()), { code: 'workflow-request-invalid' })
+  const aggregate = new WorkflowHttpTransport('https://relay.example', () => identity, async () => new Response(JSON.stringify({ data: 'a'.repeat(3 * 1024 * 1024) })))
+  assert.equal((await aggregate.request('lifecycle', {}, signal())).data.length, 3 * 1024 * 1024)
+  await assert.rejects(aggregate.request('sync', {}, signal()), { code: 'workflow-response-invalid' })
+  const excessive = new WorkflowHttpTransport('https://relay.example', () => identity, async () => new Response('x'.repeat(HUMAN_LIFECYCLE_RESPONSE_MAX_BYTES + 1)))
+  await assert.rejects(excessive.request('lifecycle', {}, signal()), { code: 'workflow-response-invalid' })
 })
 
 test('attachment quota and ticket errors expose only safe fixed messages and never masquerade as revocation', async () => {

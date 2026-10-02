@@ -1,7 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { buildBoundedHistoryWindow, buildHistoryWindow } from '../lib/history-service.js'
-import { HistoryRecords, HISTORY_DETAIL_CHUNK_BYTES } from '../lib/history-records.js'
+import { randomBytes } from 'node:crypto'
+import { inflateRawSync } from 'node:zlib'
+import WechatHistoryService, { buildBoundedHistoryWindow, buildHistoryWindow } from '../lib/history-service.js'
+import { HistoryRecords, HISTORY_DETAIL_CHUNK_BYTES, HISTORY_RECORD_BYTES, HISTORY_SURFACE_RECORD_BYTES } from '../lib/history-records.js'
+import { HistoryReadBudget } from '../lib/history-read-budget.js'
+import { humanSurface } from '../lib/human-tools/protocol.js'
 import { historyDetailDocument, historyRecordPreview } from '../lib/history-record-presentation.js'
 import { assistantRecordPresentation } from '../lib/assistant-stream-compat.js'
 
@@ -394,4 +398,149 @@ test('legacy complete-turn behavior stays separate from the bounded contract', a
       ? [event(1, 'tool/call', { turn: 1 })] : [event(0, 'turn/start', { turn: 1 })] } }
   }, signal)
   assert(result.ok); assert.equal(reads, 2); assert.equal(result.value.historyStartSeq, 0)
+})
+
+const largeSurface = id => ({
+  schemaVersion: 1, kind: 'human.surface', id: id.toString(16).padStart(32, '0'), revision: 1,
+  title: '完整任务规格', body: '说明'.repeat(500), actions: [{ id: 'share', type: 'wechat.share', label: '发送群卡' }],
+  initialRound: { title: '完整首轮', instructions: '中文'.repeat(1000), closesAt: null, recipientRefs: null, audience: 'owner-select',
+    form: { schema: 'human.form.v1', fields: Array.from({ length: 12 }, (_, field) => ({
+      key: 'field_' + field, label: '字段'.repeat(40), kind: 'choice', required: true,
+      choices: Array.from({ length: 20 }, (_, choice) => `${field}_${choice}_`.padEnd(80, '文')),
+    })), attachment: { kind: 'image', required: false, maxBytes: 10 * 1024 * 1024, mediaTypes: ['image/jpeg', 'image/png'] } },
+  },
+})
+const surfaceResult = (seq, surface = largeSurface(seq + 1), text = JSON.stringify(surface)) => event(seq, 'tool/result', {
+  message: { id: 'result-' + seq, source: { kind: 'tool', callId: 'shared-root-call' }, content: [{ type: 'text', text }] },
+  meta: { humanSurface: surface },
+})
+const surfaceGroup = (start, count = 8) => {
+  const cards = Array.from({ length: count }, (_, i) => surfaceResult(start + i))
+  const end = event(start + count, 'assistant/message', { message: { id: 'group-' + start, content: [{ type: 'text', text: '任务方案已准备' }] } })
+  Object.assign(end.event, { surfaceOp: 'append', sourceEventSeqs: cards.map(card => card.event.seq) })
+  return [...cards, end]
+}
+const largePageBytes = 2 * 1024 * 1024
+
+test('large validated Surface stays complete in the shared history/realtime presenter, ordinary records keep 96 KiB', () => {
+  const records = new HistoryRecords(), surface = largeSurface(1), source = surfaceResult(1, surface)
+  assert.deepEqual(humanSurface(surface), surface, 'fixture must be a legal complete contract, not a fake metadata bypass')
+  assert(Buffer.byteLength(JSON.stringify(surface)) > 64 * 1024)
+  assert(Buffer.byteLength(JSON.stringify(source)) > HISTORY_RECORD_BYTES)
+  assert(Buffer.byteLength(JSON.stringify(source)) < HISTORY_SURFACE_RECORD_BYTES)
+  const before = JSON.stringify(source), row = records.present('s', source)
+  assert.equal(row.detail, undefined)
+  assert.deepEqual(row.event.data.meta.humanSurface, surface)
+  assert.deepEqual(row.event.data.message, source.event.data.message)
+  const live = WechatHistoryService.prototype.presentRecord.call({ hostContext: { get: () => undefined }, records }, 's', source)
+  assert.deepEqual(live, row, 'realtime uses the same complete Surface presentation, without a second smaller record limit')
+  assert.equal(JSON.stringify(source), before)
+  const invalid = surfaceResult(2, { ...surface, revision: 2 }, 'x'.repeat(100000))
+  assert.equal(records.present('s', invalid).detail.schema, 'agent.history-detail.v1', 'invalid metadata cannot raise the ordinary record ceiling')
+  assert.equal(records.present('s', nativeResult(3, 'x'.repeat(100000), {})).detail.schema, 'agent.history-detail.v1')
+})
+
+test('large card plus oversized prose gets a detail reference without altering any card field', async () => {
+  const records = new HistoryRecords(), surface = largeSurface(2), text = '原始正文🙂'.repeat(50000)
+  const source = surfaceResult(3, surface, text), before = JSON.stringify(source)
+  const row = records.present('s', source)
+  assert(row.detail)
+  assert.deepEqual(row.event.data.meta.humanSurface, surface)
+  assert(Buffer.byteLength(JSON.stringify(row)) <= HISTORY_SURFACE_RECORD_BYTES)
+  const detail = await records.read({ sessionId: 's', reference: row.detail.reference }, async () => assert.fail(), signal)
+  assert(text.startsWith(detail.text)); assert.equal(detail.eof, false)
+  assert.equal(JSON.stringify(source), before)
+})
+
+test('eight large cards sharing a root call remain an indivisible, complete opt-in page', async () => {
+  const entries = surfaceGroup(0), before = JSON.stringify(entries)
+  const old = await builder(new HistoryRecords(), entries)
+  assert.equal(old.ok, false); assert.equal(old.error.code, 'history-unavailable', 'legacy budget must not silently drop cards')
+  const built = await builder(new HistoryRecords(), entries, { request: { pageBytes: largePageBytes } })
+  assert(built.ok, JSON.stringify(built))
+  assert(Buffer.byteLength(JSON.stringify(built.value)) > 128 * 1024)
+  assert(Buffer.byteLength(JSON.stringify(built.value)) <= largePageBytes)
+  assert.equal(built.value.events.length, 9)
+  assert.equal(built.value.hasMore, false)
+  for (let i = 0; i < 8; i++) {
+    assert.deepEqual(built.value.events[i].event.data.meta.humanSurface, entries[i].event.data.meta.humanSurface)
+    assert.equal(built.value.events[i].event.data.message.source.callId, 'shared-root-call')
+  }
+  assert.deepEqual(built.value.events.at(-1).event.sourceEventSeqs, entries.at(-1).event.sourceEventSeqs)
+  assert.equal(JSON.stringify(entries), before)
+})
+
+test('multiple large source groups page backwards with no missing cards, duplicate cards or split groups', async () => {
+  const entries = [...surfaceGroup(0), ...surfaceGroup(9), ...surfaceGroup(18)]
+  const before = JSON.stringify(entries), records = new HistoryRecords(), seen = []
+  let beforeSeq, reads = 0, pages = 0
+  for (;;) {
+    const built = await buildBoundedHistoryWindow({ sessionId: 's', pageBytes: largePageBytes, beforeSeq }, async request => {
+      reads++; assert.equal(request.pageBytes, undefined, 'the opt-in is our presentation contract, not an invented native argument')
+      return { ok: true, value: { events: entries.filter(entry => beforeSeq === undefined || entry.event.seq < beforeSeq), hasMore: false } }
+    }, signal, undefined, (original, displayed, call) => records.present('s', original, displayed, call))
+    assert(built.ok, JSON.stringify(built)); pages++
+    const seqs = built.value.events.map(entry => entry.event.seq)
+    for (const entry of built.value.events) for (const source of entry.event.sourceEventSeqs || []) assert(seqs.includes(source))
+    assert.equal(seqs.length % 9, 0)
+    assert(Buffer.byteLength(JSON.stringify(built.value)) <= largePageBytes)
+    assert(seqs.length <= 256)
+    if (beforeSeq !== undefined) assert.equal(built.value.coverage.throughSeq, beforeSeq - 1)
+    seen.unshift(...seqs); beforeSeq = built.value.historyStartSeq
+    if (!built.value.hasMore) break
+    assert(pages < 4)
+  }
+  assert(pages > 1); assert.equal(reads, pages)
+  assert.deepEqual(seen, entries.map(entry => entry.event.seq))
+  assert.equal(JSON.stringify(entries), before)
+})
+
+test('page byte opt-in rejects invalid requests before native IO and never removes the event/group ceilings', async () => {
+  for (const pageBytes of [null, '2097152', 0, 128 * 1024 - 1, 128 * 1024 + 0.5, largePageBytes + 1, Infinity, NaN]) {
+    const built = await buildBoundedHistoryWindow({ sessionId: 's', pageBytes }, async () => assert.fail('invalid opt-in read native data'), signal)
+    assert.equal(built.ok, false); assert.equal(built.error.code, 'invalid-history-request')
+  }
+  const tooLarge = await builder(new HistoryRecords(), surfaceGroup(0, 16), { request: { pageBytes: largePageBytes } })
+  assert.equal(tooLarge.ok, false); assert.equal(tooLarge.error.code, 'history-unavailable')
+  const entries = Array.from({ length: 300 }, (_, seq) => event(seq, 'step/start', { turn: 1 }))
+  const bounded = await builder(new HistoryRecords(), entries, { request: { pageBytes: largePageBytes } })
+  assert(bounded.ok); assert.equal(bounded.value.events.length, 256); assert.equal(bounded.value.hasMore, true)
+})
+
+const pageService = entries => {
+  const records = new HistoryRecords()
+  const gateway = { invoke() {}, stream() {} }
+  return {
+    hostContext: { get: name => name === 'typertGateway' ? gateway : undefined },
+    reads: new HistoryReadBudget(), timeoutMs: 10000, snapshotThresholdBytes: 32768,
+    createPageReader: () => async () => ({ ok: true, value: { events: entries, hasMore: false } }),
+    turnEvidence: { accept: () => ({ details: [], activity: [] }) },
+    presentRecord: (sessionId, original, displayed, call) => records.present(sessionId, original, displayed, call),
+    storeSnapshot: () => assert.fail('bounded pages cannot upload to object storage'),
+  }
+}
+
+test('large compressible pages use the existing small ZIP descriptor and preserve every Surface', async () => {
+  const entries = surfaceGroup(0)
+  const response = await WechatHistoryService.prototype.page.call(pageService(entries), { sessionId: 's', pageBytes: largePageBytes }, signal)
+  assert(response.ok, JSON.stringify(response)); assert.equal(response.value.payloadJson, undefined)
+  assert(Buffer.byteLength(response.value.snapshotJson) <= 256 * 1024)
+  const descriptor = JSON.parse(response.value.snapshotJson), archive = Buffer.from(descriptor.archiveBase64, 'base64')
+  const offset = 30 + archive.readUInt16LE(26) + archive.readUInt16LE(28)
+  const clear = inflateRawSync(archive.subarray(offset, offset + archive.readUInt32LE(18)))
+  assert.equal(clear.length, descriptor.originalBytes)
+  const page = JSON.parse(clear.toString('utf8'))
+  assert.equal(page.events.length, entries.length)
+  for (let i = 0; i < 8; i++) assert.deepEqual(page.events[i].event.data.meta.humanSurface, entries[i].event.data.meta.humanSurface)
+})
+
+test('poorly compressible opt-in page falls back to bounded payloadJson, not an oversized shared ZIP descriptor', async () => {
+  const entries = Array.from({ length: 8 }, (_, seq) => nativeResult(seq, randomBytes(60 * 1024).toString('base64'), {}))
+  const response = await WechatHistoryService.prototype.page.call(pageService(entries), { sessionId: 's', pageBytes: largePageBytes }, signal)
+  assert(response.ok, JSON.stringify(response)); assert.equal(response.value.snapshotJson, undefined)
+  assert(Buffer.byteLength(response.value.payloadJson) > 256 * 1024)
+  assert(Buffer.byteLength(response.value.payloadJson) <= largePageBytes)
+  const page = JSON.parse(response.value.payloadJson)
+  assert.equal(page.events.length, entries.length)
+  for (let i = 0; i < entries.length; i++) assert.deepEqual(page.events[i].event.data.message, entries[i].event.data.message)
 })

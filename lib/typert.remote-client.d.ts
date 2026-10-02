@@ -7,7 +7,7 @@ import type { WechatAttachmentBatchRequest, WechatAttachmentBatchResult } from '
 import type { WechatDirectoryCreateRequest, WechatDirectoryCreateResult, WechatDirectoryListRequest, WechatDirectoryListResult, WechatDirectoryRootsRequest, WechatDirectoryRootsResult } from '@harness-remote/dsh-wechat-remote/directory'
 import type { WechatHistoryWindowRequest, WechatHistoryWindowResult } from '@harness-remote/dsh-wechat-remote/history'
 import type { WechatHostDescribeRequest, WechatHostDescribeResult } from '@harness-remote/dsh-wechat-remote/host-info'
-import type { AssistantDraftRequest, AssistantInstallRequest, AssistantVersionRequest, AutomationApproveRequest, AutomationPauseRequest, AutomationPreviewRequest, AutomationStatusRequest, AutomationTaskRequest, HumanResult, ModeApprovalRequest, ModeVersionRequest } from '@harness-remote/dsh-wechat-remote/human-tools'
+import type { AssistantDraftRequest, AssistantInstallRequest, AssistantVersionRequest, AutomationApproveRequest, AutomationPauseRequest, AutomationPreviewRequest, AutomationStatusRequest, AutomationTaskRequest, CoverPreviewRequest, HumanResult, ModeApprovalRequest, ModeVersionRequest } from '@harness-remote/dsh-wechat-remote/human-tools'
 import type { HumanAckWireRequest, HumanActionRequest } from '@harness-remote/dsh-wechat-remote/human-tools/protocol'
 import type { ResourceResult } from '@harness-remote/dsh-wechat-remote/resources'
 
@@ -42,6 +42,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     automationStatus: (request: AutomationStatusRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     capabilities: (request: { scope: string; }, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     claim: (request: HumanActionRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
+    coverPreview: (request: CoverPreviewRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     modeApprove: (request: ModeApprovalRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     modeList: (request: { scope: string; }, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     modePreview: (request: ModeVersionRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
@@ -94,6 +95,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'humanTools/automationStatus': (request: AutomationStatusRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     'humanTools/capabilities': (request: { scope: string; }, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     'humanTools/claim': (request: HumanActionRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
+    'humanTools/coverPreview': (request: CoverPreviewRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     'humanTools/modeApprove': (request: ModeApprovalRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     'humanTools/modeList': (request: { scope: string; }, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     'humanTools/modePreview': (request: ModeVersionRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>

@@ -53,6 +53,14 @@ export declare class AgentResourcesService extends TypertRemoteService {
         id: string;
         delivery: 'chunks' | 'object';
     }, signal: AbortSignal): Promise<ResourceResult>;
+    /** Internal byte source for an explicitly named workspace image. Never a
+     * second filesystem reader: resolve/list/stat/readBytes stay native-owned. */
+    readWorkspaceFile(scope: string, reference: string, signal: AbortSignal): Promise<{
+        data: Buffer;
+        name: string;
+        version: string;
+    }>;
+    private readPreparedFile;
     chunk(request: {
         scope: string;
         transferId: string;

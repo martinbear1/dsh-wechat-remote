@@ -6,21 +6,18 @@ import { exact, fail, plain, row, sameScope, type WorkflowScope } from './data.j
 import { sha256 } from './submission-crypto.js'
 import type { WorkflowLifecycle } from './lifecycle.js'
 import { humanInitialRound } from '../human-tools/form.js'
+import { HUMAN_MEMBER_FORM_SCHEMA } from './member-form-schema.js'
+import { HUMAN_CARD_ASSET_SCHEMA, humanCardAsset } from '../human-tools/card-cover.js'
 
 const object = (properties: Record<string, unknown>, required = Object.keys(properties)) => ({ type: 'object', properties, required, additionalProperties: false })
 const text = { type: 'string' }, integer = { type: 'integer' }
 const task = object({ schema: { type: 'string', const: 'human.task.ref.v1' }, taskId: text, deliveryId: text })
-const form = object({ schema: { type: 'string', const: 'human.form.v1' }, fields: { type: 'array', description: 'At most 12 fields.', items: object({
-  key: { type: 'string', description: 'Unique snake_case key, max 40 chars.' }, label: { type: 'string', description: 'At most 80 characters.' },
-  kind: { type: 'string', enum: ['short-text', 'long-text', 'choice', 'boolean', 'number'] }, required: { type: 'boolean' },
-  maxLength: { type: 'integer', description: 'Required only for text: short <=200, long <=2000.' }, choices: { type: 'array', items: text, description: '1..20 distinct options, each <=80 characters.' },
-  min: integer, max: integer, when: { type: 'object', description: 'Bounded condition: {op:present,field} or {op:eq,field,value}; all/any items or not item. Only earlier fields.' },
-}, ['key', 'label', 'kind', 'required']) }, attachment: { description: 'null for form only; or one mandatory JPEG/PNG image, at most 10 MiB.',
-  oneOf: [{ type: 'null' }, object({ kind: { type: 'string', const: 'image' }, required: { type: 'boolean', const: true }, maxBytes: integer,
-    mediaTypes: { type: 'array', items: { type: 'string', enum: ['image/jpeg', 'image/png'] }, description: 'One or both formats, no duplicates.' } })] } })
-const roundFields = { title: { type: 'string', description: 'At most 80 characters.' }, instructions: { type: 'string', description: 'At most 2000 characters.' }, form,
+const roundFields = { title: { type: 'string', description: 'At most 80 characters.' }, instructions: { type: 'string', description: 'At most 2000 characters.' }, form: HUMAN_MEMBER_FORM_SCHEMA,
   closesAt: { oneOf: [integer, { type: 'null' }], description: 'UTC epoch milliseconds, or null.' } }
-const round = object({ ...roundFields, recipientRefs: { oneOf: [{ type: 'null' }, { type: 'array', items: text }], description: 'null means allowed group participants; a list must contain 1..100 exact observed participantRefs.' } })
+const round = object({ ...roundFields, recipientRefs: { oneOf: [{ type: 'null' }, { type: 'array', items: text }], description: 'null means allowed group participants; a list must contain 1..100 exact observed participantRefs. cover is allowed only with null for a public round.' }, cover: HUMAN_CARD_ASSET_SCHEMA }, [...Object.keys(roundFields), 'recipientRefs'])
+const initialRoundSchema = object({ ...roundFields, recipientRefs: { type: 'null' }, audience: {
+  type: 'string', enum: ['all-group', 'owner-select'], description: 'Default all-group. owner-select asks the owner to select up to 20 members natively AFTER selecting the group and BEFORE first share. This bounds the whole task, including later rounds; use a new task to change the audience. Never supply member IDs.' },
+}, [...Object.keys(roundFields), 'recipientRefs'])
 const review = object({ submissionId: text, submissionVersion: integer, title: { type: 'string', description: 'At most 80 characters.' }, body: { type: 'string', description: 'At most 4000 characters.' },
   correction: { oneOf: [{ type: 'null' }, object(roundFields)], description: 'Optional new round assigned only to this submission author. Original round is never overwritten.' } })
 const reminder = object({ roundId: text, participantRefs: { type: 'array', items: text, description: '1..20 distinct exact participantRefs.' }, title: { type: 'string', description: 'Chinese/ASCII letters/digits only; weighted length <=30.' },
@@ -43,8 +40,8 @@ export interface LifecycleToolsOptions {
 }
 export function lifecycleTools(options: LifecycleToolsOptions): ToolDefinition[] {
   const definitions: ToolDefinition[] = [
-    { name: 'human_task_create', description: 'Prepare one REAL first-round group collection task with a full fixed form and optional ONE required JPEG/PNG image (<=10 MiB). The owner reviews the entire form, explicitly chooses/shares in WeChat, and the cloud atomically publishes task + first round. This is not a reading placeholder and is not yet sent. initialRound.recipientRefs must be null for first open-group round; later exact-member rounds use human_task_prepare_round. Questions can depend only on earlier answers with bounded present/eq/all/any/not conditions. Names are self-reported, never verified identity. Images use the node offline public key; plaintext form answers/private published feedback are held by the service under ACL, not end-to-end encrypted. Optional sourceSurfaceId must be a successful card from this exact session to reuse its group. Finish your reply after the structured tool succeeds; do not make chat JSON buttons.',
-      parameters: object({ title: { type: 'string', description: 'At most 80 characters.' }, body: { type: 'string', description: 'Public description, at most 1000 characters.' }, initialRound: round, sourceSurfaceId: text }, ['title', 'body', 'initialRound']),
+    { name: 'human_task_create', description: 'Prepare one REAL first-round group collection task with a supported data-only form and no image, optional image, or required ONE JPEG/PNG image (<=10 MiB). The owner reviews the exact form in the chat action, natively chooses the group and optionally its members, then shares in WeChat; cloud publishes task + first round together. It is not sent yet. initialRound.recipientRefs is null: do not invent participants before group selection. Optional audience=owner-select requests native member selection even on FIRST share; selection bounds the whole task and later rounds, maximum20 is a product limit, not a WeChat limit. Default all-group retains existing behavior. Later rounds may narrow to actual participantRefs. Questions use only bounded earlier-field conditions. Names are self-reported. Image envelopes use the node public key; form answers/private published feedback are held under service ACL, not end-to-end encrypted. sourceSurfaceId may reuse this session successful card group. Finish your reply after the tool succeeds; no handwritten JSON buttons.',
+      parameters: object({ title: { type: 'string', description: 'At most 80 characters.' }, body: { type: 'string', description: 'Public description, at most 1000 characters.' }, initialRound: initialRoundSchema, sourceSurfaceId: text, cover: HUMAN_CARD_ASSET_SCHEMA }, ['title', 'body', 'initialRound']),
       output: { schema: { type: 'object' }, render(_input, value) {
         const surface = row(value) && humanSurface(value.surface); if (!surface) throw fail('human-surface-invalid', '首轮任务卡无效')
         return [{ type: 'text', text: `收集任务“${surface.title}”及首轮表单已准备好。主人须预览完整字段与图片要求后批准分享；尚未发布。` }]
@@ -52,14 +49,15 @@ export function lifecycleTools(options: LifecycleToolsOptions): ToolDefinition[]
         const surface = row(value) && humanSurface(value.surface); if (!surface) throw fail('human-surface-invalid', '首轮任务卡无效')
         return { humanSurface: surface as unknown as import('@deepseek-ai/dsh-tools').JsonValue }
       } }, execute: async (value, exec) => {
-        if (!row(value) || !exact(value, ['title', 'body', 'initialRound'], ['sourceSurfaceId']) || !plain(value.title, 80) || !plain(value.body, 1000)
+        if (!row(value) || !exact(value, ['title', 'body', 'initialRound'], ['sourceSurfaceId', 'cover']) || !plain(value.title, 80) || !plain(value.body, 1000)
+          || Object.hasOwn(value, 'cover') && !humanCardAsset(value.cover)
           || value.sourceSurfaceId !== undefined && (typeof value.sourceSurfaceId !== 'string' || !/^[a-f0-9]{32}$/.test(value.sourceSurfaceId))
           || !plain(exec.callId, 256) || !plain(exec.rootCallId, 256)) throw fail('lifecycle-arguments-invalid', '首轮任务参数无效')
         const initial = humanInitialRound(value.initialRound); if (!initial) throw fail('lifecycle-form-invalid', '首轮表单不受支持')
         await options.lifecycle.prepareInitial(exec.signal, initial.form.attachment !== null)
         const origin = scope(exec, options.nodeId)
         return { surface: await options.core.createCollection({ scope: origin.sessionId, generation: origin.sessionGeneration, callId: String(exec.callId), rootCallId: String(exec.rootCallId) },
-          value.title, value.body, initial, exec.signal, value.sourceSurfaceId as string | undefined) }
+          value.title, value.body, initial, exec.signal, value.sourceSurfaceId as string | undefined, humanCardAsset(value.cover)) }
       } },
     { name: 'human_task_lifecycle', description: 'Read this exact current-session task rounds, accepted submissions, participant references, delivery states and pending approval references. taskRef comes from human_task_list/get. Server checks current node/account/session generation; never use another conversation. accepted is not received or reviewed. Observed participants are not a full roster. This does not call a model or publish.',
       parameters: object({ taskRef: task, offset: integer, roundId: { type: 'string', description: 'Optional exact round ID from roundRefs. Default returns newest round details; others are summarized.' } }, ['taskRef']), output,
@@ -89,6 +87,7 @@ export function lifecycleTools(options: LifecycleToolsOptions): ToolDefinition[]
     description: `Prepare a REAL owner approval card for ${kind === 'round' ? 'a new generic form/image collection round' : kind === 'review' ? 'private feedback and optional correction round for exactly one submission author' : 'an exact <=20 participant reminder snapshot based on current round facts'}. `
       + 'Read human_task_lifecycle first and pass its expectedRevision. The cloud validates schema, ownership, references and current conditions. This tool only drafts; only the owner can approve with fresh WeChat identity. '
       + 'No private evaluation goes in public card title/body. Finish your reply so the owner can click the native structured approval action. Never forge JSON buttons, self-approve, announce publication, or retry an uncertain reminder. '
+      + (kind === 'round' ? 'Optional content.cover is the exact public 5:4 asset returned by human_card_cover_prepare, allowed only with recipientRefs:null. The exact image digest is included in owner approval; changing it needs a new draft. ' : 'No cover is accepted for private feedback, its correction, or reminders. ')
       + (kind === 'review' ? 'Use the exact latest received submission version, and base feedback on actual image/form content. Cloud holds published private feedback plaintext under participant ACL; do not claim end-to-end encrypted results.' : 'Forms use fixed supported field schemas; no code, URL, file paths, remote widgets or authority fields.'),
     parameters: object({ taskRef: task, expectedRevision: integer, content }),
     output: { schema: { type: 'object' }, render(_input, value) {

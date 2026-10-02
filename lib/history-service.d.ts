@@ -27,6 +27,8 @@ export interface WechatHistoryWindowRequest {
     readonly sessionId: string;
     readonly beforeSeq?: number;
     readonly maxMessages?: number;
+    /** page() only: explicit clear JSON budget, 128 KiB..2 MiB; omitted stays 128 KiB. */
+    readonly pageBytes?: number;
     /** Force compact JSON inline when the client's object data plane is unavailable. */
     readonly delivery?: 'auto' | 'inline';
     /** Additive capability: an inline retry may return the existing ZIP descriptor. */

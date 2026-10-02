@@ -18,7 +18,7 @@ export interface SubmissionEnvelope {
   schema: 'human.submission.box.v1'; keyId: string; ephemeralPublicKey: string; nonce: string
   cipherBytes: number; cipherDigest: string; manifestDigest: string
 }
-export type SubmissionAnswers = Record<string, string | number | boolean>
+export type SubmissionAnswers = Record<string, string | number | boolean | string[]>
 export interface SubmissionManifest {
   schema: 'human.submission.manifest.v1'; context: SubmissionContext; answers: SubmissionAnswers
   file: { mediaType: 'image/png' | 'image/jpeg'; plainBytes: number; plainDigest: string }
@@ -56,7 +56,8 @@ export function submissionEnvelope(value: unknown): SubmissionEnvelope {
 export function submissionAnswers(value: unknown): SubmissionAnswers {
   if (!row(value) || Object.keys(value).length > 12 || Object.entries(value).some(([key, answer]) =>
     !/^[a-z][a-z0-9_]{0,47}$/.test(key) || ['constructor', 'prototype', '__proto__'].includes(key)
-    || !(typeof answer === 'boolean' || typeof answer === 'number' && Number.isFinite(answer) || plain(answer, 2000))))
+    || !(typeof answer === 'boolean' || typeof answer === 'number' && Number.isFinite(answer) || plain(answer, 2000)
+      || Array.isArray(answer) && answer.length <= 20 && new Set(answer).size === answer.length && answer.every(item => plain(item, 80)))))
     throw fail('submission-invalid', '提交字段无效')
   return structuredClone(value) as SubmissionAnswers
 }

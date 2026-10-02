@@ -1,8 +1,9 @@
 import { createAgentHttpProof } from '../agent-http-proof.js'
 import type { AgentIdentity } from '../public-relay-agent.js'
 import { fail, row } from './data.js'
+import { HUMAN_CARD_REQUEST_MAX_BYTES, HUMAN_LIFECYCLE_RESPONSE_MAX_BYTES } from '../human-tools/capacity.js'
 
-export type WorkflowOperation = 'grant' | 'sync' | 'receiver-key' | 'lifecycle' | 'objects/claim' | 'objects/ack'
+export type WorkflowOperation = 'grant' | 'sync' | 'receiver-key' | 'lifecycle' | 'objects/claim' | 'objects/ack' | 'cover-assets/prepare' | 'cover-assets/finalize' | 'cover-assets/download'
 export interface WorkflowTransport {
   readonly nodeId: string
   assertIdentity(): void
@@ -17,6 +18,14 @@ export function workflowErrorMessage(code: string): string {
     'receiver-capacity': '电脑收件空间或数量已达到上限；尚未确认交付，未自动删除原始附件。',
     'submission-not-received': '本机尚无完整收件；不会据此运行模型或宣称处理完成。',
     'submission-expired': '附件保管期限已过；仅完整本地原件可恢复收件确认，不会重新签发下载或伪称已收件。',
+    cover_upload_expired: '封面上传凭证已过期；请明确重新准备封面，未自动换图或发送。',
+    cover_download_expired: '封面预览凭证已过期；请重新点击预览，未发送群卡。',
+    cover_asset_expired: '封面资产已过期，请重新准备并核对，未自动替换。',
+    cover_quota: '封面临时存储或预览次数已达保护限额，请稍后再试；未发送群卡。',
+    cover_upload_missing: '尚未确认原封面上传完成，请核对原操作；未发送群卡。',
+    cover_storage_unavailable: '封面存储暂不可用，请核对原操作；不会自动更换图片或发送。',
+    cover_ticket_unknown: '封面传输凭证结果待核对，未自动重新申请或发送。',
+    cover_ticket_pending: '封面传输凭证正在准备，请核对原操作。',
   }
   return messages[code] || '群任务服务暂不可用'
 }
@@ -37,10 +46,11 @@ export class WorkflowHttpTransport implements WorkflowTransport {
   }
   async request(operation: WorkflowOperation, body: Record<string, unknown>, signal: AbortSignal): Promise<unknown> {
     this.assertIdentity(); signal.throwIfAborted()
-    if (!['grant', 'sync', 'receiver-key', 'lifecycle', 'objects/claim', 'objects/ack'].includes(operation)) throw fail('workflow-request-invalid', '群任务操作不受支持')
+    if (!['grant', 'sync', 'receiver-key', 'lifecycle', 'objects/claim', 'objects/ack', 'cover-assets/prepare', 'cover-assets/finalize', 'cover-assets/download'].includes(operation)) throw fail('workflow-request-invalid', '群任务操作不受支持')
     const pathname = `/api/human-tasks/v1/node/${operation}`
     const serialized = JSON.stringify({ ...body, audience: 'human.workflow.node.v1' })
-    if (Buffer.byteLength(serialized) > 16384) throw fail('workflow-request-invalid', '群任务请求过大')
+    const requestLimit = ['grant', 'lifecycle'].includes(operation) ? HUMAN_CARD_REQUEST_MAX_BYTES : 16384
+    if (Buffer.byteLength(serialized) > requestLimit) throw fail('workflow-request-invalid', '群任务请求过大')
     const combined = AbortSignal.any([signal, AbortSignal.timeout(10_000)])
     const response = await this.fetcher(`${this.origin}${pathname}`, { method: 'POST', redirect: 'error', signal: combined,
       headers: { 'content-type': 'application/json', ...createAgentHttpProof(this.identity(), 'POST', pathname, serialized) }, body: serialized })
@@ -58,7 +68,7 @@ export class WorkflowHttpTransport implements WorkflowTransport {
         const { done, value } = await reader.read()
         if (done) break
         size += value.byteLength
-        if (size > 2 * 1024 * 1024) throw fail('workflow-response-invalid', '群任务响应过大')
+        if (size > (operation === 'lifecycle' ? HUMAN_LIFECYCLE_RESPONSE_MAX_BYTES : 2 * 1024 * 1024)) throw fail('workflow-response-invalid', '群任务响应过大')
         chunks.push(value)
       }
     } finally { await reader.cancel().catch(() => {}); reader.releaseLock() }

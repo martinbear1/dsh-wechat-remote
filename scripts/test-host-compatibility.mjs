@@ -14,7 +14,7 @@ test('final generated manifest exposes identical strict schemas to old and new l
   assert.deepEqual(TYPERT.invocations.filter(i => i.namespace === 'humanTools').map(i => i.method).sort(),
     ['ack', 'assistantCatalog', 'assistantDraft', 'assistantInstall', 'assistantPreview', 'assistantSessionPrepare', 'assistantSessionStatus', 'assistantStatus',
       'automationApprove', 'automationList', 'automationPause', 'automationPreview', 'automationProposals', 'automationStatus',
-      'capabilities', 'claim', 'modeApprove', 'modeList', 'modePreview', 'modeRollback', 'sourceGrant', 'status', 'workflowDraft', 'workflowReceiptRetry', 'workflowReceiptStatus'])
+      'capabilities', 'claim', 'coverPreview', 'modeApprove', 'modeList', 'modePreview', 'modeRollback', 'sourceGrant', 'status', 'workflowDraft', 'workflowReceiptRetry', 'workflowReceiptStatus'])
   for (const i of TYPERT.invocations) for (const c of [...i.parameters.map(p => p.codec), i.result, i.receiver?.codec]) {
     if (c?.mode !== 'strict') continue
     assert.equal(typeof c.create, 'function')

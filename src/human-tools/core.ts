@@ -1,7 +1,8 @@
-import { ATTEMPT_ID, HUMAN_ACTION, HUMAN_MEMBERS_ACTION, HUMAN_REMIND_ACTION, HUMAN_WORKFLOW_ACTION, humanWorkflowDraftRef, HUMAN_ID, humanSurface, humanTaskRef,
+import { ATTEMPT_ID, HUMAN_ACTION, HUMAN_MEMBERS_ACTION, HUMAN_REMIND_ACTION, HUMAN_WORKFLOW_ACTION, HUMAN_SURFACE_MAX_BYTES, humanWorkflowDraftRef, HUMAN_ID, humanSurface, humanTaskRef,
   humanSelectionRef, humanMemberRefs, humanReminderTitle, humanReceiptData, sameTaskRef, sameSelectionRef, object, text,
   type HumanAckRequest, type HumanAckWireRequest, type HumanActionRequest, type HumanReceipt, type HumanSurface, type HumanTaskRef, type HumanWorkflowDraftRef } from './protocol.js'
 import { humanInitialRound, type HumanInitialRound } from './form.js'
+import { humanCardAsset, type HumanCardAsset } from './card-cover.js'
 
 /** Business core has no DSH, Cordis, WeChat, network or filesystem dependency. */
 export interface HumanOrigin {
@@ -23,6 +24,13 @@ export const HUMAN_CONTEXT_LIMIT = 8
 const MAX_ATTEMPTS = 4
 const error = (code: string, message: string) => Object.assign(new Error(message), { code })
 const clone = <T>(value: T): T => structuredClone(value)
+function assertSurfaceBudget(surface: HumanSurface): void {
+  // Validated data-only surfaces contain safe integers. Canonical key sorting
+  // changes ordering, not UTF-8 size. Do not tighten durable ledger parsing:
+  // historical oversized cards remain readable without disabling other cards.
+  if (Buffer.byteLength(JSON.stringify(surface)) > HUMAN_SURFACE_MAX_BYTES)
+    throw error('human-surface-too-large', '任务卡片总内容过大，请缩短说明、表单标签或选项后重新生成；未发起分享')
+}
 function validOrigin(origin: unknown): origin is HumanOrigin {
   return object(origin) && text(origin.scope, 256) && text(origin.generation, 80) && text(origin.callId, 256) && text(origin.rootCallId, 256)
 }
@@ -60,9 +68,10 @@ export class HumanToolsCore {
   private ledger: HumanLedger = { schemaVersion: 1, records: [] }
   private tail: Promise<unknown> = Promise.resolve()
   private stopped = false
-  private constructor(private store: HumanStore, private randomId: () => string, private now: () => number) {}
-  static async open(store: HumanStore, randomId: () => string, now = Date.now): Promise<HumanToolsCore> {
-    const core = new HumanToolsCore(store, randomId, now)
+  private constructor(private store: HumanStore, private randomId: () => string, private now: () => number,
+    private coverAuthority?: (origin: HumanOrigin, asset: HumanCardAsset) => void) {}
+  static async open(store: HumanStore, randomId: () => string, now = Date.now, coverAuthority?: (origin: HumanOrigin, asset: HumanCardAsset) => void): Promise<HumanToolsCore> {
+    const core = new HumanToolsCore(store, randomId, now, coverAuthority)
     core.ledger = validateLedger(await store.load())
     return core
   }
@@ -111,18 +120,28 @@ export class HumanToolsCore {
     const record = this.request(this.ledger, request)
     if (!record.attempts.some(attempt => attempt.id === request.attemptId))
       throw error('human-action-not-claimed', '请先批准原卡片动作')
+    assertSurfaceBudget(record.surface)
+    if (record.surface.cover) this.cover(record.surface.cover, record.origin)
     return { surface: clone(record.surface), origin: clone(record.origin) }
   }
-  create(origin: HumanOrigin, title: string, body: string, signal: AbortSignal, sourceSurfaceId?: string): Promise<HumanSurface> {
+  create(origin: HumanOrigin, title: string, body: string, signal: AbortSignal, sourceSurfaceId?: string, cover?: HumanCardAsset): Promise<HumanSurface> {
     return this.createAction(origin, signal, () => ({ title, body,
+      ...(cover === undefined ? {} : { cover: this.cover(cover, origin) }),
       ...(sourceSurfaceId !== undefined ? { targetTaskRef: this.publishedSource(origin, sourceSurfaceId).taskRef } : {}), actions: [{ ...HUMAN_ACTION }] }))
   }
-  createCollection(origin: HumanOrigin, title: string, body: string, initialRound: HumanInitialRound, signal: AbortSignal, sourceSurfaceId?: string): Promise<HumanSurface> {
+  createCollection(origin: HumanOrigin, title: string, body: string, initialRound: HumanInitialRound, signal: AbortSignal, sourceSurfaceId?: string, cover?: HumanCardAsset): Promise<HumanSurface> {
     return this.createAction(origin, signal, () => {
       if (!humanInitialRound(initialRound)) throw error('human-surface-invalid', '首轮收集表单无效')
       return { title, body, initialRound: clone(initialRound), actions: [{ ...HUMAN_ACTION }],
+        ...(cover === undefined ? {} : { cover: this.cover(cover, origin) }),
         ...(sourceSurfaceId === undefined ? {} : { targetTaskRef: this.publishedSource(origin, sourceSurfaceId).taskRef }) }
     })
+  }
+  private cover(value: unknown, origin: HumanOrigin): HumanCardAsset {
+    const cover = humanCardAsset(value)
+    if (!cover || !this.coverAuthority) throw error('human-cover-invalid', '请先准备当前会话的公开封面图片')
+    this.coverAuthority(origin, cover)
+    return cover
   }
   /** Internal caller has already obtained a cloud-validated draft scoped to
    * this origin. The Surface stores only its immutable locator, never private
@@ -189,12 +208,15 @@ export class HumanToolsCore {
         throw error('human-target-conflict', '此工具调用已有不同工作流草稿，未覆盖原审核卡')
       if (existing && JSON.stringify(existing.surface.initialRound) !== JSON.stringify(prepared.initialRound))
         throw error('human-target-conflict', '此工具调用已有不同首轮表单，未覆盖原卡')
+      if (existing && JSON.stringify(humanCardAsset(existing.surface.cover)) !== JSON.stringify(prepared.cover))
+        throw error('human-target-conflict', '此工具调用已有不同封面，未覆盖原卡；请重新生成并批准')
       if (existing) return clone(this.record(this.ledger, origin.scope, existing.surface.id).surface)
       const next = clone(this.ledger)
       next.records = next.records.filter(row => row.createdAt + HUMAN_RETENTION_MS > this.now())
       if (next.records.length >= HUMAN_MAX_RECORDS) throw error('human-surface-capacity', '测试卡片数量已达上限，请等待旧卡片过期')
       const surface: HumanSurface = { schemaVersion: 1, kind: 'human.surface', id: this.randomId(), revision: 1, ...clone(prepared) }
       if (!humanSurface(surface) || next.records.some(row => row.surface.id === surface.id)) throw error('human-id-invalid', '卡片标识生成失败')
+      assertSurfaceBudget(surface)
       next.records.push({ surface, origin: clone(origin), createdAt: this.now(), attempts: [] })
       signal.throwIfAborted()
       await this.commit(next)

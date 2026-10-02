@@ -1,12 +1,16 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 import { historyDetailDocument, historyRecordPreview, type DetailPart } from './history-record-presentation.js'
 import { toolRecordPresentation } from './tool-record-presentation.js'
+import { humanSurface } from './human-tools/protocol.js'
 
 type Row = Record<string, any>
 // Normal inline tools share the existing 128 KiB page budget. Reserve 32 KiB
 // for page identity/facets; do not impose the detail reader's 16 KiB chunk size
-// on ordinary central-pane content. Total page and transport limits are unchanged.
+// on ordinary central-pane content. Larger pages require explicit client opt-in.
 export const HISTORY_RECORD_BYTES = 96 * 1024
+// A complete validated action contract is not prose: leave room for the
+// 128 KiB Surface plus record identity/preview without truncating its fields.
+export const HISTORY_SURFACE_RECORD_BYTES = 160 * 1024
 export const HISTORY_DETAIL_CHUNK_BYTES = 16 * 1024
 const CACHE_BYTES = 32 * 1024 * 1024
 const REFERENCE_TTL = 30 * 60_000
@@ -62,10 +66,12 @@ export class HistoryRecords {
   }
   present(sessionId: string, entry: Row, displayed: Row = entry, call?: Row): Row {
     displayed = toolRecordPresentation(displayed)
+    const recordBytes = displayed.event?.type === 'tool/result' && humanSurface(displayed.event.data?.meta?.humanSurface)
+      ? HISTORY_SURFACE_RECORD_BYTES : HISTORY_RECORD_BYTES
     // Only the actual presentation consumes the phone's page budget. Native
     // records can retain megabytes of token samples behind a short reply;
     // those samples must not turn that complete reply into a partial preview.
-    if (Buffer.byteLength(JSON.stringify(displayed)) <= HISTORY_RECORD_BYTES) return displayed
+    if (Buffer.byteLength(JSON.stringify(displayed)) <= recordBytes) return displayed
     const seq = entry.event?.seq
     if (!Number.isSafeInteger(seq) || seq < 0) throw failure('历史记录缺少原生序号')
     const source = snapshot(entry, call)
@@ -76,7 +82,7 @@ export class HistoryRecords {
     const partial = { ...historyRecordPreview(displayed), detail: {
       schema: 'agent.history-detail.v1', reference, seq, bytes: source.bytes, format: 'parts',
     } satisfies HistoryDetailReference }
-    if (Buffer.byteLength(JSON.stringify(partial)) > HISTORY_RECORD_BYTES) throw failure('记录的标识或关联信息超过手机单条展示上限，请在电脑端查看')
+    if (Buffer.byteLength(JSON.stringify(partial)) > recordBytes) throw failure('记录的标识或关联信息超过手机单条展示上限，请在电脑端查看')
     return partial
   }
   async read(request: HistoryDetailRequest, load: (seq: number) => Promise<Row | undefined>, signal: AbortSignal): Promise<HistoryDetailPage> {

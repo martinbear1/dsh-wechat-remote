@@ -1,5 +1,5 @@
 import type { AgentIdentity } from '../public-relay-agent.js';
-export type WorkflowOperation = 'grant' | 'sync' | 'receiver-key' | 'lifecycle' | 'objects/claim' | 'objects/ack';
+export type WorkflowOperation = 'grant' | 'sync' | 'receiver-key' | 'lifecycle' | 'objects/claim' | 'objects/ack' | 'cover-assets/prepare' | 'cover-assets/finalize' | 'cover-assets/download';
 export interface WorkflowTransport {
     readonly nodeId: string;
     assertIdentity(): void;

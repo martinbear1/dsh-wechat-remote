@@ -7,6 +7,8 @@ import { SubmissionReceiver } from './receiver.js'
 import { canonicalSubmission, sha256 } from './submission-crypto.js'
 import type { AutomationSnapshot, AutomationSubmission } from './automation-types.js'
 import { WORKFLOW_LONG_TERM_BYTES } from './archive-store.js'
+import { HUMAN_ROUND_MAX_BYTES, HUMAN_SURFACE_MAX_BYTES, HUMAN_LIFECYCLE_RESPONSE_MAX_BYTES } from '../human-tools/capacity.js'
+import { lifecycleCoverValid, humanCardAsset, type HumanCardAsset } from '../human-tools/card-cover.js'
 
 export interface NodeBinding { schema: 'human.node.binding.v1'; nodeId: string; ownerSubject: string; accountInstance: string; generation: string }
 export function receiverBinding(value: unknown, nodeId: string): { binding: NodeBinding; bindingKey: string } {
@@ -27,14 +29,16 @@ const receiptBlockedCodes = new Set(['download_ticket_expired', 'attachment_down
 export interface LifecycleOptions {
   transport: WorkflowTransport; keys: ReceiverKeyring; receiver?: SubmissionReceiver; store: WorkflowDataStore
   now?: () => number
+  coverAuthority?(scope: WorkflowScope, asset: HumanCardAsset): void
 }
 export const RECEIVER_SYNC_MAX_FILES = 4
 export const RECEIVER_SYNC_TIMEOUT_MS = 120_000
 function lifecycleDraft(value: unknown): LifecycleDraft {
   if (!row(value) || !humanWorkflowDraftRef(value.draftRef) || !humanTaskRef(value.taskRef) || !revision(value.expectedRevision)
     || !row(value.content) || !Number.isSafeInteger(value.expiresAt) || !['draft', 'published'].includes(String(value.state))) throw fail('lifecycle-response-invalid', '任务方案格式无效')
-  bounded(value, 64 * 1024)
+  bounded(value, HUMAN_SURFACE_MAX_BYTES)
   const ref = humanWorkflowDraftRef(value.draftRef)!
+  if (!lifecycleCoverValid(ref.kind, value.content)) throw fail('lifecycle-response-invalid', '任务方案封面范围或格式无效')
   if (ref.digest !== sha256(canonicalSubmission({ taskRef: value.taskRef, kind: ref.kind, expectedRevision: value.expectedRevision, content: value.content })))
     throw fail('lifecycle-response-invalid', '任务方案摘要不匹配')
   return copy(value) as unknown as LifecycleDraft
@@ -110,7 +114,7 @@ export class WorkflowLifecycle {
       || !Array.isArray(result.rounds) || !Array.isArray(result.submissions) || !Array.isArray(result.drafts) || !Array.isArray(result.participants)
       || !result.submissions.every(row) || result.submissions.length > 20 || result.rounds.length > 100 || result.drafts.length > 100 || result.participants.length > 1000
       || result.nextOffset !== null && !revision(result.nextOffset)) throw fail('lifecycle-response-invalid', '任务生命周期响应无效')
-    bounded(result, 1024 * 1024)
+    bounded(result, HUMAN_LIFECYCLE_RESPONSE_MAX_BYTES)
     const bindingKey = await this.registerKey(result.binding, active)
     if (result.bindingKey !== bindingKey) throw fail('lifecycle-binding-invalid', '任务接收绑定不符')
     this.available = true
@@ -138,7 +142,12 @@ export class WorkflowLifecycle {
     const active = this.active(signal)
     if (!['round', 'review', 'reminder'].includes(kind) || !revision(expectedRevision) || !row(content) || !/^[A-Za-z0-9:_-]{16,128}$/.test(idempotencyKey))
       throw fail('lifecycle-draft-invalid', '任务方案参数无效')
-    bounded(content, 12 * 1024)
+    bounded(content, HUMAN_ROUND_MAX_BYTES)
+    if (!lifecycleCoverValid(kind, content)) throw fail('lifecycle-cover-invalid', '封面仅适用于公开新轮次，不能用于定向轮次、私密反馈或订正')
+    if (content.cover !== undefined) {
+      if (!this.options.coverAuthority) throw fail('lifecycle-cover-unavailable', '此节点不能核对封面图片来源')
+      this.options.coverAuthority(scope, humanCardAsset(content.cover)!)
+    }
     const current = await this.get(scope, taskRef, active)
     if (current.revision !== expectedRevision) throw fail('lifecycle-version-conflict', '任务已变化，请重新查询后准备方案')
     const result = await this.options.transport.request('lifecycle', { operation: `${kind}-draft`, scope: scope.sessionId,

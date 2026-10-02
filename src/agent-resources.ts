@@ -167,30 +167,46 @@ export class AgentResourcesService extends TypertRemoteService {
   async prepare(request: {scope: string; id: string; delivery: 'chunks'|'object'}, signal: AbortSignal): Promise<ResourceResult> {
     return this.guarded(async () => {
       this.checkPreparation(request.delivery, signal)
-      const file = this.target(request.scope,request.id,'file')
       this.active++
       try {
+        const file = await this.readPreparedFile(request.scope, request.id, signal)
+        return await this.deliver(request.scope, file.data, { name: file.name, version: file.version }, request.delivery, signal)
+      } finally { this.active-- }
+    })
+  }
+  /** Internal byte source for an explicitly named workspace image. Never a
+   * second filesystem reader: resolve/list/stat/readBytes stay native-owned. */
+  async readWorkspaceFile(scope: string, reference: string, signal: AbortSignal): Promise<{ data: Buffer; name: string; version: string }> {
+    if (typeof reference !== 'string' || !reference || reference.length > 4096 || /[\x00-\x1f:]/.test(reference)
+      || /^[\\/]/.test(reference) || reference.split(/[\\/]/).some(part => part === '..' || !part)) throw new Error('封面文件必须是当前工作区内明确的相对路径')
+    this.checkPreparation('chunks', signal); this.active++
+    try {
+      const resolved = await this.resolve({ scope, reference }, signal)
+      if (!resolved.ok || !resolved.valueJson) throw new Error('封面文件不在当前工作区或不可读取')
+      return await this.readPreparedFile(scope, JSON.parse(resolved.valueJson).id, signal)
+    } finally { this.active-- }
+  }
+  private async readPreparedFile(scope: string, id: string, signal: AbortSignal): Promise<{ data: Buffer; name: string; version: string }> {
+        const file = this.target(scope, id, 'file')
         // Revalidate directory containment on each export, not just when listed.
-        await this.native('list',request.scope,{path:path.posix.dirname(file.location)},signal)
-        const before = await this.native('stat',request.scope,{path:file.location},signal)
+        await this.native('list',scope,{path:path.posix.dirname(file.location)},signal)
+        const before = await this.native('stat',scope,{path:file.location},signal)
         if (typeof before.absolutePath !== 'string' || !before.absolutePath || typeof before.version !== 'string') throw new Error('节点文件信息不完整')
         const paths = /^[A-Za-z]:[\\/]/.test(before.absolutePath) ? path.win32 : path.posix
         // Pin the canonical file and have native containment check its parent
         // again. A renamed parent/symlink cannot redirect later byte reads.
-        await this.native('list',request.scope,{path:paths.dirname(before.absolutePath)},signal)
+        await this.native('list',scope,{path:paths.dirname(before.absolutePath)},signal)
         if (!Number.isSafeInteger(before.bytes) || before.bytes < 0 || before.bytes > MAX_BYTES) throw new Error('手机暂支持下载 20 MB 以内的文件，请在电脑查看此文件')
         const data = Buffer.alloc(before.bytes)
         for (let offset=0; offset<data.length; offset+=CHUNK_BYTES) {
-          const value = await this.native('readBytes',request.scope,{path:before.absolutePath,range:{offset,length:Math.min(CHUNK_BYTES,data.length-offset)}},signal)
+          const value = await this.native('readBytes',scope,{path:before.absolutePath,range:{offset,length:Math.min(CHUNK_BYTES,data.length-offset)}},signal)
           const chunk = nativeFileBytes(value.data)
           if (value.absolutePath !== before.absolutePath || value.version !== before.version || value.offset !== offset || chunk.length !== Math.min(CHUNK_BYTES,data.length-offset)) throw new Error('文件正在变化，请生成完成后重试')
           chunk.copy(data,offset)
         }
-        const after = await this.native('stat',request.scope,{path:file.location},signal)
+        const after = await this.native('stat',scope,{path:file.location},signal)
         if (after.absolutePath !== before.absolutePath || after.version !== before.version || after.bytes !== before.bytes) throw new Error('文件正在变化，请重试')
-        return await this.deliver(request.scope, data, {name:path.posix.basename(file.location), version:before.version}, request.delivery, signal)
-      } finally { this.active-- }
-    })
+        return { data, name: path.posix.basename(file.location), version: before.version }
   }
   @Remote('chunk')
   async chunk(request: {scope: string; transferId: string; offset: number}, signal: AbortSignal): Promise<ResourceResult> {

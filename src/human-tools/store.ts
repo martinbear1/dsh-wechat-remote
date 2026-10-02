@@ -2,6 +2,7 @@ import { mkdir, open, rename, unlink } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import type { HumanLedger, HumanStore } from './core.js'
+import { HUMAN_LEDGER_MAX_BYTES } from './capacity.js'
 
 /** Dedicated plugin-owned state, never credentials or a copy of native history. */
 export class HumanFileStore implements HumanStore {
@@ -10,7 +11,7 @@ export class HumanFileStore implements HumanStore {
     try {
       const file = await open(this.file, 'r')
       try {
-        if ((await file.stat()).size > 1024 * 1024) throw new Error('测试卡片账本过大，未加载')
+        if ((await file.stat()).size > HUMAN_LEDGER_MAX_BYTES) throw new Error('群卡片账本过大，未加载')
         return JSON.parse(await file.readFile('utf8'))
       } finally { await file.close() }
     } catch (cause) {
@@ -20,7 +21,7 @@ export class HumanFileStore implements HumanStore {
   }
   async save(ledger: HumanLedger): Promise<void> {
     const data = JSON.stringify(ledger)
-    if (Buffer.byteLength(data) > 1024 * 1024) throw new Error('测试卡片账本达到大小上限')
+    if (Buffer.byteLength(data) > HUMAN_LEDGER_MAX_BYTES) throw new Error('群卡片账本达到大小上限')
     await mkdir(dirname(this.file), { recursive: true, mode: 0o700 })
     const temporary = `${this.file}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`
     try {

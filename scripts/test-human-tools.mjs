@@ -1173,7 +1173,7 @@ test('history/live share one bounded projection, arbitrary other metadata remain
   assert.equal(JSON.stringify(event), before)
   const bigEvent = resultEvent(origin.callId)
   bigEvent.seq = 5
-  bigEvent.data.message.content[0].text = 'large'.repeat(30000)
+  bigEvent.data.message.content[0].text = 'large'.repeat(40000)
   feeds.find(item => item.plan.namespace === 'session' && item.plan.method === 'follow').feed.push({ type: 'event', event: bigEvent })
   await until(() => messages.some(item => item.payload?.event?.seq === 5))
   const bigLive = messages.find(item => item.payload?.event?.seq === 5).payload

@@ -316,6 +316,15 @@ export class WechatAttachmentService extends TypertRemoteService {
       request.end(body)
     })
   }
+
+  /** Internal adapter seam; retains native session-reference authorization.
+   * Reading for an owner is not permission to publish the bytes to a group. */
+  async readSessionImage(sessionId: string, attachmentId: string, signal: AbortSignal): Promise<{ data: Uint8Array; mediaType: string }> {
+    if (validateRequest({ sessionId, attachments: [{ attachmentId }] })) throw new Error('会话图片引用无效')
+    const decoded = decodeNativeAttachment(await this.fetchNativeAttachment(sessionId, attachmentId, signal), { attachmentId })
+    signal.throwIfAborted()
+    return { data: decoded.data, mediaType: decoded.attachment.mediaType }
+  }
 }
 
 /** Pure native-contract validator used by regression tests. */

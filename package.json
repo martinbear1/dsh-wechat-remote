@@ -1,6 +1,6 @@
 {
   "name": "@harness-remote/dsh-wechat-remote",
-  "version": "1.7.14-rc.7",
+  "version": "1.7.14-rc.8",
   "description": "Agent远程管理助手：支持 Windows、macOS 与 Linux 上的 DeepSeek Harness，提供微信配对、安全局域网直连及端到端加密公网连接",
   "private": true,
   "license": "MIT",
@@ -105,7 +105,7 @@
     "verify:pack": "node --test scripts/test-packed-plugin.mjs && node scripts/verify-packed-plugin.mjs",
     "test": "npm run test:human-tools && npm run test:notifications && npm run test:lifecycle && npm run test:client && npm run test:attachment && npm run test:directory && npm run test:host-platform && npm run test:history && npm run test:gate-ports && npm run test:dsh-runtime && npm run test:dsh-protocol-compat && npm run test:dsh-realtime-compat && npm run test:dsh-compatibility-api && npm run test:public-relay && npm run test:updates && npm run test:native-update",
     "test:native-update": "node --test scripts/test-native-update.mjs scripts/test-native-update-store.mjs",
-    "test:human-tools": "node --test scripts/test-human-tools.mjs scripts/test-human-workflow.mjs scripts/test-human-workflow-sync.mjs scripts/test-human-workflow-service.mjs scripts/test-human-workflow-archive.mjs scripts/test-human-lifecycle.mjs scripts/test-human-automation.mjs scripts/test-human-automation-native.mjs scripts/test-assistant-registry.mjs scripts/test-assistant-native-adapter.mjs scripts/test-assistant-business.mjs scripts/test-assistant-client-store.mjs scripts/test-assistant-client-navigation.mjs",
+    "test:human-tools": "node --test scripts/test-human-card-cover-renderer.mjs scripts/test-human-card-cover.mjs scripts/test-human-card-assets.mjs scripts/test-human-tools.mjs scripts/test-human-workflow.mjs scripts/test-human-workflow-sync.mjs scripts/test-human-workflow-service.mjs scripts/test-human-workflow-archive.mjs scripts/test-human-lifecycle.mjs scripts/test-human-automation.mjs scripts/test-human-automation-native.mjs scripts/test-assistant-registry.mjs scripts/test-assistant-native-adapter.mjs scripts/test-assistant-business.mjs scripts/test-assistant-client-store.mjs scripts/test-assistant-client-navigation.mjs",
     "test:lifecycle": "node scripts/test-gate-state.mjs && node scripts/test-secure-lan.mjs && node scripts/test-lifecycle.mjs",
     "test:notifications": "node --test scripts/test-task-notifications.mjs",
     "test:client": "node scripts/test-client-bundle.mjs && node --test scripts/test-pairing-management.mjs scripts/test-pairing-http.mjs scripts/test-companion-card.mjs scripts/test-shared-page.mjs scripts/test-web-update-store.mjs",
@@ -130,6 +130,8 @@
     "verify:installer": "node scripts/test-hybrid-package.mjs"
   },
   "dependencies": {
+    "pngjs": "7.0.0",
+    "jpeg-js": "0.4.4",
     "pnpm": "11.22.0",
     "http-proxy": "^1.18.1",
     "qrcode": "^1.5.4",
@@ -138,6 +140,8 @@
     "zod": "^4.4.3"
   },
   "bundleDependencies": [
+    "pngjs",
+    "jpeg-js",
     "pnpm",
     "http-proxy",
     "qrcode",

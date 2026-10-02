@@ -1,5 +1,6 @@
 /** Agent-neutral, executable-code-free wire contract. No host/session authority is public. */
 import { humanInitialRound, type HumanInitialRound } from './form.js'
+import { humanCardAsset, type HumanCardAsset } from './card-cover.js'
 export interface HumanSurface {
   readonly schemaVersion: 1
   readonly kind: 'human.surface'
@@ -13,6 +14,7 @@ export interface HumanSurface {
   readonly reminder?: { readonly title: string; readonly type: 'complete' }
   readonly workflowRef?: HumanWorkflowDraftRef
   readonly initialRound?: HumanInitialRound
+  readonly cover?: HumanCardAsset
   readonly actions: readonly [HumanAction]
 }
 export type HumanAction = { readonly id: 'share'; readonly type: 'wechat.share'; readonly label: '发送群卡' | '发送测试卡片' }
@@ -69,6 +71,7 @@ export interface HumanReceipt {
   readonly delivery: 'recorded' | 'pending' | 'dispatching' | 'queued' | 'uncertain'
 }
 export const HUMAN_TOOL_NAME = 'human_surface_share'
+export { HUMAN_SURFACE_MAX_BYTES } from './capacity.js'
 export const HUMAN_MEMBERS_TOOL_NAME = 'human_task_select_members'
 export const HUMAN_REMIND_TOOL_NAME = 'human_task_remind'
 export const HUMAN_ACTION = Object.freeze({ id: 'share', type: 'wechat.share', label: '发送群卡' } as const)
@@ -134,7 +137,7 @@ export function exactKeys(value: Record<string, unknown>, keys: readonly string[
 /** Reject rather than coerce newer schemas, hidden fields, arbitrary routes and actions. */
 export function humanSurface(value: unknown): HumanSurface | undefined {
   if (!object(value) || !exactKeys(value, ['schemaVersion', 'kind', 'id', 'revision', 'title', 'body', 'actions',
-    ...['targetTaskRef', 'selectionRef', 'reminder', 'workflowRef', 'initialRound'].filter(key => Object.hasOwn(value, key))])
+    ...['targetTaskRef', 'selectionRef', 'reminder', 'workflowRef', 'initialRound', 'cover'].filter(key => Object.hasOwn(value, key))])
     || Object.hasOwn(value, 'targetTaskRef') && !humanTaskRef(value.targetTaskRef)
     || value.schemaVersion !== 1 || value.kind !== 'human.surface' || value.revision !== 1
     || typeof value.id !== 'string' || !HUMAN_ID.test(value.id) || !text(value.title, 80) || !text(value.body, 1000)
@@ -148,6 +151,7 @@ export function humanSurface(value: unknown): HumanSurface | undefined {
   if (!share && !members && !remind && !workflow || !share && !value.targetTaskRef) return
   if (workflow ? !humanWorkflowDraftRef(value.workflowRef) : Object.hasOwn(value, 'workflowRef')) return
   if (Object.hasOwn(value, 'initialRound') && (!share || !humanInitialRound(value.initialRound))) return
+  if (Object.hasOwn(value, 'cover') && (!share || !humanCardAsset(value.cover))) return
   if (!remind && (Object.hasOwn(value, 'selectionRef') || Object.hasOwn(value, 'reminder'))) return
   const selection = humanSelectionRef(value.selectionRef), target = humanTaskRef(value.targetTaskRef)
   if (remind && (!selection || !target || selection.taskId !== target.taskId || selection.deliveryId !== target.deliveryId
@@ -159,6 +163,7 @@ export function humanSurface(value: unknown): HumanSurface | undefined {
     body: value.body, ...(value.targetTaskRef ? { targetTaskRef: { ...humanTaskRef(value.targetTaskRef)! } } : {}),
     ...(workflow ? { workflowRef: humanWorkflowDraftRef(value.workflowRef)! } : {}),
     ...(value.initialRound ? { initialRound: humanInitialRound(value.initialRound)! } : {}),
+    ...(Object.hasOwn(value, 'cover') ? { cover: humanCardAsset(value.cover)! } : {}),
     ...(remind ? { selectionRef: { ...selection!, memberRefs: [...selection!.memberRefs] }, reminder: { title: (value.reminder as { title: string }).title, type: 'complete' as const } } : {}),
     actions: [{ ...action } as HumanAction] }
 }

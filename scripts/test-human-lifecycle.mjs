@@ -13,12 +13,15 @@ import { ReceiverKeyring } from '../lib/human-workflow/receiver-keyring.js'
 import { SubmissionReceiver } from '../lib/human-workflow/receiver.js'
 import { downloadSubmission } from '../lib/human-workflow/receiver-download.js'
 import { WorkflowFileStore } from '../lib/human-workflow/persistence.js'
-import { canonicalSubmission, sha256, sha512, decryptSubmission } from '../lib/human-workflow/submission-crypto.js'
+import { canonicalSubmission, sha256, sha512, decryptSubmission, submissionAnswers } from '../lib/human-workflow/submission-crypto.js'
 import { WorkflowLifecycle, receiverBinding } from '../lib/human-workflow/lifecycle.js'
 import { lifecycleTools } from '../lib/human-workflow/lifecycle-tools.js'
 import { HumanToolsCore } from '../lib/human-tools/core.js'
 import { humanSurface } from '../lib/human-tools/protocol.js'
-import { humanForm } from '../lib/human-tools/form.js'
+import { humanForm, humanInitialRound } from '../lib/human-tools/form.js'
+import { HUMAN_FORM_MAX_BYTES, HUMAN_ROUND_MAX_BYTES, HUMAN_SURFACE_MAX_BYTES } from '../lib/human-tools/capacity.js'
+import { HumanFileStore } from '../lib/human-tools/store.js'
+import { humanDate, humanTime } from '../lib/human-tools/form-v2.js'
 
 const signal = new AbortController().signal
 const scope = { nodeId: 'node_web_123456789', sessionId: 'session_a', sessionGeneration: '100' }
@@ -31,9 +34,9 @@ const form = () => ({ schema: 'human.form.v1', fields: [{ key: 'name', label: '�
 const initial = () => ({ title: '资料收集', instructions: '提交一张图片', form: form(), closesAt: null, recipientRefs: null })
 function memory(initial) { let value = structuredClone(initial), writes = 0; return { load: async () => structuredClone(value), save: async next => { value = structuredClone(next); writes++ }, get value() { return structuredClone(value) }, get writes() { return writes } } }
 function defer() { let resolve; return { promise: new Promise(done => { resolve = done }), resolve: value => resolve(value) } }
-function seal(key, changes = {}) {
+function seal(key, changes = {}, answers = { name: '甲' }) {
   const context = { schema: 'human.submission.context.v1', bindingKey, taskRef, roundId: 'r'.repeat(24), participantRef: 'p'.repeat(24), submissionId: 's'.repeat(24), version: 1, objectId: 'o'.repeat(24), keyId: key.keyId, ...changes }
-  const manifest = { schema: 'human.submission.manifest.v1', context, answers: { name: '甲' }, file: { mediaType: 'image/png', plainBytes: image.length, plainDigest: sha512(image) } }
+  const manifest = { schema: 'human.submission.manifest.v1', context, answers, file: { mediaType: 'image/png', plainBytes: image.length, plainDigest: sha512(image) } }
   const text = Buffer.from(canonicalSubmission(manifest)), clear = Buffer.alloc(4 + text.length + image.length)
   clear.writeUInt32BE(text.length); text.copy(clear, 4); image.copy(clear, text.length + 4)
   const ephemeral = nacl.box.keyPair(), nonce = randomBytes(24), cipher = nacl.box(clear, nonce, Buffer.from(key.publicKey, 'base64'), ephemeral.secretKey)
@@ -272,6 +275,22 @@ test('fixed initial forms and approval surfaces reject authority smuggling and r
   assert.equal(restored.forResult(scope.sessionId, 'review', scope.sessionGeneration).workflowRef.digest, ref.digest); await restored.close()
 })
 
+test('optional attachments and first native member selection preserve old snapshots without guessed participant IDs', () => {
+  const old = initial()
+  assert.deepEqual(humanInitialRound(old), old)
+  assert.equal(Object.hasOwn(humanInitialRound(old), 'audience'), false, 'legacy digests must not gain a new default field')
+  const selected = { ...initial(), audience: 'owner-select' }
+  selected.form.attachment.required = false
+  assert.deepEqual(humanInitialRound(selected), selected)
+  assert.deepEqual(humanInitialRound({ ...initial(), audience: 'all-group' }), { ...initial(), audience: 'all-group' })
+  assert.equal(humanInitialRound({ ...selected, recipientRefs: ['guessed-native-id'] }), undefined)
+  for (const audience of ['everyone', '', null, 1]) assert.equal(humanInitialRound({ ...initial(), audience }), undefined)
+  for (const required of ['false', null, 0]) {
+    const candidate = form(); candidate.attachment.required = required
+    assert.equal(humanForm(candidate), undefined)
+  }
+})
+
 test('real DSH registry accepts lifecycle schemas, emits native image and real initial-form metadata, with no approve tool', async t => {
   const ctx = new Context(); new SystemPrompt(ctx, {})
   const tools = new ToolRuntime(ctx, { mode: 'native' }), sessions = new SessionStore(ctx)
@@ -289,4 +308,152 @@ test('real DSH registry accepts lifecycle schemas, emits native image and real i
   const created = await tools.execute({ name: 'human_task_create', arguments: { title: '任务', body: '公开要求', initialRound: initial() }, agent, callId: 'create_1', signal })
   assert.equal(created.isError, false); assert(created.meta.humanSurface.initialRound)
   assert.equal(core.forResult(scope.sessionId, 'create_1', '100').actions[0].id, 'share')
+  const selected = initial(); selected.audience = 'owner-select'; selected.form.attachment.required = false
+  const selective = await tools.execute({ name: 'human_task_create', arguments: { title: '指定参与者', body: '主人选群后通过原生选择器选人', initialRound: selected }, agent, callId: 'create_selected', signal })
+  assert.equal(selective.isError, false)
+  assert.equal(selective.meta.humanSurface.initialRound.audience, 'owner-select')
+  assert.equal(selective.meta.humanSurface.initialRound.form.attachment.required, false)
+  assert.equal(selective.meta.humanSurface.initialRound.recipientRefs, null)
+  const customized = await tools.execute({ name: 'human_task_create', arguments: { title: '项目排期', body: '选择分工及参与时间',
+    initialRound: { ...initial(), form: customizedForm() } }, agent, callId: 'create_customized', signal })
+  assert.equal(customized.isError, false, JSON.stringify(customized))
+  assert.deepEqual(customized.meta.humanSurface.initialRound.form, customizedForm())
+})
+
+test('cards formerly over 12000 bytes now survive creation, durable reload and exact source grant', async () => {
+  const origin = { scope: scope.sessionId, generation: scope.sessionGeneration, callId: 'large', rootCallId: 'large' }
+  const round = { ...initial(), instructions: 'a'.repeat(2000), form: { schema: 'human.form.v1', attachment: null,
+    fields: Array.from({ length: 4 }, (_, n) => ({ key: 'f' + n, label: '选项', kind: 'choice', required: false,
+      choices: Array.from({ length: 10 }, (_, i) => '文'.repeat(70) + i) })) } }
+  assert(humanInitialRound(round), 'individual round is valid')
+  const store = memory({ schemaVersion: 1, records: [] })
+  const core = await HumanToolsCore.open(store, () => randomBytes(16).toString('hex'))
+  const large = await core.createCollection(origin, '任务', '字'.repeat(1000), round, signal)
+  assert.equal(store.writes, 1)
+  assert(Buffer.byteLength(JSON.stringify(large)) > 12000)
+  assert(Buffer.byteLength(JSON.stringify(large)) <= HUMAN_SURFACE_MAX_BYTES)
+  await core.close()
+  const legacy = store.value
+  assert(humanSurface(legacy.records[0].surface), 'historical data is still parseable')
+  const old = await HumanToolsCore.open(memory(legacy), () => randomBytes(16).toString('hex'))
+  assert(old.forResult(scope.sessionId, 'large', scope.sessionGeneration))
+  const action = { scope: scope.sessionId, surfaceId: large.id, revision: 1, actionId: 'share', attemptId: 'attempt_large_123456' }
+  await old.claim(action, signal)
+  assert.deepEqual(old.grantSource(action).surface, large)
+  await old.create({ ...origin, callId: 'normal', rootCallId: 'normal' }, '正常任务', '不影响其他卡', signal)
+  await old.close()
+})
+
+function wideForm() {
+  return { schema: 'human.form.v1', attachment: null, fields: Array.from({ length: 12 }, (_, field) => ({
+    key: 'f' + field, label: '字段'.repeat(40), kind: 'choice', required: false,
+    choices: Array.from({ length: 20 }, (_, option) => '文'.repeat(78) + String(option).padStart(2, '0')),
+  })) }
+}
+function budgetForm(bytes) {
+  const comparisons = Array.from({ length: 14 }, () => ({ op: 'eq', field: 'source', value: '' }))
+  const value = { schema: 'human.form.v1', attachment: null, fields: [
+    { key: 'source', label: '条件来源', kind: 'long-text', required: false, maxLength: 2000 },
+    { key: 'target', label: '目标', kind: 'boolean', required: false, when: { op: 'all', items: [
+      { op: 'all', items: comparisons.slice(0, 7) }, { op: 'all', items: comparisons.slice(7) },
+    ] } },
+  ] }
+  let remaining = bytes - Buffer.byteLength(JSON.stringify(value))
+  for (const comparison of comparisons) {
+    const count = Math.min(remaining, 6000), full = Math.floor(count / 3)
+    comparison.value = '文'.repeat(full) + 'a'.repeat(count % 3)
+    remaining -= count
+  }
+  assert.equal(remaining, 0); assert.equal(Buffer.byteLength(JSON.stringify(value)), bytes)
+  return value
+}
+
+test('form byte boundary is inclusive, UTF-8 aware, and invalid oversized cards do not write', async () => {
+  assert(humanForm(budgetForm(HUMAN_FORM_MAX_BYTES)))
+  assert.equal(humanForm(budgetForm(HUMAN_FORM_MAX_BYTES + 1)), undefined)
+  const store = memory({ schemaVersion: 1, records: [] })
+  const core = await HumanToolsCore.open(store, () => randomBytes(16).toString('hex'))
+  try {
+    const origin = { scope: scope.sessionId, generation: scope.sessionGeneration, callId: 'boundary', rootCallId: 'boundary' }
+    await assert.rejects(core.createCollection(origin, '任务', '说明', { ...initial(), form: budgetForm(HUMAN_FORM_MAX_BYTES + 1) }, signal))
+    assert.equal(store.writes, 0)
+    const round = { ...initial(), instructions: '文'.repeat(2000), form: budgetForm(HUMAN_FORM_MAX_BYTES) }
+    assert(Buffer.byteLength(JSON.stringify(round)) < HUMAN_ROUND_MAX_BYTES)
+    const surface = await core.createCollection(origin, '题'.repeat(80), '字'.repeat(1000), round, signal)
+    assert(Buffer.byteLength(JSON.stringify(surface)) < HUMAN_SURFACE_MAX_BYTES)
+  } finally { await core.close() }
+})
+
+test('wide Chinese forms fit without truncation and multiple large cards survive the file ledger', async t => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'human-card-capacity-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const filename = path.join(directory, 'cards.json')
+  const round = { ...initial(), form: wideForm(), instructions: '说'.repeat(2000) }
+  assert(humanForm(round.form)); assert(humanInitialRound(round))
+  const core = await HumanToolsCore.open(new HumanFileStore(filename), () => randomBytes(16).toString('hex'))
+  let last
+  try {
+    for (let index = 0; index < 18; index++) last = await core.createCollection({ scope: scope.sessionId,
+      generation: scope.sessionGeneration, callId: 'wide_' + index, rootCallId: 'wide_' + index }, '题'.repeat(80), '字'.repeat(1000), round, signal)
+  } finally { await core.close() }
+  assert((await readFile(filename)).length > 1024 * 1024, 'former ledger ceiling would have rejected these valid cards')
+  const reopened = await HumanToolsCore.open(new HumanFileStore(filename), () => randomBytes(16).toString('hex'))
+  try { assert.deepEqual(reopened.forResult(scope.sessionId, 'wide_17', scope.sessionGeneration), last) }
+  finally { await reopened.close() }
+})
+
+function customizedForm() {
+  return { schema: 'human.form.v2', attachment: null, fields: [
+    { key: 'roles', label: '可承担的工作', kind: 'multi-choice', required: true, choices: ['设计', '审核', '实施'], minSelected: 1, maxSelected: 2,
+      section: '参与安排', description: '可以选择一项或两项' },
+    { key: 'day', label: '参与日期', kind: 'date', required: true, start: '2026-10-03', end: '2026-12-31' },
+    { key: 'at', label: '参与时间', kind: 'time', required: false, start: '09:00', end: '18:30' },
+    { key: 'notes', label: '实施说明', kind: 'long-text', required: true, maxLength: 2000, when: { op: 'contains', field: 'roles', value: '实施' } },
+  ], presentation: { theme: 'green', icon: 'briefcase', layout: 'compact', submitLabel: '提交安排', completionText: '已登记，请等待后续安排', blocks: [
+    { type: 'paragraph', text: '请填写你本人的安排。' }, { type: 'list', items: ['日期只表示日历日期', '填写内容仅按本任务权限查看'] },
+    { type: 'notice', tone: 'info', text: '提交不等于负责人已批准。' },
+  ] } }
+}
+
+test('v2 forms compose native fields and presentation without changing v1 or granting execution', () => {
+  assert.deepEqual(humanForm(customizedForm()), customizedForm())
+  const legacy = { ...customizedForm(), schema: 'human.form.v1' }
+  assert.equal(humanForm(legacy), undefined)
+  for (const mutate of [
+    x => { x.presentation.url = 'https://example.com' },
+    x => { x.presentation.css = 'position:fixed' },
+    x => { x.presentation.blocks[0].type = 'html' },
+    x => { x.presentation.blocks[2].tone = 'execute' },
+    x => { x.presentation.theme = '#00ff00' },
+    x => { x.fields[0].maxSelected = 0 },
+    x => { x.fields[0].minSelected = 3 },
+    x => { x.fields[0].choices.push('设计') },
+    x => { x.fields[1].start = '2026-02-30' },
+    x => { x.fields[1].start = '2027-01-01' },
+    x => { x.fields[2].end = '24:00' },
+    x => { x.fields[3].when.op = 'eq' },
+    x => { x.fields[3].when.value = '不存在' },
+    x => { x.fields[0].when = { op: 'contains', field: 'roles', value: '设计' } },
+  ]) {
+    const candidate = customizedForm(); mutate(candidate)
+    assert.equal(humanForm(candidate), undefined, JSON.stringify(candidate))
+  }
+  for (const value of ['0001-01-01', '2000-02-29', '2024-02-29', '9999-12-31']) assert(humanDate(value))
+  for (const value of ['0000-01-01', '1900-02-29', '2026-02-29', '2026-04-31', '2026-1-01', '2026-01-01Z', '2026-01-01\n']) assert(!humanDate(value))
+  for (const value of ['00:00', '23:59']) assert(humanTime(value))
+  for (const value of ['24:00', '09:60', '9:00', '09:00Z', '09:30\n']) assert(!humanTime(value))
+})
+
+test('multi-choice answers survive authenticated image envelope and reject nested/unbounded values', async () => {
+  const keys = await ReceiverKeyring.open(memory(), scope.nodeId)
+  try {
+    const key = await keys.ensure(bindingKey, signal), answers = { roles: ['设计', '审核'], date: '2026-10-03', at: '09:00' }
+    const sealed = seal(key, {}, answers)
+    assert.deepEqual(decryptSubmission(sealed.cipher, sealed.envelope, keys.secret(key.keyId, bindingKey), sealed.context, answers).manifest.answers, answers)
+    assert.throws(() => decryptSubmission(sealed.cipher, sealed.envelope, keys.secret(key.keyId, bindingKey), sealed.context, { ...answers, roles: ['实施'] }))
+    for (const roles of [['设计', '设计'], ['x'.repeat(81)], [[1]], [{ role: '设计' }], Array.from({ length: 21 }, (_, index) => String(index))]) {
+      assert.throws(() => submissionAnswers({ roles }))
+    }
+    assert.deepEqual(submissionAnswers({ roles: [] }), { roles: [] })
+  } finally { await keys.close() }
 })

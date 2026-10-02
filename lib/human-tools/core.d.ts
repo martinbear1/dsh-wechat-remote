@@ -1,5 +1,6 @@
 import { type HumanAckRequest, type HumanAckWireRequest, type HumanActionRequest, type HumanReceipt, type HumanSurface, type HumanTaskRef, type HumanWorkflowDraftRef } from './protocol.js';
 import { type HumanInitialRound } from './form.js';
+import { type HumanCardAsset } from './card-cover.js';
 /** Business core has no DSH, Cordis, WeChat, network or filesystem dependency. */
 export interface HumanOrigin {
     readonly scope: string;
@@ -33,11 +34,12 @@ export declare class HumanToolsCore {
     private store;
     private randomId;
     private now;
+    private coverAuthority?;
     private ledger;
     private tail;
     private stopped;
     private constructor();
-    static open(store: HumanStore, randomId: () => string, now?: () => number): Promise<HumanToolsCore>;
+    static open(store: HumanStore, randomId: () => string, now?: () => number, coverAuthority?: (origin: HumanOrigin, asset: HumanCardAsset) => void): Promise<HumanToolsCore>;
     /** Stop admission immediately; callers must await the already-started write
      * before another instance opens this ledger during a plugin reload. */
     close(): Promise<void>;
@@ -55,8 +57,9 @@ export declare class HumanToolsCore {
         surface: HumanSurface;
         origin: HumanOrigin;
     };
-    create(origin: HumanOrigin, title: string, body: string, signal: AbortSignal, sourceSurfaceId?: string): Promise<HumanSurface>;
-    createCollection(origin: HumanOrigin, title: string, body: string, initialRound: HumanInitialRound, signal: AbortSignal, sourceSurfaceId?: string): Promise<HumanSurface>;
+    create(origin: HumanOrigin, title: string, body: string, signal: AbortSignal, sourceSurfaceId?: string, cover?: HumanCardAsset): Promise<HumanSurface>;
+    createCollection(origin: HumanOrigin, title: string, body: string, initialRound: HumanInitialRound, signal: AbortSignal, sourceSurfaceId?: string, cover?: HumanCardAsset): Promise<HumanSurface>;
+    private cover;
     /** Internal caller has already obtained a cloud-validated draft scoped to
      * this origin. The Surface stores only its immutable locator, never private
      * evaluation text. Claiming this button is NOT approving/publishing it. */

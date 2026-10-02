@@ -5,7 +5,7 @@ import { assertScope, copy, exact, fail, identifier, plain, row, sameScope, scop
 import { sameTaskRef, type HumanTaskRef } from '../human-tools/protocol.js'
 import { ReceiverKeyring } from './receiver-keyring.js'
 import { canonicalSubmission, decryptSubmission, sha256, submissionAnswers, submissionContext, submissionEnvelope,
-  submissionManifest, SUBMISSION_CIPHER_MAX, type SubmissionContext, type SubmissionEnvelope, type SubmissionManifest } from './submission-crypto.js'
+  submissionManifest, SUBMISSION_CIPHER_MAX, type SubmissionContext, type SubmissionEnvelope, type SubmissionManifest, type SubmissionAnswers } from './submission-crypto.js'
 
 interface Receipt {
   schema: 'human.receiver.receipt.v1'; nodeId: string; origin: WorkflowScope; context: SubmissionContext
@@ -14,7 +14,7 @@ interface Receipt {
 }
 export interface ReceiverDelivery {
   claimId: string; leaseExpiresAt: number; submissionId: string; version: number
-  context: SubmissionContext; envelope: SubmissionEnvelope; values: Record<string, string | number | boolean>; download: unknown
+  context: SubmissionContext; envelope: SubmissionEnvelope; values: SubmissionAnswers; download: unknown
 }
 export interface ReceiverOptions {
   root: string; nodeId: string; keys: ReceiverKeyring; assertIdentity(): void

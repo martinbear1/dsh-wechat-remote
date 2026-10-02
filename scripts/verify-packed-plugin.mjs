@@ -161,6 +161,19 @@ export function verifyPackedPlugin(existingArchive) {
       for (const entry of entries) await import(entry);
       const main = await import(${JSON.stringify(pathToFileURL(path.resolve(directory, inspected.manifest.main)).href)});
       assert.equal(main.name, 'gate'); assert.equal(typeof main.apply, 'function');
+      // Exercise actual image validation from the artifact outside checkout.
+      // Fonts, fixed drawing templates and a rendering engine are not bundled.
+      const fs = await import('node:fs');
+      assert(!fs.existsSync(${JSON.stringify(path.join(directory, 'lib/human-tools/assets/NotoSansSC-Regular.otf'))}));
+      assert(!fs.existsSync(${JSON.stringify(path.join(directory, 'node_modules/@resvg/resvg-wasm'))}));
+      const { normalizeCardCoverImage } = await import(${JSON.stringify(pathToFileURL(path.join(directory, 'lib/human-tools/card-cover-renderer.js')).href)});
+      const { PNG } = ownRequire('pngjs');
+      const source = PNG.sync.write({ width: 500, height: 400, data: Buffer.alloc(500 * 400 * 4, 230) });
+      const cover = await normalizeCardCoverImage(source, 'image/png', AbortSignal.timeout(20000));
+      const decoded = PNG.sync.read(Buffer.from(cover.data));
+      assert.equal(decoded.width, 500); assert.equal(decoded.height, 400);
+      assert.deepEqual(decoded.data, PNG.sync.read(source).data);
+      console.log('packed computer image validation passed: ' + cover.data.length + ' bytes');
       const { TYPERT } = await import(${JSON.stringify(pathToFileURL(path.join(directory, 'lib/typert.host.js')).href)});
       const projection = (z, schema) => {
         try { return { value: z.toJSONSchema(schema) }; }
@@ -182,7 +195,7 @@ export function verifyPackedPlugin(existingArchive) {
       console.log('separate host Zod schema equivalence passed: ' + schemas);
       console.log('packed host imports passed: ' + entries.length);`
     const output = execFileSync(process.execPath, ['--input-type=module', '--eval', probe], { cwd: temporary,
-      env: { ...process.env, NODE_PATH: '', NODE_OPTIONS: '' }, encoding: 'utf8', windowsHide: true, timeout: 15000 })
+      env: { ...process.env, NODE_PATH: '', NODE_OPTIONS: '' }, encoding: 'utf8', windowsHide: true, timeout: 35000 })
     let registration
     vm.runInNewContext(fs.readFileSync(path.join(directory, 'lib/client.js'), 'utf8'), {
       window: { __ModuleLoader__: { load(value) { registration = value } } },
@@ -193,7 +206,7 @@ export function verifyPackedPlugin(existingArchive) {
       hostEntriesLoaded: inspected.hostEntries.length, nativePeerVersions: peers, browserRegistration: true,
       packedBytes: fs.statSync(archive).size,
       bundledZodBytes: filesBelow(path.join(directory, 'node_modules/zod')).reduce((n, file) => n + fs.statSync(file).size, 0),
-      acceptedByUpdatePolicy: true,
+      acceptedByUpdatePolicy: true, computerCoverWorker: true,
       isolatedFromCheckout: true, actualTarball: true }
     console.log(output.trim())
     console.log(JSON.stringify(result, null, 2))

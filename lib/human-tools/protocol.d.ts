@@ -1,5 +1,6 @@
 /** Agent-neutral, executable-code-free wire contract. No host/session authority is public. */
 import { type HumanInitialRound } from './form.js';
+import { type HumanCardAsset } from './card-cover.js';
 export interface HumanSurface {
     readonly schemaVersion: 1;
     readonly kind: 'human.surface';
@@ -16,6 +17,7 @@ export interface HumanSurface {
     };
     readonly workflowRef?: HumanWorkflowDraftRef;
     readonly initialRound?: HumanInitialRound;
+    readonly cover?: HumanCardAsset;
     readonly actions: readonly [HumanAction];
 }
 export type HumanAction = {
@@ -91,6 +93,7 @@ export interface HumanReceipt {
     readonly delivery: 'recorded' | 'pending' | 'dispatching' | 'queued' | 'uncertain';
 }
 export declare const HUMAN_TOOL_NAME = "human_surface_share";
+export { HUMAN_SURFACE_MAX_BYTES } from './capacity.js';
 export declare const HUMAN_MEMBERS_TOOL_NAME = "human_task_select_members";
 export declare const HUMAN_REMIND_TOOL_NAME = "human_task_remind";
 export declare const HUMAN_ACTION: Readonly<{

@@ -37,12 +37,20 @@ import { createNativeAutomationAdapter, installNativeAutomationGate } from '../h
 import { automationTools } from '../human-workflow/automation-tools.js'
 import { automationProposalTools } from '../human-workflow/automation-proposal-tools.js'
 import type { AutomationConfig, NativeAutomationAdapter } from '../human-workflow/automation-types.js'
+import { CardCoverAssets, CARD_COVER_LEDGER_MAX_BYTES } from './card-cover-assets.js'
+import { humanCardAsset, type HumanCardAsset } from './card-cover.js'
+import { cardCoverTool } from './card-cover-tools.js'
+import { uploadCardCover } from './card-cover-upload.js'
+import { normalizeCardCoverImage } from './card-cover-renderer.js'
+import type { AgentResourcesService } from '../agent-resources.js'
+import type { WechatAttachmentService } from '../attachment-service.js'
 
 export interface HumanToolsConfig { readonly enabled?: boolean; readonly store?: HumanStore
   readonly assistants?: false | { native?: NativeAssistantAdapter; registryStore?: WorkflowDataStore; businessStore?: WorkflowDataStore; sessionIntentStore?: WorkflowDataStore }
   readonly workflow?: { transport: WorkflowTransport; modeStore?: WorkflowDataStore; recordStore?: WorkflowDataStore; replicaStore?: WorkflowDataStore
     lifecycleStore?: WorkflowDataStore; receiverKeyStore?: WorkflowDataStore; receiverRoot?: string
-    automationStore?: WorkflowDataStore; automationNative?: NativeAutomationAdapter } }
+    automationStore?: WorkflowDataStore; automationNative?: NativeAutomationAdapter; coverStore?: WorkflowDataStore } }
+export interface CoverPreviewRequest { scope: string; surfaceId: string; revision: 1; requestId: string }
 export interface AutomationTaskRequest { scope: string; taskRef: HumanTaskRef }
 export interface AutomationPreviewRequest extends AutomationTaskRequest { config: AutomationConfig; expectedRevision: number }
 export interface AutomationApproveRequest extends AutomationTaskRequest { previewId: string; digest: string; expectedRevision: number }
@@ -65,6 +73,7 @@ export class HumanToolsService extends TypertRemoteService {
   private assistants?: { registry: AssistantRegistry; business: AssistantBusinessRecords; native: NativeAssistantAdapter; sessionIntents?: AssistantSessionIntents }
   private lifecycle?: { runtime: WorkflowLifecycle; keys: ReceiverKeyring; receiver?: SubmissionReceiver; unsubscribe(): void }
   private automation?: WorkflowAutomation
+  private covers?: CardCoverAssets
   private automationReason = '宿主尚不支持受控原生自动处理；手动群任务仍可使用'
   constructor(private readonly host: Context, config: HumanToolsConfig = {}) {
     super(host, 'humanTools')
@@ -75,7 +84,14 @@ export class HumanToolsService extends TypertRemoteService {
       this.lifetime.abort(disabled())
       const drained = this.core?.close()
       try { this.unregister?.() } finally {
-        try { await Promise.all([drained, this.workflow?.modes.close(), this.workflow?.records.close(), this.workflow?.replica.close(), this.closeAssistants(), this.closeLifecycle()]) }
+        try {
+          // Once lifecycle mounted, an automation store may still be opening.
+          // Drain its aborted initializer before a replacement fiber can load.
+          // A pending initial action read has no mounted writer and retains
+          // the existing non-blocking disabled/late-disposed host behavior.
+          if (this.lifecycle) await this.ready?.catch(() => {})
+          await Promise.all([drained, this.workflow?.modes.close(), this.workflow?.records.close(), this.workflow?.replica.close(), this.closeAssistants(), this.closeLifecycle(), this.covers?.close()])
+        }
         finally { removeAutomationGate() }
       }
     })
@@ -89,7 +105,10 @@ export class HumanToolsService extends TypertRemoteService {
     // Resolve the actual host profile, including linked/native installations.
     // Web and Desktop must never share one action ledger on the same computer.
     const store = config.store || new HumanFileStore(path.join(path.dirname(defaultGateStatePath(this.host)), 'human-tools-v1.json'))
-    const core = await HumanToolsCore.open(store, () => randomBytes(16).toString('hex'))
+    const core = await HumanToolsCore.open(store, () => randomBytes(16).toString('hex'), Date.now, (origin, asset) => {
+      if (!this.covers || !this.workflow) throw fail('cover-unavailable', '此节点尚不能准备封面图片')
+      this.covers.assertAsset({ nodeId: this.workflow.transport.nodeId, sessionId: origin.scope, sessionGeneration: origin.generation }, asset)
+    })
     if (this.lifetime.signal.aborted) { core.close(); return }
     this.core = core
     const unregisterTools: (() => void)[] = []
@@ -106,9 +125,10 @@ export class HumanToolsService extends TypertRemoteService {
         const replica = await WorkflowReplica.open(config.workflow.replicaStore || file('facts'), transport)
         let modes: ModeRegistry | undefined, records: WorkflowRecords | undefined
         try {
-          const capabilities = () => { transport.assertIdentity(); return createCapabilityManifest(transport.nodeId, { 'task.query': { status: 'available' },
-            'automation.run': this.automation?.capability().supported ? { status: 'available' } : { status: 'blocked', reason: this.automationReason },
-            ...(this.lifecycle ? { 'surface.form-collection': { status: 'available' as const }, 'task.lifecycle': { status: 'available' as const },
+          const capabilities = () => { transport.assertIdentity(); const automation = this.automation?.capability(); return createCapabilityManifest(transport.nodeId, { 'task.query': { status: 'available' },
+            'surface.cover-image': this.covers ? { status: 'available' } : { status: 'blocked', reason: '封面资产服务未就绪；旧无封面群卡仍可使用。' },
+            'automation.run': automation?.supported ? { status: 'available' } : { status: 'blocked', reason: automation?.reason || this.automationReason },
+            ...(this.lifecycle ? { 'surface.form-collection': { status: 'available' as const }, 'task.audience-select': { status: 'available' as const }, 'task.lifecycle': { status: 'available' as const },
               'recipient.query': { status: 'available' as const }, 'result.private': { status: 'available' as const },
               ...(this.lifecycle.receiver ? { 'submission.receive': { status: 'available' as const } } : {}) } : {}) }) }
           modes = await ModeRegistry.open(config.workflow.modeStore || file('modes'),
@@ -117,6 +137,33 @@ export class HumanToolsService extends TypertRemoteService {
             { nodeId: transport.nodeId, modes, randomId: () => randomBytes(16).toString('hex'), validateReferences: (scope, refs) => replica.validateReferences(scope, refs) })
           this.lifetime.signal.throwIfAborted(); transport.assertIdentity()
           this.workflow = { transport, modes, records, replica }
+          try {
+            this.covers = await CardCoverAssets.open({ transport,
+              store: config.workflow.coverStore || new WorkflowFileStore(path.join(path.dirname(defaultGateStatePath(this.host)), `human-workflow-${transport.nodeId}-covers.json`), CARD_COVER_LEDGER_MAX_BYTES),
+              upload: uploadCardCover,
+              read: async (scope, source, signal) => {
+                let data: Uint8Array, mediaType: string
+                if (source.kind === 'attachment') {
+                  const reader = this.host.get('wechatAttachment') as WechatAttachmentService | undefined
+                  if (!reader?.readSessionImage) throw fail('cover-source-unavailable', '此宿主暂不能核对会话图片')
+                  const value = await reader.readSessionImage(scope.sessionId, source.attachmentId, signal); data = value.data; mediaType = value.mediaType
+                } else {
+                  const reader = this.host.get('agentResources' as never) as AgentResourcesService | undefined
+                  if (!reader?.readWorkspaceFile) throw fail('cover-source-unavailable', '此宿主暂不能核对工作区文件')
+                  const value = await reader.readWorkspaceFile(scope.sessionId, source.reference, signal); data = value.data
+                  // Detect encoded raster header; never trust the filename.
+                  mediaType = data[0] === 137 && data[1] === 80 && data[2] === 78 && data[3] === 71 ? 'image/png'
+                    : data[0] === 255 && data[1] === 216 ? 'image/jpeg' : ''
+                }
+                if (mediaType !== 'image/png' && mediaType !== 'image/jpeg') throw fail('cover-source-invalid', '封面仅接受真实PNG或JPEG图片')
+                return normalizeCardCoverImage(data, mediaType, signal)
+              } })
+            this.lifetime.signal.throwIfAborted(); transport.assertIdentity()
+            unregisterTools.push((this.host.get('tools') as ToolRuntime).register(cardCoverTool(transport.nodeId, this.covers, exec => {
+              this.lifetime.signal.throwIfAborted(); transport.assertIdentity()
+              if (!exec.agent || (this.host.get('agents') as any)?.get(String(exec.agent.id)) !== exec.agent) throw fail('cover-scope-invalid', '不是当前原生Agent')
+            })))
+          } catch { await this.covers?.close(); this.covers = undefined; this.lifetime.signal.throwIfAborted(); transport.assertIdentity() }
           const keyFile = path.join(path.dirname(defaultGateStatePath(this.host)), `human-workflow-${transport.nodeId}-receiver-keys.json`)
           const keys = await ReceiverKeyring.open(config.workflow.receiverKeyStore || new ReceiverKeyFileStore(keyFile), transport.nodeId)
           let receiver: SubmissionReceiver | undefined, runtime: WorkflowLifecycle | undefined
@@ -130,26 +177,38 @@ export class HumanToolsService extends TypertRemoteService {
                   taskRef, submissionId: delivery.submissionId, claimId: delivery.claimId, version: delivery.version,
                   manifestDigest: delivery.envelope.manifestDigest, cipherDigest: delivery.envelope.cipherDigest }, signal) })
             }
-            runtime = await WorkflowLifecycle.open({ transport, keys, receiver, store: config.workflow.lifecycleStore || await archival('lifecycle') })
+            runtime = await WorkflowLifecycle.open({ transport, keys, receiver, store: config.workflow.lifecycleStore || await archival('lifecycle'),
+              coverAuthority: (scope, asset) => { if (!this.covers) throw fail('cover-unavailable', '封面资产不可用'); this.covers.assertAsset(scope, asset) } })
             this.lifetime.signal.throwIfAborted(); transport.assertIdentity()
             const current = runtime
             this.lifecycle = { runtime, keys, receiver, unsubscribe: replica.onSynchronized((binding, tasks) => {
               void current.synced(binding, tasks, this.lifetime.signal).then(() => this.automation?.drive(this.lifetime.signal)).catch(() => {})
             }) }
             const nativeAutomation = config.workflow.automationNative || createNativeAutomationAdapter(this.host)
-            if (nativeAutomation.probe().supported) {
-              try {
-                this.automation = await WorkflowAutomation.open({ nodeId: transport.nodeId, store: config.workflow.automationStore || await archival('automation'), native: nativeAutomation,
-                  authority: { assertIdentity: () => transport.assertIdentity(), inspect: (scope, task, signal, extra) => current.inspectAutomation(scope, task, signal, extra),
-                    ready: (scope, task, submission, signal) => current.readyAutomation(scope, task, submission, signal) },
-                  tools: (run, policy, authorize, saved) => automationTools({ lifecycle: current, core, run, policy, authorize, saved,
-                    ...(receiver && attachments ? { saveImage: (data, mediaType) => attachments.saveImage({ data, mediaType }) } : {}) }) })
-                for (const tool of automationProposalTools({ nodeId: transport.nodeId, runtime: this.automation, assertAgent: exec => {
-                  this.lifetime.signal.throwIfAborted(); transport.assertIdentity()
-                  if (!exec.agent || (this.host.get('agents') as any)?.get(String(exec.agent.id)) !== exec.agent) throw fail('workflow-scope-invalid', '不是当前原生 Agent')
-                } })) unregisterTools.push((this.host.get('tools') as ToolRuntime).register(tool))
-              } catch { this.automationReason = '自动处理账本或原生适配不可用；已停止自动运行，手动群任务仍可使用'; await nativeAutomation.close() }
-            } else { this.automationReason = nativeAutomation.probe().reason || this.automationReason; await nativeAutomation.close() }
+            let automation: WorkflowAutomation | undefined
+            const unregisterAutomation: (() => void)[] = []
+            try {
+              // Keep the ledger/adapter alive even if optional native services
+              // are still starting (or an old host never supplies them).
+              // capability/preview/dispatch recheck the actual APIs; opening
+              // this ledger does not approve, resume, or run an Agent.
+              automation = await WorkflowAutomation.open({ nodeId: transport.nodeId, store: config.workflow.automationStore || await archival('automation'), native: nativeAutomation,
+                authority: { assertIdentity: () => transport.assertIdentity(), inspect: (scope, task, signal, extra) => current.inspectAutomation(scope, task, signal, extra),
+                  ready: (scope, task, submission, signal) => current.readyAutomation(scope, task, submission, signal) },
+                tools: (run, policy, authorize, saved) => automationTools({ lifecycle: current, core, run, policy, authorize, saved,
+                  ...(receiver && attachments ? { saveImage: (data, mediaType) => attachments.saveImage({ data, mediaType }) } : {}) }) })
+              this.lifetime.signal.throwIfAborted(); transport.assertIdentity()
+              for (const tool of automationProposalTools({ nodeId: transport.nodeId, runtime: automation, assertAgent: exec => {
+                this.lifetime.signal.throwIfAborted(); transport.assertIdentity()
+                if (!exec.agent || (this.host.get('agents') as any)?.get(String(exec.agent.id)) !== exec.agent) throw fail('workflow-scope-invalid', '不是当前原生 Agent')
+              } })) unregisterAutomation.push((this.host.get('tools') as ToolRuntime).register(tool))
+              this.automation = automation; unregisterTools.push(...unregisterAutomation)
+            } catch {
+              unregisterAutomation.reverse().forEach(remove => remove())
+              this.automationReason = '自动处理账本或原生适配不可用；已停止自动运行，手动群任务仍可使用'
+              if (automation) await automation.close(); else await nativeAutomation.close()
+              this.lifetime.signal.throwIfAborted(); transport.assertIdentity()
+            }
             for (const tool of lifecycleTools({ nodeId: transport.nodeId, lifecycle: runtime, core,
               assertAgent: exec => {
                 this.lifetime.signal.throwIfAborted(); transport.assertIdentity()
@@ -218,7 +277,7 @@ export class HumanToolsService extends TypertRemoteService {
         unregisterTools.push((this.host.get('tools') as ToolRuntime).register(tool))
       const unregisterContext = registerHumanContext(this.host, core)
       this.unregister = () => { unregisterContext(); unregisterTools.reverse().forEach(remove => remove()) }
-    } catch (cause) { unregisterTools.reverse().forEach(remove => remove()); await Promise.all([core.close(), this.workflow?.modes.close(), this.workflow?.records.close(), this.workflow?.replica.close(), this.closeAssistants(), this.closeLifecycle()]); this.core = undefined; this.workflow = undefined; throw cause }
+    } catch (cause) { unregisterTools.reverse().forEach(remove => remove()); await Promise.all([core.close(), this.workflow?.modes.close(), this.workflow?.records.close(), this.workflow?.replica.close(), this.closeAssistants(), this.closeLifecycle(), this.covers?.close()]); this.core = undefined; this.workflow = undefined; throw cause }
   }
   private async closeLifecycle() {
     const current = this.lifecycle; if (!current) return
@@ -309,6 +368,28 @@ export class HumanToolsService extends TypertRemoteService {
         throw fail('lifecycle-draft-invalid', '此按钮不是工作流审核入口')
       return this.lifecycle.runtime.preview({ nodeId: this.workflow!.transport.nodeId, sessionId: source.origin.scope, sessionGeneration: generation },
         source.surface.targetTaskRef, source.surface.workflowRef, active)
+    })
+  }
+  /** Owner-only read preview; never claims an action or approves publication.
+   * Resolve the asset from the durable Surface / exact cloud draft, not input. */
+  @Remote('coverPreview')
+  async coverPreview(request: CoverPreviewRequest, signal: AbortSignal): Promise<HumanResult> {
+    return this.result(async () => {
+      const active = AbortSignal.any([signal, this.lifetime.signal]), core = await this.use(active)
+      if (!row(request) || request.revision !== 1 || !this.covers || !this.workflow) throw fail('cover-preview-invalid', '封面预览不可用')
+      const scope = await this.workflowScope(request.scope, active)
+      core.assertGeneration(request.scope, request.surfaceId, scope.sessionGeneration)
+      const status = core.status(request.scope, request.surfaceId) as { surface: HumanSurface }, surface = status.surface
+      let asset: HumanCardAsset | undefined
+      if (surface.actions[0].id === 'share') asset = humanCardAsset(surface.cover)
+      else if (surface.actions[0].id === 'workflow-approve' && surface.workflowRef?.kind === 'round' && surface.targetTaskRef && this.lifecycle) {
+        const preview = await this.lifecycle.runtime.preview(scope, surface.targetTaskRef, surface.workflowRef, active)
+        if (row(preview) && row(preview.draft) && row(preview.draft.content)) asset = humanCardAsset(preview.draft.content.cover)
+      }
+      if (!asset) throw fail('cover-preview-invalid', '此卡没有可公开预览的封面资产')
+      const result = await this.covers.preview(scope, asset, request.requestId, active)
+      core.assertGeneration(request.scope, request.surfaceId, await this.claimGeneration(request.scope, active))
+      return result
     })
   }
   private async closeAssistants() {

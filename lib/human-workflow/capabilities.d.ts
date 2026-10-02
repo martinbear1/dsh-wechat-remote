@@ -1,5 +1,6 @@
+import { workflowCapabilityContracts } from './capability-contracts.js';
 export type CapabilityStatus = 'available' | 'blocked' | 'planned';
-export declare const CAPABILITY_IDS: readonly ["surface.reading-confirmation", "action.select-members", "action.remind-selected-pending", "surface.form-collection", "task.lifecycle", "task.query", "recipient.query", "mode.packages", "workflow.records", "submission.receive", "result.private", "automation.run"];
+export declare const CAPABILITY_IDS: readonly ["surface.reading-confirmation", "surface.cover-image", "action.select-members", "action.remind-selected-pending", "surface.form-collection", "task.audience-select", "task.lifecycle", "task.query", "recipient.query", "mode.packages", "workflow.records", "submission.receive", "result.private", "automation.run"];
 export type CapabilityId = typeof CAPABILITY_IDS[number];
 export interface WorkflowCapability {
     id: CapabilityId;
@@ -23,8 +24,10 @@ export interface CapabilityManifest {
         titleCharacters: 80;
         bodyCharacters: 1000;
     };
+    /** Legacy limits above describe mode templates, not member collection forms. */
+    contracts: ReturnType<typeof workflowCapabilityContracts>;
 }
-export type CapabilityAvailability = Partial<Record<'surface.reading-confirmation' | 'action.select-members' | 'action.remind-selected-pending' | 'task.query' | 'recipient.query' | 'surface.form-collection' | 'task.lifecycle' | 'submission.receive' | 'result.private' | 'automation.run', {
+export type CapabilityAvailability = Partial<Record<'surface.reading-confirmation' | 'surface.cover-image' | 'action.select-members' | 'action.remind-selected-pending' | 'task.query' | 'recipient.query' | 'surface.form-collection' | 'task.audience-select' | 'task.lifecycle' | 'submission.receive' | 'result.private' | 'automation.run', {
     status: CapabilityStatus;
     reason?: string;
 }>>;

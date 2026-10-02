@@ -5,6 +5,7 @@ import type { SystemPrompt } from '@deepseek-ai/dsh-system-prompt'
 import { HUMAN_TOOL_NAME, HUMAN_MEMBERS_TOOL_NAME, HUMAN_REMIND_TOOL_NAME, HUMAN_ID, exactKeys, humanSurface,
   humanReminderTitle, object, text } from './protocol.js'
 import type { HumanToolsCore } from './core.js'
+import { HUMAN_CARD_ASSET_SCHEMA, humanCardAsset } from './card-cover.js'
 
 /** Only this adapter knows DSH tool execution, agent/session and prompt semantics. */
 export function dshHumanToolsAvailable(ctx: Context): boolean {
@@ -109,11 +110,12 @@ export function humanShareTool(core: HumanToolsCore): ToolDefinition {
       + 'This returns immediately; it does not share, publish files, invite members or wait for the user. '
       + 'The owner reviews the text in your final reply and clicks the action. A new target requires WeChat group selection; sourceSurfaceId reuses the original group. '
       + 'WeChat confirmation remains a user action; only then the approved text is published to that group. '
-      + 'Every member of that group may read the published text and confirm their own reading status. No private assignments or files are supported yet. '
+      + 'Every member of that group may read the published text and confirm their own reading status. This reading-only tool does not collect files or publish private feedback; query human_capabilities and use the task lifecycle tools for those capabilities. '
       + 'Only one card per root tool call: repeats reuse the original without replacing it. '
+      + 'Optional cover is the exact public 5:4 asset from human_card_cover_prepare, never a recipe, path or URL. Owner previews the actual image; changed bytes require new approval. Omit it for the fixed image. '
       + 'After tool success, finish your normal reply and say the card is ready for the owner to send. Never claim it was shared or read.',
     parameters: { type: 'object', properties: { title: { type: 'string', minLength: 1, maxLength: 80 },
-      body: { type: 'string', minLength: 1, maxLength: 1000 }, sourceSurfaceId: { type: 'string', pattern: '^[a-f0-9]{32}$' } },
+      body: { type: 'string', minLength: 1, maxLength: 1000 }, sourceSurfaceId: { type: 'string', pattern: '^[a-f0-9]{32}$' }, cover: HUMAN_CARD_ASSET_SCHEMA },
       required: ['title', 'body'], additionalProperties: false },
     output: {
       schema: { type: 'object', properties: { surface: { type: 'object' } }, required: ['surface'], additionalProperties: false },
@@ -129,15 +131,16 @@ export function humanShareTool(core: HumanToolsCore): ToolDefinition {
       },
     },
     async execute(args: unknown, exec: ToolRunContext) {
-      if (!object(args) || !exactKeys(args, ['title', 'body', ...(Object.hasOwn(args, 'sourceSurfaceId') ? ['sourceSurfaceId'] : [])])
+      if (!object(args) || !exactKeys(args, ['title', 'body', ...['sourceSurfaceId', 'cover'].filter(key => Object.hasOwn(args, key))])
         || !text(args.title, 80) || !text(args.body, 1000)
+        || Object.hasOwn(args, 'cover') && !humanCardAsset(args.cover)
         || Object.hasOwn(args, 'sourceSurfaceId') && (typeof args.sourceSurfaceId !== 'string' || !HUMAN_ID.test(args.sourceSurfaceId)))
-        throw new Error('仅支持有效的title、body和可选sourceSurfaceId字段')
+        throw new Error('仅支持有效的title、body和可选sourceSurfaceId、cover字段')
       if (!exec.agent?.session || exec.agent.id !== exec.agent.session.id || !Number.isSafeInteger(exec.agent.session.header?.createdAt)
         || !text(exec.callId, 256) || !text(exec.rootCallId, 256))
         throw new Error('此工具需要具有稳定身份的真实DSH会话上下文')
       return { surface: await core.create({ scope: String(exec.agent.session.id), generation: String(exec.agent.session.header.createdAt), callId: String(exec.callId),
-        rootCallId: String(exec.rootCallId) }, args.title, args.body, exec.signal, args.sourceSurfaceId as string | undefined) }
+        rootCallId: String(exec.rootCallId) }, args.title, args.body, exec.signal, args.sourceSurfaceId as string | undefined, humanCardAsset(args.cover)) }
     },
   }
 }

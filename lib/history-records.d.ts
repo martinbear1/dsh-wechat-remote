@@ -1,6 +1,7 @@
 import { type DetailPart } from './history-record-presentation.js';
 type Row = Record<string, any>;
 export declare const HISTORY_RECORD_BYTES: number;
+export declare const HISTORY_SURFACE_RECORD_BYTES: number;
 export declare const HISTORY_DETAIL_CHUNK_BYTES: number;
 export interface HistoryDetailReference {
     readonly schema: 'agent.history-detail.v1';

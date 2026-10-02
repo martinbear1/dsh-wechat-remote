@@ -37,15 +37,15 @@ async function setup(t, options = {}) {
   let identity = nodeId, calls = 0
   const transport = { nodeId, assertIdentity() { if (identity !== nodeId) throw Object.assign(new Error('node identity changed'), { code: 'binding_revoked' }) },
     async request(...args) { calls++; if (options.request) return options.request(...args); assert.fail('empty local mode operations must not contact task backend') } }
-  const modeStore = options.modeStore || store(), recordStore = store(), replicaStore = store(), coreStore = store({ schemaVersion: 1, records: [] })
+  const modeStore = options.modeStore || store(), automationStore = options.automationStore || store(), recordStore = store(), replicaStore = store(), coreStore = store({ schemaVersion: 1, records: [] })
   const config = { enabled: true, assistants: false, store: coreStore, workflow: { transport, modeStore, recordStore, replicaStore,
-    receiverKeyStore: store(), lifecycleStore: store() } }
+    receiverKeyStore: store(), lifecycleStore: store(), automationStore } }
   let fiber = await ctx.plugin(HumanToolsService, config), service = ctx.get('humanTools'), sequence = 0
   t.after(async () => { await ctx.fiber.dispose() })
   async function run(name, args) {
     return tools.execute({ name, arguments: args, callId: `service_call_${++sequence}`, agent, signal })
   }
-  return { ctx, tools, session, agent, modeStore, recordStore, coreStore, replicaStore, transport, config,
+  return { ctx, tools, session, agent, modeStore, recordStore, coreStore, replicaStore, automationStore, transport, config,
     get fiber() { return fiber }, get service() { return service }, get networkCalls() { return calls },
     rotate() { identity = 'node_' + 'b'.repeat(32) }, run,
     async draft() { const result = await run('human_mode_draft', { package: pkg() }); assert.equal(result.isError, false, JSON.stringify(result)); return JSON.parse(result.content[0].text) },
@@ -53,6 +53,76 @@ async function setup(t, options = {}) {
     async reload() { fiber = await ctx.plugin(HumanToolsService, config); service = ctx.get('humanTools'); return service },
   }
 }
+
+// Cordis provides/withdraws real services; methods must NOT be invoked by
+// discovery. Only the native model/run boundary is absent in this fixture.
+function provideAutomationServices(ctx) {
+  const untouched = () => assert.fail('capability discovery must not inspect, restore, approve, or run')
+  for (const [name, service] of Object.entries({
+    sessionController: { inspect: untouched, resolveAgent: untouched },
+    agentPresets: { readDocument: untouched, composedPreset: untouched },
+    permissionPresets: { resolve: untouched }, workspaceRegistry: { archivedSessionIds: [] },
+  })) ctx.provide(name, service)
+}
+const automationCapability = async host => unwrap(await host.service.capabilities({ scope: sessionId }, signal)).workflow.capabilities.find(c => c.id === 'automation.run')
+
+test('real Cordis late optional dependencies recover discovery without remount, approval, timers or Agent wake', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const host = await setup(t), before = await automationCapability(host), service = host.service, ledger = service.automation
+  assert.equal(before.status, 'blocked'); assert(before.reason.includes('sessionController.inspect'))
+  assert(host.tools.get('human_automation_propose'), 'draft proposal stays distinct from executable automatic capability')
+  const started = deferred(), ready = deferred()
+  const mounting = host.ctx.plugin(async child => { provideAutomationServices(child); started.resolve(); await ready.promise })
+  await started.promise
+  assert.equal((await automationCapability(host)).status, 'blocked', 'Cordis does not expose a still-loading provider')
+  ready.resolve(); const nativeFiber = await mounting
+  assert.equal((await automationCapability(host)).status, 'available')
+  assert.equal(host.service, service); assert.equal(service.automation, ledger); assert.equal(host.automationStore.loads, 1)
+  const agentResult = await host.run('human_capabilities', {})
+  assert.equal(agentResult.isError, false)
+  assert.equal(JSON.parse(agentResult.content[0].text).capabilities.find(c => c.id === 'automation.run').status, 'available', 'Agent and owner read the same current capability')
+  const other = await setup(t)
+  assert.equal((await automationCapability(other)).status, 'blocked', 'another host/profile does not inherit this host native readiness')
+  assert.equal(host.automationStore.writes, 0); assert.equal(host.networkCalls, 0)
+  assert.equal(host.tools.get('human_automation_save'), undefined, 'no private execution tools without an approved run')
+  await nativeFiber.dispose()
+  assert.equal((await automationCapability(host)).status, 'blocked', 'withdrawn native dependencies fail closed')
+  const recovered = await host.ctx.plugin(provideAutomationServices)
+  assert.equal((await automationCapability(host)).status, 'available')
+  assert.equal(host.automationStore.loads, 1); assert.equal(host.networkCalls, 0)
+  await host.fiber.dispose()
+  assert.equal(ledger.capability().supported, false)
+  assert.equal(host.tools.get('human_automation_propose'), undefined)
+  assert.equal((await service.capabilities({ scope: sessionId }, signal)).ok, false)
+  await recovered.dispose()
+  await host.ctx.plugin(provideAutomationServices)
+  assert.equal(ledger.capability().supported, false, 'late provider cannot revive disposed workflow/adapter')
+})
+
+test('automation store failure stays isolated from manual tools and does not masquerade as missing native services', async t => {
+  const host = await setup(t, { automationStore: { async load() { throw new Error('C:/private/profile/SECRET-fixture') } } })
+  const cap = await automationCapability(host)
+  assert.equal(cap.status, 'blocked'); assert(cap.reason.includes('账本')); assert(!cap.reason.includes('SECRET'))
+  await host.ctx.plugin(provideAutomationServices)
+  assert.equal((await automationCapability(host)).status, 'blocked')
+  assert.equal(host.service.automation, undefined); assert.equal(host.tools.get('human_automation_propose'), undefined)
+  assert.equal((await host.run('human_surface_share', { title: '仍可手动', body: '没有自动授权' })).isError, false)
+})
+
+test('dispose drains a pending automation load and closes its late adapter before Cordis replacement', async t => {
+  const started = deferred(), release = deferred(), memory = store()
+  const host = await setup(t, { automationStore: { ...memory, async load() { started.resolve(); await release.promise; return memory.load() } } })
+  await started.promise
+  const old = host.service; let disposed = false
+  const disposal = host.fiber.dispose().then(() => { disposed = true })
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(disposed, false)
+  await host.ctx.plugin(provideAutomationServices)
+  release.resolve(); await disposal
+  assert.equal(old.automation, undefined); assert.equal(host.tools.get('human_automation_propose'), undefined)
+  assert.equal((await old.capabilities({ scope: sessionId }, signal)).ok, false)
+  await host.reload()
+  assert.equal((await automationCapability(host)).status, 'available'); assert.equal(host.networkCalls, 0)
+})
 
 async function claimedShare(host) {
   const card = await host.run('human_surface_share', { title: '发现回归', body: '完整源工具卡' })

@@ -8,7 +8,7 @@ import { createRequire } from 'node:module'
 import { lstat, mkdir, open, readFile, readdir, realpath, rename } from 'node:fs/promises'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { assistantDefinition, assistantGuidance, legacyAssistantGuidanceV1, type AssistantDefinition } from './definition.js'
+import { assistantDefinition, assistantGuidance, legacyAssistantGuidanceV1, legacyAssistantGuidanceV2, type AssistantDefinition } from './definition.js'
 import type { NativeAssistantAdapter, NativeAssistantCapability, NativeAssistantInstallation, NativeAssistantPreview } from './types.js'
 
 type Row = Record<string, unknown>
@@ -137,7 +137,7 @@ export function validateNativeAssistantPreview(value: unknown): NativeAssistantP
     if (!persona || !isRow(persona.config) || typeof persona.config.prefix !== 'string'
       || persona.config.complete !== false || persona.config.includeRuntimeContext !== true) throw invalid()
     const prefix = persona.config.prefix
-    if (![assistantGuidance(definition), legacyAssistantGuidanceV1(definition)]
+    if (![assistantGuidance(definition), legacyAssistantGuidanceV2(definition), legacyAssistantGuidanceV1(definition)]
       .some(guidance => prefix.endsWith(`\n\n${guidance}`))) throw invalid()
     return structuredClone(value) as unknown as NativeAssistantPreview
   } catch { throw invalid() }

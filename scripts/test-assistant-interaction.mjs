@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, writeFile, readdir, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { randomBytes } from 'node:crypto'
 import { ASSISTANT_INTERACTION_GUIDANCE, ASSISTANT_AUTHORING_GUIDANCE, HUMAN_TASK_CONTENT_GUIDANCE } from '../lib/assistant-presets/interaction-guidance.js'
 import { assistantDefinition, assistantGuidance } from '../lib/assistant-presets/definition.js'
 import { assistantTemplates } from '../lib/assistant-presets/catalog.js'
@@ -14,6 +15,7 @@ import { HUMAN_MEMBER_FORM_SCHEMA } from '../lib/human-workflow/member-form-sche
 import { humanShareTool } from '../lib/human-tools/dsh.js'
 import { humanForm, humanInitialRound } from '../lib/human-tools/form.js'
 import { humanSurface } from '../lib/human-tools/protocol.js'
+import { HumanToolsCore } from '../lib/human-tools/core.js'
 
 // Prompt/rule wiring contracts only. These tests neither invoke an LLM nor
 // establish conversational quality, WeChat behavior, or real user approval.
@@ -221,6 +223,7 @@ test('actual task output is brief and truthful while presentation metadata prese
   assert.match(rendered[0].text, /已准备好，尚未发布/)
   assert.match(rendered[0].text, /不再另写规格表或重复审核步骤/)
   assert.match(rendered[0].text, /不得声称已经发送/)
+  assert.match(rendered[0].text, /内部执行事实（不是给用户照读的文案）/)
   assert.deepEqual(metadata.humanSurface, card)
   assert.equal(metadata.humanSurface.initialRound.form.fields[0].required, true)
   assert.equal(metadata.humanSurface.initialRound.form.fields[0].maxLength, 120)
@@ -228,6 +231,60 @@ test('actual task output is brief and truthful while presentation metadata prese
   const invalid = { ...card, initialRound: { ...card.initialRound, instructions: '' } }
   assert.throws(() => tool.output.render({}, { surface: invalid }))
   assert.throws(() => tool.output.presentationMeta({}, { surface: invalid }))
+})
+
+test('current persona, drafting tool and skill teach task selection rather than a mandatory teacher page', () => {
+  const teacher = assistantTemplates().find(item => item.id === 'teacher').definition
+  const persona = assistantGuidance(teacher)
+  assert.match(persona, /职业助手工作方法 v3/)
+  assert.match(persona, /你就是老师身边的教学与班级事务助理/)
+  assert.match(persona, /不问“是否创建任务卡”/)
+  assert.match(persona, /不自行增加|不顺手添加/)
+  assert.match(persona, /只有过期、前后矛盾、时区不明或用户要求检查时才追问/)
+  assert.match(persona, /没有可信应交名单就不能猜全班缺交者/)
+  assert.match(HUMAN_WORKFLOW_SKILL.content, /不是先把所有字段和展示块列出来再逐个填/)
+  assert.match(HUMAN_WORKFLOW_SKILL.content, /供核对的数据不等于要在最终答复中逐项复述/)
+  assert.match(HUMAN_WORKFLOW_SKILL.content, /后续处理和反馈只有本次要启用时才协商/)
+  assert.match(HUMAN_TASK_CONTENT_GUIDANCE, /没有要求你设计细则时，不自行增加字数、评分标准、格式、期限/)
+  assert.match(HUMAN_TASK_CONTENT_GUIDANCE, /不是每次照读的模板/)
+  assert.match(ASSISTANT_AUTHORING_GUIDANCE, /不要靠固定问卷、卡片模板或套话制造人格/)
+})
+
+test('real task creation preserves two different minimal designs without adding fields, rounds or presentation blocks', async t => {
+  let saved = { schemaVersion: 1, records: [] }
+  const core = await HumanToolsCore.open({ load: async () => structuredClone(saved), save: async value => { saved = structuredClone(value) } },
+    () => randomBytes(16).toString('hex'))
+  t.after(() => core.close())
+  const prepared = []
+  const agent = { id: 'business-session', session: { id: 'business-session', header: { id: 'business-session', createdAt: 100 } } }
+  const tool = lifecycleTools({ nodeId: 'test_node', core, assertAgent: exec => assert.equal(exec.agent, agent),
+    lifecycle: { prepareInitial: async (_signal, withImage) => prepared.push(withImage) } }).find(item => item.name === 'human_task_create')
+  const cases = [
+    { title: '国庆写话', body: '写完后拍照提交。', initialRound: { title: '国庆写话', instructions: '写一写你的国庆假期，不少于100字。',
+      form: { schema: 'human.form.v2', fields: [{ key: 'student_name', label: '姓名', kind: 'short-text', required: true, maxLength: 20 }],
+        attachment: { kind: 'image', required: true, mediaTypes: ['image/jpeg', 'image/png'], maxBytes: 10 * 1024 * 1024 } },
+      closesAt: 2000000000000, recipientRefs: null } },
+    { title: '周五开会时间', body: '选一个方便的时间。', initialRound: { title: '周五开会时间', instructions: '请选择你方便参加的时间。',
+      form: { schema: 'human.form.v2', fields: [{ key: 'slot', label: '时间', kind: 'choice', required: true,
+        choices: ['上午', '下午'] }], attachment: null },
+      closesAt: null, recipientRefs: null } },
+  ]
+  for (const [index, input] of cases.entries()) {
+    const before = structuredClone(input)
+    const value = await tool.execute(input, { agent, signal, callId: `call-${index}`, rootCallId: `root-${index}` })
+    const card = humanSurface(value.surface)
+    assert(card)
+    assert.deepEqual(input, before, 'generation must not mutate the model-selected design')
+    assert.deepEqual(card.initialRound, input.initialRound, 'no template fields or extra phases are inserted')
+    assert.equal(card.initialRound.form.fields.length, 1)
+    assert.equal(card.initialRound.form.presentation, undefined)
+    assert.equal(card.cover, undefined)
+    assert.deepEqual(tool.output.presentationMeta(input, value).humanSurface, card)
+    assert(!tool.output.render(input, value)[0].text.includes('student_name'))
+    assert.deepEqual(saved.records[index].surface.initialRound, input.initialRound)
+    assert.deepEqual(saved.records[index].attempts, [], 'preparing a concise result is not owner approval or a send attempt')
+  }
+  assert.deepEqual(prepared, [true, false], 'image reception is only prepared when this task asks for an image')
 })
 
 test('reading and review tool exports still distinguish prepared output from actual publication and require owner approval', () => {

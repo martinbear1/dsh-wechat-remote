@@ -71,6 +71,7 @@ try {
     'human-tools/dsh.ts',
     'human-tools/service.ts',
     'assistant-presets/definition.ts',
+    'assistant-presets/interaction-guidance.ts',
     'assistant-presets/catalog.ts',
     'assistant-presets/registry.ts',
     'assistant-presets/types.ts',

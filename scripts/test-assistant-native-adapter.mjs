@@ -8,11 +8,17 @@ import { dump, load } from 'js-yaml'
 import { entryListSchema, applyEntryPatches } from '@deepseek-ai/cordis-plugin-include'
 import { isJsExpr } from '@deepseek-ai/cordis-plugin-loader'
 import { createNativeAssistantAdapter, validateNativeAssistantPreview } from '../lib/assistant-presets/native-adapter.js'
+import { legacyAssistantGuidanceV1 } from '../lib/assistant-presets/definition.js'
 
 const signal = new AbortController().signal
 const definition = () => ({ schemaVersion: 1, name: '项目助理', description: '协助项目日常工作', role: '了解用户职责，按明确范围辅助工作',
   methods: ['先了解目标，再设计工作步骤', '使用规范群工具收集反馈'], onboarding: [{ key: 'project', label: '项目', prompt: '你负责哪个项目？' }],
   skills: ['human-workflow'], basePreset: 'standard' })
+// Independently evaluated from git b14d8d1057be9685fdccf953e7c47ad50d88473a:
+// src/assistant-presets/definition.ts::assistantGuidance, with definition() above.
+// Pin the bytes, rather than letting a changed compatibility helper certify itself.
+const LEGACY_GUIDANCE_SHA256 = '34eb91c7449a8c9eef4fe8a87b3387c56072fabdefb5c370ea5b0dba9f16cac2'
+const sha256 = value => createHash('sha256').update(value).digest('hex')
 const base = () => [
   { id: 'persona', name: '@deepseek-ai/dsh-persona', config: { prefix: 'Base {{model}}', suffix: 'Directory {{cwd}}' } },
   { id: 'bash', name: '@deepseek-ai/dsh-tool-bash', disabled: { __jsExpr: "process.platform === 'win32'" } },
@@ -74,6 +80,76 @@ async function fixture(t, options = {}) {
       assert.equal(defaultId, 'standard'); assert.deepEqual(declarations.get('standard').plugins, base())
     } }
 }
+
+async function historicalPreview(f) {
+  const preview = await f.preview(), guidance = legacyAssistantGuidanceV1(definition())
+  assert.equal(Buffer.byteLength(guidance), 1191)
+  assert.equal(sha256(guidance), LEGACY_GUIDANCE_SHA256)
+  const patch = JSON.parse(preview.patch)
+  patch[0].insert[0].config.plugins[0].config.prefix = 'Base {{model}}\n\n' + guidance
+  const oldPatch = JSON.stringify(patch, null, 2) + '\n'
+  assert.notEqual(oldPatch, preview.patch, 'newly prepared native bundles must use the new guidance, not silently keep V1')
+  return { ...preview, patch: oldPatch, patchDigest: sha256(oldPatch) }
+}
+
+async function seedHistoricalArtifact(f, preview, state) {
+  // Seed what the OLD owner-approved native install already persisted. Calling
+  // the new install implementation here would test a new plan, not old recovery.
+  const target = path.join(f.profile, 'assistant-native-bundles', preview.presetId)
+  await mkdir(target, { recursive: true })
+  const manifest = JSON.stringify({ name: preview.bundleName, version: '1.0.0', private: true, type: 'module',
+    description: preview.definition.description, dsh: { bundle: { patch: './cordis.patch.yml' } } }, null, 2) + '\n'
+  const receipt = { schema: 'assistant.native.install.v1', patchDigest: preview.patchDigest,
+    requestId: '00000000-0000-4000-8000-000000000001', phase: state === 'installed' ? 'settled' : 'started',
+    ...(state === 'installed' ? { application: 'applied' } : {}) }
+  await writeFile(path.join(target, 'package.json'), manifest)
+  await writeFile(path.join(target, 'cordis.patch.yml'), preview.patch)
+  await writeFile(path.join(target, 'install-state.json'), JSON.stringify(receipt))
+  const publishNativeState = () => {
+    const row = JSON.parse(preview.patch)[0].insert[0]
+    f.bundles.push({ name: preview.bundleName, version: '1.0.0', installed: true, enabled: true,
+      rows: [{ rowId: row.id, moduleName: row.name }], overrides: [] })
+    f.declarations.set(row.config.id, { name: row.config.name, plugins: row.config.plugins })
+  }
+  if (state === 'installed') publishNativeState()
+  const snapshot = async () => Object.fromEntries(await Promise.all(
+    ['package.json', 'cordis.patch.yml', 'install-state.json'].map(async name => [name, sha256(await readFile(path.join(target, name)))])))
+  return { snapshot, publishNativeState }
+}
+
+for (const state of ['installed', 'unknown']) test(`historical V1 ${state} artifact survives a fresh adapter without rewriting bytes or reinstalling`, async t => {
+  const f = await fixture(t), preview = await historicalPreview(f), saved = await seedHistoricalArtifact(f, preview, state)
+  assert.deepEqual(validateNativeAssistantPreview(preview), preview)
+  const before = await saved.snapshot(); await f.adapter.close()
+  const restored = createNativeAssistantAdapter(f.host, { codec }); t.after(() => restored.close())
+  assert.equal((await restored.verify(structuredClone(preview), signal)).state, state)
+  assert.equal((await restored.install(structuredClone(preview), signal)).state, state, 'a repeated old approval is reconciliation only')
+  assert.equal(f.calls.length, 0)
+  if (state === 'unknown') {
+    saved.publishNativeState() // A later native read confirms the old operation; do not submit it again.
+    assert.equal((await restored.verify(preview, signal)).state, 'installed')
+  }
+  assert.deepEqual(await saved.snapshot(), before, 'manifest, approved patch and durable receipt all retain their exact old bytes')
+  assert.equal(f.calls.length, 0); await f.assertUnchanged()
+})
+
+test('V1 compatibility accepts only exact guidance and cannot replace an approved old artifact with a valid new plan', async t => {
+  const f = await fixture(t), current = await f.preview(), old = await historicalPreview(f)
+  const saved = await seedHistoricalArtifact(f, old, 'installed'), before = await saved.snapshot()
+  for (const change of [
+    value => { value.patch = current.patch }, // No new digest: stale approval must fail.
+    value => { value.definition.role += ' changed' },
+    value => { const patch = JSON.parse(value.patch); patch[0].insert[0].config.plugins[0].config.prefix += '\nextra instruction'
+      value.patch = JSON.stringify(patch, null, 2) + '\n'; value.patchDigest = sha256(value.patch) },
+  ]) {
+    const modified = structuredClone(old); change(modified)
+    assert.throws(() => validateNativeAssistantPreview(modified), { code: 'assistant-native-preview-invalid' })
+  }
+  assert.deepEqual(validateNativeAssistantPreview(current), current, 'a valid new snapshot is structurally valid, but not the approved old installation')
+  await assert.rejects(f.adapter.install(current, signal), { code: 'assistant-native-artifact-changed' })
+  assert.deepEqual(await saved.snapshot(), before); assert.equal(f.calls.length, 0)
+  assert.equal((await f.adapter.verify(old, signal)).state, 'installed')
+})
 
 test('feature detection refuses old copy-based hosts and absent public management services', async () => {
   for (const services of [{}, { agentPresets: { list() {}, copy() {}, read() {} }, pluginManager: {} }]) {

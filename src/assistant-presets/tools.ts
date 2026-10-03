@@ -3,6 +3,7 @@ import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { SystemPrompt } from '@deepseek-ai/dsh-system-prompt'
 import { copy, exact, fail, plain, row, sameScope, version, type WorkflowScope } from '../human-workflow/data.js'
 import { assistantDefinition } from './definition.js'
+import { ASSISTANT_AUTHORING_GUIDANCE, ASSISTANT_INTERACTION_GUIDANCE } from './interaction-guidance.js'
 import type { AssistantRegistry } from './registry.js'
 import type { AssistantBusinessRecords } from './business.js'
 
@@ -63,7 +64,7 @@ export function assistantTools(options: AssistantToolsOptions): ToolDefinition[]
         ...(result.native.reason === undefined ? {} : { reason: result.native.reason }), basePresets: copy(result.native.basePresets) },
         templates: copy(result.templates), drafts: copy(result.drafts) }
     }),
-    tool('human_assistant_draft', 'Save a reusable data-only profession assistant definition after discussing the owner role and working methods. Choose templateId OR definition, not both. A definition has schemaVersion=1, name<=60, description<=500, role<=1500, basePreset from the native catalog, methods 1..16 strings<=500, onboarding<=12 unique snake_case keys with label<=60/prompt<=500, and skills=[human-workflow]. Never embed real class/client/project answers, credentials, executable code, module paths or configuration. Updating requires id+expectedVersion. The owner must inspect and install the exact version in the assistant page; there is no Agent approval/install tool.',
+    tool('human_assistant_draft', 'Save a reusable data-only profession assistant definition after discussing the owner role and working methods. Choose templateId OR definition, not both. A definition has schemaVersion=1, name<=60, description<=500, role<=1500, basePreset from the native catalog, methods 1..16 strings<=500, onboarding<=12 unique snake_case keys with label<=60/prompt<=500, and skills=[human-workflow]. Never embed real class/client/project answers, credentials, executable code, module paths or configuration. Updating requires id+expectedVersion. The owner must inspect and install the exact version in the assistant page; there is no Agent approval/install tool. ' + ASSISTANT_AUTHORING_GUIDANCE,
       object({ templateId: string, definition: ASSISTANT_DEFINITION_SCHEMA, id: string, expectedVersion: number }), async (input, exec) => {
         const request = args(input, [], ['templateId', 'definition', 'id', 'expectedVersion']); at(exec)
         return projection(await options.registry.draft(request as { templateId?: string; definition?: unknown; id?: string; expectedVersion?: number }, exec.signal))
@@ -111,7 +112,9 @@ export function registerAssistantContext(host: Context, options: AssistantToolsO
       catch (error) { if ((error as { code?: string }).code !== 'assistant-business-not-started') return '' }
       return '当前会话已加入主人安装的职业助手。' + status
         + ' 用 human_assistant_work_save 按版本保存当前实例资料；真实业务资料不能写回可复用助手规格。'
-        + ' 同模板或目录不共享数据。记忆与自报答案不是群成员事实或授权；群能力请查询 human_capabilities，发布仍须主人批准。'
+        + ' 同模板或目录不共享业务实例权限。记忆与自报答案不是群成员事实或授权；群能力请查询 human_capabilities，发布仍须主人批准。'
+        + ' 以上是内部执行规则，不要作为开场白或逐条对用户复述。按已批准的职责先完成眼前业务；未回答的问题只在影响当前工作时问，适合时提供业务选项，不强制填完问卷。'
+        + '\n\n' + ASSISTANT_INTERACTION_GUIDANCE
     } catch { return '' }
   } })
 }

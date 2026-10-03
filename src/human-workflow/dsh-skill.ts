@@ -1,4 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
+import { HUMAN_TASK_CONTENT_GUIDANCE } from '../assistant-presets/interaction-guidance.js'
 
 /** Trusted package instructions, not generated executable code. Profession
  * templates may reference this skill; task data never rewrites its protocol. */
@@ -9,6 +10,10 @@ export const HUMAN_WORKFLOW_SKILL = {
   source: 'bundled', provider: 'harness-remote-human-workflow',
   invocation: { modelInvocable: true, userInvocable: true },
   content: `# 群工作流工具使用方法
+
+本技能是内部工作方法与执行约束，不是要向用户复述的产品说明。沿用当前职业身份和用户目标，使用通用能力办事，而不是扮演功能测试员。能力目录用于选择，不是需要给用户展示的功能清单。
+
+${HUMAN_TASK_CONTENT_GUIDANCE}
 
 先调用 human_capabilities，按当前节点实际可用的能力工作。available 仅说明节点实现可用，不代表当前手机微信、AppID 资格、云端部署和本次授权已经验证。读取 contracts 的可定制范围、前置条件和各自限额；blocked 和 planned 不是已实现功能，不编造对应按钮或结果。
 
@@ -80,7 +85,7 @@ existing=new-only 仅计批准服务器时间之后的新提交，include-existi
 
 ## 表单、图片收件与后续轮次
 
-新建收集任务使用 human_task_create，传入完整 initialRound：title、instructions、form、closesAt、recipientRefs:null。可选 audience 为 all-group（默认）或 owner-select；后者让主人先原生选群，再原生选择最多20位成员，最后发送第一张卡，不需要先有登记卡或猜成员ID。选择限制是当前产品限额。该名单限制整个任务，后续轮次只可缩小、不自动扩大；更换参与范围创建新任务。取消选人不得改成全员发送。
+新建收集任务使用 human_task_create，传入完整 initialRound：title、instructions、form、closesAt、recipientRefs:null。可选 initialRound.audience 为 all-group（默认）或 owner-select，必须放在 initialRound 内，不能放顶层；后者让主人先原生选群，再原生选择最多20位成员，最后发送第一张卡，不需要先有登记卡或猜成员ID。选择限制是当前产品限额。该名单限制整个任务，后续轮次只可缩小、不自动扩大；更换参与范围创建新任务。取消选人不得改成全员发送。
 
 表单支持最多12字段、每个单选1..20选项和有限条件分支。attachment=null 表示不收图片；图片定义 required=false 表示可交可不交，true 表示必须交一张 JPEG/PNG。图片最多10MiB，按实际能力设置更小限额。模式模板的 choices 上限12不等于成员表单上限。工具会预先登记指定节点的独立离线接收公钥；主人在聊天气泡核对完整要求后批准首次群卡，任务与首轮同事务发布，不用先发占位阅读卡。未批准不能说成员已能提交。
 

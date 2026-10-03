@@ -13,12 +13,12 @@ const block = { oneOf: [
 export const HUMAN_MEMBER_FORM_SCHEMA = object({
   schema: { type: 'string', enum: ['human.form.v1', 'human.form.v2'], description: 'Use v2 for multi-choice/date/time, field descriptions/sections, or presentation. v1 rejects all these extensions. No code, CSS, HTML or URLs.' },
   fields: { type: 'array', description: 'At most 12 fields.', items: object({
-    key: { type: 'string', description: 'Unique snake_case key, max 40 chars.' }, label: boundedText(80),
+    key: { type: 'string', description: 'Unique snake_case key, max 40 chars.' }, label: boundedText(80, 'Business field name only; required/type are rendered separately, so do not append them to the label.'),
     kind: { type: 'string', enum: ['short-text', 'long-text', 'choice', 'boolean', 'number', 'multi-choice', 'date', 'time'] }, required: { type: 'boolean' },
     maxLength: { type: 'integer', description: 'Only text, required: short 1..200, long 1..2000.' },
     choices: { type: 'array', items: boundedText(80), description: 'Only choice/multi-choice, required. 1..20 distinct nonblank option strings.' },
     min: { ...integer, description: 'Only number: integer range, required.' }, max: { ...integer, description: 'Only number: integer range, required.' },
-    description: boundedText(300, 'v2 only: help text, not executable markup.'), section: boundedText(80, 'v2 only: heading before this field; does not change field order.'),
+    description: boundedText(300, 'v2 only: optional help only when needed; do not repeat obvious labels, task instructions or technical limits. Not executable markup.'), section: boundedText(80, 'v2 only: heading before this field; does not change field order.'),
     minSelected: { ...integer, description: 'v2 multi-choice only, required; 0..20, effective minimum is at least 1 for required fields.' },
     maxSelected: { ...integer, description: 'v2 multi-choice only, required; 0..20, >=minSelected and <=choices.length.' },
     start: { type: 'string', description: 'v2 date/time only. Inclusive YYYY-MM-DD or HH:mm. Date is a real calendar day, not an instant/timezone.' },
@@ -31,6 +31,6 @@ export const HUMAN_MEMBER_FORM_SCHEMA = object({
   ] },
   presentation: { ...object({ theme: { type: 'string', enum: [...HUMAN_FORM_THEMES] }, icon: { type: 'string', enum: [...HUMAN_FORM_ICONS] },
     layout: { type: 'string', enum: [...HUMAN_FORM_LAYOUTS] }, submitLabel: boundedText(20), completionText: boundedText(300),
-    blocks: { type: 'array', description: 'At most 8 blocks.', items: block },
+    blocks: { type: 'array', description: 'Optional, at most 8 blocks. Omit when task instructions suffice; use only for distinct helpful content, not another copy of the task requirements.', items: block },
   }, []), description: 'v2 only. Optional page tokens/text; no effect on WeChat outer message layout, permissions or actual submission state. Completion text is your business wording, not proof that the Agent has processed the result.' },
 }, ['schema', 'fields', 'attachment'])

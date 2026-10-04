@@ -25,6 +25,7 @@ export declare class AssistantStore {
     load: () => Promise<void>;
     choose: (templateId: string) => Promise<void>;
     preview: (id: string, version: number) => Promise<void>;
+    reinstall: (sourceId: string, sourceVersion: number) => Promise<void>;
     install: () => Promise<void>;
     verify: (id: string, version: number) => Promise<void>;
 }

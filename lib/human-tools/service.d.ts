@@ -77,6 +77,8 @@ export interface AssistantDraftRequest {
     definitionJson?: string;
     id?: string;
     expectedVersion?: number;
+    sourceId?: string;
+    sourceVersion?: number;
 }
 export interface HumanResult {
     readonly ok: boolean;

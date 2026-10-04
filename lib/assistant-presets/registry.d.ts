@@ -42,6 +42,8 @@ export declare class AssistantRegistry {
         drafts: {
             presetId?: string | undefined;
             templateId?: string | undefined;
+            nativeState?: "unknown" | "disabled" | "installed" | "uninstalled" | "stale" | undefined;
+            reason?: string | undefined;
             id: string;
             version: number;
             digest: string;
@@ -90,6 +92,7 @@ export declare class AssistantRegistry {
     }, signal: AbortSignal): Promise<{
         presetId: string;
         state: "installed" | "pending-restart" | "unknown";
+        nativeState?: "installed" | "uninstalled" | "disabled" | "stale" | "unknown";
         message?: string;
         id: string;
         version: number;
@@ -101,12 +104,23 @@ export declare class AssistantRegistry {
     }, signal: AbortSignal): Promise<{
         presetId: string;
         state: "installed" | "pending-restart" | "unknown";
+        nativeState?: "installed" | "uninstalled" | "disabled" | "stale" | "unknown";
         message?: string;
         id: string;
         version: number;
         digest: string;
     }>;
+    /** A launch must freshly verify its exact approved plan, not trust catalog
+     * cache. undefined means unmanaged; false must not fall back to defaults. */
+    verifyPreset(presetId: string, signal: AbortSignal): Promise<boolean | undefined>;
+    /** Explicit owner reinstallation starts a NEW draft and approval. Never
+     * reuse historical consent, artifacts, ID or native installation receipt. */
+    redraft(ref: {
+        id: string;
+        version: number;
+    }, signal: AbortSignal): Promise<Entry>;
     private reconcile;
+    private validateResult;
     private saveResult;
     installedForPreset(presetId: string): {
         presetId?: string | undefined;

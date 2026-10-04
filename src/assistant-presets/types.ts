@@ -28,6 +28,8 @@ export interface NativeAssistantPreview {
 export interface NativeAssistantInstallation {
   presetId: string
   state: 'installed' | 'pending-restart' | 'unknown'
+  /** Fresh observation only; legacy installation ledgers keep their old shape. */
+  nativeState?: 'installed' | 'uninstalled' | 'disabled' | 'stale' | 'unknown'
   message?: string
 }
 export interface NativeAssistantAdapter {

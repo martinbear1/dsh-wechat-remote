@@ -34,14 +34,33 @@ export class AssistantRegistry {
     if (!entry) throw fail('assistant-not-found', '当前节点没有这个助手版本')
     return entry
   }
-  async catalog(signal: AbortSignal) {
-    this.check(signal); const native = await this.native.probe(); this.check(signal)
-    const templates = assistantTemplates(), templatesByDigest = new Map(templates.map(t => [definitionDigest(t.definition), t.id]))
-    return { schema: 'human.assistants.catalog.v1', nodeId: this.nodeId, native, templates,
-      drafts: this.state.current().entries.map(e => ({ id: e.id, version: e.version, digest: e.digest, name: e.definition.name,
-        description: e.definition.description, state: e.state,
-        ...(templatesByDigest.has(e.digest) ? { templateId: templatesByDigest.get(e.digest) } : {}),
-        ...(e.result?.presetId ? { presetId: e.result.presetId } : {}) })) }
+  catalog(signal: AbortSignal) {
+    const operation = this.tail.then(async () => {
+      this.check(signal)
+      let native
+      try { native = await this.native.probe() }
+      catch { this.check(signal); native = { supported: false, basePresets: [], reason: '暂时无法读取原生助手，请稍后核对。' } }
+      this.check(signal)
+      const checked = new Map<string, AssistantInstallResult>()
+      // The journal is installation history, never evidence of current native
+      // availability. Serialize against installation and retain every old plan.
+      for (const entry of this.state.current().entries.map(copy)) if (entry.state !== 'draft') {
+        checked.set(`${entry.id}:${entry.version}`, await this.reconcile(entry, signal))
+      }
+      this.check(signal)
+      const templates = assistantTemplates(), templatesByDigest = new Map(templates.map(t => [definitionDigest(t.definition), t.id]))
+      return { schema: 'human.assistants.catalog.v1', nodeId: this.nodeId, native, templates,
+        drafts: this.state.current().entries.map(e => {
+          const observed = checked.get(`${e.id}:${e.version}`)
+          return { id: e.id, version: e.version, digest: e.digest, name: e.definition.name,
+            description: e.definition.description, state: e.state,
+            ...(observed ? { nativeState: observed.nativeState || (observed.state === 'installed' ? 'installed' : 'unknown'), reason: observed.message || '' } : {}),
+            ...(templatesByDigest.has(e.digest) ? { templateId: templatesByDigest.get(e.digest) } : {}),
+            ...(e.result?.presetId ? { presetId: e.result.presetId } : {}) }
+        }) }
+    })
+    this.tail = operation.catch(() => {})
+    return operation
   }
   draft(request: { templateId?: string; definition?: unknown; id?: string; expectedVersion?: number }, signal: AbortSignal) {
     this.check(signal)
@@ -120,20 +139,57 @@ export class AssistantRegistry {
     this.tail = operation.catch(() => {})
     return operation
   }
+  /** A launch must freshly verify its exact approved plan, not trust catalog
+   * cache. undefined means unmanaged; false must not fall back to defaults. */
+  async verifyPreset(presetId: string, signal: AbortSignal): Promise<boolean | undefined> {
+    this.check(signal)
+    const entry = this.state.current().entries.find(e => e.plan?.presetId === presetId)
+    if (!entry) return undefined
+    return (await this.status(entry, signal)).state === 'installed'
+  }
+  /** Explicit owner reinstallation starts a NEW draft and approval. Never
+   * reuse historical consent, artifacts, ID or native installation receipt. */
+  async redraft(ref: { id: string; version: number }, signal: AbortSignal) {
+    const status = await this.status(ref, signal)
+    if (status.nativeState !== 'uninstalled') throw fail('assistant-reinstall-unavailable', '请先核对原生安装状态；仅已确认未安装的助手可以重新准备安装。')
+    this.check(signal)
+    return this.draft({ definition: copy(this.find(ref.id, ref.version).definition) }, signal)
+  }
   private async reconcile(entry: Entry, signal: AbortSignal) {
     if (!entry.plan) throw fail('assistant-not-installed', '此助手尚未提交安装')
-    const result = await this.native.verify(entry.plan, signal)
+    let result: AssistantInstallResult
+    try {
+      result = await this.native.verify(entry.plan, signal)
+      this.validateResult(entry.plan, result)
+    } catch {
+      // Native I/O failures are not evidence that the old installed flag is
+      // still true. Do not expose native exceptions/paths in the public result.
+      this.check(signal)
+      result = { presetId: entry.plan.presetId, state: 'unknown', nativeState: 'unknown', message: '暂时无法核对这个助手的安装状态，请稍后刷新或在原生插件管理中检查。' }
+    }
     this.check(signal); await this.saveResult(entry, result); this.check(signal)
     return { id: entry.id, version: entry.version, digest: entry.digest, ...result }
+  }
+  private validateResult(plan: AssistantNativePlan, result: AssistantInstallResult) {
+    if (!row(result) || !exact(result, ['presetId', 'state'], ['message', 'nativeState'])
+      || result.presetId !== plan.presetId || !['installed', 'pending-restart', 'unknown'].includes(result.state)
+      || result.message !== undefined && (typeof result.message !== 'string' || result.message.length > 2000)
+      || result.nativeState !== undefined && !['installed', 'uninstalled', 'disabled', 'stale', 'unknown'].includes(result.nativeState)
+      || result.nativeState !== undefined && (result.state === 'installed') !== (result.nativeState === 'installed'))
+      throw fail('assistant-native-invalid', '宿主安装结果不匹配')
   }
   private saveResult(entry: Entry, result: AssistantInstallResult) {
     if (!entry.plan && !this.find(entry.id, entry.version).plan) throw fail('assistant-native-invalid', '安装记录缺失')
     const plan = entry.plan || this.find(entry.id, entry.version).plan!
-    if (result.presetId !== plan.presetId || !['installed', 'pending-restart', 'unknown'].includes(result.state))
-      throw fail('assistant-native-invalid', '宿主安装结果不匹配')
+    this.validateResult(plan, result)
+    // Persist only the legacy receipt shape so older releases can still open
+    // this ledger. Detailed native status is always re-observed, never cached.
+    const saved = { presetId: result.presetId, state: result.state, ...(result.message === undefined ? {} : { message: result.message }) }
+    const prior = this.find(entry.id, entry.version)
+    if (prior.state === (result.state === 'installed' ? 'installed' : 'unknown') && JSON.stringify(prior.result) === JSON.stringify(saved)) return Promise.resolve()
     return this.state.update(ledger => {
       const e = ledger.entries.find(e => e.id === entry.id && e.version === entry.version)!
-      e.result = copy(result); e.state = result.state === 'installed' ? 'installed' : 'unknown'
+      e.result = copy(saved); e.state = result.state === 'installed' ? 'installed' : 'unknown'
     }, this.settle)
   }
   installedForPreset(presetId: string) {

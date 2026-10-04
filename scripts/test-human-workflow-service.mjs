@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { Context } from '@deepseek-ai/cordis'
 import { ToolRuntime, assertSupportedJsonSchema, renderToolsSdk } from '@deepseek-ai/dsh-tools'
 import { SessionStore, SessionId } from '@deepseek-ai/dsh-session'
@@ -9,6 +10,7 @@ import { TypertGatewayService } from '@deepseek-ai/dsh-api-gateway'
 import { HumanToolsService } from '../lib/human-tools/service.js'
 import { TYPERT } from '../lib/typert.host.js'
 import { invokeLegacyRpc, parseLegacyClientRequest } from '../lib/dsh-protocol-compat.js'
+import { assistantGuidance } from '../lib/assistant-presets/definition.js'
 
 const nodeId = 'node_' + 'a'.repeat(32), sessionId = 'session_service', signal = new AbortController().signal
 function deferred() { let resolve; return { promise: new Promise(done => { resolve = done }), resolve: value => resolve(value) } }
@@ -38,11 +40,12 @@ async function setup(t, options = {}) {
   const session = sessions.create(SessionId(sessionId), { meta: { createdAt: 100 } })
   const agent = { id: session.id, session, ctx, status: 'idle', send() { assert.fail('service must not wake Agent') } }
   ctx.provide('agents', { get: id => id === agent.id ? agent : undefined }); ctx.on('session/flush', async () => {})
+  options.provide?.(ctx)
   let identity = nodeId, calls = 0
   const transport = { nodeId, assertIdentity() { if (identity !== nodeId) throw Object.assign(new Error('node identity changed'), { code: 'binding_revoked' }) },
     async request(...args) { calls++; if (options.request) return options.request(...args); assert.fail('empty local mode operations must not contact task backend') } }
   const modeStore = options.modeStore || store(), automationStore = options.automationStore || store(), recordStore = store(), replicaStore = store(), coreStore = store({ schemaVersion: 1, records: [] })
-  const config = { enabled: true, assistants: false, store: coreStore, workflow: { transport, modeStore, recordStore, replicaStore,
+  const config = { enabled: true, assistants: options.assistants ?? false, store: coreStore, workflow: { transport, modeStore, recordStore, replicaStore,
     receiverKeyStore: store(), lifecycleStore: store(), automationStore } }
   let fiber = await ctx.plugin(HumanToolsService, config), service = ctx.get('humanTools'), sequence = 0
   t.after(async () => { await ctx.fiber.dispose() })
@@ -57,6 +60,37 @@ async function setup(t, options = {}) {
     async reload() { fiber = await ctx.plugin(HumanToolsService, config); service = ctx.get('humanTools'); return service },
   }
 }
+
+test('assistant RPC freshly rejects an uninstalled managed preset even when it is native default; reinstall requires new approval', async t => {
+  let available=true, installs=0, defaultId='standard', resolves=0
+  const registryStore=store(),sessionIntentStore=store(),hash=text=>createHash('sha256').update(text).digest('hex')
+  const native={async probe(){return {supported:true,basePresets:[{id:'standard',name:'Standard'}]}},
+    async preview({presetId,definition}) {
+      const rowId=`harness-assistant-${presetId}`,patch=JSON.stringify([{insert:[{id:rowId,name:'@deepseek-ai/dsh-agent-preset',config:{id:presetId,name:definition.name,description:definition.description,
+        plugins:[{id:'persona',name:'@deepseek-ai/dsh-persona',config:{prefix:'Base\n\n'+assistantGuidance(definition),complete:false,includeRuntimeContext:true}}]}}]}])
+      return {schema:'assistant.native.preview.v1',presetId,basePreset:definition.basePreset,definition,rowId,bundleName:`@harness-remote-assistants/${presetId}`,
+        patch,patchDigest:hash(patch),baseDigest:hash('[]'),profileFingerprint:hash('fixture'),defaultPreset:'standard',warnings:[]}
+    },async install(plan){installs++;return {presetId:plan.presetId,state:'installed'}},
+    async verify(plan){return {presetId:plan.presetId,state:available?'installed':'unknown',nativeState:available?'installed':'uninstalled'}},async close(){}}
+  const host=await setup(t,{assistants:{native,registryStore,sessionIntentStore,businessStore:store()},provide(ctx){
+    ctx.provide('agentPresets',{get defaultId(){return defaultId},readDocument(){},resolve(id){resolves++;return {id}}})
+    ctx.provide('sessionController',{inspect(){assert.fail('prepare must not inspect')},create(){assert.fail('service must not create a native session')}})
+  }})
+  const draft=unwrap(await host.service.assistantDraft({templateId:'teacher'},signal)),p=unwrap(await host.service.assistantPreview({id:draft.id,version:draft.version},signal))
+  const result=unwrap(await host.service.assistantInstall({id:p.id,version:p.version,digest:p.digest,previewId:p.previewId},signal))
+  defaultId=result.presetId; assert.equal(unwrap(await host.service.assistantCatalog({},signal)).drafts[0].state,'installed')
+  available=false
+  const denied=await host.service.assistantSessionPrepare({presetId:result.presetId},signal)
+  assert.equal(denied.ok,false);assert.equal(denied.error.code,'assistant-not-installed');assert.equal(resolves,0)
+  assert.equal(sessionIntentStore.writes,0);assert.equal(registryStore.value.entries[0].state,'unknown')
+  const mixed=await host.service.assistantDraft({sourceId:draft.id,sourceVersion:draft.version,templateId:'teacher'},signal)
+  assert.equal(mixed.ok,false);assert.equal(mixed.error.code,'assistant-draft-invalid')
+  const next=unwrap(await host.service.assistantDraft({sourceId:draft.id,sourceVersion:draft.version},signal))
+  assert.notEqual(next.id,draft.id);assert.equal(next.state,'draft');assert.equal(installs,1)
+  available=true
+  const intent=unwrap(await host.service.assistantSessionPrepare({presetId:result.presetId},signal));assert.equal(intent.dispatch,true)
+  assert.equal(installs,1)
+})
 
 // Cordis provides/withdraws real services; methods must NOT be invoked by
 // discovery. Only the native model/run boundary is absent in this fixture.

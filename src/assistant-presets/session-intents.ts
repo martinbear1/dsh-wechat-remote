@@ -10,7 +10,7 @@ interface Intent {
 interface Ledger { schema: 'human.assistant.session-intents.v1'; nodeId: string; intents: Intent[] }
 export interface SessionIntentOptions {
   nodeId: string; store: WorkflowDataStore; assertIdentity(): void
-  installed(presetId: string): boolean | Promise<boolean>
+  installed(presetId: string, signal: AbortSignal): boolean | Promise<boolean>
   /** Native read-only APIs only; no restore, resolveAgent or create. */
   inspect(sessionId: string, signal: AbortSignal): Promise<unknown>
   workspace(workspaceId: string): { path: string; sessionIds: readonly string[] } | undefined
@@ -59,7 +59,7 @@ export class AssistantSessionIntents {
       || !/^[a-z][a-z0-9_-]{0,63}$/.test(request.presetId) || request.workspaceId !== undefined && !identifier(request.workspaceId)
       || request.previousAttemptId !== undefined && !attemptIdValid(request.previousAttemptId)) throw fail('assistant-session-input-invalid', '会话创建意图无效')
     if (!this.options.supported()) throw fail('assistant-session-unsupported', '宿主缺少原生会话核对能力；请使用 DSH 自带的新会话入口')
-    if (!await this.options.installed(request.presetId)) throw fail('assistant-not-installed', '只能使用此节点已确认安装的助手或当前原生默认预设')
+    if (!await this.options.installed(request.presetId, active)) throw fail('assistant-not-installed', '此助手当前不可用，请刷新助手目录并核对安装状态。')
     this.active(active)
     if (request.workspaceId !== undefined && !this.options.workspace(request.workspaceId)) throw fail('assistant-workspace-unavailable', '所选原生工作区已不可用')
     const result = await this.state.update(next => {

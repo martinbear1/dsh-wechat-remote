@@ -17,7 +17,7 @@ import { WorkflowRecords } from '../human-workflow/workflow-records.js'
 import { humanWorkflowTools, registerHumanWorkflowContext } from '../human-workflow/dsh-tools.js'
 import { WorkflowReplica, REPLICA_MAX_BYTES, WORKFLOW_DRAFT_TTL_MS, WORKFLOW_SOURCE_GRANT_TTL_MS } from '../human-workflow/replica.js'
 import { workflowQueryTools } from '../human-workflow/query-tools.js'
-import { fail, row, type WorkflowDataStore, type WorkflowScope } from '../human-workflow/data.js'
+import { exact, fail, row, type WorkflowDataStore, type WorkflowScope } from '../human-workflow/data.js'
 import type { WorkflowTransport } from '../human-workflow/transport.js'
 import { registerHumanWorkflowSkill } from '../human-workflow/dsh-skill.js'
 import { AssistantRegistry } from '../assistant-presets/registry.js'
@@ -63,7 +63,7 @@ export interface ModeVersionRequest { scope: string; id: string; version: number
 export interface ModeApprovalRequest extends ModeVersionRequest { digest: string; previewId: string; expectedActivationVersion: number }
 export interface AssistantVersionRequest { id: string; version: number }
 export interface AssistantInstallRequest extends AssistantVersionRequest { digest: string; previewId: string }
-export interface AssistantDraftRequest { templateId?: string; definitionJson?: string; id?: string; expectedVersion?: number }
+export interface AssistantDraftRequest { templateId?: string; definitionJson?: string; id?: string; expectedVersion?: number; sourceId?: string; sourceVersion?: number }
 export interface HumanResult { readonly ok: boolean; readonly valueJson?: string; readonly error?: { readonly code: string; readonly message: string } }
 /** Private owner RPC only. Never mount this namespace on a published/guest route. */
 export class HumanToolsService extends TypertRemoteService {
@@ -285,8 +285,9 @@ export class HumanToolsService extends TypertRemoteService {
                 const get = (name: string): any => this.host.get(name as never)
                 this.assistants.sessionIntents = await AssistantSessionIntents.open({ nodeId: transport.nodeId,
                   store: assistantConfig.sessionIntentStore || file('assistant-session-intents'), assertIdentity: () => transport.assertIdentity(),
-                  installed: async presetId => {
-                    if (registry!.installedForPreset(presetId)) return true
+                  installed: async (presetId, signal) => {
+                    const verified = await registry!.verifyPreset(presetId, signal)
+                    if (verified !== undefined) return verified
                     const presets = get('agentPresets')
                     if (presets?.defaultId !== presetId || typeof presets?.resolve !== 'function') return false
                     const resolved = await presets.resolve(presetId)
@@ -445,6 +446,10 @@ export class HumanToolsService extends TypertRemoteService {
   async assistantDraft(request: AssistantDraftRequest, signal: AbortSignal): Promise<HumanResult> {
     return this.result(async () => {
       const registry = await this.assistantRegistry(signal), { definitionJson, ...input } = request
+      if (input.sourceId !== undefined || input.sourceVersion !== undefined) {
+        if (!row(request) || !exact(request, ['sourceId', 'sourceVersion'])) throw fail('assistant-draft-invalid', '重新准备安装不能混入其他助手或定义。')
+        return registry.redraft({ id: input.sourceId!, version: input.sourceVersion! }, AbortSignal.any([signal, this.lifetime.signal]))
+      }
       if (definitionJson !== undefined && (typeof definitionJson !== 'string' || Buffer.byteLength(definitionJson) > 24 * 1024))
         throw fail('assistant-definition-invalid', '助手定义过大或无效')
       return registry.draft({ ...input, ...(definitionJson === undefined ? {} : { definition: JSON.parse(definitionJson) }) }, AbortSignal.any([signal, this.lifetime.signal]))

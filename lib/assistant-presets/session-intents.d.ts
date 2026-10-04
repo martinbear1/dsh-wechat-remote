@@ -14,7 +14,7 @@ export interface SessionIntentOptions {
     nodeId: string;
     store: WorkflowDataStore;
     assertIdentity(): void;
-    installed(presetId: string): boolean | Promise<boolean>;
+    installed(presetId: string, signal: AbortSignal): boolean | Promise<boolean>;
     /** Native read-only APIs only; no restore, resolveAgent or create. */
     inspect(sessionId: string, signal: AbortSignal): Promise<unknown>;
     workspace(workspaceId: string): {

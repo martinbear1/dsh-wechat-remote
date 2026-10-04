@@ -24,10 +24,15 @@ export class AssistantStore {
     finally { if (current()) this.set({ busy: false }) }
   }
   private async read(current: () => boolean) {
-    const catalog = await this.call('assistantCatalog', {})
-    if (!current()) return
-    if (catalog?.schema !== 'human.assistants.catalog.v1' || !Array.isArray(catalog.templates) || !Array.isArray(catalog.drafts)) throw new Error('助手目录格式不受支持')
-    this.set({ catalog })
+    // Do not leave a previous "installed" catalog actionable after a failed
+    // fresh read or a disconnected native host.
+    if (current()) this.set({ catalog: null })
+    try {
+      const catalog = await this.call('assistantCatalog', {})
+      if (!current()) return
+      if (catalog?.schema !== 'human.assistants.catalog.v1' || !Array.isArray(catalog.templates) || !Array.isArray(catalog.drafts)) throw new Error('助手目录格式不受支持')
+      this.set({ catalog })
+    } catch (error) { if (current()) this.set({ message: '' }); throw error }
   }
   load = () => this.run(current => this.read(current))
   choose = (templateId: string) => this.run(async current => {
@@ -44,6 +49,15 @@ export class AssistantStore {
     const preview = await this.call('assistantPreview', { id, version })
     if (current()) this.set({ preview })
   })
+  reinstall = (sourceId: string, sourceVersion: number) => this.run(async current => {
+    this.set({ preview: null, message: '' })
+    const draft = await this.call('assistantDraft', { sourceId, sourceVersion })
+    if (!current()) return
+    await this.read(current)
+    if (!current()) return
+    const preview = await this.call('assistantPreview', { id: draft.id, version: draft.version })
+    if (current()) this.set({ preview })
+  })
   install = () => this.run(async current => {
     const preview = this.state.preview
     if (!preview || preview.expiresAt <= Date.now()) throw new Error('请重新预览后确认安装')
@@ -56,6 +70,7 @@ export class AssistantStore {
     } finally { if (current()) await this.read(current) }
   })
   verify = (id: string, version: number) => this.run(async current => {
+    this.set({ catalog: null, message: '' })
     const result = await this.call('assistantStatus', { id, version })
     if (!current()) return
     this.set({ message: result.message || '状态已核对' }); await this.read(current)

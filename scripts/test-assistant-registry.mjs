@@ -142,6 +142,68 @@ test('old installed version remains pinned when template is customized', async t
   assert.equal(h.registry.get(newer).state,'draft')
   await assert.rejects(h.registry.draft({id:p.id,expectedVersion:1,definition:p.definition},signal))
 })
+
+test('catalog reconciles native uninstall and read failures without reinstalling or changing legacy plans', async t => {
+  const h = await setup(t), p = await h.approved()
+  await h.registry.install({id:p.id,version:p.version,digest:p.digest,previewId:p.previewId},signal)
+  const original = structuredClone(h.store.value.entries[0].plan)
+  let nativeState = 'uninstalled'
+  h.native.verify = async plan => ({presetId:plan.presetId,state:'unknown',nativeState,message:'此助手当前未安装。'})
+  let row = (await h.registry.catalog(signal)).drafts[0]
+  assert.equal(row.state,'unknown'); assert.equal(row.nativeState,'uninstalled')
+  assert.equal(h.registry.installedForPreset(p.native.presetId),undefined)
+  assert.deepEqual(h.store.value.entries[0].plan,original); assert.equal(h.store.value.entries.length,1)
+  assert.equal(h.store.value.entries[0].result.nativeState,undefined,'new observation metadata is not persisted into the legacy ledger')
+  assert.equal(h.counts().installs,1)
+  h.native.verify = async plan => ({presetId:plan.presetId,state:'installed',nativeState:'installed'})
+  assert.equal((await h.registry.catalog(signal)).drafts[0].state,'installed')
+  h.native.probe = async () => { throw Error('C:/private/profile/config failed') }
+  h.native.verify = async () => { throw Error('C:/private/profile/config failed') }
+  const catalog = await h.registry.catalog(signal); row = catalog.drafts[0]
+  assert.equal(catalog.native.supported,false); assert.equal(row.state,'unknown'); assert.equal(row.nativeState,'unknown')
+  assert(!JSON.stringify(catalog).includes('private/profile'))
+  assert.equal(h.counts().installs,1)
+  const reopened = await AssistantRegistry.open(h.store,{nodeId:'fixture_node',native:h.native,assertIdentity(){}})
+  t.after(()=>reopened.close()); assert.equal(reopened.get(p).state,'unknown')
+  assert.deepEqual(h.store.value.entries[0].plan,original)
+})
+
+test('fresh launch verification rejects native loss after a successful catalog and cannot treat a managed preset as default fallback', async t => {
+  const h = await setup(t), p = await h.approved()
+  await h.registry.install({id:p.id,version:p.version,digest:p.digest,previewId:p.previewId},signal)
+  assert.equal((await h.registry.catalog(signal)).drafts[0].state,'installed')
+  h.setState('unknown')
+  assert.equal(await h.registry.verifyPreset(p.native.presetId,signal),false)
+  assert.equal(await h.registry.verifyPreset('standard',signal),undefined,'only truly unmanaged presets may use native default fallback')
+  h.setState('installed'); assert.equal(await h.registry.verifyPreset(p.native.presetId,signal),true)
+  h.native.verify = async plan => ({presetId:plan.presetId,state:'installed',nativeState:'uninstalled'})
+  assert.equal(await h.registry.verifyPreset(p.native.presetId,signal),false,'contradictory or malformed host results fail closed')
+})
+
+test('reinstalling an absent historical assistant creates only a new draft and requires fresh preview and consent', async t => {
+  const h = await setup(t), p = await h.approved(), originalConsent={id:p.id,version:p.version,digest:p.digest,previewId:p.previewId}
+  await h.registry.install(originalConsent,signal)
+  await assert.rejects(h.registry.redraft(p,signal),{code:'assistant-reinstall-unavailable'})
+  h.native.verify=async plan=>({presetId:plan.presetId,state:'unknown',nativeState:'uninstalled'})
+  const old=structuredClone(h.store.value.entries[0].plan), draft=await h.registry.redraft(p,signal)
+  assert.notEqual(draft.id,p.id); assert.equal(draft.state,'draft'); assert.deepEqual(draft.definition,p.definition)
+  assert.equal(h.counts().installs,1); assert.deepEqual(h.store.value.entries[0].plan,old)
+  await h.registry.install(originalConsent,signal); assert.equal(h.counts().installs,1,'old consent can only verify the old installation')
+  await assert.rejects(h.registry.install({id:draft.id,version:draft.version,digest:draft.digest,previewId:p.previewId},signal),{code:'assistant-preview-expired'})
+  const preview=await h.registry.preview(draft,signal)
+  assert.notEqual(preview.native.presetId,p.native.presetId)
+  await h.registry.install({id:preview.id,version:preview.version,digest:preview.digest,previewId:preview.previewId},signal)
+  assert.equal(h.counts().installs,2); assert.deepEqual(h.store.value.entries[0].plan,old)
+})
+
+test('catalog waits for an in-flight approved install and verifies the settled result exactly once', async t => {
+  const pause=deferred(),h=await setup(t,{pause}),p=await h.approved()
+  const installation=h.registry.install({id:p.id,version:p.version,digest:p.digest,previewId:p.previewId},signal)
+  while(h.counts().installs===0) await new Promise(r=>setImmediate(r))
+  const listing=h.registry.catalog(signal); await new Promise(r=>setImmediate(r))
+  assert.equal(h.counts().verifies,0); pause.resolve(); await installation
+  assert.equal((await listing).drafts[0].state,'installed'); assert.equal(h.counts().verifies,1)
+})
 test('restart expires consent; foreign node ledger is refused without overwrite', async t => {
   const h = await setup(t), p = await h.approved(), before = h.store.value
   const r = await AssistantRegistry.open(h.store,{nodeId:'fixture_node',native:h.native,assertIdentity(){}}); t.after(()=>r.close())

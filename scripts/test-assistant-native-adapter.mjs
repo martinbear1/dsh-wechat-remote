@@ -367,6 +367,24 @@ test('native declaration tampering or bundle errors are not reported installed, 
   assert.equal((await f.adapter.verify(preview, signal)).state, 'unknown')
 })
 
+test('native uninstall, disabled and changed content are distinct fresh observations and never reinstall', async t => {
+  const f=await fixture(t),preview=await f.preview(); await f.adapter.install(preview,signal)
+  const original=structuredClone(f.declarations.get(preview.presetId)),bundle=structuredClone(f.bundles[0])
+  f.bundles[0].enabled=false
+  assert.equal((await f.adapter.verify(preview,signal)).nativeState,'disabled')
+  f.bundles[0].enabled=true; f.declarations.get(preview.presetId).plugins[0].config.prefix='changed'
+  assert.equal((await f.adapter.verify(preview,signal)).nativeState,'stale')
+  f.declarations.delete(preview.presetId); f.bundles.length=0
+  assert.equal((await f.adapter.verify(preview,signal)).nativeState,'uninstalled')
+  f.bundles.push({...bundle,installed:false})
+  assert.equal((await f.adapter.verify(preview,signal)).nativeState,'uninstalled')
+  f.bundles[0]=bundle; f.declarations.set(preview.presetId,original)
+  assert.equal((await f.adapter.verify(preview,signal)).nativeState,'installed')
+  f.bundles.push(null)
+  const unknown=await f.adapter.verify(preview,signal); assert.equal(unknown.state,'unknown'); assert.equal(unknown.nativeState,'unknown')
+  assert.equal(f.calls.length,1)
+})
+
 test('unexpected bundle rows or overrides and duplicate owner clicks do not widen the approved install', async t => {
   const f = await fixture(t), preview = await f.preview()
   const results = await Promise.all([f.adapter.install(preview, signal), f.adapter.install(preview, signal)])

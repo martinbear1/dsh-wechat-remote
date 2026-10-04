@@ -75,6 +75,12 @@ export declare class HumanToolsCore {
      * Bounded, read-only and generation-scoped: prompt assembly performs no I/O,
      * writes, queue operations or model wakeup. No titles/bodies are included. */
     contextSnapshot(scope: string, generation: string): HumanReceipt[];
+    /** Context-only action semantics derived from saved surfaces. Keep the wire
+     * receipt and persisted ledger unchanged, including historical approvals. */
+    contextActionSnapshot(scope: string, generation: string): (HumanReceipt & {
+        actionId: HumanSurface['actions'][0]['id'];
+        workflowKind?: HumanWorkflowDraftRef['kind'];
+    })[];
     claim(request: HumanActionRequest, signal: AbortSignal): Promise<unknown>;
     ack(request: HumanAckRequest | HumanAckWireRequest, signal: AbortSignal): Promise<HumanReceipt>;
     status(scope: string, surfaceId: string): unknown;

@@ -257,6 +257,33 @@ test('lifecycle accepts a bounded large cloud page but projects only current rou
   assert(!Object.hasOwn(query, 'binding')); assert(!Object.hasOwn(query, 'bindingKey'))
 })
 
+test('published reminder plans expose real delivery facts without routing secrets, including old-server unknown', async t => {
+  const content = { roundId: 'r'.repeat(24), participantRefs: ['p'.repeat(24)], title: '请交资料', condition: 'pending-submission' }
+  const ref = { schema: 'human.lifecycle.draft.ref.v1', draftId: 'a'.repeat(24), kind: 'reminder', version: 1,
+    digest: sha256(canonicalSubmission({ taskRef, kind: 'reminder', expectedRevision: 1, content })) }
+  const draft = { draftRef: ref, taskRef, expectedRevision: 1, content, expiresAt: Date.now() + 60000, state: 'published',
+    context: { taskTitle: '项目资料', roundTitle: '补充资料' },
+    result: { operationId: 'o'.repeat(24), taskId: taskRef.taskId, deliveryId: taskRef.deliveryId, route: { roomid: 'never-to-model' } } }
+  const page = { drafts: [draft], submissions: [], nextOffset: null }, f = await lifecycleFixture(t, { page })
+  const effects = async () => (await f.runtime.query(scope, taskRef, signal)).drafts[0].effects
+  assert.equal((await effects()).notificationState, 'unknown')
+  for (const [phase, outcome, reason, expected] of [
+    ['prepared', null, null, 'not-started'], ['invoked', null, null, 'pending'],
+    ['settled', 'failed', null, 'failed'], ['settled', 'cancelled', null, 'cancelled'],
+    ['settled', 'unknown', null, 'unknown'], ['settled', 'success', null, 'succeeded'],
+    ['settled', 'cancelled', 'no_pending_members', 'not-needed'],
+  ]) {
+    draft.execution = { operationId: 'o'.repeat(24), phase, outcome, reason }
+    assert.equal((await effects()).notificationState, expected)
+    assert.equal((await effects()).groupCardState, 'not-sent-by-this-action')
+    assert(!JSON.stringify(await f.runtime.query(scope, taskRef, signal)).includes('never-to-model'))
+  }
+  draft.execution.operationId = 'foreign-operation'
+  await assert.rejects(effects(), { code: 'lifecycle-response-invalid' })
+  delete draft.execution; draft.context.submissionCreatedAt = -1
+  await assert.rejects(effects(), { code: 'lifecycle-response-invalid' })
+})
+
 test('fixed initial forms and approval surfaces reject authority smuggling and remain origin/digest bound', async () => {
   assert(humanForm(form()))
   for (const extra of [{ url: 'https://evil' }, { script: 'run()' }]) assert.equal(humanForm({ ...form(), ...extra }), undefined)

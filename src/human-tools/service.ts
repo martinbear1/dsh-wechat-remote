@@ -128,7 +128,7 @@ export class HumanToolsService extends TypertRemoteService {
           const capabilities = () => { transport.assertIdentity(); const automation = this.automation?.capability(); return createCapabilityManifest(transport.nodeId, { 'task.query': { status: 'available' },
             'surface.cover-image': this.covers ? { status: 'available' } : { status: 'blocked', reason: '封面资产服务未就绪；旧无封面群卡仍可使用。' },
             'automation.run': automation?.supported ? { status: 'available' } : { status: 'blocked', reason: automation?.reason || this.automationReason },
-            ...(this.lifecycle ? { 'surface.form-collection': { status: 'available' as const }, 'task.audience-select': { status: 'available' as const }, 'task.lifecycle': { status: 'available' as const },
+            ...(this.lifecycle ? { 'surface.form-collection': { status: 'available' as const }, 'task.audience-select': { status: 'available' as const }, 'task.audience-known': { status: 'available' as const }, 'task.lifecycle': { status: 'available' as const },
               'recipient.query': { status: 'available' as const }, 'result.private': { status: 'available' as const },
               ...(this.lifecycle.receiver ? { 'submission.receive': { status: 'available' as const } } : {}) } : {}) }) }
           modes = await ModeRegistry.open(config.workflow.modeStore || file('modes'),

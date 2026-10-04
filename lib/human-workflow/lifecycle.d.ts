@@ -24,7 +24,34 @@ export interface LifecycleDraft {
     expiresAt: number;
     state: 'draft' | 'published';
     result?: unknown;
+    context?: {
+        taskTitle: string;
+        roundTitle?: string;
+        submissionCreatedAt?: number;
+        reminderTargetCount?: number;
+    };
+    execution?: {
+        operationId: string;
+        phase: 'prepared' | 'invoked' | 'settled';
+        outcome: string | null;
+        reason: string | null;
+    };
 }
+export type LifecycleReminderContent = {
+    roundId: string;
+    title: string;
+} & ({
+    condition: 'pending-submission' | 'result-published';
+    participantRefs: string[];
+    recipientSource?: never;
+} | {
+    condition: 'pending-submission';
+    recipientSource: 'task-audience';
+    participantRefs?: never;
+});
+/** Request data only. Actual audience membership and current eligibility are
+ * resolved by the authenticated server without creating participant records. */
+export declare function lifecycleReminderContent(value: unknown): LifecycleReminderContent | undefined;
 interface Analysis {
     scope: WorkflowScope;
     taskRef: HumanTaskRef;

@@ -79,18 +79,85 @@ export declare function workflowCapabilityContracts(): {
         readonly executableCode: false;
     };
     readonly audience: {
-        readonly initial: readonly ["all-group", "owner-select"];
+        readonly initial: readonly ["all-group", "owner-select", "known-members"];
         readonly selectionTool: "human_task_create";
         readonly selectionParameter: "initialRound.audience";
         readonly selectionRequires: "owner-native-selection-after-room-binding";
+        readonly selectionRequiresAppliesTo: "owner-select";
+        readonly composition: {
+            readonly default: "all-group";
+            readonly choice: "agent-selects-from-current-user-intent";
+            readonly sourceSurfaceId: "optional-group-reuse-required-only-for-known-members";
+            readonly knownIdentityDoesNotForceKnownMembers: true;
+            readonly ownerReselectionAllowed: true;
+            readonly taskOrRound: "independent-choice-by-user-intent-not-by-known-identities";
+            readonly mandatoryQuestionnaire: false;
+        };
         readonly maxSelectedMembers: 20;
         readonly limitOrigin: "product";
         readonly binds: "whole-task";
         readonly laterRounds: "may-narrow-not-expand";
         readonly membersAre: "group-scoped-native-identities-not-real-names";
         readonly rosterEnumeration: false;
+        readonly knownMembers: {
+            readonly capability: "task.audience-known";
+            readonly source: "same-session-successful-sourceSurfaceId";
+            readonly parameter: "initialRound.sourceParticipantRefs";
+            readonly references: "1..20-distinct-observed-source-task-participantRefs";
+            readonly resolution: "server-verifies-source-task-original-group-and-native-member-mapping";
+            readonly taskEffect: "new-independent-task";
+            readonly recipientRefs: null;
+            readonly nativeGroupAndMemberRepicking: false;
+            readonly selectorPreselection: false;
+            readonly ownerNativeSendConfirmation: true;
+            readonly rosterEnumeration: false;
+            readonly groupIdProvidesRoster: false;
+            readonly automaticMention: false;
+            readonly visibility: {
+                readonly taskPage: "owner-and-resolved-recipients";
+                readonly submissionsAndFeedback: "owner-and-self";
+                readonly sharedTitleAndCover: "visible-in-group-not-recipient-private";
+                readonly privateEvaluationInSharedCard: false;
+            };
+            readonly nativeParticipantMeaning: "audience-not-mention";
+            readonly nativeSystemNotice: "platform-behavior-not-guaranteed";
+            readonly invalidMapping: "reject-never-widen-or-guess";
+            readonly names: "self-reported-match-unambiguously-or-ask";
+        };
         readonly outcomes: readonly ["success", "cancelled", "failed", "unknown"];
         readonly cancelledSelectionPublishes: false;
+    };
+    readonly reminders: {
+        readonly tool: "human_task_prepare_reminder";
+        readonly nativeEffect: "separate-at-mentions-and-task-link";
+        readonly independentOwnerClick: true;
+        readonly automaticAfterShare: false;
+        readonly shareParameter: false;
+        readonly composition: readonly ["share-only", "remind-existing-task-only", "share-then-separate-reminder"];
+        readonly singleGestureCombination: {
+            readonly status: "unverified";
+            readonly toolExposed: false;
+            readonly documentedJointParameter: false;
+            readonly nativeExtraNotice: "device-behavior-unverified";
+        };
+        readonly sources: readonly ["participantRefs", "task-audience"];
+        readonly mutuallyExclusive: true;
+        readonly taskAudience: {
+            readonly parameter: "content.recipientSource";
+            readonly value: "task-audience";
+            readonly conditions: readonly ["pending-submission"];
+            readonly tasks: readonly ["owner-select", "known-members"];
+            readonly round: "public-recipientRefs-null";
+            readonly beforeMemberFirstOpen: true;
+            readonly scope: "immutable-task-selected-audience-minus-submitted-and-owner";
+            readonly eligibility: "rechecked-at-execution";
+            readonly previewCount: "informational-not-authorization";
+            readonly maxRecipients: 20;
+            readonly createsParticipantRecords: false;
+            readonly rosterEnumeration: false;
+        };
+        readonly sentEvidence: "drafts[].effects.notificationState";
+        readonly nativeSuccessIsReadReceipt: false;
     };
     readonly processing: {
         readonly triggers: readonly ["manual", "per-submission", "all-recipients"];
@@ -165,6 +232,12 @@ export declare function workflowCapabilityContracts(): {
         readonly need: "单纯阅读并确认";
         readonly tool: "human_surface_share";
         readonly requiresForm: false;
+    }, {
+        readonly need: "另给已登记YYB布置新作业";
+        readonly tool: "human_task_create";
+        readonly audience: "known-members";
+        readonly prerequisite: "从准确来源任务和成功发卡回执取得sourceSurfaceId；查真实提交将姓名唯一对应sourceParticipantRefs，重名或缺失先询问";
+        readonly result: "原群新独立任务，不追加旧任务；仍由主人确认发送，不自动@";
     }];
     readonly workflow: {
         readonly fixedBusinessSequence: false;

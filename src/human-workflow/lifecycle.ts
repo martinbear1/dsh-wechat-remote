@@ -1,4 +1,4 @@
-import { humanTaskRef, humanWorkflowDraftRef, sameTaskRef, type HumanTaskRef, type HumanWorkflowDraftRef } from '../human-tools/protocol.js'
+import { humanTaskRef, humanWorkflowDraftRef, humanReminderTitle, sameTaskRef, type HumanTaskRef, type HumanWorkflowDraftRef } from '../human-tools/protocol.js'
 import { assertScope, bounded, copy, exact, fail, plain, revision, row, sameScope, scopeValid, StateQueue, version, type WorkflowDataStore, type WorkflowScope } from './data.js'
 import { workflowErrorMessage, type WorkflowTransport } from './transport.js'
 import { randomBytes } from 'node:crypto'
@@ -20,6 +20,26 @@ export function receiverBinding(value: unknown, nodeId: string): { binding: Node
 export interface LifecycleDraft {
   draftRef: HumanWorkflowDraftRef; taskRef: HumanTaskRef; expectedRevision: number; content: Record<string, unknown>
   expiresAt: number; state: 'draft' | 'published'; result?: unknown
+  context?: { taskTitle: string; roundTitle?: string; submissionCreatedAt?: number; reminderTargetCount?: number }
+  execution?: { operationId: string; phase: 'prepared' | 'invoked' | 'settled'; outcome: string | null; reason: string | null }
+}
+export type LifecycleReminderContent = { roundId: string; title: string } & (
+  { condition: 'pending-submission' | 'result-published'; participantRefs: string[]; recipientSource?: never }
+  | { condition: 'pending-submission'; recipientSource: 'task-audience'; participantRefs?: never }
+)
+/** Request data only. Actual audience membership and current eligibility are
+ * resolved by the authenticated server without creating participant records. */
+export function lifecycleReminderContent(value: unknown): LifecycleReminderContent | undefined {
+  if (!row(value) || !plain(value.roundId, 128) || !humanReminderTitle(value.title)) return
+  if (Object.hasOwn(value, 'recipientSource')) {
+    if (!exact(value, ['roundId', 'title', 'condition', 'recipientSource'])
+      || value.recipientSource !== 'task-audience' || value.condition !== 'pending-submission') return
+  } else if (!exact(value, ['roundId', 'title', 'condition', 'participantRefs'])
+    || !['pending-submission', 'result-published'].includes(String(value.condition))
+    || !Array.isArray(value.participantRefs) || value.participantRefs.length < 1 || value.participantRefs.length > 20
+    || new Set(value.participantRefs).size !== value.participantRefs.length
+    || !value.participantRefs.every(ref => typeof ref === 'string' && /^[A-Za-z0-9_-]{24,64}(?![\s\S])/.test(ref))) return
+  return copy(value) as LifecycleReminderContent
 }
 interface Analysis { scope: WorkflowScope; taskRef: HumanTaskRef; submissionId: string; submissionVersion: number; revision: number; text: string; updatedAt: number }
 interface ReceiptAttempt { scope: WorkflowScope; taskRef: HumanTaskRef; submissionId: string; submissionVersion: number
@@ -38,10 +58,42 @@ function lifecycleDraft(value: unknown): LifecycleDraft {
     || !row(value.content) || !Number.isSafeInteger(value.expiresAt) || !['draft', 'published'].includes(String(value.state))) throw fail('lifecycle-response-invalid', '任务方案格式无效')
   bounded(value, HUMAN_SURFACE_MAX_BYTES)
   const ref = humanWorkflowDraftRef(value.draftRef)!
+  if (ref.kind === 'reminder' && Object.hasOwn(value.content, 'recipientSource') && !lifecycleReminderContent(value.content))
+    throw fail('lifecycle-response-invalid', '提醒对象来源无效')
   if (!lifecycleCoverValid(ref.kind, value.content)) throw fail('lifecycle-response-invalid', '任务方案封面范围或格式无效')
   if (ref.digest !== sha256(canonicalSubmission({ taskRef: value.taskRef, kind: ref.kind, expectedRevision: value.expectedRevision, content: value.content })))
     throw fail('lifecycle-response-invalid', '任务方案摘要不匹配')
+  if (value.context !== undefined && (!row(value.context) || !exact(value.context, ['taskTitle'], ['roundTitle', 'submissionCreatedAt', 'reminderTargetCount'])
+    || !plain(value.context.taskTitle, 80) || value.context.roundTitle !== undefined && !plain(value.context.roundTitle, 80)
+    || value.context.submissionCreatedAt !== undefined && !revision(value.context.submissionCreatedAt)
+    || value.context.reminderTargetCount !== undefined && (ref.kind !== 'reminder'
+      || !Number.isSafeInteger(value.context.reminderTargetCount) || Number(value.context.reminderTargetCount) < 0 || Number(value.context.reminderTargetCount) > 20)))
+    throw fail('lifecycle-response-invalid', '任务说明来源无效')
+  if (value.execution !== undefined) {
+    const execution = value.execution, result = value.result
+    if (ref.kind !== 'reminder' || value.state !== 'published' || !row(execution) || !row(result)
+      || !exact(execution, ['operationId', 'phase', 'outcome', 'reason']) || !plain(execution.operationId, 80)
+      || execution.operationId !== result.operationId || result.taskId !== (value.taskRef as HumanTaskRef).taskId
+      || result.deliveryId !== (value.taskRef as HumanTaskRef).deliveryId
+      || !['prepared', 'invoked', 'settled'].includes(String(execution.phase))
+      || (execution.phase === 'settled' ? !['success', 'failed', 'cancelled', 'unknown'].includes(String(execution.outcome)) : execution.outcome !== null)
+      || execution.reason !== null && !plain(execution.reason, 80))
+      throw fail('lifecycle-response-invalid', '提醒执行结果不匹配')
+  }
   return copy(value) as unknown as LifecycleDraft
+}
+function draftEffects(draft: LifecycleDraft) {
+  const published = draft.state === 'published', kind = draft.draftRef.kind, execution = draft.execution
+  let notificationState = 'not-requested-by-this-action'
+  if (kind === 'reminder') {
+    notificationState = !published ? 'not-started' : !execution ? 'unknown'
+      : execution.phase === 'prepared' ? 'not-started' : execution.phase === 'invoked' ? 'pending'
+        : execution.reason === 'no_pending_members' ? 'not-needed'
+          : ({ success: 'succeeded', failed: 'failed', cancelled: 'cancelled', unknown: 'unknown' }[execution.outcome || ''] || 'unknown')
+  }
+  return { contentState: !published ? 'not-published' : kind === 'review' ? 'private-feedback-visible'
+    : kind === 'round' ? 'existing-task-updated' : 'unchanged',
+  groupCardState: 'not-sent-by-this-action', notificationState }
 }
 /** Local receiver and draft tools never approve. Only the authenticated owner
  * WeChat endpoint can publish a draft. No Agent restoration or execution here. */
@@ -134,7 +186,8 @@ export class WorkflowLifecycle {
     return { schema: 'human.lifecycle.query.v1', taskRef, revision: page.revision, rounds: copy(selectedRounds),
       roundRefs: rounds.map(item => ({ id: item.id, number: item.number, title: item.title })), submissions: copy(submissions),
       participants: copy(page.participants), drafts: (page.drafts as unknown[]).map(value => {
-        const draft = lifecycleDraft(value); return { draftRef: draft.draftRef, state: draft.state, expiresAt: draft.expiresAt }
+        const draft = lifecycleDraft(value); return { draftRef: draft.draftRef, state: draft.state, expiresAt: draft.expiresAt,
+          effects: draftEffects(draft) }
       }), nextOffset: submissions.length < (page.submissions as unknown[]).length ? offset + submissions.length : page.nextOffset, asOf: (this.options.now ?? Date.now)() }
   }
   async prepare(scope: WorkflowScope, taskRef: HumanTaskRef, kind: HumanWorkflowDraftRef['kind'], expectedRevision: number,
@@ -144,12 +197,18 @@ export class WorkflowLifecycle {
       throw fail('lifecycle-draft-invalid', '任务方案参数无效')
     bounded(content, HUMAN_ROUND_MAX_BYTES)
     if (!lifecycleCoverValid(kind, content)) throw fail('lifecycle-cover-invalid', '封面仅适用于公开新轮次，不能用于定向轮次、私密反馈或订正')
+    if (kind === 'reminder' && !lifecycleReminderContent(content)) throw fail('lifecycle-reminder-invalid', '提醒内容或对象来源无效')
     if (content.cover !== undefined) {
       if (!this.options.coverAuthority) throw fail('lifecycle-cover-unavailable', '此节点不能核对封面图片来源')
       this.options.coverAuthority(scope, humanCardAsset(content.cover)!)
     }
     const current = await this.get(scope, taskRef, active)
     if (current.revision !== expectedRevision) throw fail('lifecycle-version-conflict', '任务已变化，请重新查询后准备方案')
+    if (kind === 'reminder' && content.recipientSource === 'task-audience') {
+      const round = (current.rounds as unknown[]).find(value => row(value) && value.id === content.roundId)
+      if (!row(round) || round.recipientRefs !== null)
+        throw fail('lifecycle-reminder-invalid', '只能复用此任务公开提交要求的固定指定名单进行提醒')
+    }
     const result = await this.options.transport.request('lifecycle', { operation: `${kind}-draft`, scope: scope.sessionId,
       sessionGeneration: scope.sessionGeneration, taskRef, expectedRevision, content, idempotencyKey }, active)
     this.options.transport.assertIdentity(); active.throwIfAborted()

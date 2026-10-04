@@ -132,6 +132,8 @@ export class HumanToolsCore {
   createCollection(origin: HumanOrigin, title: string, body: string, initialRound: HumanInitialRound, signal: AbortSignal, sourceSurfaceId?: string, cover?: HumanCardAsset): Promise<HumanSurface> {
     return this.createAction(origin, signal, () => {
       if (!humanInitialRound(initialRound)) throw error('human-surface-invalid', '首轮收集表单无效')
+      if (initialRound.audience === 'known-members' && sourceSurfaceId === undefined)
+        throw error('human-source-required', '向已登记成员安排新任务需要同会话已成功发送的来源任务')
       return { title, body, initialRound: clone(initialRound), actions: [{ ...HUMAN_ACTION }],
         ...(cover === undefined ? {} : { cover: this.cover(cover, origin) }),
         ...(sourceSurfaceId === undefined ? {} : { targetTaskRef: this.publishedSource(origin, sourceSurfaceId).taskRef }) }
@@ -149,8 +151,12 @@ export class HumanToolsCore {
   createWorkflow(origin: HumanOrigin, taskRef: HumanTaskRef, draftRef: HumanWorkflowDraftRef, signal: AbortSignal): Promise<HumanSurface> {
     return this.createAction(origin, signal, () => {
       if (!humanTaskRef(taskRef) || !humanWorkflowDraftRef(draftRef)) throw error('human-surface-invalid', '工作流草稿引用无效')
-      return { title: draftRef.kind === 'round' ? '审核新一轮任务' : draftRef.kind === 'review' ? '审核个人反馈' : '审核任务提醒',
-        body: '方案尚未批准。请打开主人审核页核对准确内容、对象与版本后决定；此按钮本身不会发群消息。',
+      const presentation = draftRef.kind === 'round'
+        ? { title: '补充提交要求', body: '查看本次要求和参与对象。确认后会更新原任务页面，不会另建任务或自动发群。' }
+        : draftRef.kind === 'review'
+          ? { title: '给提交者的反馈', body: '查看反馈及相关要求。确认后仅你和对应成员可在任务页查看，不会自动通知对方。' }
+          : { title: '提醒参与者', body: '提醒还没发出。查看提醒内容和对象，再按页面提示发送。' }
+      return { ...presentation,
         targetTaskRef: clone(taskRef), workflowRef: clone(draftRef), actions: [{ ...HUMAN_WORKFLOW_ACTION }] }
     })
   }
@@ -240,6 +246,18 @@ export class HumanToolsCore {
       .map(row => row.attempts.slice().reverse().find(attempt => attempt.receipt)?.receipt)
       .filter((receipt): receipt is HumanReceipt => Boolean(receipt))
       .slice(-HUMAN_CONTEXT_LIMIT).map(clone)
+  }
+  /** Context-only action semantics derived from saved surfaces. Keep the wire
+   * receipt and persisted ledger unchanged, including historical approvals. */
+  contextActionSnapshot(scope: string, generation: string): (HumanReceipt & {
+    actionId: HumanSurface['actions'][0]['id']; workflowKind?: HumanWorkflowDraftRef['kind']
+  })[] {
+    return this.contextSnapshot(scope, generation).flatMap(receipt => {
+      const surface = this.ledger.records.find(record => record.origin.scope === scope
+        && record.origin.generation === generation && record.surface.id === receipt.surfaceId)?.surface
+      return surface ? [{ ...receipt, actionId: surface.actions[0].id,
+        ...(surface.workflowRef ? { workflowKind: surface.workflowRef.kind } : {}) }] : []
+    })
   }
   claim(request: HumanActionRequest, signal: AbortSignal): Promise<unknown> {
     return this.serial(async () => {

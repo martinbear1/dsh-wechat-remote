@@ -127,7 +127,7 @@ test('generic capability contracts separate local availability, native authoriza
   assert.equal(contract.presentation.messageCard.cover.default, 'bundled-fixed')
   assert.equal(contract.presentation.messageCard.sourceBody, 'in-app-description-not-a-wechat-share-parameter')
   contract.audience.initial.push('invented')
-  assert.deepEqual(createCapabilityManifest(scope.nodeId).contracts.audience.initial, ['all-group', 'owner-select'])
+  assert.deepEqual(createCapabilityManifest(scope.nodeId).contracts.audience.initial, ['all-group', 'owner-select', 'known-members'])
 })
 
 test('automatic capability follows native availability but mode activation never grants execution or job tools', () => {

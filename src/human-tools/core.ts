@@ -36,20 +36,20 @@ function validOrigin(origin: unknown): origin is HumanOrigin {
 }
 function validateLedger(value: unknown): HumanLedger {
   if (!object(value) || value.schemaVersion !== 1 || !Array.isArray(value.records) || value.records.length > HUMAN_MAX_RECORDS)
-    throw error('human-store-invalid', '测试卡片存储格式不受支持')
+    throw error('human-store-invalid', '任务卡片存储格式不受支持')
   const ids = new Set<string>()
   for (const record of value.records) {
     if (!object(record) || !humanSurface(record.surface) || !validOrigin(record.origin)
       || !Number.isSafeInteger(record.createdAt) || Number(record.createdAt) < 0
       || !Array.isArray(record.attempts) || record.attempts.length > MAX_ATTEMPTS)
-      throw error('human-store-invalid', '测试卡片记录无效')
+      throw error('human-store-invalid', '任务卡片记录无效')
     const surface = record.surface as HumanSurface
-    if (ids.has(surface.id)) throw error('human-store-invalid', '测试卡片标识重复')
+    if (ids.has(surface.id)) throw error('human-store-invalid', '任务卡片标识重复')
     ids.add(surface.id)
     const attempts = new Set<string>()
     for (const attempt of record.attempts) {
       if (!object(attempt) || typeof attempt.id !== 'string' || !ATTEMPT_ID.test(attempt.id) || attempts.has(attempt.id))
-        throw error('human-store-invalid', '测试卡片动作无效')
+        throw error('human-store-invalid', '任务卡片动作无效')
       attempts.add(attempt.id)
       const receipt = attempt.receipt
       if (receipt !== undefined && (!object(receipt) || receipt.schema !== 'human.action.receipt.v1'
@@ -58,7 +58,7 @@ function validateLedger(value: unknown): HumanLedger {
         || !['success', 'cancelled', 'failed', 'unknown'].includes(String(receipt.outcome))
         || !humanReceiptData(surface, receipt)
         || !['recorded', 'pending', 'dispatching', 'queued', 'uncertain'].includes(String(receipt.delivery))))
-        throw error('human-store-invalid', '测试卡片回执无效')
+        throw error('human-store-invalid', '任务卡片回执无效')
     }
   }
   return clone(value) as unknown as HumanLedger
@@ -78,7 +78,7 @@ export class HumanToolsCore {
   /** Stop admission immediately; callers must await the already-started write
    * before another instance opens this ledger during a plugin reload. */
   close(): Promise<void> { this.stopped = true; return this.tail.then(() => {}) }
-  private available(): void { if (this.stopped) throw error('human-tools-disabled', '测试卡片功能已关闭') }
+  private available(): void { if (this.stopped) throw error('human-tools-disabled', '群任务功能已关闭') }
   private serial<T>(work: () => Promise<T>): Promise<T> {
     const result = this.tail.then(() => { this.available(); return work() })
     this.tail = result.catch(() => {})
@@ -96,7 +96,7 @@ export class HumanToolsCore {
   private record(ledger: HumanLedger, scope: string, surfaceId: string): HumanRecord {
     if (!text(scope, 256) || typeof surfaceId !== 'string' || !HUMAN_ID.test(surfaceId)) throw error('human-action-invalid', '卡片参数无效')
     const record = ledger.records.find(row => row.surface.id === surfaceId && row.origin.scope === scope)
-    if (!record || record.createdAt + HUMAN_RETENTION_MS <= this.now()) throw error('human-surface-unavailable', '测试卡片已过期或不属于此会话')
+    if (!record || record.createdAt + HUMAN_RETENTION_MS <= this.now()) throw error('human-surface-unavailable', '任务卡片已过期或不属于此会话')
     return record
   }
   private request(ledger: HumanLedger, request: HumanActionRequest): HumanRecord {
@@ -111,7 +111,7 @@ export class HumanToolsCore {
   assertGeneration(scope: string, surfaceId: string, generation: string): void {
     this.available()
     if (this.record(this.ledger, scope, surfaceId).origin.generation !== generation)
-      throw error('human-origin-conflict', '会话身份已变化，不能打开旧测试卡片')
+      throw error('human-origin-conflict', '会话身份已变化，不能打开旧任务卡片')
   }
   /** Re-sign only a persisted claim, including receipt reconciliation. This
    * never claims, executes, retries or replaces an action by itself. */
@@ -204,7 +204,7 @@ export class HumanToolsCore {
       // One surface per root invocation also covers native Code Mode subcalls.
       const existing = this.ledger.records.find(row => row.origin.scope === origin.scope && row.origin.rootCallId === origin.rootCallId)
       if (existing && existing.origin.generation !== origin.generation)
-        throw error('human-origin-conflict', '会话身份已变化，不能复用旧测试卡片')
+        throw error('human-origin-conflict', '会话身份已变化，不能复用旧任务卡片')
       if (existing && (!sameTaskRef(existing.surface.targetTaskRef, prepared.targetTaskRef)
         || existing.surface.actions[0].id !== prepared.actions[0].id
         || !sameSelectionRef(existing.surface.selectionRef, prepared.selectionRef)
@@ -219,7 +219,7 @@ export class HumanToolsCore {
       if (existing) return clone(this.record(this.ledger, origin.scope, existing.surface.id).surface)
       const next = clone(this.ledger)
       next.records = next.records.filter(row => row.createdAt + HUMAN_RETENTION_MS > this.now())
-      if (next.records.length >= HUMAN_MAX_RECORDS) throw error('human-surface-capacity', '测试卡片数量已达上限，请等待旧卡片过期')
+      if (next.records.length >= HUMAN_MAX_RECORDS) throw error('human-surface-capacity', '任务卡片数量已达上限，请等待旧卡片过期')
       const surface: HumanSurface = { schemaVersion: 1, kind: 'human.surface', id: this.randomId(), revision: 1, ...clone(prepared) }
       if (!humanSurface(surface) || next.records.some(row => row.surface.id === surface.id)) throw error('human-id-invalid', '卡片标识生成失败')
       assertSurfaceBudget(surface)
@@ -265,7 +265,7 @@ export class HumanToolsCore {
       const next = clone(this.ledger), record = this.request(next, request)
       if (!record.attempts.some(attempt => attempt.id === request.attemptId)) {
         if (record.attempts.some(attempt => !attempt.receipt)) throw error('human-action-in-progress', '已有分享操作待确认，请先返回原页面')
-        if (record.attempts.length >= MAX_ATTEMPTS) throw error('human-action-capacity', '此测试卡片已达到操作次数上限')
+        if (record.attempts.length >= MAX_ATTEMPTS) throw error('human-action-capacity', '此任务卡片已达到操作次数上限')
         record.attempts.push({ id: request.attemptId })
         await this.commit(next)
       }

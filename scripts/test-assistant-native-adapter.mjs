@@ -8,7 +8,9 @@ import { dump, load } from 'js-yaml'
 import { entryListSchema, applyEntryPatches } from '@deepseek-ai/cordis-plugin-include'
 import { isJsExpr } from '@deepseek-ai/cordis-plugin-loader'
 import { createNativeAssistantAdapter, validateNativeAssistantPreview } from '../lib/assistant-presets/native-adapter.js'
-import { legacyAssistantGuidanceV1, legacyAssistantGuidanceV2 } from '../lib/assistant-presets/definition.js'
+import { assistantGuidance, legacyAssistantGuidanceV1, legacyAssistantGuidanceV2 } from '../lib/assistant-presets/definition.js'
+import { assistantTemplates } from '../lib/assistant-presets/catalog.js'
+import { renderPrompt, renderContextSnapshot } from '@deepseek-ai/dsh-system-prompt'
 
 const signal = new AbortController().signal
 const definition = () => ({ schemaVersion: 1, name: '项目助理', description: '协助项目日常工作', role: '了解用户职责，按明确范围辅助工作',
@@ -21,6 +23,11 @@ const LEGACY_GUIDANCE_SHA256 = '34eb91c7449a8c9eef4fe8a87b3387c56072fabdefb5c370
 // Evaluated from RC9 commit e034dd3ec9507bf181a8aabc14e2ba8b99b36e77 before
 // editing its guidance, with the same definition() fixture above.
 const V2_GUIDANCE_SHA256 = '133c2ccc3dbb1d5109bf9a3bc75b74945d265c699094751515be4d6de29e307a'
+// RC11 bfc9e0eb76e2cde484ab7cc55bd5515d1ab9da3a: fixing how the native
+// prefix is composed must not change an already approved V3 artifact's bytes.
+const V3_GUIDANCE_SHA256 = 'ae3c37a9a0cf78f9ba7dc46ca759b825527c4cfc6e8ab4e23e7aad45a9744e70'
+const stockIdentity = 'You are a coding agent powered by the {{model}} model.'
+const neutralIdentity = 'You are an AI assistant powered by the {{model}} model.'
 const sha256 = value => createHash('sha256').update(value).digest('hex')
 const base = () => [
   { id: 'persona', name: '@deepseek-ai/dsh-persona', config: { prefix: 'Base {{model}}', suffix: 'Directory {{cwd}}' } },
@@ -35,7 +42,9 @@ async function fixture(t, options = {}) {
   await mkdir(profile); await writeFile(anchor, '{}')
   const originalManifest = '{"name":"user-profile","private":true}\n', originalPatch = '# user-owned configuration\n'
   await writeFile(path.join(profile, 'package.json'), originalManifest); await writeFile(path.join(profile, 'cordis.patch.yml'), originalPatch)
-  const declarations = new Map([['standard', { name: 'Standard', plugins: base() }]]), bundles = [], calls = [], cancellations = [], nativeInstall = deferred()
+  const originalBase = base()
+  if (options.prefix !== undefined) originalBase[0].config.prefix = options.prefix
+  const declarations = new Map([['standard', { name: 'Standard', plugins: structuredClone(originalBase) }]]), bundles = [], calls = [], cancellations = [], nativeInstall = deferred()
   let defaultId = 'standard', behavior = options.behavior || 'applied', broken = false, delayed = false
   const presets = { get defaultId() { return defaultId },
     async list() { return [...declarations].map(([id, value]) => ({ id, name: value.name, ...(broken && id !== 'standard' ? { broken: 'bad plugin' } : {}) })) },
@@ -80,16 +89,16 @@ async function fixture(t, options = {}) {
     async assertUnchanged() {
       assert.equal(await readFile(path.join(profile, 'package.json'), 'utf8'), originalManifest)
       assert.equal(await readFile(path.join(profile, 'cordis.patch.yml'), 'utf8'), originalPatch)
-      assert.equal(defaultId, 'standard'); assert.deepEqual(declarations.get('standard').plugins, base())
+      assert.equal(defaultId, 'standard'); assert.deepEqual(declarations.get('standard').plugins, originalBase)
     } }
 }
 
 async function historicalPreview(f, version = 1) {
-  const preview = await f.preview(), guidance = (version === 1 ? legacyAssistantGuidanceV1 : legacyAssistantGuidanceV2)(definition())
-  assert.equal(Buffer.byteLength(guidance), version === 1 ? 1191 : 3704)
-  assert.equal(sha256(guidance), version === 1 ? LEGACY_GUIDANCE_SHA256 : V2_GUIDANCE_SHA256)
+  const preview = await f.preview(), guidance = [null, legacyAssistantGuidanceV1, legacyAssistantGuidanceV2, assistantGuidance][version](definition())
+  assert.equal(Buffer.byteLength(guidance), [0, 1191, 3704, 4819][version])
+  assert.equal(sha256(guidance), [null, LEGACY_GUIDANCE_SHA256, V2_GUIDANCE_SHA256, V3_GUIDANCE_SHA256][version])
   const patch = JSON.parse(preview.patch)
-  patch[0].insert[0].config.plugins[0].config.prefix = 'Base {{model}}\n\n' + guidance
+  patch[0].insert[0].config.plugins[0].config.prefix = (version === 3 ? stockIdentity : 'Base {{model}}') + '\n\n' + guidance
   const oldPatch = JSON.stringify(patch, null, 2) + '\n'
   assert.notEqual(oldPatch, preview.patch, 'newly prepared native bundles must use current guidance, not silently keep historical text')
   return { ...preview, patch: oldPatch, patchDigest: sha256(oldPatch) }
@@ -120,8 +129,8 @@ async function seedHistoricalArtifact(f, preview, state) {
   return { snapshot, publishNativeState }
 }
 
-for (const version of [1, 2]) for (const state of ['installed', 'unknown']) test(`historical V${version} ${state} artifact survives a fresh adapter without rewriting bytes or reinstalling`, async t => {
-  const f = await fixture(t), preview = await historicalPreview(f, version), saved = await seedHistoricalArtifact(f, preview, state)
+for (const version of [1, 2, 3]) for (const state of ['installed', 'unknown']) test(`historical V${version} ${state} artifact survives a fresh adapter without rewriting bytes or reinstalling`, async t => {
+  const f = await fixture(t, version === 3 ? { prefix: stockIdentity } : {}), preview = await historicalPreview(f, version), saved = await seedHistoricalArtifact(f, preview, state)
   assert.deepEqual(validateNativeAssistantPreview(preview), preview)
   const before = await saved.snapshot(); await f.adapter.close()
   const restored = createNativeAssistantAdapter(f.host, { codec }); t.after(() => restored.close())
@@ -136,8 +145,8 @@ for (const version of [1, 2]) for (const state of ['installed', 'unknown']) test
   assert.equal(f.calls.length, 0); await f.assertUnchanged()
 })
 
-for (const version of [1, 2]) test(`V${version} compatibility accepts only exact guidance and cannot replace an approved old artifact with a valid new plan`, async t => {
-  const f = await fixture(t), current = await f.preview(), old = await historicalPreview(f, version)
+for (const version of [1, 2, 3]) test(`V${version} compatibility accepts only exact guidance and cannot replace an approved old artifact with a valid new plan`, async t => {
+  const f = await fixture(t, version === 3 ? { prefix: stockIdentity } : {}), current = await f.preview(), old = await historicalPreview(f, version)
   const saved = await seedHistoricalArtifact(f, old, 'installed'), before = await saved.snapshot()
   for (const change of [
     value => { value.patch = current.patch }, // No new digest: stale approval must fail.
@@ -183,6 +192,65 @@ test('native preview is read-only, data-only and pins inherited plugins without 
   assert.match((await f.services.agentPresets.readDocument('standard')).content, /!!js/)
   assert.deepEqual(row.config.plugins[1].disabled, { __jsExpr: "process.platform === 'win32'" })
   await f.assertUnchanged()
+})
+
+test('all professional templates replace only the native stock coding identity and preserve host policy and tools', async t => {
+  for (const template of assistantTemplates()) {
+    const policy = '\n\nDeployment policy: respect approval and workspace boundaries.'
+    const f = await fixture(t, { prefix: stockIdentity + policy })
+    const d = { ...template.definition, basePreset: 'standard' }
+    const preview = await f.adapter.preview({ presetId: `assistant-${template.id}-v1`, definition: d }, signal)
+    const plugins = JSON.parse(preview.patch)[0].insert[0].config.plugins, persona = plugins[0].config
+    assert.equal(persona.prefix, neutralIdentity + policy + '\n\n' + assistantGuidance(d))
+    assert.equal(persona.suffix, 'Directory {{cwd}}')
+    assert.equal(persona.complete, false); assert.equal(persona.includeRuntimeContext, true)
+    assert.deepEqual(plugins.slice(1), base().slice(1))
+    assert.deepEqual(validateNativeAssistantPreview(preview), preview)
+    // Actual SDK interpolation, without a model call or any production session.
+    const assembly = { sections: [{ name: 'deployment:persona', text: persona.prefix },
+      { name: 'host:safety', text: 'Approval remains enforced.' }, { name: 'deployment:suffix', text: persona.suffix }],
+      contexts: [{ name: 'host:runtime', text: 'Workspace {{cwd}}; permission scope unchanged.' }], tools: [],
+      variables: { model: 'test-model', cwd: '/test-workspace' } }
+    const rendered = renderPrompt(assembly)
+    assert(!rendered.includes('You are a coding agent'))
+    assert(rendered.includes(d.role)); assert(rendered.includes('Approval remains enforced.'))
+    assert(rendered.includes('Directory /test-workspace'))
+    assert(renderContextSnapshot(assembly).includes('permission scope unchanged'))
+    await f.assertUnchanged()
+  }
+})
+
+test('custom base policy is never stripped, including quoted stock identity and CRLF tails', async t => {
+  for (const [prefix, expected] of [
+    [stockIdentity, neutralIdentity],
+    [stockIdentity + '\r\nKeep native restrictions.', neutralIdentity + '\r\nKeep native restrictions.'],
+    ['Private deployment policy\n' + stockIdentity, 'Private deployment policy\n' + stockIdentity],
+    ['Custom role; preserve all author instructions.', 'Custom role; preserve all author instructions.'],
+    [stockIdentity + ' Extra constraints.', stockIdentity + ' Extra constraints.'],
+  ]) {
+    const f = await fixture(t, { prefix }), preview = await f.preview()
+    assert.equal(JSON.parse(preview.patch)[0].insert[0].config.plugins[0].config.prefix, expected + '\n\n' + assistantGuidance(definition()))
+    await f.assertUnchanged()
+  }
+})
+
+test('professional presets are not offered as bases and cannot stack a second profession, while historical verification still works', async t => {
+  for (const guidance of [legacyAssistantGuidanceV1, legacyAssistantGuidanceV2, assistantGuidance]) {
+    const f = await fixture(t), derived = base()
+    derived[0].config.prefix = stockIdentity + '\n\n' + guidance(definition())
+    // Detect composition rather than relying solely on a package/preset naming convention.
+    f.declarations.set('existing-profession', { name: '已有职业', plugins: derived })
+    assert.deepEqual((await f.adapter.probe()).basePresets, [{ id: 'standard', name: 'Standard' }])
+    await assert.rejects(f.adapter.preview({ presetId: 'assistant-new-role', definition: { ...definition(), basePreset: 'existing-profession' } }, signal),
+      { code: 'assistant-base-derived' })
+    assert.equal(f.calls.length, 0); await f.assertUnchanged()
+  }
+})
+
+test('an approved old coding-prefix preview without a receipt must be re-reviewed, never silently upgraded on install', async t => {
+  const f = await fixture(t, { prefix: stockIdentity }), old = await historicalPreview(f, 3)
+  await assert.rejects(f.adapter.install(old, signal), { code: 'assistant-native-preview-stale' })
+  assert.equal(f.calls.length, 0); await f.assertUnchanged()
 })
 
 test('approved definition cannot smuggle modules, scripts, paths or prompt variables', async t => {

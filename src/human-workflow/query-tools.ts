@@ -12,7 +12,7 @@ export function workflowQueryTools(nodeId: string, replica: WorkflowReplica): To
   return ['list', 'get', 'participants'].map(kind => ({
     name: `human_task_${kind}`,
     description: `Read ${kind === 'list' ? 'tasks' : kind === 'get' ? 'one task' : 'observed participants of one task'} from the authenticated current-node/current-session projection. `
-      + 'Always report freshness; stale data is not current status. Counts cover observed participants only, not the whole group. '
+      + 'Inspect freshness before interpreting facts; stale data is not current status. Explain a relevant stale/offline limitation in business language, but do not recite freshness enums, internal IDs or diagnostic metadata in every answer. Counts cover observed participants only, not the whole group. '
       + 'Owner is excluded from participant counts. This is read-only; it never sends, changes task facts or wakes an Agent. No cross-session access.',
     parameters: { type: 'object', properties: { ...(kind !== 'list' ? { taskId: { type: 'string', description: 'Existing task ID, 1 to 128 characters.' } } : {}),
       offset: { type: 'integer', description: 'Nonnegative page offset.' }, limit: { type: 'integer', description: 'Page size from 1 to 50.' } },

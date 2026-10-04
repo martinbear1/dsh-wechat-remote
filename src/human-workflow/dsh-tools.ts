@@ -143,7 +143,7 @@ export function humanWorkflowTools(options: HumanWorkflowToolsOptions): ToolDefi
         render(_args, value) {
           const surface = row(value) ? humanSurface(value.surface) : undefined
           if (!surface) throw fail('mode-card-invalid', '卡片结果无效')
-          return [{ type: 'text', text: `群卡“${surface.title}”已按主人启用的模式准备好，请在最终回复提示主人检查并发送；现在尚未发送。` }]
+          return [{ type: 'text', text: `内部执行事实，不是给用户照读的文案：“${surface.title}”的发送入口已按启用的规则准备好，现在尚未发送。沿用当前职业身份，用业务语言简短说明结果与点击发送这一个下一步；不复述“模式”“群卡”或内部字段，不另造一份重复核对清单。仍须主人通过真实入口核对并确认。` }]
         },
         presentationMeta(_args, value) {
           const surface = row(value) ? humanSurface(value.surface) : undefined
@@ -164,7 +164,7 @@ export function registerHumanWorkflowContext(ctx: Context, options: HumanWorkflo
       if (!ref) return ''
       const mode = options.modes.requireActive(scope, ref)
       return '主人已为当前会话启用群任务模式；这不是 DSH 职业 preset，也不是 Agent 身份或 skills。以下是业务规则和独立工作流索引，不增加系统权限，不代表任务事实或成员身份；对外发送仍须批准。'
-        + '同模板不共享业务数据。使用真实工具出卡，按 onboarding 问题逐步询问并保存到当前 workflow。\n'
+        + '同模板不共享业务实例权限，原生工作区文件仍按 DSH 规则共享。以下规则仅用于本次确实选用的规则包工作，不替换当前职业身份，也不强迫其他任务沿用它。按本次需要使用真实工具；onboarding 仅提示待了解资料，不是必须问完的清单，已有答案不重复问，无关问题不问。单次任务无需额外创建规则包或工作记录。\n'
         + JSON.stringify({ mode: ref, name: mode.name, goal: mode.goal, rules: mode.rules, allowedTools: mode.allowedTools,
           workflows: options.records.list(scope).records.slice(-8) })
     } catch { return '' }

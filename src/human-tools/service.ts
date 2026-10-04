@@ -459,7 +459,7 @@ export class HumanToolsService extends TypertRemoteService {
       return { ok: true, valueJson: JSON.stringify(value) }
     }
     catch (cause) { return { ok: false, error: { code: typeof (cause as { code?: unknown })?.code === 'string'
-      ? (cause as { code: string }).code : 'human-tools-unavailable', message: cause instanceof Error ? cause.message : '测试卡片不可用' } } }
+      ? (cause as { code: string }).code : 'human-tools-unavailable', message: cause instanceof Error ? cause.message : '群任务暂不可用' } } }
   }
   /** Synchronous bounded lookup used identically by history and live projection. */
   present(scope: string, callId: string): HumanSurface | undefined {
@@ -587,7 +587,7 @@ export class HumanToolsService extends TypertRemoteService {
 }
 
 function disabled(): Error & { code: string } {
-  return Object.assign(new Error('此节点尚未启用测试卡片功能'), { code: 'human-tools-disabled' })
+  return Object.assign(new Error('此节点尚未启用群任务功能'), { code: 'human-tools-disabled' })
 }
 
 function originUnavailable(): Error & { code: string } {

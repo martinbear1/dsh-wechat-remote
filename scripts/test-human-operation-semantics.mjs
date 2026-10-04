@@ -6,6 +6,8 @@ import { HUMAN_WORKFLOW_ACTION, humanSurface } from '../lib/human-tools/protocol
 import { registerHumanContext, humanShareTool, humanMembersTool, humanRemindTool } from '../lib/human-tools/dsh.js'
 import { lifecycleTools } from '../lib/human-workflow/lifecycle-tools.js'
 import { HUMAN_WORKFLOW_SKILL } from '../lib/human-workflow/dsh-skill.js'
+import { createCapabilityManifest } from '../lib/human-workflow/capabilities.js'
+import { workflowQueryTools } from '../lib/human-workflow/query-tools.js'
 
 // Local protocol/prompt wiring only: no LLM invocation, WeChat operation,
 // production state, or claim of real-user conversational acceptance.
@@ -153,4 +155,55 @@ test('skill decision guidance keeps notification facts, user intent and unsuppor
   assert.match(text, /记忆与回复都不能把它或 surface success 改写成“已提醒”/)
   assert.match(text, /旧服务缺少执行状态时保持未知/)
   assert.match(text, /没有已批准且实际运行的处理规则或通知机制，不承诺/)
+})
+
+test('generic collection results preserve project context instead of assigning a teacher identity', async t => {
+  const { core } = await fixture(t)
+  const surface = await core.createCollection(origin, '项目本周进展', '请提交进展。', initial(), signal)
+  const create = lifecycleTools({ nodeId: 'test_node', core, lifecycle: {}, assertAgent() {} }).find(tool => tool.name === 'human_task_create')
+  const before = structuredClone(surface), result = create.output.render({}, { surface })[0].text
+  assert.match(result, /保持当前助理的职业身份/)
+  assert.match(result, /不因使用本工具改称用户的职业或替换任务语境/)
+  assert(!/老师|教师|班级|学生/.test(result))
+  assert.match(result, /尚未发布/)
+  assert.deepEqual(create.output.presentationMeta({}, { surface }).humanSurface, before)
+})
+
+test('participation reminders and collection reminders are discoverably different optional operations', () => {
+  assert.match(humanRemindTool({}).description, /NOT an unsubmitted form in a particular round/)
+  assert.match(humanRemindTool({}).description, /human_task_prepare_reminder with the appropriate condition/)
+  const capability = createCapabilityManifest('test_node').capabilities.find(item => item.id === 'action.remind-selected-pending')
+  assert.match(capability.description, /参与确认不是表单提交/)
+  assert.match(HUMAN_WORKFLOW_SKILL.content, /这个分支判断的是参与确认，不是某次表单是否提交/)
+  assert.match(HUMAN_WORKFLOW_SKILL.content, /无需为提醒再强制选人/)
+})
+
+test('optional rule-package memory does not become a mandatory replacement for the profession assistant work instance', () => {
+  assert.match(HUMAN_WORKFLOW_SKILL.content, /仅在本次明确使用已启用的 human_mode 规则包时/)
+  assert.match(HUMAN_WORKFLOW_SKILL.content, /普通单次任务不必为了记忆先创建或启用规则包/)
+  assert.match(HUMAN_WORKFLOW_SKILL.content, /若当前预设实际提供 human_assistant_work_start\/get\/save/)
+  assert.match(HUMAN_WORKFLOW_SKILL.content, /不要拿 human_workflow_save 代替它/)
+})
+
+test('query guidance checks freshness without making every user answer a diagnostic report', async () => {
+  const seen = [], result = { freshness: { state: 'stale' }, tasks: [] }
+  const tools = workflowQueryTools('test_node', { query: async (...args) => { seen.push(args); return result } })
+  for (const tool of tools) {
+    assert.match(tool.description, /Inspect freshness before interpreting facts; stale data is not current status/)
+    assert.match(tool.description, /do not recite freshness enums/)
+    assert(!tool.description.includes('Always report freshness'))
+  }
+  const exec = { agent: { id: origin.scope, session: { id: origin.scope, header: { id: origin.scope, createdAt: 100 } } }, signal }
+  assert.deepEqual(await tools[0].execute({}, exec), result)
+  assert.equal(seen.length, 1)
+  assert.equal(seen[0][0].sessionId, origin.scope)
+  assert.equal(JSON.parse(tools[0].output.render({}, result)[0].text).freshness.state, 'stale', 'model retains exact stale evidence')
+})
+
+test('current production errors are not labelled as test cards while stable error codes remain intact', async t => {
+  const { core } = await fixture(t)
+  assert.throws(() => core.assertGeneration(origin.scope, 'f'.repeat(32), origin.generation), cause => cause.code === 'human-surface-unavailable' && !cause.message.includes('测试'))
+  await core.close()
+  await assert.rejects(core.create(origin, '事项', '说明', signal), cause => cause.code === 'human-tools-disabled' && cause.message === '群任务功能已关闭')
+  assert.throws(() => humanShareTool(core).output.render({}, {}), { message: '无效的任务卡片结果' })
 })

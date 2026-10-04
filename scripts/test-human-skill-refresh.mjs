@@ -85,6 +85,26 @@ test('native skill discovery alone does not reload changed bodies with an unchan
   second()
 })
 
+test('a session that loaded the preceding composable-targets revision discovers the profession-scope correction', async t => {
+  const f = await fixture(t)
+  const remove = f.skills.register({ ...HUMAN_WORKFLOW_SKILL,
+    description: '修订 2026-10-04-composable-targets-v1：按用户意图组合群任务、新事项/补交、已知对象和单独提醒；用业务语言交互。旧会话参与相关工作时按需重新加载。',
+    content: 'PREVIOUS_COMPOSABLE_TARGETS_BODY' })
+  f.persist(await f.step())
+  remove()
+  registerHumanWorkflowSkill(f.ctx)
+  const update = await f.step()
+  assert.equal(update.messages.length, 1)
+  assert(update.messages[0].content[0].text.includes(HUMAN_WORKFLOW_SKILL_REVISION))
+  f.persist(update)
+  const latest = await f.load()
+  assert.equal(latest.isError, false)
+  assert.match(latest.content[0].text, /不要拿 human_workflow_save 代替它/)
+  assert.match(latest.content[0].text, /参与确认，不是某次表单是否提交/)
+  assert(!latest.content[0].text.includes('PREVIOUS_COMPOSABLE_TARGETS_BODY'))
+  assert.equal((await f.step()).messages.length, 0)
+})
+
 test('native consumer re-establishes its current catalog after actual session compaction hides the earlier catalog', async t => {
   const f = await fixture(t)
   registerHumanWorkflowSkill(f.ctx)

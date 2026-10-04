@@ -22,7 +22,7 @@ const catalog: WorkflowCapability[] = [
   { id: 'surface.reading-confirmation', version: 1, status: 'available', description: '准备公开阅读确认群卡；可引用已准备的公开封面，原生发送仍由主人批准。', tools: ['human_surface_share', 'human_mode_prepare_card'], ownerApproval: true },
   { id: 'surface.cover-image', version: 1, status: 'blocked', description: '安全接入明确选择的当前会话或工作区PNG/JPEG成品，核验格式、去元数据并保存准确图片摘要，上传私有临时封面；Agent可用电脑实际工具制作图片，插件不提供字体、绘制引擎或模板。主人须预览最终图片批准公开，不是自动发群。', tools: ['human_card_cover_prepare'], ownerApproval: true, reason: '需要本机封面资产账本、图片校验与云端临时对象服务。' },
   { id: 'action.select-members', version: 1, status: 'available', description: '主人原生选择既有任务成员；不是全群名册。', tools: ['human_task_select_members'], ownerApproval: true },
-  { id: 'action.remind-selected-pending', version: 1, status: 'available', description: '准备提醒主人原生选择的全部未确认成员；不支持任意子集。', tools: ['human_task_remind'], ownerApproval: true },
+  { id: 'action.remind-selected-pending', version: 1, status: 'available', description: '准备提醒主人原生选择的全部未确认参与者；不支持任意子集。参与确认不是表单提交，催交或已发布反馈提醒使用 recipient.query。', tools: ['human_task_remind'], ownerApproval: true },
   { id: 'task.query', version: 1, status: 'blocked', description: '查询当前节点授权任务和参与事实，返回新鲜度。', tools: ['human_task_list', 'human_task_get', 'human_task_participants'], ownerApproval: false, reason: '需要已认证的节点任务同步连接。' },
   { id: 'surface.form-collection', version: 1, status: 'blocked', description: '首发群任务、表单与可选已准备公开封面一同批准发布，图片要求需本机原生收件支持。', tools: ['human_task_create'], ownerApproval: true, reason: '需要任务生命周期服务。' },
   { id: 'task.audience-select', version: 1, status: 'blocked', description: '首发也可由主人先选群再原生选人，本任务仅所选成员参与；后续轮次不扩大范围，非全群名册。最多20人为当前产品限额。', tools: ['human_task_create'], ownerApproval: true, reason: '需要任务生命周期服务和支持原生名单选择的小程序/云端。' },

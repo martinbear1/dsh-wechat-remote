@@ -385,6 +385,9 @@ test('official native ToolRuntime accepts schemas and executes real mode/workflo
   const prepared = await host.tools.execute({ name: 'human_mode_prepare_card', arguments: { ...reference(drafted), values: { title: '真实结构卡', body: '请确认' } },
     callId: 'card_root', agent: host.agent, signal })
   assert.equal(prepared.isError, false, JSON.stringify(prepared)); assert(humanSurface(prepared.meta?.humanSurface))
+  assert.match(prepared.content[0].text, /沿用当前职业身份/)
+  assert.match(prepared.content[0].text, /现在尚未发送/)
+  assert(!prepared.content[0].text.startsWith('群卡'))
   assert.equal(f.core.forResult(scope.sessionId, 'card_root').title, '真实结构卡')
   const bad = await host.tools.execute({ name: 'human_mode_prepare_card', arguments: { ...reference(drafted), values: { title: 'bad', body: 'x', script: 'execute' } },
     callId: 'bad_card', agent: host.agent, signal })
@@ -421,6 +424,9 @@ test('dynamic context uses only current confirmed Agent scope and does not mutat
   const sections = async context => renderContextSections(await prompt.assemble(context)).filter(x => x.name === 'harness-remote.human-workflow')
   const found = await sections({ agent: host.agent, scope: host.agent })
   assert.equal(found.length, 1); assert.match(found[0].text, /不是 DSH 职业 preset/)
+  assert.match(found[0].text, /原生工作区文件仍按 DSH 规则共享/)
+  assert.match(found[0].text, /不替换当前职业身份，也不强迫其他任务沿用它/)
+  assert.match(found[0].text, /不是必须问完的清单，已有答案不重复问，无关问题不问/)
   assert.deepEqual(host.session.events, before)
   assert.deepEqual(await sections({ agent: host.agent, scope: {} }), [])
   const wrong = { ...host.agent, session: { ...host.session, header: { ...host.session.header, createdAt: 200 } } }

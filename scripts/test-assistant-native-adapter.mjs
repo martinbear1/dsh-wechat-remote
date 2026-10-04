@@ -8,7 +8,7 @@ import { dump, load } from 'js-yaml'
 import { entryListSchema, applyEntryPatches } from '@deepseek-ai/cordis-plugin-include'
 import { isJsExpr } from '@deepseek-ai/cordis-plugin-loader'
 import { createNativeAssistantAdapter, validateNativeAssistantPreview } from '../lib/assistant-presets/native-adapter.js'
-import { assistantGuidance, legacyAssistantGuidanceV1, legacyAssistantGuidanceV2 } from '../lib/assistant-presets/definition.js'
+import { assistantGuidance, legacyAssistantGuidanceV1, legacyAssistantGuidanceV2, legacyAssistantGuidanceV3 } from '../lib/assistant-presets/definition.js'
 import { assistantTemplates } from '../lib/assistant-presets/catalog.js'
 import { renderPrompt, renderContextSnapshot } from '@deepseek-ai/dsh-system-prompt'
 
@@ -94,7 +94,7 @@ async function fixture(t, options = {}) {
 }
 
 async function historicalPreview(f, version = 1) {
-  const preview = await f.preview(), guidance = [null, legacyAssistantGuidanceV1, legacyAssistantGuidanceV2, assistantGuidance][version](definition())
+  const preview = await f.preview(), guidance = [null, legacyAssistantGuidanceV1, legacyAssistantGuidanceV2, legacyAssistantGuidanceV3][version](definition())
   assert.equal(Buffer.byteLength(guidance), [0, 1191, 3704, 4819][version])
   assert.equal(sha256(guidance), [null, LEGACY_GUIDANCE_SHA256, V2_GUIDANCE_SHA256, V3_GUIDANCE_SHA256][version])
   const patch = JSON.parse(preview.patch)
@@ -163,7 +163,7 @@ for (const version of [1, 2, 3]) test(`V${version} compatibility accepts only ex
   assert.equal((await f.adapter.verify(old, signal)).state, 'installed')
 })
 
-test('a historical V2 preview without an install receipt cannot silently install current V3 wording', async t => {
+test('a historical V2 preview without an install receipt cannot silently install current V4 wording', async t => {
   const f = await fixture(t), old = await historicalPreview(f, 2)
   await assert.rejects(f.adapter.install(old, signal), { code: 'assistant-native-preview-stale' })
   assert.equal(f.calls.length, 0)
@@ -235,7 +235,7 @@ test('custom base policy is never stripped, including quoted stock identity and 
 })
 
 test('professional presets are not offered as bases and cannot stack a second profession, while historical verification still works', async t => {
-  for (const guidance of [legacyAssistantGuidanceV1, legacyAssistantGuidanceV2, assistantGuidance]) {
+  for (const guidance of [legacyAssistantGuidanceV1, legacyAssistantGuidanceV2, legacyAssistantGuidanceV3, assistantGuidance]) {
     const f = await fixture(t), derived = base()
     derived[0].config.prefix = stockIdentity + '\n\n' + guidance(definition())
     // Detect composition rather than relying solely on a package/preset naming convention.

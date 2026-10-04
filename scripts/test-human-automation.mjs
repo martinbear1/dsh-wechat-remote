@@ -49,6 +49,16 @@ test('unknown is not retried and pauses admission of later submissions', async t
   h.view.submissions = [submission(), submission('a'.repeat(24))]; await h.runtime.drive(); await h.runtime.drive()
   const status = await h.status(); assert.equal(h.stats.calls, 1); assert.equal(status.policy.state, 'paused'); assert.equal(status.runs.filter(r => r.state === 'unknown').length, 1)
 })
+
+test('unsupported document automatic reading blocks visibly before any model call', async t => {
+  const h = await fixture(t, { ready: async () => { throw Object.assign(new Error('document reading unavailable'), { code: 'automation-document-reading-unavailable' }) } })
+  await h.approve(); h.view.submissions = [{ ...submission(), delivery: 'received' }]
+  await h.runtime.drive(); await h.runtime.drive()
+  const status = await h.status()
+  assert.equal(h.stats.calls, 0); assert.equal(status.policy.usedRuns, 0)
+  assert.equal(status.policy.state, 'blocked'); assert.match(status.policy.reason, /文档.*自动读取/)
+  assert.equal(status.runs.length, 0)
+})
 test('crash recovery changes dispatch intent to unknown AND pauses active policy', async t => {
   const h = await fixture(t); await h.approve(); h.view.submissions = [submission()]; h.view.native.busy = true; await h.runtime.drive()
   const raw = h.state.value; raw.runs[0].state = 'dispatching'; raw.runs[0].messageId = 'known_message'

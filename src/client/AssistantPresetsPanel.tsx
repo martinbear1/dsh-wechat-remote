@@ -18,7 +18,7 @@ export function AssistantPresetsPanel({ store, start }: { store: AssistantStore;
   return <section className={styles.companionCard} aria-label="工作助手">
     <strong>工作助手</strong>
     <p>选一个现成助手，预览后安装为 DSH 原生工作模式。具体身份、班级或项目资料在开始会话后再逐步告诉它。</p>
-    <p>想按自己的习惯定制？在小程序「助手预设」选择「对话定制」，用普通语言描述需求；生成的草稿也会出现在这里。</p>
+    <p>想设计其他助手？选择「助手设计师」，安装后用普通语言告诉它想解决什么工作。它会准备可重复使用的模式，生成的草稿也会出现在这里；不需要开发知识。</p>
     <button type="button" disabled={busy} onClick={() => void store.load()}>{catalog ? '刷新助手目录' : '查看可用助手'}</button>
     {catalog && !catalog.native?.supported ? <p role="status">{catalog.native?.reason || '此宿主尚不支持原生预设安装'}</p> : null}
     {catalog?.native?.supported ? <div className={styles.actions}>{catalog.templates.map((item: any) =>

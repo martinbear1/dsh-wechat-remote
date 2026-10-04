@@ -32,6 +32,7 @@ import { SubmissionReceiver } from '../human-workflow/receiver.js'
 import { downloadSubmission } from '../human-workflow/receiver-download.js'
 import { WorkflowLifecycle } from '../human-workflow/lifecycle.js'
 import { lifecycleTools } from '../human-workflow/lifecycle-tools.js'
+import { submissionFileTool } from '../human-workflow/submission-file-tools.js'
 import { WorkflowAutomation, automationPolicyView, automationPreviewView } from '../human-workflow/automation-engine.js'
 import { createNativeAutomationAdapter, installNativeAutomationGate } from '../human-workflow/automation-native.js'
 import { automationTools } from '../human-workflow/automation-tools.js'
@@ -44,12 +45,14 @@ import { uploadCardCover } from './card-cover-upload.js'
 import { normalizeCardCoverImage } from './card-cover-renderer.js'
 import type { AgentResourcesService } from '../agent-resources.js'
 import type { WechatAttachmentService } from '../attachment-service.js'
+import { WorkspaceDirectory } from '../human-workflow/workspace-directory.js'
+import { workspaceTools } from '../human-workflow/workspace-tools.js'
 
 export interface HumanToolsConfig { readonly enabled?: boolean; readonly store?: HumanStore
   readonly assistants?: false | { native?: NativeAssistantAdapter; registryStore?: WorkflowDataStore; businessStore?: WorkflowDataStore; sessionIntentStore?: WorkflowDataStore }
   readonly workflow?: { transport: WorkflowTransport; modeStore?: WorkflowDataStore; recordStore?: WorkflowDataStore; replicaStore?: WorkflowDataStore
     lifecycleStore?: WorkflowDataStore; receiverKeyStore?: WorkflowDataStore; receiverRoot?: string
-    automationStore?: WorkflowDataStore; automationNative?: NativeAutomationAdapter; coverStore?: WorkflowDataStore } }
+    automationStore?: WorkflowDataStore; automationNative?: NativeAutomationAdapter; coverStore?: WorkflowDataStore; workspaceStore?: WorkflowDataStore } }
 export interface CoverPreviewRequest { scope: string; surfaceId: string; revision: 1; requestId: string }
 export interface AutomationTaskRequest { scope: string; taskRef: HumanTaskRef }
 export interface AutomationPreviewRequest extends AutomationTaskRequest { config: AutomationConfig; expectedRevision: number }
@@ -74,6 +77,7 @@ export class HumanToolsService extends TypertRemoteService {
   private lifecycle?: { runtime: WorkflowLifecycle; keys: ReceiverKeyring; receiver?: SubmissionReceiver; unsubscribe(): void }
   private automation?: WorkflowAutomation
   private covers?: CardCoverAssets
+  private directory?: WorkspaceDirectory
   private automationReason = '宿主尚不支持受控原生自动处理；手动群任务仍可使用'
   constructor(private readonly host: Context, config: HumanToolsConfig = {}) {
     super(host, 'humanTools')
@@ -90,7 +94,7 @@ export class HumanToolsService extends TypertRemoteService {
           // A pending initial action read has no mounted writer and retains
           // the existing non-blocking disabled/late-disposed host behavior.
           if (this.lifecycle) await this.ready?.catch(() => {})
-          await Promise.all([drained, this.workflow?.modes.close(), this.workflow?.records.close(), this.workflow?.replica.close(), this.closeAssistants(), this.closeLifecycle(), this.covers?.close()])
+          await Promise.all([drained, this.workflow?.modes.close(), this.workflow?.records.close(), this.workflow?.replica.close(), this.closeAssistants(), this.closeLifecycle(), this.covers?.close(), this.directory?.close()])
         }
         finally { removeAutomationGate() }
       }
@@ -126,11 +130,15 @@ export class HumanToolsService extends TypertRemoteService {
         let modes: ModeRegistry | undefined, records: WorkflowRecords | undefined
         try {
           const capabilities = () => { transport.assertIdentity(); const automation = this.automation?.capability(); return createCapabilityManifest(transport.nodeId, { 'task.query': { status: 'available' },
+            'workspace.directory': this.directory && typeof (this.host.get('workspaceRegistry') as any)?.list === 'function'
+              && Array.isArray((this.host.get('workspaceRegistry') as any)?.archivedSessionIds)
+              ? { status: 'available' } : { status: 'blocked', reason: '需要宿主可核对的真实工作区及会话状态；不能用Agent提供的路径或普通记忆代替。' },
+            'task.reshare': this.lifecycle ? { status: 'available' } : { status: 'blocked', reason: '原任务在线核验及补发工具尚未就绪。' },
             'surface.cover-image': this.covers ? { status: 'available' } : { status: 'blocked', reason: '封面资产服务未就绪；旧无封面群卡仍可使用。' },
             'automation.run': automation?.supported ? { status: 'available' } : { status: 'blocked', reason: automation?.reason || this.automationReason },
             ...(this.lifecycle ? { 'surface.form-collection': { status: 'available' as const }, 'task.audience-select': { status: 'available' as const }, 'task.audience-known': { status: 'available' as const }, 'task.lifecycle': { status: 'available' as const },
               'recipient.query': { status: 'available' as const }, 'result.private': { status: 'available' as const },
-              ...(this.lifecycle.receiver ? { 'submission.receive': { status: 'available' as const } } : {}) } : {}) }) }
+              ...(this.lifecycle.receiver ? { 'submission.receive': { status: 'available' as const }, 'submission.file-receive': { status: 'available' as const } } : {}) } : {}) }) }
           modes = await ModeRegistry.open(config.workflow.modeStore || file('modes'),
             { nodeId: transport.nodeId, capabilities, randomId: () => randomBytes(16).toString('hex') })
           records = await WorkflowRecords.open(config.workflow.recordStore || file('records'),
@@ -169,6 +177,20 @@ export class HumanToolsService extends TypertRemoteService {
           let receiver: SubmissionReceiver | undefined, runtime: WorkflowLifecycle | undefined
           try {
             const attachments = this.host.get('attachments') as AttachmentStore | undefined
+            this.directory = await WorkspaceDirectory.open(config.workflow.workspaceStore || new WorkflowFileStore(path.join(path.dirname(defaultGateStatePath(this.host)), `human-workflow-${transport.nodeId}-workspace-directory.json`), 16 * 1024 * 1024), {
+              transport, published: (scope, id) => core.publishedEvidence(scope, id), host: {
+                header: (id, signal) => this.workspaceHeader(id, signal),
+                workspaces: () => {
+                  const registry = this.host.get('workspaceRegistry') as any
+                  if (typeof registry?.list !== 'function') throw fail('workspace-unavailable', '宿主暂不能可靠核对原生工作区，请更新宿主后使用共享目录')
+                  return registry.list()
+                }, archived: () => {
+                  const registry = this.host.get('workspaceRegistry') as any
+                  if (!Array.isArray(registry?.archivedSessionIds)) throw fail('workspace-unavailable', '宿主暂不能核对会话归档状态')
+                  return registry.archivedSessionIds
+                },
+              },
+            })
             if (typeof attachments?.validateImage === 'function' && typeof attachments?.saveImage === 'function') {
               receiver = await SubmissionReceiver.open({ root: config.workflow.receiverRoot || path.join(path.dirname(keyFile), `human-workflow-${transport.nodeId}-received`),
                 nodeId: transport.nodeId, keys, assertIdentity: () => transport.assertIdentity(), download: downloadSubmission,
@@ -178,6 +200,7 @@ export class HumanToolsService extends TypertRemoteService {
                   manifestDigest: delivery.envelope.manifestDigest, cipherDigest: delivery.envelope.cipherDigest }, signal) })
             }
             runtime = await WorkflowLifecycle.open({ transport, keys, receiver, store: config.workflow.lifecycleStore || await archival('lifecycle'),
+              workspaceAccess: (scope, task, signal) => this.directory!.access(scope, task, signal),
               coverAuthority: (scope, asset) => { if (!this.covers) throw fail('cover-unavailable', '封面资产不可用'); this.covers.assertAsset(scope, asset) } })
             this.lifetime.signal.throwIfAborted(); transport.assertIdentity()
             const current = runtime
@@ -209,7 +232,19 @@ export class HumanToolsService extends TypertRemoteService {
               if (automation) await automation.close(); else await nativeAutomation.close()
               this.lifetime.signal.throwIfAborted(); transport.assertIdentity()
             }
-            for (const tool of lifecycleTools({ nodeId: transport.nodeId, lifecycle: runtime, core,
+            if (receiver) unregisterTools.push((this.host.get('tools') as ToolRuntime).register(submissionFileTool({ nodeId: transport.nodeId, lifecycle: runtime,
+              assertAgent: exec => {
+                this.lifetime.signal.throwIfAborted(); transport.assertIdentity()
+                const agents = this.host.get('agents') as { get(id: string): unknown } | undefined
+                if (!exec.agent || agents?.get(String(exec.agent.id)) !== exec.agent) throw fail('workflow-scope-invalid', '调用者不是当前真实Agent')
+              } })))
+            const assertAgent = (exec: import('@deepseek-ai/dsh-tools').ToolRunContext) => {
+              this.lifetime.signal.throwIfAborted(); transport.assertIdentity()
+              if (!exec.agent || (this.host.get('agents') as any)?.get(String(exec.agent.id)) !== exec.agent) throw fail('workflow-scope-invalid', '调用者不是当前真实Agent')
+            }
+            for (const tool of workspaceTools({ nodeId: transport.nodeId, directory: this.directory, lifecycle: runtime, core, assertAgent }))
+              unregisterTools.push((this.host.get('tools') as ToolRuntime).register(tool))
+            for (const tool of lifecycleTools({ nodeId: transport.nodeId, lifecycle: runtime, core, directory: this.directory,
               assertAgent: exec => {
                 this.lifetime.signal.throwIfAborted(); transport.assertIdentity()
                 const agents = this.host.get('agents') as { get(id: string): unknown } | undefined
@@ -277,7 +312,7 @@ export class HumanToolsService extends TypertRemoteService {
         unregisterTools.push((this.host.get('tools') as ToolRuntime).register(tool))
       const unregisterContext = registerHumanContext(this.host, core)
       this.unregister = () => { unregisterContext(); unregisterTools.reverse().forEach(remove => remove()) }
-    } catch (cause) { unregisterTools.reverse().forEach(remove => remove()); await Promise.all([core.close(), this.workflow?.modes.close(), this.workflow?.records.close(), this.workflow?.replica.close(), this.closeAssistants(), this.closeLifecycle(), this.covers?.close()]); this.core = undefined; this.workflow = undefined; throw cause }
+    } catch (cause) { unregisterTools.reverse().forEach(remove => remove()); await Promise.all([core.close(), this.workflow?.modes.close(), this.workflow?.records.close(), this.workflow?.replica.close(), this.closeAssistants(), this.closeLifecycle(), this.covers?.close(), this.directory?.close()]); this.core = undefined; this.workflow = undefined; throw cause }
   }
   private async closeLifecycle() {
     const current = this.lifecycle; if (!current) return
@@ -475,8 +510,19 @@ export class HumanToolsService extends TypertRemoteService {
   }
   @Remote('capabilities')
   async capabilities(request: { scope: string }, signal: AbortSignal): Promise<HumanResult> {
-    return this.result(async () => { await this.use(signal); return { schema: 'human.tools.v1', enabled: true, shareTest: true, members: true, remind: true,
-      ...(this.workflow ? { workflow: this.workflow.modes.manifest() } : {}) } })
+    return this.result(async () => {
+      await this.use(signal)
+      const manifest = this.workflow?.modes.manifest()
+      // Phone action discovery is a readiness projection, not the Agent's
+      // capability documentation. Keep it independent of growing contracts,
+      // tool descriptions and Skill text. Full details remain discoverable
+      // through human_capabilities and the exact mode preview endpoints.
+      return { schema: 'human.tools.v1', enabled: true, shareTest: true, members: true, remind: true,
+        ...(manifest ? { workflow: { schema: 'human.capabilities.status.v1', nodeId: manifest.nodeId, version: manifest.version,
+          statusMeaning: 'node-implementation-not-device-verification-or-authorization',
+          capabilities: manifest.capabilities.map(({ id, version, status, ownerApproval, reason }) =>
+            ({ id, version, status, ownerApproval, ...(reason !== undefined ? { reason } : {}) })) } } : {}) }
+    })
   }
   @Remote('sourceGrant')
   async sourceGrant(request: HumanActionRequest, signal: AbortSignal): Promise<HumanResult> {
@@ -485,8 +531,10 @@ export class HumanToolsService extends TypertRemoteService {
       if (!this.workflow) throw fail('workflow-unavailable', '此节点尚未连接群任务服务')
       const source = core.grantSource(request), generation = await this.claimGeneration(request.scope, active)
       core.assertGeneration(request.scope, request.surfaceId, generation)
+      const shared = source.surface.targetTaskRef && await this.directory?.access({ nodeId: this.workflow.transport.nodeId,
+        sessionId: request.scope, sessionGeneration: generation }, source.surface.targetTaskRef, active)
       const grant = await this.workflow.transport.request('grant', { scope: source.origin.scope, sessionGeneration: generation,
-        surfaceId: request.surfaceId, attemptId: request.attemptId, surface: source.surface }, active)
+        surfaceId: request.surfaceId, attemptId: request.attemptId, surface: source.surface, ...(shared ? { workspaceRef: shared.workspaceRef } : {}) }, active)
       active.throwIfAborted(); this.workflow.transport.assertIdentity()
       if (!row(grant) || grant.schema !== 'human.source.grant.v1' || typeof grant.sourceGrant !== 'string' || grant.sourceGrant.length > 4096
         || !Number.isSafeInteger(grant.expiresAt) || Number(grant.expiresAt) <= Date.now()) throw fail('workflow-response-invalid', '任务来源凭证无效')
@@ -536,6 +584,22 @@ export class HumanToolsService extends TypertRemoteService {
   }
   /** A missing live Session is not evidence that its durable generation still
    * exists. Query headers only; never acquire a Session/Agent writer to claim. */
+  private async workspaceHeader(scope: string, signal: AbortSignal): Promise<unknown> {
+    signal.throwIfAborted()
+    const sessions = this.host.get('sessions') as SessionStore | undefined, live = sessions?.get(scope as SessionId)
+    if (live) return structuredClone(live.header)
+    const query = this.host.get('sessionQuery') as any
+    const result = typeof query?.filterSessions === 'function' ? await query.filterSessions([{ kind: 'id', values: [scope] }], signal)
+      : typeof query?.listSessions === 'function' ? await query.listSessions(signal) : undefined
+    signal.throwIfAborted()
+    if (!Array.isArray(result)) throw fail('workspace-source-unavailable', '宿主不能只读核对来源会话，请回到来源会话后重试')
+    const matches = result.filter(value => row(value) && row(value.header) && value.header.id === scope)
+    if (matches.length !== 1) throw fail('workspace-source-unavailable', '来源会话已删除或身份不明确')
+    const current = sessions?.get(scope as SessionId)
+    if (current && (current.header.createdAt !== matches[0].header.createdAt || current.header.cwd !== matches[0].header.cwd))
+      throw fail('workspace-source-unavailable', '核对期间来源会话已变更')
+    return structuredClone(matches[0].header)
+  }
   private async claimGeneration(scope: string, signal: AbortSignal): Promise<string> {
     try {
       signal.throwIfAborted()

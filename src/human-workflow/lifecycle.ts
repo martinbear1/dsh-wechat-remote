@@ -1,14 +1,17 @@
-import { humanTaskRef, humanWorkflowDraftRef, humanReminderTitle, sameTaskRef, type HumanTaskRef, type HumanWorkflowDraftRef } from '../human-tools/protocol.js'
+import { humanTaskRef, humanWorkflowDraftRef, humanReminderTitle, humanSelectionRef, humanRecipientRef, sameTaskRef, type HumanTaskRef, type HumanWorkflowDraftRef, type HumanSelectionRef, type HumanReminderPreview, type HumanRecipientRef } from '../human-tools/protocol.js'
 import { assertScope, bounded, copy, exact, fail, plain, revision, row, sameScope, scopeValid, StateQueue, version, type WorkflowDataStore, type WorkflowScope } from './data.js'
 import { workflowErrorMessage, type WorkflowTransport } from './transport.js'
 import { randomBytes } from 'node:crypto'
 import { ReceiverKeyring } from './receiver-keyring.js'
 import { SubmissionReceiver } from './receiver.js'
 import { canonicalSubmission, sha256 } from './submission-crypto.js'
+import { SUBMISSION_RECEIVE_FORMATS, submissionImageType } from './submission-file-contract.js'
 import type { AutomationSnapshot, AutomationSubmission } from './automation-types.js'
 import { WORKFLOW_LONG_TERM_BYTES } from './archive-store.js'
 import { HUMAN_ROUND_MAX_BYTES, HUMAN_SURFACE_MAX_BYTES, HUMAN_LIFECYCLE_RESPONSE_MAX_BYTES } from '../human-tools/capacity.js'
 import { lifecycleCoverValid, humanCardAsset, type HumanCardAsset } from '../human-tools/card-cover.js'
+import { recipientFacts, recipientSnapshot } from './recipient-facts.js'
+import type { WorkspaceTaskAccess } from './workspace-directory.js'
 
 export interface NodeBinding { schema: 'human.node.binding.v1'; nodeId: string; ownerSubject: string; accountInstance: string; generation: string }
 export function receiverBinding(value: unknown, nodeId: string): { binding: NodeBinding; bindingKey: string } {
@@ -23,17 +26,30 @@ export interface LifecycleDraft {
   context?: { taskTitle: string; roundTitle?: string; submissionCreatedAt?: number; reminderTargetCount?: number }
   execution?: { operationId: string; phase: 'prepared' | 'invoked' | 'settled'; outcome: string | null; reason: string | null }
 }
-export type LifecycleReminderContent = { roundId: string; title: string } & (
+export type LifecycleReminderContent = { roundId: string | null; title: string } & (
   { condition: 'pending-submission' | 'result-published'; participantRefs: string[]; recipientSource?: never }
   | { condition: 'pending-submission'; recipientSource: 'task-audience'; participantRefs?: never }
+  | { condition: 'pending-submission'; recipientSource: 'selected-members'; selectionRef: HumanSelectionRef; participantRefs?: never }
+  | { condition: 'none'; recipientSource: 'exact-references'; recipientRefs: HumanRecipientRef[]; type: 'complete' | 'participate'; participantRefs?: never }
 )
 /** Request data only. Actual audience membership and current eligibility are
  * resolved by the authenticated server without creating participant records. */
 export function lifecycleReminderContent(value: unknown): LifecycleReminderContent | undefined {
-  if (!row(value) || !plain(value.roundId, 128) || !humanReminderTitle(value.title)) return
+  if (!row(value) || !humanReminderTitle(value.title)) return
+  if (value.recipientSource === 'exact-references') {
+    if (!exact(value, ['roundId', 'title', 'condition', 'recipientSource', 'recipientRefs', 'type']) || value.condition !== 'none'
+      || value.roundId !== null && !plain(value.roundId, 128) || !['complete', 'participate'].includes(String(value.type))
+      || !Array.isArray(value.recipientRefs) || !value.recipientRefs.length || value.recipientRefs.length > 20
+      || !value.recipientRefs.every(humanRecipientRef)
+      || new Set(value.recipientRefs.map(ref => canonicalSubmission(ref))).size !== value.recipientRefs.length) return
+    return copy(value) as LifecycleReminderContent
+  }
+  if (!plain(value.roundId, 128)) return
   if (Object.hasOwn(value, 'recipientSource')) {
-    if (!exact(value, ['roundId', 'title', 'condition', 'recipientSource'])
-      || value.recipientSource !== 'task-audience' || value.condition !== 'pending-submission') return
+    if (value.condition !== 'pending-submission') return
+    if (value.recipientSource === 'selected-members') {
+      if (!exact(value, ['roundId', 'title', 'condition', 'recipientSource', 'selectionRef']) || !humanSelectionRef(value.selectionRef)) return
+    } else if (!exact(value, ['roundId', 'title', 'condition', 'recipientSource']) || value.recipientSource !== 'task-audience') return
   } else if (!exact(value, ['roundId', 'title', 'condition', 'participantRefs'])
     || !['pending-submission', 'result-published'].includes(String(value.condition))
     || !Array.isArray(value.participantRefs) || value.participantRefs.length < 1 || value.participantRefs.length > 20
@@ -41,15 +57,28 @@ export function lifecycleReminderContent(value: unknown): LifecycleReminderConte
     || !value.participantRefs.every(ref => typeof ref === 'string' && /^[A-Za-z0-9_-]{24,64}(?![\s\S])/.test(ref))) return
   return copy(value) as LifecycleReminderContent
 }
+/** Derived from the checked immutable cloud draft, never supplied by the model. */
+export function lifecycleReminderPreview(draft: LifecycleDraft): HumanReminderPreview | undefined {
+  const content = lifecycleReminderContent(draft.content)
+  if (draft.draftRef.kind !== 'reminder' || !content || !draft.context?.taskTitle) return
+  return { schema: 'human.reminder.preview.v1', title: content.title, taskTitle: draft.context.taskTitle, condition: content.condition,
+    type: content.recipientSource === 'exact-references' ? content.type : 'complete',
+    recipientSource: content.recipientSource || 'observed', recipientCount: content.recipientSource === 'task-audience' ? null
+      : content.recipientSource === 'selected-members' ? content.selectionRef.memberRefs.length
+        : content.recipientSource === 'exact-references' ? content.recipientRefs.length : content.participantRefs.length }
+}
 interface Analysis { scope: WorkflowScope; taskRef: HumanTaskRef; submissionId: string; submissionVersion: number; revision: number; text: string; updatedAt: number }
 interface ReceiptAttempt { scope: WorkflowScope; taskRef: HumanTaskRef; submissionId: string; submissionVersion: number
   revision: number; requestId: string; state: 'pending' | 'received' | 'blocked'; errorCode?: string; updatedAt: number }
 interface Ledger { schema: 'human.lifecycle.local.v1'; nodeId: string; analyses: Analysis[]; receipts?: ReceiptAttempt[] }
-const receiptBlockedCodes = new Set(['download_ticket_expired', 'attachment_download_quota', 'usage_ledger_capacity', 'metering_unavailable', 'receiver-capacity'])
+const receiptRetryableCodes = new Set(['download_ticket_expired', 'attachment_download_quota', 'usage_ledger_capacity', 'metering_unavailable', 'receiver-capacity', 'receiver_format_unsupported'])
+const receiptBlockedCodes = new Set([...receiptRetryableCodes, 'submission-file-invalid', 'submission-image-invalid', 'submission-manifest-invalid',
+  'submission-integrity-invalid', 'submission-context-invalid', 'receiver-file-mismatch'])
 export interface LifecycleOptions {
   transport: WorkflowTransport; keys: ReceiverKeyring; receiver?: SubmissionReceiver; store: WorkflowDataStore
   now?: () => number
   coverAuthority?(scope: WorkflowScope, asset: HumanCardAsset): void
+  workspaceAccess?(scope: WorkflowScope, taskRef: HumanTaskRef, signal: AbortSignal): Promise<WorkspaceTaskAccess | undefined>
 }
 export const RECEIVER_SYNC_MAX_FILES = 4
 export const RECEIVER_SYNC_TIMEOUT_MS = 120_000
@@ -100,6 +129,7 @@ function draftEffects(draft: LifecycleDraft) {
 export class WorkflowLifecycle {
   private readonly lifetime = new AbortController()
   private readonly registered = new Set<string>()
+  private readonly fileRegistered = new Set<string>()
   private readonly offsets = new Map<string, number>()
   private background: Promise<void> = Promise.resolve()
   private syncing = false
@@ -137,32 +167,43 @@ export class WorkflowLifecycle {
     return new WorkflowLifecycle(options, new StateQueue(options.store, ledger, WORKFLOW_LONG_TERM_BYTES))
   }
   private active(signal: AbortSignal): AbortSignal { this.options.transport.assertIdentity(); this.lifetime.signal.throwIfAborted(); return AbortSignal.any([signal, this.lifetime.signal]) }
-  async prepareInitial(signal: AbortSignal, requiresImage: boolean): Promise<void> {
+  async prepareInitial(signal: AbortSignal, requiresAttachment: boolean, requiresFile = false): Promise<void> {
     const active = this.active(signal)
-    if (requiresImage && !this.options.receiver) throw fail('receiver-unavailable', '此宿主尚不能可靠接收和验证图片')
-    // Before the first task exists, discover only the node's current binding.
-    // This creates no Agent/session and does not turn the snapshot into facts.
-    const page = await this.options.transport.request('sync', { mode: 'snapshot', limit: 1 }, active)
-    if (!row(page) || page.schema !== 'human.workflow.sync.v1') throw fail('lifecycle-binding-invalid', '无法核对首轮接收节点')
-    await this.registerKey(page.binding, active); this.available = true
+    if (requiresAttachment && !this.options.receiver) throw fail('receiver-unavailable', '此宿主尚不能可靠接收和验证附件')
+    // Discover fresh authenticated binding without allocating a task snapshot.
+    // Even a one-row snapshot copies the full source and consumes scarce slots;
+    // neither cached binding nor an events cursor is a fresh authority substitute.
+    const page = await this.options.transport.request('sync', { mode: 'binding' }, active)
+    this.options.transport.assertIdentity(); active.throwIfAborted()
+    if (!row(page) || page.schema !== 'human.workflow.binding.v1' || !revision(page.asOf)
+      || receiverBinding(page.binding, this.options.transport.nodeId).bindingKey !== page.bindingKey)
+      throw fail('lifecycle-binding-invalid', '无法核对首轮接收节点')
+    const bindingKey = await this.registerKey(page.binding, active)
+    if (requiresFile && !this.fileRegistered.has(bindingKey)) throw fail('receiver-file-unavailable', '接收节点与服务端尚未共同确认文档收件能力')
+    this.available = true
   }
   private async registerKey(binding: unknown, signal: AbortSignal): Promise<string> {
     const { bindingKey } = receiverBinding(binding, this.options.transport.nodeId)
     if (this.registered.has(bindingKey)) return bindingKey
     const key = await this.options.keys.ensure(bindingKey, signal)
-    const result = await this.options.transport.request('receiver-key', { key }, signal)
+    const result = await this.options.transport.request('receiver-key', { key, ...(this.options.receiver ? { receiveFormats: SUBMISSION_RECEIVE_FORMATS } : {}) }, signal)
     if (!row(result) || result.bindingKey !== bindingKey || receiverBinding(result.binding, this.options.transport.nodeId).bindingKey !== bindingKey
       || canonicalSubmission(result.key) !== canonicalSubmission(key)) throw fail('lifecycle-binding-invalid', '接收公钥登记绑定不符')
-    this.options.transport.assertIdentity(); signal.throwIfAborted(); this.registered.add(bindingKey); return bindingKey
+    if (this.options.receiver && result.receiveFormats !== undefined && canonicalSubmission(result.receiveFormats) !== canonicalSubmission(SUBMISSION_RECEIVE_FORMATS))
+      throw fail('receiver-file-unavailable', '服务端确认的附件格式与本节点不一致')
+    this.options.transport.assertIdentity(); signal.throwIfAborted(); this.registered.add(bindingKey)
+    if (this.options.receiver && result.receiveFormats !== undefined) this.fileRegistered.add(bindingKey)
+    return bindingKey
   }
   private async get(scope: WorkflowScope, taskRef: HumanTaskRef, signal: AbortSignal, extra: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
     assertScope(scope, this.options.transport.nodeId); if (!humanTaskRef(taskRef)) throw fail('lifecycle-query-invalid', '任务引用无效')
     const active = this.active(signal)
+    const shared = await this.options.workspaceAccess?.(scope, taskRef, active), expectedOrigin = shared?.sourceScope ?? scope
     const result = await this.options.transport.request('lifecycle', { operation: 'get', scope: scope.sessionId,
-      sessionGeneration: scope.sessionGeneration, taskRef, ...extra }, active)
+      sessionGeneration: scope.sessionGeneration, taskRef, ...extra, ...(shared ? { workspaceRef: shared.workspaceRef } : {}) }, active)
     this.options.transport.assertIdentity(); active.throwIfAborted()
     if (!row(result) || !sameTaskRef(humanTaskRef(result.taskRef), taskRef) || !row(result.origin)
-      || result.origin.scope !== scope.sessionId || result.origin.sessionGeneration !== scope.sessionGeneration || !revision(result.revision)
+      || result.origin.scope !== expectedOrigin.sessionId || result.origin.sessionGeneration !== expectedOrigin.sessionGeneration || !revision(result.revision)
       || !Array.isArray(result.rounds) || !Array.isArray(result.submissions) || !Array.isArray(result.drafts) || !Array.isArray(result.participants)
       || !result.submissions.every(row) || result.submissions.length > 20 || result.rounds.length > 100 || result.drafts.length > 100 || result.participants.length > 1000
       || result.nextOffset !== null && !revision(result.nextOffset)) throw fail('lifecycle-response-invalid', '任务生命周期响应无效')
@@ -171,6 +212,15 @@ export class WorkflowLifecycle {
     if (result.bindingKey !== bindingKey) throw fail('lifecycle-binding-invalid', '任务接收绑定不符')
     this.available = true
     return result
+  }
+  async reshare(scope: WorkflowScope, taskRef: HumanTaskRef, roundId: string | null, signal: AbortSignal) {
+    if (roundId !== null && !plain(roundId, 128)) throw fail('lifecycle-query-invalid', '原任务提交要求引用无效')
+    const page = await this.get(scope, taskRef, signal)
+    if (!row(page.task) || !plain(page.task.title, 80) || !plain(page.task.body, 1000)) throw fail('lifecycle-response-invalid', '服务器未返回可核对的原任务公开内容')
+    const round = roundId === null ? undefined : (page.rounds as Record<string, unknown>[]).find(r => r.id === roundId)
+    if (roundId !== null && (!round || round.recipientRefs !== null || !plain(round.title, 80) || !plain(round.instructions, 2000)))
+      throw fail('lifecycle-share-invalid', '只能重新发送原入口或已发布的公开提交要求，不能公开个人反馈或定向订正')
+    return { title: (round?.title ?? page.task.title) as string, body: ((round?.instructions ?? page.task.body) as string).slice(0, 1000) }
   }
   async query(scope: WorkflowScope, taskRef: HumanTaskRef, signal: AbortSignal, offset = 0, roundId?: string): Promise<unknown> {
     if (!revision(offset) || roundId !== undefined && !plain(roundId, 128)) throw fail('lifecycle-query-invalid', '任务分页或轮次引用无效')
@@ -190,6 +240,22 @@ export class WorkflowLifecycle {
           effects: draftEffects(draft) }
       }), nextOffset: submissions.length < (page.submissions as unknown[]).length ? offset + submissions.length : page.nextOffset, asOf: (this.options.now ?? Date.now)() }
   }
+  async recipients(scope: WorkflowScope, taskRef: HumanTaskRef, signal: AbortSignal, roundId: string | null = null, offset = 0, snapshot?: string) {
+    assertScope(scope, this.options.transport.nodeId)
+    if (!humanTaskRef(taskRef) || roundId !== null && !plain(roundId, 128) || !revision(offset) || offset > 10000
+      || snapshot !== undefined && !recipientSnapshot(snapshot) || offset > 0 && snapshot === undefined)
+      throw fail('lifecycle-query-invalid', '成员范围或分页快照无效，请从第一页重新查询')
+    const active = this.active(signal)
+    const shared = await this.options.workspaceAccess?.(scope, taskRef, active), expectedOrigin = shared?.sourceScope ?? scope
+    const result = await this.options.transport.request('lifecycle', { operation: 'recipients', scope: scope.sessionId,
+      sessionGeneration: scope.sessionGeneration, taskRef, roundId, offset, ...(snapshot === undefined ? {} : { snapshot }), ...(shared ? { workspaceRef: shared.workspaceRef } : {}) }, active)
+    this.options.transport.assertIdentity(); active.throwIfAborted()
+    if (!row(result) || !row(result.origin) || result.origin.scope !== expectedOrigin.sessionId || result.origin.sessionGeneration !== expectedOrigin.sessionGeneration)
+      throw fail('lifecycle-response-invalid', '成员事实不属于当前会话')
+    const { bindingKey } = receiverBinding(result.binding, this.options.transport.nodeId)
+    if (result.bindingKey !== bindingKey) throw fail('lifecycle-binding-invalid', '成员事实节点绑定不符')
+    return recipientFacts(result, taskRef, roundId, offset, snapshot)
+  }
   async prepare(scope: WorkflowScope, taskRef: HumanTaskRef, kind: HumanWorkflowDraftRef['kind'], expectedRevision: number,
     content: Record<string, unknown>, idempotencyKey: string, signal: AbortSignal): Promise<LifecycleDraft> {
     const active = this.active(signal)
@@ -198,19 +264,26 @@ export class WorkflowLifecycle {
     bounded(content, HUMAN_ROUND_MAX_BYTES)
     if (!lifecycleCoverValid(kind, content)) throw fail('lifecycle-cover-invalid', '封面仅适用于公开新轮次，不能用于定向轮次、私密反馈或订正')
     if (kind === 'reminder' && !lifecycleReminderContent(content)) throw fail('lifecycle-reminder-invalid', '提醒内容或对象来源无效')
+    if (kind === 'reminder' && content.recipientSource === 'exact-references'
+      && (content.recipientRefs as HumanRecipientRef[]).some(ref => ref.taskId !== taskRef.taskId || ref.deliveryId !== taskRef.deliveryId))
+      throw fail('lifecycle-reminder-invalid', '提醒对象引用不属于此任务')
     if (content.cover !== undefined) {
       if (!this.options.coverAuthority) throw fail('lifecycle-cover-unavailable', '此节点不能核对封面图片来源')
       this.options.coverAuthority(scope, humanCardAsset(content.cover)!)
     }
     const current = await this.get(scope, taskRef, active)
+    const submissionForm = kind === 'round' ? content.form : kind === 'review' && row(content.correction) ? content.correction.form : undefined
+    if (row(submissionForm) && row(submissionForm.attachment) && submissionForm.attachment.kind === 'file' && !this.fileRegistered.has(String(current.bindingKey)))
+      throw fail('receiver-file-unavailable', '接收节点与服务端尚未共同确认文档收件能力')
     if (current.revision !== expectedRevision) throw fail('lifecycle-version-conflict', '任务已变化，请重新查询后准备方案')
     if (kind === 'reminder' && content.recipientSource === 'task-audience') {
       const round = (current.rounds as unknown[]).find(value => row(value) && value.id === content.roundId)
       if (!row(round) || round.recipientRefs !== null)
         throw fail('lifecycle-reminder-invalid', '只能复用此任务公开提交要求的固定指定名单进行提醒')
     }
+    const shared = await this.options.workspaceAccess?.(scope, taskRef, active)
     const result = await this.options.transport.request('lifecycle', { operation: `${kind}-draft`, scope: scope.sessionId,
-      sessionGeneration: scope.sessionGeneration, taskRef, expectedRevision, content, idempotencyKey }, active)
+      sessionGeneration: scope.sessionGeneration, taskRef, expectedRevision, content, idempotencyKey, ...(shared ? { workspaceRef: shared.workspaceRef } : {}) }, active)
     this.options.transport.assertIdentity(); active.throwIfAborted()
     if (!row(result)) throw fail('lifecycle-response-invalid', '任务方案响应无效')
     const draft = lifecycleDraft(result.draft)
@@ -247,7 +320,7 @@ export class WorkflowLifecycle {
         catch { this.active(active); state = 'blocked'; errorCode = 'submission-not-received' }
       }
       items.push({ submissionId: item.id, submissionVersion: item.version, roundId: item.roundId, state, revision: r?.revision ?? 0,
-        ...(errorCode ? { errorCode, message: workflowErrorMessage(errorCode) } : {}), retryable: state === 'blocked' && item.delivery === 'pending' && !!errorCode && receiptBlockedCodes.has(errorCode) })
+        ...(errorCode ? { errorCode, message: workflowErrorMessage(errorCode) } : {}), retryable: state === 'blocked' && item.delivery === 'pending' && !!errorCode && receiptRetryableCodes.has(errorCode) })
     }
     return { schema: 'human.workflow.receipts.v1', taskRef: copy(taskRef), asOf: page.asOf, items, nextOffset: page.nextOffset }
   }
@@ -260,7 +333,7 @@ export class WorkflowLifecycle {
     return this.state.update(next => {
       this.active(active)
       const r = next.receipts?.find(r => sameScope(r.scope, scope) && sameTaskRef(r.taskRef, taskRef) && r.submissionId === input.submissionId && r.submissionVersion === input.submissionVersion)
-      if (!r || r.revision !== input.expectedRevision || r.state !== 'blocked' || !r.errorCode || !receiptBlockedCodes.has(r.errorCode)) throw fail('receipt-version-conflict', '收件状态已变化；请先刷新核对，不会重复申请下载')
+      if (!r || r.revision !== input.expectedRevision || r.state !== 'blocked' || !r.errorCode || !receiptRetryableCodes.has(r.errorCode)) throw fail('receipt-version-conflict', '收件状态已变化；请先刷新核对，不会重复申请下载')
       r.requestId = randomBytes(32).toString('hex'); r.revision++; r.state = 'pending'; delete r.errorCode; r.updatedAt = (this.options.now ?? Date.now)()
       return { schema: 'human.workflow.receipt-retry.v1', taskRef: copy(taskRef), submissionId: r.submissionId, submissionVersion: r.submissionVersion, revision: r.revision, state: 'pending' }
     }, active)
@@ -306,7 +379,7 @@ export class WorkflowLifecycle {
             attempts++
             try {
             const claim = (receipt?: unknown) => this.options.transport.request('objects/claim', { scope: scope.sessionId, sessionGeneration: scope.sessionGeneration,
-              taskRef, submissionId: item.id, requestId: intent!.requestId, ...(receipt ? { receipt } : {}) }, active)
+              taskRef, submissionId: item.id, requestId: intent!.requestId, ...(receipt ? { receipt } : { receiveFormats: SUBMISSION_RECEIVE_FORMATS }) }, active)
             const recovered = typeof this.options.receiver.recoverReceipt === 'function' && await this.options.receiver.recoverReceipt(scope, taskRef, String(page.bindingKey), item.id, item.version, claim, active)
             if (!recovered) {
               if (item.delivery === 'expired') continue // only durable-original ACK may recover an expired object
@@ -335,13 +408,38 @@ export class WorkflowLifecycle {
     const finished = operation.finally(() => { this.syncing = false })
     this.background = finished.catch(() => {}); return finished
   }
-  async readImage(scope: WorkflowScope, taskRef: HumanTaskRef, submissionId: string, signal: AbortSignal) {
-    if (!this.options.receiver) throw fail('receiver-unavailable', '此宿主不支持原生图片接收')
+  private async readAttachment(scope: WorkflowScope, taskRef: HumanTaskRef, submissionId: string, signal: AbortSignal) {
+    if (!this.options.receiver) throw fail('receiver-unavailable', '此宿主不支持附件接收')
     const page = await this.get(scope, taskRef, signal, { submissionId })
     const item = (page.submissions as Record<string, unknown>[]).find(item => item.id === submissionId)
     if (!item) throw fail('submission-unavailable', '提交不属于此会话任务')
-    const result = await this.options.receiver.read(scope, submissionId, String(page.bindingKey), this.active(signal))
-    if (!sameTaskRef(result.manifest.context.taskRef, taskRef) || item.version !== result.manifest.context.version) throw fail('submission-unavailable', '提交版本已变化')
+    const originalScope = { ...scope, sessionId: String((page.origin as Record<string, unknown>).scope), sessionGeneration: String((page.origin as Record<string, unknown>).sessionGeneration) }
+    const result = await this.options.receiver.read(originalScope, submissionId, String(page.bindingKey), this.active(signal))
+    if (!sameTaskRef(result.manifest.context.taskRef, taskRef) || item.id !== result.manifest.context.submissionId
+      || item.version !== result.manifest.context.version || item.roundId !== result.manifest.context.roundId
+      || item.participantRef !== result.manifest.context.participantRef || !row(item.values)
+      || canonicalSubmission(item.values) !== canonicalSubmission(result.manifest.answers))
+      throw fail('submission-unavailable', '提交来源、答案或版本已变化')
+    return result
+  }
+  async readImage(scope: WorkflowScope, taskRef: HumanTaskRef, submissionId: string, signal: AbortSignal) {
+    const result = await this.readAttachment(scope, taskRef, submissionId, signal)
+    const mediaType = result.manifest.file.mediaType
+    if (!submissionImageType(mediaType)) throw fail('submission-not-image', '该提交是文档，请使用 human_submission_file 取得文件路径并用宿主文件工具读取')
+    return { ...result, manifest: { ...result.manifest, file: { ...result.manifest.file, mediaType } } }
+  }
+  async exportFile(scope: WorkflowScope, taskRef: HumanTaskRef, submissionId: string, signal: AbortSignal) {
+    if (!this.options.receiver) throw fail('receiver-unavailable', '此宿主不支持附件接收')
+    const page = await this.get(scope, taskRef, signal, { submissionId })
+    const item = (page.submissions as Record<string, unknown>[]).find(item => item.id === submissionId)
+    if (!item) throw fail('submission-unavailable', '提交不属于此会话任务')
+    const originalScope = { ...scope, sessionId: String((page.origin as Record<string, unknown>).scope), sessionGeneration: String((page.origin as Record<string, unknown>).sessionGeneration) }
+    const result = await this.options.receiver.exportFile(originalScope, submissionId, String(page.bindingKey), this.active(signal))
+    if (!sameTaskRef(result.manifest.context.taskRef, taskRef) || item.id !== result.manifest.context.submissionId
+      || item.version !== result.manifest.context.version || item.roundId !== result.manifest.context.roundId
+      || item.participantRef !== result.manifest.context.participantRef || !row(item.values)
+      || canonicalSubmission(item.values) !== canonicalSubmission(result.manifest.answers))
+      throw fail('submission-unavailable', '提交来源、答案或版本已变化')
     return result
   }
   /** Fresh signed authority for automatic work. This is intentionally not the
@@ -361,7 +459,9 @@ export class WorkflowLifecycle {
     if (submission.state !== 'accepted') return false
     if (submission.delivery === 'not-required') return true
     if (submission.delivery !== 'received') return false
-    const received = await this.readImage(scope, taskRef, submission.id, signal)
+    const received = await this.readAttachment(scope, taskRef, submission.id, signal)
+    if (!submissionImageType(received.manifest.file.mediaType))
+      throw fail('automation-document-reading-unavailable', '文档已接收；自动读取和分析尚未接通，请先在会话中查看文件')
     return received.manifest.context.version === submission.version && received.manifest.context.roundId === submission.roundId
   }
   async saveAnalysis(scope: WorkflowScope, taskRef: HumanTaskRef, input: { submissionId: string; submissionVersion: number; expectedRevision: number; text: string }, signal: AbortSignal) {
@@ -370,7 +470,7 @@ export class WorkflowLifecycle {
     const page = await this.get(scope, taskRef, active, { submissionId: input.submissionId })
     const submission = (page.submissions as Record<string, unknown>[]).find(item => item.id === input.submissionId && item.version === input.submissionVersion)
     if (!submission) throw fail('submission-unavailable', '分析引用的提交不存在')
-    if (submission.delivery !== 'not-required') await this.readImage(scope, taskRef, input.submissionId, active)
+    if (submission.delivery !== 'not-required') await this.readAttachment(scope, taskRef, input.submissionId, active)
     return this.state.update(ledger => {
       this.options.transport.assertIdentity()
       const previous = ledger.analyses.find(entry => sameScope(entry.scope, scope) && entry.submissionId === input.submissionId)

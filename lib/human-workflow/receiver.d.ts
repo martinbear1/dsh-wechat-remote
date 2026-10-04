@@ -2,6 +2,12 @@ import { type WorkflowScope } from './data.js';
 import { type HumanTaskRef } from '../human-tools/protocol.js';
 import { ReceiverKeyring } from './receiver-keyring.js';
 import { type SubmissionContext, type SubmissionEnvelope, type SubmissionManifest, type SubmissionAnswers } from './submission-crypto.js';
+import { type SubmissionFileType } from './submission-file-contract.js';
+interface FileDeclaration {
+    kind: 'file';
+    mediaType: SubmissionFileType;
+    plainBytes: number;
+}
 export interface ReceiverDelivery {
     claimId: string;
     leaseExpiresAt: number;
@@ -11,6 +17,7 @@ export interface ReceiverDelivery {
     envelope: SubmissionEnvelope;
     values: SubmissionAnswers;
     download: unknown;
+    attachment?: FileDeclaration;
 }
 export interface ReceiverOptions {
     root: string;
@@ -35,6 +42,7 @@ export declare class SubmissionReceiver {
     private constructor();
     static open(options: ReceiverOptions): Promise<SubmissionReceiver>;
     private check;
+    private validateRaster;
     private serial;
     private directory;
     private readReceipt;
@@ -57,7 +65,22 @@ export declare class SubmissionReceiver {
         artifactRef: string;
         receivedAt: number;
         manifest: SubmissionManifest;
+        data: Uint8Array;
         image: Uint8Array;
+    }>;
+    /** Explicit authorized access creates a private, system-named plaintext copy.
+     * It is inert data, not a command or a trustworthy instruction. The retained
+     * original remains ciphertext; user filenames are never joined into paths. */
+    exportFile(origin: WorkflowScope, submissionId: string, bindingKey: string, signal: AbortSignal): Promise<{
+        path: string;
+        displayName: string;
+        mediaType: "image/png" | "image/jpeg" | "application/pdf" | "application/vnd.openxmlformats-officedocument.wordprocessingml.document" | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" | "application/vnd.openxmlformats-officedocument.presentationml.presentation" | "text/plain" | "text/csv";
+        bytes: number;
+        sha256: string;
+        manifest: SubmissionManifest;
+        receivedAt: number;
+        artifactRef: string;
     }>;
     close(): Promise<void>;
 }
+export {};

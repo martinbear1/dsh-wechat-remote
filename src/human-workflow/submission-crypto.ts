@@ -1,13 +1,16 @@
 /** Versioned offline submission envelope. No session keys, executable fields,
- * file names, URLs or account credentials occur inside this protocol. Public
+ * URLs or account credentials occur inside this protocol. v2 adds an encrypted
+ * sanitized display name, never a filesystem path. Public
  * keys are distributed by the authenticated service: this does NOT protect
  * first contact against a malicious server replacing the whole identity. */
 import { createHash } from 'node:crypto'
 import nacl from 'tweetnacl'
 import { exact, fail, identifier, plain, row, version } from './data.js'
 import { humanTaskRef, type HumanTaskRef } from '../human-tools/protocol.js'
+import { SUBMISSION_FILE_MAX, safeSubmissionName, submissionFileType, submissionImageType, type SubmissionFileType } from './submission-file-contract.js'
+import { validateSubmissionFile } from './submission-file.js'
 
-export const SUBMISSION_IMAGE_MAX = 10 * 1024 * 1024
+export const SUBMISSION_IMAGE_MAX = SUBMISSION_FILE_MAX
 export const SUBMISSION_CIPHER_MAX = SUBMISSION_IMAGE_MAX + 64 * 1024
 export const SUBMISSION_MANIFEST_MAX = 32 * 1024
 export interface SubmissionContext {
@@ -19,10 +22,15 @@ export interface SubmissionEnvelope {
   cipherBytes: number; cipherDigest: string; manifestDigest: string
 }
 export type SubmissionAnswers = Record<string, string | number | boolean | string[]>
-export interface SubmissionManifest {
+export interface ImageSubmissionManifest {
   schema: 'human.submission.manifest.v1'; context: SubmissionContext; answers: SubmissionAnswers
   file: { mediaType: 'image/png' | 'image/jpeg'; plainBytes: number; plainDigest: string }
 }
+export interface FileSubmissionManifest {
+  schema: 'human.submission.manifest.v2'; context: SubmissionContext; answers: SubmissionAnswers
+  file: { mediaType: SubmissionFileType; plainBytes: number; plainDigest: string; displayName: string }
+}
+export type SubmissionManifest = ImageSubmissionManifest | FileSubmissionManifest
 export const sha512 = (value: Uint8Array | string): string => createHash('sha512').update(value).digest('hex')
 export const sha256 = (value: Uint8Array | string): string => createHash('sha256').update(value).digest('hex')
 export function canonicalSubmission(value: unknown): string {
@@ -62,8 +70,11 @@ export function submissionAnswers(value: unknown): SubmissionAnswers {
   return structuredClone(value) as SubmissionAnswers
 }
 export function submissionManifest(value: unknown): SubmissionManifest {
-  if (!row(value) || !exact(value, ['schema', 'context', 'answers', 'file']) || value.schema !== 'human.submission.manifest.v1'
-    || !row(value.file) || !exact(value.file, ['mediaType', 'plainBytes', 'plainDigest']) || !['image/jpeg', 'image/png'].includes(String(value.file.mediaType))
+  if (!row(value) || !exact(value, ['schema', 'context', 'answers', 'file']) || !['human.submission.manifest.v1', 'human.submission.manifest.v2'].includes(String(value.schema))
+    || !row(value.file) || !exact(value.file, ['mediaType', 'plainBytes', 'plainDigest', ...(value.schema === 'human.submission.manifest.v2' ? ['displayName'] : [])])
+    || !submissionFileType(value.file.mediaType) || value.schema === 'human.submission.manifest.v1' && !submissionImageType(value.file.mediaType)
+    || value.schema === 'human.submission.manifest.v2' && (typeof value.file.displayName !== 'string' || !value.file.displayName
+      || value.file.displayName.length > 120 || safeSubmissionName(value.file.displayName, value.file.mediaType) !== value.file.displayName)
     || !Number.isSafeInteger(value.file.plainBytes) || Number(value.file.plainBytes) < 1 || Number(value.file.plainBytes) > SUBMISSION_IMAGE_MAX
     || typeof value.file.plainDigest !== 'string' || !/^[a-f0-9]{128}$/.test(value.file.plainDigest)) throw fail('submission-manifest-invalid', '附件清单无效')
   submissionContext(value.context); submissionAnswers(value.answers)
@@ -71,7 +82,7 @@ export function submissionManifest(value: unknown): SubmissionManifest {
   return structuredClone(value) as unknown as SubmissionManifest
 }
 export function decryptSubmission(cipher: Uint8Array, raw: unknown, secretKey: Uint8Array, expected: SubmissionContext,
-  values: SubmissionAnswers): { manifest: SubmissionManifest; image: Uint8Array } {
+  values: SubmissionAnswers): { manifest: SubmissionManifest; data: Uint8Array; image: Uint8Array } {
   const envelope = submissionEnvelope(raw), context = submissionContext(expected)
   if (envelope.keyId !== context.keyId || cipher.length !== envelope.cipherBytes || sha512(cipher) !== envelope.cipherDigest || secretKey.length !== 32)
     throw fail('submission-integrity-invalid', '提交密文完整性或密钥不匹配')
@@ -90,10 +101,10 @@ export function decryptSubmission(cipher: Uint8Array, raw: unknown, secretKey: U
     || canonicalSubmission(manifest.answers) !== canonicalSubmission(submissionAnswers(values))) throw fail('submission-context-invalid', '提交来源、答案或版本已变化')
   const image = bytes.subarray(length + 4)
   if (image.length !== manifest.file.plainBytes || sha512(image) !== manifest.file.plainDigest)
-    throw fail('submission-integrity-invalid', '图片大小或摘要不匹配')
-  const signature = manifest.file.mediaType === 'image/png' ? image.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
-    : image.length > 3 && image[0] === 255 && image[1] === 216 && image[2] === 255
-  if (!signature) throw fail('submission-image-invalid', '图片格式与声明不符')
+    throw fail('submission-integrity-invalid', '附件大小或摘要不匹配')
+  validateSubmissionFile(image, manifest.file.mediaType)
   // Full raster decoding/admission is mandatory in the receiver before ACK.
-  return { manifest, image }
+  // `image` remains an internal compatibility alias. Public image access MUST
+  // enforce image MIME; document readers use data and the generic file tool.
+  return { manifest, data: image, image }
 }

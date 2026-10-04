@@ -26,6 +26,7 @@ export interface HumanToolsConfig {
         automationStore?: WorkflowDataStore;
         automationNative?: NativeAutomationAdapter;
         coverStore?: WorkflowDataStore;
+        workspaceStore?: WorkflowDataStore;
     };
 }
 export interface CoverPreviewRequest {
@@ -98,6 +99,7 @@ export declare class HumanToolsService extends TypertRemoteService {
     private lifecycle?;
     private automation?;
     private covers?;
+    private directory?;
     private automationReason;
     constructor(host: Context, config?: HumanToolsConfig);
     private initialize;
@@ -164,6 +166,7 @@ export declare class HumanToolsService extends TypertRemoteService {
     claim(request: HumanActionRequest, signal: AbortSignal): Promise<HumanResult>;
     /** A missing live Session is not evidence that its durable generation still
      * exists. Query headers only; never acquire a Session/Agent writer to claim. */
+    private workspaceHeader;
     private claimGeneration;
     ack(request: HumanAckWireRequest, signal: AbortSignal): Promise<HumanResult>;
     status(request: {

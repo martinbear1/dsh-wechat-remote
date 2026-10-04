@@ -42,7 +42,10 @@ async function lifecycle() {
     nodeId: scope.nodeId, assertIdentity() {}, async request(operation, payload) {
       calls++
       if (operation === 'receiver-key') return { binding, bindingKey, key: payload.key }
-      if (operation === 'sync') return { schema: 'human.workflow.sync.v1', binding }
+      if (operation === 'sync') {
+        assert.deepEqual(payload, { mode: 'binding' })
+        return { schema: 'human.workflow.binding.v1', binding, bindingKey, asOf: Date.now() }
+      }
       if (payload.operation === 'get') return { binding, bindingKey, taskRef, origin: { scope: scope.sessionId, sessionGeneration: '100' }, revision: 1, rounds: [], submissions: [], participants: [], drafts: draft ? [draft] : [], nextOffset: null }
       const kind = payload.operation.replace('-draft', '')
       const content = structuredClone(payload.content)
@@ -182,6 +185,6 @@ test('capability cover only safely imports finished images; member-page presenta
   const manifest = createCapabilityManifest(scope.nodeId)
   assert(!JSON.stringify(manifest).includes('电脑渲染模板'))
   const skill = JSON.stringify(HUMAN_WORKFLOW_SKILL)
-  assert.match(skill, /插件不提供字体、绘制引擎、固定模板或生图器/)
+  assert.match(skill, /插件不捆绑字体、绘制引擎或生图器，不要求某一种制作工具/)
   assert(!skill.includes("kind:'template'")); assert(!skill.includes('human.card.cover.v1'))
 })

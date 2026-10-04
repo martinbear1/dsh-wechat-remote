@@ -4,7 +4,11 @@ import { Context } from '@deepseek-ai/cordis'
 import { ToolRuntime, assertSupportedJsonSchema, renderToolsSdk } from '@deepseek-ai/dsh-tools'
 import { SessionStore, SessionId } from '@deepseek-ai/dsh-session'
 import { SystemPrompt, renderContextSections } from '@deepseek-ai/dsh-system-prompt'
+import { TypertRegistry } from '@deepseek-ai/dsh-typert-registry'
+import { TypertGatewayService } from '@deepseek-ai/dsh-api-gateway'
 import { HumanToolsService } from '../lib/human-tools/service.js'
+import { TYPERT } from '../lib/typert.host.js'
+import { invokeLegacyRpc, parseLegacyClientRequest } from '../lib/dsh-protocol-compat.js'
 
 const nodeId = 'node_' + 'a'.repeat(32), sessionId = 'session_service', signal = new AbortController().signal
 function deferred() { let resolve; return { promise: new Promise(done => { resolve = done }), resolve: value => resolve(value) } }
@@ -65,6 +69,52 @@ function provideAutomationServices(ctx) {
   })) ctx.provide(name, service)
 }
 const automationCapability = async host => unwrap(await host.service.capabilities({ scope: sessionId }, signal)).workflow.capabilities.find(c => c.id === 'automation.run')
+
+test('phone capability discovery projects live readiness within its RPC budget without dropping Agent contracts', async t => {
+  const host = await setup(t), registry = new TypertRegistry(host.ctx)
+  registry.register(TYPERT)
+  const gateway = new TypertGatewayService(host.ctx)
+  const discover = async () => {
+    const request = parseLegacyClientRequest('humanTools/capabilities', { type: 'client-request', rpcId: 'capability-projection-test',
+      method: 'humanTools/capabilities', payload: { args: { request: { scope: sessionId } } } })
+    const reply = await invokeLegacyRpc(gateway, request, { signal, describeHost() { assert.fail('not a host route') } })
+    // This is exactly the envelope checked by mini human-actions.call(), not
+    // merely valueJson. Nested JSON escaping is part of the 16 KiB budget.
+    assert(Buffer.byteLength(JSON.stringify(reply.result), 'utf8') <= 16 * 1024)
+    assert.equal(reply.result.ok, true)
+    return unwrap(reply.result.value)
+  }
+  const phone = await discover(), manifest = host.service.workflow.modes.manifest()
+  assert.deepEqual(Object.keys(phone).sort(), ['enabled', 'members', 'remind', 'schema', 'shareTest', 'workflow'])
+  assert.equal(phone.schema, 'human.tools.v1')
+  assert.equal(phone.workflow.schema, 'human.capabilities.status.v1')
+  assert.equal(phone.workflow.nodeId, nodeId); assert.equal(phone.workflow.version, 1)
+  assert.equal(phone.workflow.statusMeaning, 'node-implementation-not-device-verification-or-authorization')
+  assert.deepEqual(phone.workflow.capabilities, manifest.capabilities.map(({ id, version, status, ownerApproval, reason }) =>
+    ({ id, version, status, ownerApproval, ...(reason !== undefined ? { reason } : {}) })))
+  assert.deepEqual(Object.keys(phone.workflow).sort(), ['capabilities', 'nodeId', 'schema', 'statusMeaning', 'version'])
+  assert(phone.workflow.capabilities.some(cap => cap.status === 'blocked' && cap.reason), 'blocked reasons stay exact, not truncated')
+
+  // Future documentation growth must not break unrelated phone actions. This
+  // deliberately exceeds the phone budget without changing operational facts.
+  const originalManifest = host.service.workflow.modes.manifest.bind(host.service.workflow.modes)
+  host.service.workflow.modes.manifest = () => ({ ...originalManifest(), contracts: { large: '文档'.repeat(100_000) },
+    skill: 'not-a-phone-status'.repeat(100_000), futureField: 'private-host-field',
+    capabilities: originalManifest().capabilities.map(cap => ({ ...cap, description: '说明'.repeat(100_000),
+      tools: ['not-needed-in-phone-discovery'], futureField: 'not-projected' })) })
+  assert.deepEqual(await discover(), phone, 'status projection explicitly excludes arbitrary documentation and extra fields')
+  host.service.workflow.modes.manifest = originalManifest
+
+  const agent = await host.run('human_capabilities', {})
+  assert.equal(agent.isError, false)
+  const full = JSON.parse(agent.content[0].text)
+  assert.equal(full.schema, 'human.capabilities.v1')
+  assert.deepEqual(full.contracts, manifest.contracts)
+  assert(full.contracts.memberForm && full.contracts.recipientFacts && full.contracts.reminders)
+  assert(full.capabilities.every(cap => typeof cap.description === 'string' && Array.isArray(cap.tools)))
+  assert.equal(host.networkCalls, 0)
+  assert.equal(host.modeStore.writes, 0); assert.equal(host.coreStore.writes, 0)
+})
 
 test('real Cordis late optional dependencies recover discovery without remount, approval, timers or Agent wake', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] })

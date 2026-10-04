@@ -34,6 +34,69 @@ const form = () => ({ schema: 'human.form.v1', fields: [{ key: 'name', label: '�
 const initial = () => ({ title: '资料收集', instructions: '提交一张图片', form: form(), closesAt: null, recipientRefs: null })
 function memory(initial) { let value = structuredClone(initial), writes = 0; return { load: async () => structuredClone(value), save: async next => { value = structuredClone(next); writes++ }, get value() { return structuredClone(value) }, get writes() { return writes } } }
 function defer() { let resolve; return { promise: new Promise(done => { resolve = done }), resolve: value => resolve(value) } }
+
+async function bindingFixture(t, { change, afterRequest } = {}) {
+  const keyStore = memory(), ledger = memory(), requests = [], keys = await ReceiverKeyring.open(keyStore, scope.nodeId)
+  let current = binding, denied = false
+  const transport = { nodeId: scope.nodeId, assertIdentity() { if (denied) throw Object.assign(new Error('binding revoked'), { code: 'binding_revoked' }) },
+    async request(route, input) {
+      requests.push(structuredClone({ route, input }))
+      if (route === 'sync') {
+        assert.deepEqual(input, { mode: 'binding' }, 'preflight must never allocate a snapshot or borrow event facts')
+        const result = { schema: 'human.workflow.binding.v1', binding: current, bindingKey: receiverBinding(current, scope.nodeId).bindingKey, asOf: 100 }
+        change?.(result); afterRequest?.(); return result
+      }
+      assert.equal(route, 'receiver-key')
+      return { binding: current, bindingKey: receiverBinding(current, scope.nodeId).bindingKey, key: input.key }
+    } }
+  const lifecycle = await WorkflowLifecycle.open({ transport, keys, store: ledger })
+  t.after(async () => { await lifecycle.close(); await keys.close() })
+  return { lifecycle, requests, keyStore, ledger, set binding(value) { current = value }, revoke() { denied = true } }
+}
+
+test('new task preflight reads fresh binding each time without allocating any snapshot slots', async t => {
+  const f = await bindingFixture(t)
+  for (let n = 0; n < 8; n++) await f.lifecycle.prepareInitial(signal, false)
+  assert.equal(f.requests.filter(item => item.route === 'sync').length, 8)
+  assert.equal(f.requests.filter(item => item.route === 'receiver-key').length, 1)
+  assert.equal(f.keyStore.writes, 1); assert.equal(f.ledger.writes, 0)
+  assert.equal(f.lifecycle.available, true)
+})
+
+test('new task preflight observes binding/account replacement and never falls back to a previously authorized binding', async t => {
+  const f = await bindingFixture(t)
+  await f.lifecycle.prepareInitial(signal, false)
+  f.binding = { ...binding, ownerSubject: 'new-owner', accountInstance: 'new-account', generation: 'new-generation' }
+  await f.lifecycle.prepareInitial(signal, false)
+  const registrations = f.requests.filter(item => item.route === 'receiver-key')
+  assert.equal(registrations.length, 2); assert.notEqual(registrations[0].input.key.keyId, registrations[1].input.key.keyId)
+  assert.equal(f.keyStore.value.keys.length, 2, 'retain old receipt keys without reusing their authority')
+  const before = f.requests.length; f.revoke()
+  await assert.rejects(f.lifecycle.prepareInitial(signal, false), { code: 'binding_revoked' })
+  assert.equal(f.requests.length, before); assert.equal(f.keyStore.writes, 2)
+})
+
+test('binding-only preflight rejects malformed or old snapshot responses before key creation', async t => {
+  for (const change of [value => { value.schema = 'human.workflow.sync.v1' }, value => { value.bindingKey = '0'.repeat(64) },
+    value => { value.asOf = '100' }, value => { delete value.asOf }, value => { value.binding = { ...binding, nodeId: 'foreign-node' } }]) {
+    const f = await bindingFixture(t, { change })
+    await assert.rejects(f.lifecycle.prepareInitial(signal, false), { code: 'lifecycle-binding-invalid' })
+    assert.equal(f.keyStore.writes, 0); assert.equal(f.requests.length, 1); assert.equal(f.lifecycle.available, false)
+  }
+})
+
+test('binding-only preflight rechecks current identity and cancellation after the fresh response before key writes', async t => {
+  let revoke
+  const changed = await bindingFixture(t, { afterRequest: () => revoke() }); revoke = () => changed.revoke()
+  await assert.rejects(changed.lifecycle.prepareInitial(signal, false), { code: 'binding_revoked' })
+  assert.equal(changed.keyStore.writes, 0); assert.equal(changed.requests.length, 1)
+  const abort = new AbortController(), cancelled = await bindingFixture(t, { afterRequest: () => abort.abort() })
+  await assert.rejects(cancelled.lifecycle.prepareInitial(abort.signal, false), { name: 'AbortError' })
+  assert.equal(cancelled.keyStore.writes, 0); assert.equal(cancelled.requests.length, 1)
+  const missing = await bindingFixture(t)
+  await assert.rejects(missing.lifecycle.prepareInitial(signal, true), { code: 'receiver-unavailable' })
+  assert.equal(missing.requests.length, 0)
+})
 function seal(key, changes = {}, answers = { name: '甲' }) {
   const context = { schema: 'human.submission.context.v1', bindingKey, taskRef, roundId: 'r'.repeat(24), participantRef: 'p'.repeat(24), submissionId: 's'.repeat(24), version: 1, objectId: 'o'.repeat(24), keyId: key.keyId, ...changes }
   const manifest = { schema: 'human.submission.manifest.v1', context, answers, file: { mediaType: 'image/png', plainBytes: image.length, plainDigest: sha512(image) } }
@@ -234,6 +297,21 @@ test('background receiver limits each sync to four attempts, resumes mid-page an
   assert.equal(f.claims[8][1], String(4).padStart(24, '0'))
 })
 
+test('invalid document receipt blocks durably without repeated download or false delivery and is not a blind retry', async t => {
+  const disk = memory(), entry = { id: 's'.repeat(24), roundId: 'r'.repeat(24), state: 'accepted', delivery: 'pending', version: 1, values: {} }
+  const f = await lifecycleFixture(t, { store: disk, page: { submissions: [entry], nextOffset: null }, onReceive() {
+    throw Object.assign(new Error('untrusted detail must not escape'), { code: 'submission-file-invalid' })
+  } })
+  await f.runtime.synced(binding, [f.tasks[0]], signal); await f.runtime.synced(binding, [f.tasks[0]], signal)
+  assert.equal(f.claims.length, 1)
+  const status = await f.runtime.receiptStatus(scope, taskRef, signal)
+  assert.equal(status.items[0].state, 'blocked'); assert.equal(status.items[0].retryable, false)
+  assert.match(status.items[0].message, /未确认送达/); assert(!JSON.stringify(status).includes('untrusted detail'))
+  await assert.rejects(f.runtime.retryReceipt(scope, taskRef, { submissionId: entry.id, submissionVersion: 1, expectedRevision: status.items[0].revision }, signal), { code: 'receipt-version-conflict' })
+  await f.runtime.close(); const restored = await WorkflowLifecycle.open(f.settings); t.after(() => restored.close())
+  await restored.synced(binding, [f.tasks[0]], signal); assert.equal(f.claims.length, 1)
+})
+
 test('background receiver enforces total time budget and preserves cancellation, not per-object multi-hour work', async t => {
   let now = 0
   const f = await lifecycleFixture(t, { now: () => now, onReceive() { now += 120_001 } })
@@ -325,13 +403,16 @@ test('real DSH registry accepts lifecycle schemas, emits native image and real i
   const session = sessions.create(SessionId(scope.sessionId), { meta: { createdAt: 100 } }), agent = { id: session.id, session, ctx }
   const core = await HumanToolsCore.open(memory({ schemaVersion: 1, records: [] }), () => randomBytes(16).toString('hex'))
   const attachment = { attachmentId: 'a'.repeat(64), mediaType: 'image/png', bytes: image.length, width: 1, height: 1 }
-  const runtime = { prepareInitial: async () => {}, readImage: async () => ({ image, manifest: { context: { version: 1 }, file: { mediaType: 'image/png' } }, receivedAt: 1 }) }
+  const imageSource = { taskRef, roundId: 'r'.repeat(24), participantRef: 'p'.repeat(24), submissionId: 's'.repeat(24), version: 1 }
+  const runtime = { prepareInitial: async () => {}, readImage: async () => ({ image, manifest: { context: imageSource, file: { mediaType: 'image/png' } }, receivedAt: 1 }) }
   const definitions = lifecycleTools({ nodeId: scope.nodeId, lifecycle: runtime, core, assertAgent: exec => assert.equal(exec.agent, agent), saveImage: async bytes => { assert.deepEqual(Buffer.from(bytes), image); return attachment } })
   for (const tool of definitions) { assertSupportedJsonSchema(tool.parameters); assertSupportedJsonSchema(tool.output.schema); tools.register(tool) }
   assert(!definitions.some(tool => /approve|install|run_agent/.test(tool.name)))
   t.after(async () => { await core.close(); await ctx.fiber.dispose() })
   const result = await tools.execute({ name: 'human_submission_image', arguments: { taskRef, submissionId: 's'.repeat(24) }, agent, callId: 'image_1', signal })
   assert.equal(result.isError, false); assert.deepEqual(result.content.find(block => block.type === 'image').attachment, attachment)
+  const imageText = result.content.find(block => block.type === 'text').text
+  assert(imageText.includes(JSON.stringify({ ...imageSource, receivedAt: 1 }))); assert(!imageText.includes('group_openid'))
   const created = await tools.execute({ name: 'human_task_create', arguments: { title: '任务', body: '公开要求', initialRound: initial() }, agent, callId: 'create_1', signal })
   assert.equal(created.isError, false); assert(created.meta.humanSurface.initialRound)
   assert.equal(core.forResult(scope.sessionId, 'create_1', '100').actions[0].id, 'share')

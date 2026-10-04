@@ -1,6 +1,8 @@
 /** Agent-neutral, executable-code-free wire contract. No host/session authority is public. */
 import { humanInitialRound, type HumanInitialRound } from './form.js'
 import { humanCardAsset, type HumanCardAsset } from './card-cover.js'
+import { humanWorkflowInlinePreview, type HumanWorkflowInlinePreview } from '../human-workflow/inline-preview.js'
+export { humanWorkflowInlinePreview, type HumanWorkflowInlinePreview } from '../human-workflow/inline-preview.js'
 export interface HumanSurface {
   readonly schemaVersion: 1
   readonly kind: 'human.surface'
@@ -13,17 +15,57 @@ export interface HumanSurface {
   readonly selectionRef?: HumanSelectionRef
   readonly reminder?: { readonly title: string; readonly type: 'complete' }
   readonly workflowRef?: HumanWorkflowDraftRef
+  /** Public reminder intent shown inline; never a native grant or send receipt. */
+  readonly reminderPreview?: HumanReminderPreview
+  readonly workflowPreview?: HumanWorkflowInlinePreview
+  readonly reshare?: { readonly roundId: string | null }
   readonly initialRound?: HumanInitialRound
   readonly cover?: HumanCardAsset
   readonly actions: readonly [HumanAction]
 }
 export type HumanAction = { readonly id: 'share'; readonly type: 'wechat.share'; readonly label: '发送群卡' | '发送测试卡片' }
+  | { readonly id: 'reshare'; readonly type: 'wechat.reshare'; readonly label: '再次发送原任务' }
   | { readonly id: 'select-members'; readonly type: 'wechat.select-members'; readonly label: '选择任务成员' }
   | { readonly id: 'remind'; readonly type: 'wechat.remind'; readonly label: '提醒已选未完成人员' }
   | { readonly id: 'workflow-approve'; readonly type: 'workflow.approve'; readonly label: '审核任务方案' }
 export interface HumanWorkflowDraftRef {
   readonly schema: 'human.lifecycle.draft.ref.v1'; readonly draftId: string; readonly version: 1
   readonly digest: string; readonly kind: 'round' | 'review' | 'reminder'
+}
+export interface HumanReminderPreview {
+  readonly schema: 'human.reminder.preview.v1'
+  readonly title: string
+  readonly taskTitle: string
+  readonly condition: 'pending-submission' | 'result-published' | 'none'
+  readonly recipientSource: 'observed' | 'task-audience' | 'selected-members' | 'exact-references'
+  readonly recipientCount: number | null
+  readonly type: 'complete' | 'participate'
+}
+export function humanReminderPreview(value: unknown): HumanReminderPreview | undefined {
+  if (!object(value) || !exactKeys(value, ['schema', 'title', 'taskTitle', 'condition', 'recipientSource', 'recipientCount', 'type'])
+    || value.schema !== 'human.reminder.preview.v1' || !humanReminderTitle(value.title) || !text(value.taskTitle, 80)
+    || !['complete', 'participate'].includes(String(value.type))
+    || !['pending-submission', 'result-published', 'none'].includes(String(value.condition))
+    || !['observed', 'task-audience', 'selected-members', 'exact-references'].includes(String(value.recipientSource))
+    || (value.recipientSource === 'exact-references' ? value.condition !== 'none'
+      : value.condition === 'none' || value.type !== 'complete' || value.recipientSource !== 'observed' && value.condition !== 'pending-submission')
+    || (value.recipientSource === 'task-audience' ? value.recipientCount !== null
+      : !Number.isSafeInteger(value.recipientCount) || Number(value.recipientCount) < 1 || Number(value.recipientCount) > 20)) return
+  return { schema: 'human.reminder.preview.v1', title: value.title, taskTitle: value.taskTitle,
+    condition: value.condition as HumanReminderPreview['condition'], recipientSource: value.recipientSource as HumanReminderPreview['recipientSource'],
+    recipientCount: value.recipientCount as number | null, type: value.type as HumanReminderPreview['type'] }
+}
+export interface HumanRecipientRef {
+  readonly schema: 'human.recipient.ref.v1'; readonly taskId: string; readonly deliveryId: string
+  readonly source: 'observed' | 'selection' | 'audience'; readonly ref: string; readonly revision: number
+}
+export function humanRecipientRef(value: unknown): HumanRecipientRef | undefined {
+  if (!object(value) || !exactKeys(value, ['schema', 'taskId', 'deliveryId', 'source', 'ref', 'revision'])
+    || value.schema !== 'human.recipient.ref.v1' || !humanTaskRef({ schema: 'human.task.ref.v1', taskId: value.taskId, deliveryId: value.deliveryId })
+    || !['observed', 'selection', 'audience'].includes(String(value.source)) || typeof value.ref !== 'string' || !TASK_REF_ID.test(value.ref)
+    || (value.source === 'selection' ? !Number.isSafeInteger(value.revision) || Number(value.revision) < 1 : value.revision !== 0)) return
+  return { schema: 'human.recipient.ref.v1', taskId: value.taskId as string, deliveryId: value.deliveryId as string,
+    source: value.source as HumanRecipientRef['source'], ref: value.ref, revision: value.revision as number }
 }
 export type HumanOutcome = 'success' | 'cancelled' | 'failed' | 'unknown'
 export interface HumanActionRequest {
@@ -76,6 +118,7 @@ export const HUMAN_MEMBERS_TOOL_NAME = 'human_task_select_members'
 export const HUMAN_REMIND_TOOL_NAME = 'human_task_remind'
 export const HUMAN_ACTION = Object.freeze({ id: 'share', type: 'wechat.share', label: '发送群卡' } as const)
 export const HUMAN_MEMBERS_ACTION = Object.freeze({ id: 'select-members', type: 'wechat.select-members', label: '选择任务成员' } as const)
+export const HUMAN_RESHARE_ACTION = Object.freeze({ id: 'reshare', type: 'wechat.reshare', label: '再次发送原任务' } as const)
 export const HUMAN_REMIND_ACTION = Object.freeze({ id: 'remind', type: 'wechat.remind', label: '提醒已选未完成人员' } as const)
 // Persisted/wire compatibility label, not the current business-facing button
 // copy. Renderers may display a kind-specific label without changing this value
@@ -140,7 +183,7 @@ export function exactKeys(value: Record<string, unknown>, keys: readonly string[
 /** Reject rather than coerce newer schemas, hidden fields, arbitrary routes and actions. */
 export function humanSurface(value: unknown): HumanSurface | undefined {
   if (!object(value) || !exactKeys(value, ['schemaVersion', 'kind', 'id', 'revision', 'title', 'body', 'actions',
-    ...['targetTaskRef', 'selectionRef', 'reminder', 'workflowRef', 'initialRound', 'cover'].filter(key => Object.hasOwn(value, key))])
+    ...['targetTaskRef', 'selectionRef', 'reminder', 'workflowRef', 'reminderPreview', 'workflowPreview', 'reshare', 'initialRound', 'cover'].filter(key => Object.hasOwn(value, key))])
     || Object.hasOwn(value, 'targetTaskRef') && !humanTaskRef(value.targetTaskRef)
     || value.schemaVersion !== 1 || value.kind !== 'human.surface' || value.revision !== 1
     || typeof value.id !== 'string' || !HUMAN_ID.test(value.id) || !text(value.title, 80) || !text(value.body, 1000)
@@ -151,10 +194,19 @@ export function humanSurface(value: unknown): HumanSurface | undefined {
   const members = action.id === HUMAN_MEMBERS_ACTION.id && action.type === HUMAN_MEMBERS_ACTION.type && action.label === HUMAN_MEMBERS_ACTION.label
   const remind = action.id === HUMAN_REMIND_ACTION.id && action.type === HUMAN_REMIND_ACTION.type && action.label === HUMAN_REMIND_ACTION.label
   const workflow = action.id === HUMAN_WORKFLOW_ACTION.id && action.type === HUMAN_WORKFLOW_ACTION.type && action.label === HUMAN_WORKFLOW_ACTION.label
-  if (!share && !members && !remind && !workflow || !share && !value.targetTaskRef) return
+  const reshare = action.id === HUMAN_RESHARE_ACTION.id && action.type === HUMAN_RESHARE_ACTION.type && action.label === HUMAN_RESHARE_ACTION.label
+  if (!share && !members && !remind && !workflow && !reshare || !share && !value.targetTaskRef) return
+  if (reshare ? !object(value.reshare) || !exactKeys(value.reshare, ['roundId'])
+    || value.reshare.roundId !== null && (typeof value.reshare.roundId !== 'string' || !TASK_REF_ID.test(value.reshare.roundId)) : Object.hasOwn(value, 'reshare')) return
   if (workflow ? !humanWorkflowDraftRef(value.workflowRef) : Object.hasOwn(value, 'workflowRef')) return
+  if (Object.hasOwn(value, 'reminderPreview') && (!workflow || humanWorkflowDraftRef(value.workflowRef)?.kind !== 'reminder' || !humanReminderPreview(value.reminderPreview))) return
+  if (Object.hasOwn(value, 'workflowPreview') && (!workflow || !humanWorkflowInlinePreview(value.workflowPreview)
+    || humanWorkflowInlinePreview(value.workflowPreview)?.kind !== humanWorkflowDraftRef(value.workflowRef)?.kind)) return
   if (Object.hasOwn(value, 'initialRound') && (!share || !humanInitialRound(value.initialRound))) return
   if (object(value.initialRound) && value.initialRound.audience === 'known-members' && !humanTaskRef(value.targetTaskRef)) return
+  if (object(value.initialRound) && Array.isArray(value.initialRound.sourceRecipientRefs)
+    && value.initialRound.sourceRecipientRefs.some(ref => !object(ref) || !object(value.targetTaskRef)
+      || ref.taskId !== value.targetTaskRef.taskId || ref.deliveryId !== value.targetTaskRef.deliveryId)) return
   if (Object.hasOwn(value, 'cover') && (!share || !humanCardAsset(value.cover))) return
   if (!remind && (Object.hasOwn(value, 'selectionRef') || Object.hasOwn(value, 'reminder'))) return
   const selection = humanSelectionRef(value.selectionRef), target = humanTaskRef(value.targetTaskRef)
@@ -166,6 +218,9 @@ export function humanSurface(value: unknown): HumanSurface | undefined {
   return { schemaVersion: 1, kind: 'human.surface', id: value.id, revision: 1, title: value.title,
     body: value.body, ...(value.targetTaskRef ? { targetTaskRef: { ...humanTaskRef(value.targetTaskRef)! } } : {}),
     ...(workflow ? { workflowRef: humanWorkflowDraftRef(value.workflowRef)! } : {}),
+    ...(value.reminderPreview ? { reminderPreview: humanReminderPreview(value.reminderPreview)! } : {}),
+    ...(value.workflowPreview ? { workflowPreview: humanWorkflowInlinePreview(value.workflowPreview)! } : {}),
+    ...(reshare ? { reshare: { roundId: (value.reshare as { roundId: string | null }).roundId } } : {}),
     ...(value.initialRound ? { initialRound: humanInitialRound(value.initialRound)! } : {}),
     ...(Object.hasOwn(value, 'cover') ? { cover: humanCardAsset(value.cover)! } : {}),
     ...(remind ? { selectionRef: { ...selection!, memberRefs: [...selection!.memberRefs] }, reminder: { title: (value.reminder as { title: string }).title, type: 'complete' as const } } : {}),

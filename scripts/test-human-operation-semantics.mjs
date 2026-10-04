@@ -114,11 +114,11 @@ test('tools distinguish a new assignment, an existing-task update, private feedb
   const create = byName('human_task_create'), round = byName('human_task_prepare_round'), review = byName('human_task_prepare_review'), reminder = byName('human_task_prepare_reminder')
   assert.match(create.description, /multiple independent tasks can coexist/)
   assert.match(create.description, /NEW task, not a new round or replacement of the source task/)
-  assert.match(create.description, /sourceSurfaceId alone only reuses the source group and does not select members/)
+  assert.match(create.description, /Either source option alone only reuses the source group and does not select members/)
   assert.equal(create.parameters.properties.initialRound.properties.recipientRefs.type, 'null')
   assert.match(round.description, /independent matter or a separately assigned new task uses human_task_create/)
   assert.match(review.description, /NOT a message or notification/)
-  assert.match(reminder.description, /Preparing or approving this draft is NOT evidence that a reminder was sent/)
+  assert.match(reminder.description, /Preparing or approving is not sending/)
   assert.match(byName('human_task_lifecycle').description, /drafts\[\]\.effects/)
   for (const [kind, tool] of [['round', round], ['review', review], ['reminder', reminder]]) {
     const surface = await core.createWorkflow({ ...origin, rootCallId: kind }, taskRef, draft(kind), signal)

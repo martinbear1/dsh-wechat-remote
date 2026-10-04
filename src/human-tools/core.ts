@@ -1,8 +1,10 @@
-import { ATTEMPT_ID, HUMAN_ACTION, HUMAN_MEMBERS_ACTION, HUMAN_REMIND_ACTION, HUMAN_WORKFLOW_ACTION, HUMAN_SURFACE_MAX_BYTES, humanWorkflowDraftRef, HUMAN_ID, humanSurface, humanTaskRef,
-  humanSelectionRef, humanMemberRefs, humanReminderTitle, humanReceiptData, sameTaskRef, sameSelectionRef, object, text,
-  type HumanAckRequest, type HumanAckWireRequest, type HumanActionRequest, type HumanReceipt, type HumanSurface, type HumanTaskRef, type HumanWorkflowDraftRef } from './protocol.js'
+import { ATTEMPT_ID, HUMAN_ACTION, HUMAN_RESHARE_ACTION, HUMAN_MEMBERS_ACTION, HUMAN_REMIND_ACTION, HUMAN_WORKFLOW_ACTION, HUMAN_SURFACE_MAX_BYTES, humanWorkflowDraftRef, HUMAN_ID, humanSurface, humanTaskRef,
+  humanSelectionRef, humanMemberRefs, humanReminderTitle, humanReminderPreview, humanReceiptData, sameTaskRef, sameSelectionRef, object, text,
+  type HumanAckRequest, type HumanAckWireRequest, type HumanActionRequest, type HumanReceipt, type HumanSurface, type HumanTaskRef, type HumanWorkflowDraftRef, type HumanReminderPreview } from './protocol.js'
 import { humanInitialRound, type HumanInitialRound } from './form.js'
 import { humanCardAsset, type HumanCardAsset } from './card-cover.js'
+import { validWorkspaceSource, type WorkspaceSourceProof } from '../human-workflow/workspace-source.js'
+import { humanWorkflowInlinePreview, type HumanWorkflowInlinePreview } from '../human-workflow/inline-preview.js'
 
 /** Business core has no DSH, Cordis, WeChat, network or filesystem dependency. */
 export interface HumanOrigin {
@@ -129,14 +131,26 @@ export class HumanToolsCore {
       ...(cover === undefined ? {} : { cover: this.cover(cover, origin) }),
       ...(sourceSurfaceId !== undefined ? { targetTaskRef: this.publishedSource(origin, sourceSurfaceId).taskRef } : {}), actions: [{ ...HUMAN_ACTION }] }))
   }
-  createCollection(origin: HumanOrigin, title: string, body: string, initialRound: HumanInitialRound, signal: AbortSignal, sourceSurfaceId?: string, cover?: HumanCardAsset): Promise<HumanSurface> {
+  createCollection(origin: HumanOrigin, title: string, body: string, initialRound: HumanInitialRound, signal: AbortSignal, sourceSurfaceId?: string, cover?: HumanCardAsset, workspaceSource?: WorkspaceSourceProof): Promise<HumanSurface> {
     return this.createAction(origin, signal, () => {
       if (!humanInitialRound(initialRound)) throw error('human-surface-invalid', '首轮收集表单无效')
-      if (initialRound.audience === 'known-members' && sourceSurfaceId === undefined)
+      if (workspaceSource !== undefined && (sourceSurfaceId !== undefined || !validWorkspaceSource(workspaceSource, origin)))
+        throw error('human-source-invalid', '共享任务来源尚未经过当前工作区授权核验')
+      if (initialRound.audience === 'known-members' && sourceSurfaceId === undefined && workspaceSource === undefined)
         throw error('human-source-required', '向已登记成员安排新任务需要同会话已成功发送的来源任务')
+      const targetTaskRef = workspaceSource?.taskRef ?? (sourceSurfaceId === undefined ? undefined : this.publishedSource(origin, sourceSurfaceId).taskRef)
+      if (initialRound.sourceRecipientRefs?.some(ref => ref.taskId !== targetTaskRef?.taskId || ref.deliveryId !== targetTaskRef?.deliveryId))
+        throw error('human-source-invalid', '成员引用不属于选定的来源任务')
       return { title, body, initialRound: clone(initialRound), actions: [{ ...HUMAN_ACTION }],
         ...(cover === undefined ? {} : { cover: this.cover(cover, origin) }),
-        ...(sourceSurfaceId === undefined ? {} : { targetTaskRef: this.publishedSource(origin, sourceSurfaceId).taskRef }) }
+        ...(targetTaskRef === undefined ? {} : { targetTaskRef }) }
+    })
+  }
+  /** Adapter has freshly read this exact public task/round; no new publication. */
+  createReshare(origin: HumanOrigin, taskRef: HumanTaskRef, roundId: string | null, title: string, body: string, signal: AbortSignal): Promise<HumanSurface> {
+    return this.createAction(origin, signal, () => {
+      if (!humanTaskRef(taskRef) || roundId !== null && !text(roundId, 128)) throw error('human-source-invalid', '原任务分享目标无效')
+      return { title, body, targetTaskRef: clone(taskRef), reshare: { roundId }, actions: [{ ...HUMAN_RESHARE_ACTION }] }
     })
   }
   private cover(value: unknown, origin: HumanOrigin): HumanCardAsset {
@@ -148,15 +162,19 @@ export class HumanToolsCore {
   /** Internal caller has already obtained a cloud-validated draft scoped to
    * this origin. The Surface stores only its immutable locator, never private
    * evaluation text. Claiming this button is NOT approving/publishing it. */
-  createWorkflow(origin: HumanOrigin, taskRef: HumanTaskRef, draftRef: HumanWorkflowDraftRef, signal: AbortSignal): Promise<HumanSurface> {
+  createWorkflow(origin: HumanOrigin, taskRef: HumanTaskRef, draftRef: HumanWorkflowDraftRef, signal: AbortSignal, reminderPreview?: HumanReminderPreview, workflowPreview?: HumanWorkflowInlinePreview): Promise<HumanSurface> {
     return this.createAction(origin, signal, () => {
       if (!humanTaskRef(taskRef) || !humanWorkflowDraftRef(draftRef)) throw error('human-surface-invalid', '工作流草稿引用无效')
+      if (reminderPreview !== undefined && (draftRef.kind !== 'reminder' || !humanReminderPreview(reminderPreview))) throw error('human-surface-invalid', '提醒内容预览无效')
+      if (workflowPreview !== undefined && (reminderPreview !== undefined || draftRef.kind !== workflowPreview.kind || !humanWorkflowInlinePreview(workflowPreview)))
+        throw error('human-surface-invalid', '任务内容预览无效')
       const presentation = draftRef.kind === 'round'
         ? { title: '补充提交要求', body: '查看本次要求和参与对象。确认后会更新原任务页面，不会另建任务或自动发群。' }
         : draftRef.kind === 'review'
           ? { title: '给提交者的反馈', body: '查看反馈及相关要求。确认后仅你和对应成员可在任务页查看，不会自动通知对方。' }
           : { title: '提醒参与者', body: '提醒还没发出。查看提醒内容和对象，再按页面提示发送。' }
-      return { ...presentation,
+      return { ...presentation, ...(reminderPreview ? { title: reminderPreview.title, body: `关于：${reminderPreview.taskTitle}`, reminderPreview: clone(reminderPreview) } : {}),
+        ...(workflowPreview ? { workflowPreview: clone(workflowPreview) } : {}),
         targetTaskRef: clone(taskRef), workflowRef: clone(draftRef), actions: [{ ...HUMAN_WORKFLOW_ACTION }] }
     })
   }
@@ -171,6 +189,12 @@ export class HumanToolsCore {
     const taskRef = record.attempts.slice().reverse().find(attempt => attempt.receipt?.outcome === 'success' && attempt.receipt.taskRef)?.receipt?.taskRef
     if (!taskRef) throw error('human-source-unavailable', '此卡片尚无可复用的成功发布记录')
     return { record, taskRef: clone(taskRef) }
+  }
+  /** Host-only admission of a source into the explicit shared directory. */
+  publishedEvidence(scope: { nodeId: string; sessionId: string; sessionGeneration: string }, sourceSurfaceId: string) {
+    this.available()
+    const { record, taskRef } = this.publishedSource({ scope: scope.sessionId, generation: scope.sessionGeneration, callId: 'workspace-source', rootCallId: 'workspace-source' }, sourceSurfaceId)
+    return { origin: { ...scope }, taskRef, title: record.surface.title }
   }
   createMembers(origin: HumanOrigin, sourceSurfaceId: string, signal: AbortSignal): Promise<HumanSurface> {
     return this.createAction(origin, signal, () => {

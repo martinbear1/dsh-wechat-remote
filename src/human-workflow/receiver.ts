@@ -5,16 +5,30 @@ import { assertScope, copy, exact, fail, identifier, plain, row, sameScope, scop
 import { sameTaskRef, type HumanTaskRef } from '../human-tools/protocol.js'
 import { ReceiverKeyring } from './receiver-keyring.js'
 import { canonicalSubmission, decryptSubmission, sha256, submissionAnswers, submissionContext, submissionEnvelope,
-  submissionManifest, SUBMISSION_CIPHER_MAX, type SubmissionContext, type SubmissionEnvelope, type SubmissionManifest, type SubmissionAnswers } from './submission-crypto.js'
+  submissionManifest, sha512, SUBMISSION_CIPHER_MAX, type SubmissionContext, type SubmissionEnvelope, type SubmissionManifest, type SubmissionAnswers } from './submission-crypto.js'
+import { safeSubmissionName, submissionFileExtension, submissionFileType, submissionImageType, type SubmissionFileType } from './submission-file-contract.js'
+
+interface FileDeclaration { kind: 'file'; mediaType: SubmissionFileType; plainBytes: number }
+function checkDeclaration(manifest: SubmissionManifest, declaration: unknown): void {
+  if (manifest.schema === 'human.submission.manifest.v1') {
+    if (declaration !== undefined) throw fail('receiver-file-mismatch', '图片收件合同与清单版本不符')
+    return
+  }
+  if (!row(declaration) || !exact(declaration, ['kind', 'mediaType', 'plainBytes']) || declaration.kind !== 'file'
+    || !submissionFileType(declaration.mediaType) || declaration.mediaType !== manifest.file.mediaType || declaration.plainBytes !== manifest.file.plainBytes)
+    throw fail('receiver-file-mismatch', '文件类型或大小与已受理提交不符')
+}
 
 interface Receipt {
   schema: 'human.receiver.receipt.v1'; nodeId: string; origin: WorkflowScope; context: SubmissionContext
   envelope: SubmissionEnvelope; manifest: SubmissionManifest; receivedAt: number; acked: boolean
   claimId?: string
+  attachment?: FileDeclaration
 }
 export interface ReceiverDelivery {
   claimId: string; leaseExpiresAt: number; submissionId: string; version: number
   context: SubmissionContext; envelope: SubmissionEnvelope; values: SubmissionAnswers; download: unknown
+  attachment?: FileDeclaration
 }
 export interface ReceiverOptions {
   root: string; nodeId: string; keys: ReceiverKeyring; assertIdentity(): void
@@ -49,6 +63,10 @@ export class SubmissionReceiver {
     await receiver.recover(); return receiver
   }
   private check(signal?: AbortSignal): void { this.lifetime.signal.throwIfAborted(); signal?.throwIfAborted(); this.options.assertIdentity() }
+  private async validateRaster(data: Uint8Array, mediaType: 'image/png' | 'image/jpeg', signal?: AbortSignal): Promise<void> {
+    try { await this.options.validateImage(data, mediaType) }
+    catch { this.check(signal); throw fail('submission-image-invalid', '图片未通过本机完整解码，尚未确认送达') }
+  }
   private serial<T>(work: () => Promise<T>): Promise<T> {
     const result = this.tail.then(() => { this.check(); return work() }); this.tail = result.catch(() => {}); return result
   }
@@ -64,12 +82,13 @@ export class SubmissionReceiver {
     if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 64 * 1024) throw fail('receiver-store-invalid', '持久收件记录无效')
     let raw: unknown
     try { raw = JSON.parse(await readFile(file, 'utf8')) } catch { throw fail('receiver-store-invalid', '持久收件记录不可读取') }
-    if (!row(raw) || !exact(raw, ['schema', 'nodeId', 'origin', 'context', 'envelope', 'manifest', 'receivedAt', 'acked'], ['claimId'])
+    if (!row(raw) || !exact(raw, ['schema', 'nodeId', 'origin', 'context', 'envelope', 'manifest', 'receivedAt', 'acked'], ['claimId', 'attachment'])
       || raw.schema !== 'human.receiver.receipt.v1' || raw.nodeId !== this.options.nodeId || !scopeValid(raw.origin)
       || raw.origin.nodeId !== this.options.nodeId || !Number.isSafeInteger(raw.receivedAt) || Number(raw.receivedAt) < 0 || typeof raw.acked !== 'boolean'
       || raw.claimId !== undefined && !identifier(raw.claimId))
       throw fail('receiver-store-invalid', '持久收件记录不属于此节点')
     const context = submissionContext(raw.context), envelope = submissionEnvelope(raw.envelope), manifest = submissionManifest(raw.manifest)
+    checkDeclaration(manifest, raw.attachment)
     if (envelope.keyId !== context.keyId || canonicalSubmission(manifest.context) !== canonicalSubmission(context)) throw fail('receiver-store-invalid', '持久收件关联无效')
     return { ...raw, context, envelope, manifest } as unknown as Receipt
   }
@@ -83,6 +102,8 @@ export class SubmissionReceiver {
     const decoded = decryptSubmission(await this.bytes(dir, receipt), receipt.envelope,
       this.options.keys.secret(receipt.context.keyId, receipt.context.bindingKey), receipt.context, receipt.manifest.answers)
     if (canonicalSubmission(decoded.manifest) !== canonicalSubmission(receipt.manifest)) throw fail('receiver-store-invalid', '收件记录与密文清单不符')
+    checkDeclaration(decoded.manifest, receipt.attachment)
+    if (submissionImageType(decoded.manifest.file.mediaType)) await this.validateRaster(decoded.data, decoded.manifest.file.mediaType)
     return decoded
   }
   private async recover(): Promise<void> {
@@ -105,13 +126,13 @@ export class SubmissionReceiver {
     }
     this.check()
   }
-  private async capacity(extra: number): Promise<void> {
+  private async capacity(extra: number, newItem = true): Promise<void> {
     const entries = await readdir(this.root); let bytes = extra
-    if (entries.length >= (this.options.maxItems ?? 512)) throw fail('receiver-capacity', '本地收件数量已达上限，云端尚未确认交付')
+    if (newItem && entries.length >= (this.options.maxItems ?? 512)) throw fail('receiver-capacity', '本地收件数量已达上限，云端尚未确认交付')
     for (const name of entries) {
       const dir = await this.directory(name)
       for (const child of await readdir(dir)) {
-        if (!/^(?:payload\.box|receipt\.json(?:\.[a-f0-9]{24}\.tmp)?)$/.test(child)) throw fail('receiver-store-invalid', '收件目录存在未知文件')
+        if (!/^(?:payload\.box|receipt\.json(?:\.[a-f0-9]{24}\.tmp)?|original\.(?:jpg|png|pdf|docx|xlsx|pptx|txt|csv)(?:\.[a-f0-9]{24}\.tmp)?)$/.test(child)) throw fail('receiver-store-invalid', '收件目录存在未知文件')
         const stat = await lstat(path.join(dir, child)); if (!stat.isFile() || stat.isSymbolicLink()) throw fail('receiver-path-invalid', '收件文件不可重定向')
         bytes += stat.size
       }
@@ -133,17 +154,21 @@ export class SubmissionReceiver {
       if (receipt) {
         if (!sameScope(receipt.origin, origin) || canonicalSubmission(receipt.envelope) !== canonicalSubmission(envelope)
           || canonicalSubmission(receipt.manifest.answers) !== canonicalSubmission(values)) throw fail('receiver-conflict', '已接收版本不能被替换')
+        checkDeclaration(receipt.manifest, delivery.attachment)
         await this.verified(destination, receipt)
       } else {
         await this.capacity(envelope.cipherBytes + 64 * 1024)
         const cipher = await this.options.download(delivery.download, envelope.cipherBytes, active); this.check(active)
         const decoded = decryptSubmission(cipher, envelope, this.options.keys.secret(context.keyId, bindingKey), context, values)
-        await this.options.validateImage(decoded.image, decoded.manifest.file.mediaType); this.check(active)
+        checkDeclaration(decoded.manifest, delivery.attachment)
+        if (submissionImageType(decoded.manifest.file.mediaType)) await this.validateRaster(decoded.data, decoded.manifest.file.mediaType, active)
+        this.check(active)
         const stageName = `.stage-${name}-${randomBytes(12).toString('hex')}`, stage = path.join(this.root, stageName)
         await mkdir(stage, { mode: 0o700 }); await this.directory(stageName)
         await writeNew(path.join(stage, 'payload.box'), cipher)
         receipt = { schema: 'human.receiver.receipt.v1', nodeId: this.options.nodeId, origin: copy(origin), context, envelope,
-          manifest: decoded.manifest, receivedAt: (this.options.now ?? Date.now)(), acked: false, claimId: delivery.claimId }
+          manifest: decoded.manifest, receivedAt: (this.options.now ?? Date.now)(), acked: false, claimId: delivery.claimId,
+          ...(delivery.attachment === undefined ? {} : { attachment: copy(delivery.attachment) }) }
         await writeNew(path.join(stage, 'receipt.json'), JSON.stringify(receipt)); await syncDirectory(stage)
         this.check(active); await rename(stage, destination); await syncDirectory(this.root)
       }
@@ -188,7 +213,8 @@ export class SubmissionReceiver {
           if (delivery.state !== 'receipt-only' || delivery.claimId !== proof.claimId || !Number.isSafeInteger(delivery.leaseExpiresAt)
             || Number(delivery.leaseExpiresAt) <= (this.options.now ?? Date.now)() || delivery.download !== undefined) throw fail('receiver-ack-invalid', '持久收件恢复租约无效')
           const answer = await this.options.ack(origin, taskRef, { claimId: proof.claimId, leaseExpiresAt: Number(delivery.leaseExpiresAt), submissionId, version,
-            context, envelope: receipt.envelope, values: receipt.manifest.answers, download: undefined }, signal)
+            context, envelope: receipt.envelope, values: receipt.manifest.answers, download: undefined,
+            ...(receipt.attachment === undefined ? {} : { attachment: copy(receipt.attachment) }) }, signal)
           if (!row(answer) || !row(answer.delivery) || answer.delivery.state !== 'received' || answer.delivery.submissionId !== submissionId || answer.delivery.version !== version
             || answer.delivery.manifestDigest !== proof.manifestDigest || answer.delivery.cipherDigest !== proof.cipherDigest) throw fail('receiver-ack-invalid', '云端尚未确认持久收件恢复')
         }
@@ -207,6 +233,37 @@ export class SubmissionReceiver {
         if (receipt.context.submissionId !== submissionId || receipt.context.bindingKey !== bindingKey || !sameScope(receipt.origin, origin)) continue
         const result = await this.verified(dir, receipt); this.check(signal)
         return { ...result, artifactRef: name, receivedAt: receipt.receivedAt }
+      }
+      throw fail('submission-not-received', '此会话的提交尚未可靠接收到本机')
+    })
+  }
+  /** Explicit authorized access creates a private, system-named plaintext copy.
+   * It is inert data, not a command or a trustworthy instruction. The retained
+   * original remains ciphertext; user filenames are never joined into paths. */
+  exportFile(origin: WorkflowScope, submissionId: string, bindingKey: string, signal: AbortSignal) {
+    return this.serial(async () => {
+      this.check(signal); assertScope(origin, this.options.nodeId)
+      if (!identifier(submissionId) || !/^[a-f0-9]{64}$/.test(bindingKey)) throw fail('receiver-reference-invalid', '收件引用无效')
+      for (const name of await readdir(this.root)) {
+        if (!/^[a-f0-9]{64}$/.test(name)) continue
+        const dir = await this.directory(name), receipt = await this.readReceipt(dir)
+        if (receipt.context.submissionId !== submissionId || receipt.context.bindingKey !== bindingKey || !sameScope(receipt.origin, origin)) continue
+        const result = await this.verified(dir, receipt); this.check(signal)
+        const mediaType = result.manifest.file.mediaType, filename = path.join(dir, `original.${submissionFileExtension(mediaType)}`)
+        try {
+          const stat = await lstat(filename)
+          if (!stat.isFile() || stat.isSymbolicLink() || stat.size !== result.data.length || await realpath(filename) !== filename
+            || sha512(await readFile(filename)) !== result.manifest.file.plainDigest) throw fail('receiver-file-invalid', '本地文件副本已变化，未自动覆盖')
+        } catch (cause) {
+          if ((cause as NodeJS.ErrnoException).code !== 'ENOENT') throw cause
+          await this.capacity(result.data.length, false); this.check(signal)
+          const temporary = `${filename}.${randomBytes(12).toString('hex')}.tmp`
+          await writeNew(temporary, result.data); this.check(signal)
+          await rename(temporary, filename); await syncDirectory(dir)
+        }
+        this.check(signal)
+        return { path: filename, displayName: result.manifest.schema === 'human.submission.manifest.v2' ? result.manifest.file.displayName : safeSubmissionName(null, mediaType),
+          mediaType, bytes: result.data.length, sha256: sha256(result.data), manifest: result.manifest, receivedAt: receipt.receivedAt, artifactRef: name }
       }
       throw fail('submission-not-received', '此会话的提交尚未可靠接收到本机')
     })

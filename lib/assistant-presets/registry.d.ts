@@ -41,6 +41,7 @@ export declare class AssistantRegistry {
         templates: import("./catalog.js").AssistantTemplate[];
         drafts: {
             presetId?: string | undefined;
+            templateId?: string | undefined;
             id: string;
             version: number;
             digest: string;

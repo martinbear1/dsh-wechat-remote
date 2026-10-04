@@ -36,9 +36,12 @@ export class AssistantRegistry {
   }
   async catalog(signal: AbortSignal) {
     this.check(signal); const native = await this.native.probe(); this.check(signal)
-    return { schema: 'human.assistants.catalog.v1', nodeId: this.nodeId, native, templates: assistantTemplates(),
+    const templates = assistantTemplates(), templatesByDigest = new Map(templates.map(t => [definitionDigest(t.definition), t.id]))
+    return { schema: 'human.assistants.catalog.v1', nodeId: this.nodeId, native, templates,
       drafts: this.state.current().entries.map(e => ({ id: e.id, version: e.version, digest: e.digest, name: e.definition.name,
-        description: e.definition.description, state: e.state, ...(e.result?.presetId ? { presetId: e.result.presetId } : {}) })) }
+        description: e.definition.description, state: e.state,
+        ...(templatesByDigest.has(e.digest) ? { templateId: templatesByDigest.get(e.digest) } : {}),
+        ...(e.result?.presetId ? { presetId: e.result.presetId } : {}) })) }
   }
   draft(request: { templateId?: string; definition?: unknown; id?: string; expectedVersion?: number }, signal: AbortSignal) {
     this.check(signal)

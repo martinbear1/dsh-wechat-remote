@@ -5,6 +5,7 @@ import { assertSupportedJsonSchema } from '@deepseek-ai/dsh-tools'
 import { HumanToolsCore, HUMAN_RETENTION_MS } from '../lib/human-tools/core.js'
 import { humanInitialRound } from '../lib/human-tools/form.js'
 import { humanSurface } from '../lib/human-tools/protocol.js'
+import { humanMembersTool, humanRemindTool } from '../lib/human-tools/dsh.js'
 import { lifecycleTools } from '../lib/human-workflow/lifecycle-tools.js'
 import { createCapabilityManifest } from '../lib/human-workflow/capabilities.js'
 import { HUMAN_WORKFLOW_SKILL } from '../lib/human-workflow/dsh-skill.js'
@@ -20,6 +21,9 @@ const refs = ['p'.repeat(24), 'q'.repeat(64)]
 const initial = () => ({ title: '本次答复', instructions: '填写答复。', closesAt: null, recipientRefs: null,
   form: { schema: 'human.form.v2', fields: [{ key: 'reply', label: '答复', kind: 'short-text', required: true, maxLength: 80 }], attachment: null } })
 const known = () => ({ ...initial(), audience: 'known-members', sourceParticipantRefs: [...refs] })
+const recipientRef = (source = 'selection', id = 'k') => ({ schema: 'human.recipient.ref.v1', taskId: taskRef.taskId,
+  deliveryId: taskRef.deliveryId, source, ref: id.repeat(24), revision: source === 'selection' ? 3 : 0 })
+const genericKnown = () => ({ ...initial(), audience: 'known-members', sourceRecipientRefs: [recipientRef()] })
 const followup = () => ({ ...origin, callId: 'independent', rootCallId: 'independent' })
 function memory(value = { schemaVersion: 1, records: [] }) {
   let state = structuredClone(value)
@@ -137,6 +141,107 @@ test('Agent schema exposes source participants but rejects missing source before
   assert.match(tool.description, /does not automatically @/)
 })
 
+test('generic known identities strictly choose one source list and preserve old schema bytes', () => {
+  const old = known(); assert.equal(JSON.stringify(humanInitialRound(old)), JSON.stringify(old))
+  for (const source of ['observed', 'selection', 'audience']) {
+    const value = { ...genericKnown(), sourceRecipientRefs: [recipientRef(source)] }
+    assert.deepEqual(humanInitialRound(value), value)
+  }
+  const twenty = { ...genericKnown(), sourceRecipientRefs: Array.from({ length: 20 }, (_, n) => recipientRef('selection', String.fromCharCode(65 + n))) }
+  assert.deepEqual(humanInitialRound(twenty), twenty)
+  const reversed = Object.fromEntries(Object.entries(recipientRef()).reverse())
+  for (const sourceRecipientRefs of [undefined, null, [], [recipientRef(), reversed], [...twenty.sourceRecipientRefs, recipientRef('selection', 'z')],
+    [{ ...recipientRef(), revision: 0 }], [{ ...recipientRef('observed'), revision: 1 }], [{ ...recipientRef(), roomid: 'raw' }],
+    [{ ...recipientRef(), ref: '姓名' }], [{ ...recipientRef(), taskId: 'guessed' }], [refs[0]]])
+    assert.equal(humanInitialRound({ ...genericKnown(), sourceRecipientRefs }), undefined)
+  for (const sourceParticipantRefs of [refs, [], undefined, null])
+    assert.equal(humanInitialRound({ ...genericKnown(), sourceParticipantRefs }), undefined, 'source options are mutually exclusive even if one is undefined')
+  const neither = genericKnown(); delete neither.sourceRecipientRefs
+  assert.equal(humanInitialRound(neither), undefined)
+  for (const audience of [undefined, 'all-group', 'owner-select']) {
+    assert.equal(humanInitialRound({ ...genericKnown(), audience }), undefined)
+    assert.equal(humanInitialRound({ ...initial(), audience, sourceRecipientRefs: undefined }), undefined)
+    const independent = { ...initial(), ...(audience === undefined ? {} : { audience }) }
+    assert.deepEqual(humanInitialRound(independent), independent, 'known identities do not require use of this path')
+  }
+})
+
+test('selection-only identities create independent task drafts without any source participant record', async t => {
+  const { core, source, store } = await fixture(t)
+  const value = genericKnown(), surface = await core.createCollection(followup(), '重新安排', '请完成新的事项。', value, signal, source.id)
+  assert.notEqual(surface.id, source.id); assert.deepEqual(surface.targetTaskRef, taskRef)
+  assert.deepEqual(surface.initialRound.sourceRecipientRefs, value.sourceRecipientRefs)
+  assert.equal(surface.initialRound.sourceParticipantRefs, undefined)
+  assert.equal(surface.workflowRef, undefined); assert.equal(surface.initialRound.recipientRefs, null)
+  assert.deepEqual(humanSurface(surface), surface)
+  assert.equal(store.value.records[1].attempts.length, 0, 'prepared known audience is not approved or sent')
+  const originalSource = store.value.records[0]
+  const formChanged = { ...value, sourceRecipientRefs: [recipientRef('audience', 'j')] }
+  await assert.rejects(core.createCollection(followup(), '重新安排', '请完成新的事项。', formChanged, signal, source.id), { code: 'human-target-conflict' })
+  const snapshot = sha256(canonicalSubmission(surface))
+  await core.close()
+  const reopened = await HumanToolsCore.open(store, id, () => 100); t.after(() => reopened.close())
+  assert.deepEqual(reopened.forResult(origin.scope, followup().rootCallId, origin.generation), surface)
+  await reopened.claim(request(surface), signal)
+  assert.equal(sha256(canonicalSubmission(reopened.grantSource(request(surface)).surface)), snapshot)
+  assert.deepEqual(store.value.records[0], originalSource, 'source task remains unchanged; no enrollment invented')
+})
+
+test('generic source references reject cross-task/delivery sources during construction and durable surface parsing', async t => {
+  const f = await fixture(t), before = f.store.value
+  await assert.rejects(f.core.createCollection(followup(), '事项', '答复。', genericKnown(), signal), { code: 'human-source-required' })
+  for (const patch of [{ taskId: 'x'.repeat(24) }, { deliveryId: 'y'.repeat(24) }]) {
+    const value = { ...genericKnown(), sourceRecipientRefs: [{ ...recipientRef(), ...patch }] }
+    assert(humanInitialRound(value), 'shape validation alone is not authority')
+    await assert.rejects(f.core.createCollection(followup(), '事项', '答复。', value, signal, f.source.id), { code: 'human-source-invalid' })
+  }
+  await assert.rejects(f.core.createCollection({ ...followup(), scope: 'other' }, '事项', '答复。', genericKnown(), signal, f.source.id), { code: 'human-surface-unavailable' })
+  await assert.rejects(f.core.createCollection({ ...followup(), generation: '200' }, '事项', '答复。', genericKnown(), signal, f.source.id), { code: 'human-origin-conflict' })
+  assert.deepEqual(f.store.value, before)
+  const surface = await f.core.createCollection(followup(), '事项', '答复。', genericKnown(), signal, f.source.id)
+  for (const changed of [
+    { ...surface, targetTaskRef: { ...taskRef, taskId: 'x'.repeat(24) } },
+    { ...surface, initialRound: { ...surface.initialRound, sourceRecipientRefs: [{ ...recipientRef(), deliveryId: 'y'.repeat(24) }] } },
+    { ...surface, initialRound: { ...surface.initialRound, sourceParticipantRefs: refs } },
+  ]) {
+    assert.equal(humanSurface(changed), undefined)
+    const corrupt = f.store.value; corrupt.records[1].surface = changed
+    await assert.rejects(HumanToolsCore.open(memory(corrupt), id, () => 100), { code: 'human-store-invalid' })
+  }
+  for (const outcome of [null, 'failed', 'cancelled', 'unknown']) {
+    const blocked = await fixture(t, outcome)
+    await assert.rejects(blocked.core.createCollection(followup(), '事项', '答复。', genericKnown(), signal, blocked.source.id), { code: 'human-source-unavailable' })
+  }
+})
+
+test('Agent tool schema exposes optional generic reuse and legacy reminder describes only its own restriction', async t => {
+  const { core, source } = await fixture(t)
+  let prepared = 0
+  const tool = lifecycleTools({ core, nodeId: 'test_node', assertAgent() {}, lifecycle: { prepareInitial: async () => { prepared++ } } }).find(item => item.name === 'human_task_create')
+  assertSupportedJsonSchema(tool.parameters)
+  const schema = tool.parameters.properties.initialRound.properties
+  assert.deepEqual(schema.audience.enum, ['all-group', 'owner-select', 'known-members'])
+  assert.equal(schema.sourceRecipientRefs.items.properties.schema.const, 'human.recipient.ref.v1')
+  assert.deepEqual(schema.sourceRecipientRefs.items.properties.source.enum, ['observed', 'selection', 'audience'])
+  assert(!tool.parameters.properties.initialRound.required.includes('sourceRecipientRefs'))
+  assert.match(schema.sourceRecipientRefs.description, /mutually exclusive with sourceParticipantRefs/)
+  assert.match(tool.description, /people who have never opened or submitted/)
+  const agent = { id: origin.scope, session: { id: origin.scope, header: { id: origin.scope, createdAt: 100 } } }
+  const exec = { agent, signal, callId: 'generic-tool', rootCallId: 'generic-tool' }
+  const args = { title: '独立安排', body: '完成这件事。', initialRound: genericKnown(), sourceSurfaceId: source.id }
+  const missing = { ...args }; delete missing.sourceSurfaceId
+  await assert.rejects(tool.execute(missing, exec), { code: 'human-source-required' })
+  await assert.rejects(tool.execute({ ...args, initialRound: { ...args.initialRound, sourceParticipantRefs: refs } }, exec), { code: 'lifecycle-form-invalid' })
+  assert.equal(prepared, 0)
+  const result = await tool.execute(args, exec)
+  assert.equal(prepared, 1); assert.deepEqual(result.surface.initialRound.sourceRecipientRefs, args.initialRound.sourceRecipientRefs)
+  assert.deepEqual(tool.output.presentationMeta(args, result).humanSurface, result.surface)
+  const members = humanMembersTool(core), reminder = humanRemindTool(core)
+  assert.match(members.description, /human_task_recipients/); assert.match(members.description, /never opened or submitted/)
+  assert.match(members.description, /sourceRecipientRefs/); assert.match(reminder.description, /THIS legacy tool accepts only/)
+  assert.match(reminder.description, /exact subset without reselecting/); assert.match(reminder.description, /condition=none/)
+})
+
 test('known-member capability separates local availability from original-group proof and never promises roster enumeration or automatic mention', () => {
   const blocked = createCapabilityManifest('test_node')
   assert.equal(blocked.capabilities.find(item => item.id === 'task.audience-known').status, 'blocked')
@@ -156,7 +261,7 @@ test('known-member capability separates local availability from original-group p
   assert.equal(contract.nativeParticipantMeaning, 'audience-not-mention')
   assert.deepEqual(manifest.contracts.audience.composition, {
     default: 'all-group', choice: 'agent-selects-from-current-user-intent',
-    sourceSurfaceId: 'optional-group-reuse-required-only-for-known-members',
+    sourceSurfaceId: 'optional-same-session-group-source', workspaceSourceId: 'mutually-exclusive-verified-workspace-source',
     knownIdentityDoesNotForceKnownMembers: true, ownerReselectionAllowed: true,
     taskOrRound: 'independent-choice-by-user-intent-not-by-known-identities', mandatoryQuestionnaire: false,
   })

@@ -1,6 +1,8 @@
-import { type HumanAckRequest, type HumanAckWireRequest, type HumanActionRequest, type HumanReceipt, type HumanSurface, type HumanTaskRef, type HumanWorkflowDraftRef } from './protocol.js';
+import { type HumanAckRequest, type HumanAckWireRequest, type HumanActionRequest, type HumanReceipt, type HumanSurface, type HumanTaskRef, type HumanWorkflowDraftRef, type HumanReminderPreview } from './protocol.js';
 import { type HumanInitialRound } from './form.js';
 import { type HumanCardAsset } from './card-cover.js';
+import { type WorkspaceSourceProof } from '../human-workflow/workspace-source.js';
+import { type HumanWorkflowInlinePreview } from '../human-workflow/inline-preview.js';
 /** Business core has no DSH, Cordis, WeChat, network or filesystem dependency. */
 export interface HumanOrigin {
     readonly scope: string;
@@ -58,14 +60,30 @@ export declare class HumanToolsCore {
         origin: HumanOrigin;
     };
     create(origin: HumanOrigin, title: string, body: string, signal: AbortSignal, sourceSurfaceId?: string, cover?: HumanCardAsset): Promise<HumanSurface>;
-    createCollection(origin: HumanOrigin, title: string, body: string, initialRound: HumanInitialRound, signal: AbortSignal, sourceSurfaceId?: string, cover?: HumanCardAsset): Promise<HumanSurface>;
+    createCollection(origin: HumanOrigin, title: string, body: string, initialRound: HumanInitialRound, signal: AbortSignal, sourceSurfaceId?: string, cover?: HumanCardAsset, workspaceSource?: WorkspaceSourceProof): Promise<HumanSurface>;
+    /** Adapter has freshly read this exact public task/round; no new publication. */
+    createReshare(origin: HumanOrigin, taskRef: HumanTaskRef, roundId: string | null, title: string, body: string, signal: AbortSignal): Promise<HumanSurface>;
     private cover;
     /** Internal caller has already obtained a cloud-validated draft scoped to
      * this origin. The Surface stores only its immutable locator, never private
      * evaluation text. Claiming this button is NOT approving/publishing it. */
-    createWorkflow(origin: HumanOrigin, taskRef: HumanTaskRef, draftRef: HumanWorkflowDraftRef, signal: AbortSignal): Promise<HumanSurface>;
+    createWorkflow(origin: HumanOrigin, taskRef: HumanTaskRef, draftRef: HumanWorkflowDraftRef, signal: AbortSignal, reminderPreview?: HumanReminderPreview, workflowPreview?: HumanWorkflowInlinePreview): Promise<HumanSurface>;
     private source;
     private publishedSource;
+    /** Host-only admission of a source into the explicit shared directory. */
+    publishedEvidence(scope: {
+        nodeId: string;
+        sessionId: string;
+        sessionGeneration: string;
+    }, sourceSurfaceId: string): {
+        origin: {
+            nodeId: string;
+            sessionId: string;
+            sessionGeneration: string;
+        };
+        taskRef: HumanTaskRef;
+        title: string;
+    };
     createMembers(origin: HumanOrigin, sourceSurfaceId: string, signal: AbortSignal): Promise<HumanSurface>;
     createReminder(origin: HumanOrigin, sourceSurfaceId: string, title: string, signal: AbortSignal, memberRefs?: readonly string[]): Promise<HumanSurface>;
     private createAction;

@@ -4,7 +4,7 @@ import { mkdtemp, writeFile, readdir, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { randomBytes } from 'node:crypto'
-import { ASSISTANT_INTERACTION_GUIDANCE, ASSISTANT_AUTHORING_GUIDANCE, HUMAN_TASK_CONTENT_GUIDANCE } from '../lib/assistant-presets/interaction-guidance.js'
+import { ASSISTANT_INTERACTION_GUIDANCE, ASSISTANT_AUTHORING_GUIDANCE, ASSISTANT_WORKSPACE_GUIDANCE, HUMAN_TASK_CONTENT_GUIDANCE } from '../lib/assistant-presets/interaction-guidance.js'
 import { assistantDefinition, assistantGuidance } from '../lib/assistant-presets/definition.js'
 import { assistantTemplates } from '../lib/assistant-presets/catalog.js'
 import { assistantTools, registerAssistantContext } from '../lib/assistant-presets/tools.js'
@@ -55,13 +55,35 @@ test('brevity guidance retains material risks, actual state and user-requested e
   assert.match(text, /不为省事跳过确认/)
 })
 
+test('member working records are optional evidence-based methods, never a permanent identity grant', () => {
+  const text = HUMAN_WORKFLOW_SKILL.content
+  assert.match(text, /姓名登记，也可以随日常提交逐步积累/)
+  assert.match(text, /自报姓名关联到该次提交的 participantRef/)
+  assert.match(text, /不在通用能力中预设一对一关系或职业特例/)
+  assert.match(text, /来源任务与提交版本/)
+  assert.match(text, /identity.groupRef \/ identity.memberRef/)
+  assert.match(text, /不随普通新任务、订正或重选名单改变/)
+  assert.match(text, /recipientRef 则绑定当前来源任务及选人版本/)
+  assert.match(text, /登记40条不证明全群正好40人/)
+  assert.match(text, /退群重入后永久不变的保证/)
+  assert.match(text, /记忆中的引用是查找线索/)
+  assert.match(text, /先查询目标任务的当前可用引用/)
+  assert.match(text, /不是已存在的后台实时监听/)
+  assert.match(text, /删去本地名单记录也不等于撤销已发布任务/)
+  for (const template of assistantTemplates()) assert.match(template.definition.methods.join('\n'), /长期协作可按需要积累带来源的人员资料/)
+  const teacher = assistantTemplates().find(item => item.id === 'teacher')
+  assert.match(teacher.definition.methods.join('\n'), /不强制签到/)
+  assert.match(teacher.definition.methods.join('\n'), /根据真实资料处理人员关系/)
+})
+
 test('real assistant guidance includes shared rules once without replacing profession-specific methods', () => {
   const templates = assistantTemplates()
-  assert.deepEqual(templates.map(item => item.id), ['teacher', 'project', 'sales', 'general'])
-  assert.equal(new Set(templates.map(item => item.definition.role)).size, 4)
+  assert.deepEqual(templates.map(item => item.id), ['designer', 'teacher', 'project', 'sales', 'general'])
+  assert.equal(new Set(templates.map(item => item.definition.role)).size, 5)
   for (const template of templates) {
     const d = assistantDefinition(template.definition), text = assistantGuidance(d)
     includesOnce(text, ASSISTANT_INTERACTION_GUIDANCE)
+    includesOnce(text, ASSISTANT_WORKSPACE_GUIDANCE)
     assert(text.includes(d.role))
     for (const method of d.methods) assert(text.includes(method))
     assert.match(text, /候选问题按需询问，缺项不阻挡无关任务/)
@@ -71,6 +93,7 @@ test('real assistant guidance includes shared rules once without replacing profe
   const custom = { ...definition(), role: '协助策展，不套用教师流程', methods: ['用户要求时详细解释作品取舍'], onboarding: [] }
   assert(assistantGuidance(custom).includes(custom.role))
   assert(assistantGuidance(custom).includes(custom.methods[0]))
+  includesOnce(assistantGuidance(custom), ASSISTANT_WORKSPACE_GUIDANCE)
   assert.deepEqual(assistantDefinition(custom).onboarding, [])
 })
 
@@ -166,14 +189,17 @@ test('real lifecycle tool schema separates short summary, complete instructions 
   const initial = tool.parameters.properties.initialRound
   assert.deepEqual(initial.properties.audience.enum, ['all-group', 'owner-select', 'known-members'])
   assert.match(initial.properties.audience.description, /Known identities do not force known-members/)
-  assert.match(initial.properties.audience.description, /requires outer sourceSurfaceId AND initialRound.sourceParticipantRefs/)
+  assert.match(initial.properties.audience.description, /requires outer sourceSurfaceId OR workspaceSourceId \(mutually exclusive\) AND exactly ONE of initialRound.sourceRecipientRefs or legacy initialRound.sourceParticipantRefs/)
   assert.equal(initial.properties.recipientRefs.type, 'null')
   assert.deepEqual(initial.properties.sourceParticipantRefs.items, { type: 'string' })
-  assert.match(initial.properties.sourceParticipantRefs.description, /Required ONLY for audience=known-members, forbidden otherwise/)
+  assert.match(initial.properties.sourceParticipantRefs.description, /mutually exclusive with sourceRecipientRefs and forbidden for other audiences/)
   assert.match(initial.properties.sourceParticipantRefs.description, /1\.\.20 distinct opaque participantRefs/)
-  assert.match(tool.parameters.properties.sourceSurfaceId.description, /Required for known-members/)
+  assert.match(tool.parameters.properties.sourceSurfaceId.description, /Mutually exclusive with workspaceSourceId/)
+  assert.match(tool.parameters.properties.workspaceSourceId.description, /workspace/i)
   assert(!initial.required.includes('audience'))
   assert(!initial.required.includes('sourceParticipantRefs'))
+  assert(!initial.required.includes('sourceRecipientRefs'))
+  assert.match(initial.properties.sourceRecipientRefs.description, /selected people who never opened the task/)
   assert(!tool.parameters.required.includes('sourceSurfaceId'))
   const schema = tool.parameters.properties.initialRound.properties.form
   assert.equal(schema, HUMAN_MEMBER_FORM_SCHEMA)
@@ -184,11 +210,13 @@ test('real lifecycle tool schema separates short summary, complete instructions 
   assert.match(schema.properties.presentation.properties.blocks.description, /Omit when task instructions suffice/)
   assert.match(schema.properties.presentation.description, /not proof that the Agent has processed/)
   assert.match(schema.properties.fields.description, /At most 12 fields/)
-  assert.match(schema.properties.attachment.description, /ONE JPEG\/PNG <=10MiB/)
+  assert.match(schema.properties.attachment.description, /ONE attachment <=10MiB/)
+  assert.match(schema.properties.attachment.description, /kind=image retains JPEG\/PNG/)
+  assert.match(schema.properties.attachment.description, /v3 kind=file/)
 })
 
 test('actual validators accept a useful minimal form without extra fields, help, blocks, cover or image', () => {
-  for (const version of ['human.form.v1', 'human.form.v2']) {
+  for (const version of ['human.form.v1', 'human.form.v2', 'human.form.v3']) {
     const input = minimalForm(version), parsed = humanForm(input)
     assert.deepEqual(parsed, input)
     assert.notEqual(parsed, input)
@@ -248,7 +276,7 @@ test('actual task output is brief and truthful while presentation metadata prese
 test('current persona, drafting tool and skill teach task selection rather than a mandatory teacher page', () => {
   const teacher = assistantTemplates().find(item => item.id === 'teacher').definition
   const persona = assistantGuidance(teacher)
-  assert.match(persona, /职业助手工作方法 v3/)
+  assert.match(persona, /职业助手工作方法 v4/)
   assert.match(persona, /你就是老师身边的教学与班级事务助理/)
   assert.match(persona, /不问“是否创建任务卡”/)
   assert.match(persona, /不自行增加|不顺手添加/)
@@ -297,6 +325,34 @@ test('real task creation preserves two different minimal designs without adding 
     assert.deepEqual(saved.records[index].attempts, [], 'preparing a concise result is not owner approval or a send attempt')
   }
   assert.deepEqual(prepared, [true, false], 'image reception is only prepared when this task asks for an image')
+})
+
+// Regression obligations from dshtest8, deliberately not an LLM quality score.
+// These assert instructions reach each new approved profession persona and the
+// current native skill; live Agent choices still require separate evaluation.
+test('dshtest8 business intent and memory corrections reach every newly generated persona', () => {
+  for (const template of assistantTemplates()) {
+    const persona = assistantGuidance(template.definition)
+    for (const pattern of [/“放学前”只有业务含义，不等于午夜/, /不自行补成当天23:59或另一天/,
+      /选项标签和说明必须表达同一个选择/, /未问过或未回答不算已确认/, /不把建议写成用户原话/,
+      /没有确认参与不等于没有交资料/, /查看提交记录再回答谁交了/, /同一已完整展示并确认的内容不另加重复审批/,
+      /不笼统要求“审核”“审批”/, /不把工具状态汇报当成给用户的答复/]) assert.match(persona, pattern)
+  }
+})
+
+test('dshtest8 capability composition guidance preserves alternatives rather than a reminder pipeline', () => {
+  const text = HUMAN_WORKFLOW_SKILL.content
+  for (const pattern of [/human_capabilities\(\{view:'catalog'\}\)/, /detail:'full'/,
+    /一次最多一个附件、10MiB/, /JPEG\/PNG、PDF、DOCX、XLSX、PPTX、TXT、CSV/, /旧版 DOC、多文件/,
+    /能收 DOCX\/PDF 不等于能自动理解或批改文档/, /human_submission_file/, /不承诺 DOCX\/PDF 等自动批改/,
+    /省略 cover 才使用默认图/, /不强制每次生图/, /封面上的文字或画出的@只是图片内容/,
+    /同一会话可以并存多项独立任务/, /仅要求提醒原事项时也不要擅自另造一项任务/,
+    /查 human_task_recipients/, /observedAt 只说明被观察到，不代表已读/, /不是完整群名单/,
+    /recipientSource:'exact-references'/, /不自动按提交或参与状态增减名单/,
+    /recipientSource:'task-audience'/, /recipientSource:'selected-members'/, /完整 selectionRef/,
+    /acceptedAt 已存在的提交即使附件后来过期，也不能当成未交/,
+    /preview 默认 inline/, /preview:'page'/, /不能省略微信要求的末端真实手势/,
+    /不能承诺每人单独发一条、未知全群@或后台代点/]) assert.match(text, pattern)
 })
 
 test('reading and review tool exports still distinguish prepared output from actual publication and require owner approval', () => {

@@ -1,6 +1,8 @@
 /** Agent-neutral, executable-code-free wire contract. No host/session authority is public. */
 import { type HumanInitialRound } from './form.js';
 import { type HumanCardAsset } from './card-cover.js';
+import { type HumanWorkflowInlinePreview } from '../human-workflow/inline-preview.js';
+export { humanWorkflowInlinePreview, type HumanWorkflowInlinePreview } from '../human-workflow/inline-preview.js';
 export interface HumanSurface {
     readonly schemaVersion: 1;
     readonly kind: 'human.surface';
@@ -16,6 +18,12 @@ export interface HumanSurface {
         readonly type: 'complete';
     };
     readonly workflowRef?: HumanWorkflowDraftRef;
+    /** Public reminder intent shown inline; never a native grant or send receipt. */
+    readonly reminderPreview?: HumanReminderPreview;
+    readonly workflowPreview?: HumanWorkflowInlinePreview;
+    readonly reshare?: {
+        readonly roundId: string | null;
+    };
     readonly initialRound?: HumanInitialRound;
     readonly cover?: HumanCardAsset;
     readonly actions: readonly [HumanAction];
@@ -24,6 +32,10 @@ export type HumanAction = {
     readonly id: 'share';
     readonly type: 'wechat.share';
     readonly label: '发送群卡' | '发送测试卡片';
+} | {
+    readonly id: 'reshare';
+    readonly type: 'wechat.reshare';
+    readonly label: '再次发送原任务';
 } | {
     readonly id: 'select-members';
     readonly type: 'wechat.select-members';
@@ -44,6 +56,25 @@ export interface HumanWorkflowDraftRef {
     readonly digest: string;
     readonly kind: 'round' | 'review' | 'reminder';
 }
+export interface HumanReminderPreview {
+    readonly schema: 'human.reminder.preview.v1';
+    readonly title: string;
+    readonly taskTitle: string;
+    readonly condition: 'pending-submission' | 'result-published' | 'none';
+    readonly recipientSource: 'observed' | 'task-audience' | 'selected-members' | 'exact-references';
+    readonly recipientCount: number | null;
+    readonly type: 'complete' | 'participate';
+}
+export declare function humanReminderPreview(value: unknown): HumanReminderPreview | undefined;
+export interface HumanRecipientRef {
+    readonly schema: 'human.recipient.ref.v1';
+    readonly taskId: string;
+    readonly deliveryId: string;
+    readonly source: 'observed' | 'selection' | 'audience';
+    readonly ref: string;
+    readonly revision: number;
+}
+export declare function humanRecipientRef(value: unknown): HumanRecipientRef | undefined;
 export type HumanOutcome = 'success' | 'cancelled' | 'failed' | 'unknown';
 export interface HumanActionRequest {
     readonly scope: string;
@@ -105,6 +136,11 @@ export declare const HUMAN_MEMBERS_ACTION: Readonly<{
     readonly id: "select-members";
     readonly type: "wechat.select-members";
     readonly label: "选择任务成员";
+}>;
+export declare const HUMAN_RESHARE_ACTION: Readonly<{
+    readonly id: "reshare";
+    readonly type: "wechat.reshare";
+    readonly label: "再次发送原任务";
 }>;
 export declare const HUMAN_REMIND_ACTION: Readonly<{
     readonly id: "remind";

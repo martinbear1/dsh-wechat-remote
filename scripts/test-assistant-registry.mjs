@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { AssistantRegistry } from '../lib/assistant-presets/registry.js'
-import { assistantDefinition, assistantGuidance, legacyAssistantGuidanceV1, legacyAssistantGuidanceV2, definitionDigest } from '../lib/assistant-presets/definition.js'
+import { assistantDefinition, assistantGuidance, legacyAssistantGuidanceV1, legacyAssistantGuidanceV2, legacyAssistantGuidanceV3, definitionDigest } from '../lib/assistant-presets/definition.js'
 import { assistantTemplates } from '../lib/assistant-presets/catalog.js'
 const signal = new AbortController().signal, hash = text => createHash('sha256').update(text).digest('hex')
 function memory(initial) { let value = structuredClone(initial); return { async load() { return structuredClone(value) }, async save(next) { value = structuredClone(next) }, get value() { return structuredClone(value) } } }
@@ -11,11 +11,12 @@ function historicalLedger(state, guidanceVersion = 1) {
   const definition = { schemaVersion: 1, name: '项目助理', description: '协助项目日常工作', role: '了解用户职责，按明确范围辅助工作',
     methods: ['先了解目标，再设计工作步骤', '使用规范群工具收集反馈'], onboarding: [{ key: 'project', label: '项目', prompt: '你负责哪个项目？' }],
     skills: ['human-workflow'], basePreset: 'standard' }
-  const guidance = (guidanceVersion === 1 ? legacyAssistantGuidanceV1 : legacyAssistantGuidanceV2)(definition)
+  const guidance = [null, legacyAssistantGuidanceV1, legacyAssistantGuidanceV2, legacyAssistantGuidanceV3][guidanceVersion](definition)
   // Baseline independently evaluated at b14d8d1057be9685fdccf953e7c47ad50d88473a,
   // not computed from the compatibility function under test at runtime.
-  assert.equal(hash(guidance), guidanceVersion === 1 ? '34eb91c7449a8c9eef4fe8a87b3387c56072fabdefb5c370ea5b0dba9f16cac2'
-    : '133c2ccc3dbb1d5109bf9a3bc75b74945d265c699094751515be4d6de29e307a')
+  assert.equal(hash(guidance), [null, '34eb91c7449a8c9eef4fe8a87b3387c56072fabdefb5c370ea5b0dba9f16cac2',
+    '133c2ccc3dbb1d5109bf9a3bc75b74945d265c699094751515be4d6de29e307a',
+    'ae3c37a9a0cf78f9ba7dc46ca759b825527c4cfc6e8ab4e23e7aad45a9744e70'][guidanceVersion])
   const id = 'assistant_' + 'a'.repeat(24), presetId = `hr-assistant-${id.slice(-24)}-v1`, rowId = `harness-assistant-${presetId}`
   const plugins = [{ id: 'persona', name: '@deepseek-ai/dsh-persona', config: { prefix: 'Base\n\n' + guidance, complete: false, includeRuntimeContext: true } }]
   const patch = JSON.stringify([{ insert: [{ id: rowId, name: '@deepseek-ai/dsh-agent-preset',
@@ -47,13 +48,26 @@ async function setup(t, options = {}) {
     async approved() { const draft = await registry.draft({templateId:'teacher'}, signal); return registry.preview(draft, signal) } }
 }
 test('templates and AI definitions have the same strict, data-only contract', () => {
-  assert.equal(assistantTemplates().length, 4)
+  assert.equal(assistantTemplates().length, 5)
   const definition = assistantTemplates()[0].definition
   for (const field of ['callback', 'plugins', 'code', 'systemPrompt', 'memberId']) assert.throws(() => assistantDefinition({...definition,[field]:'unapproved'}))
   assert.throws(() => assistantDefinition({...definition, skills:['invented']}))
   assert.throws(() => assistantDefinition({...definition, onboarding:[{key:'constructor',label:'bad',prompt:'bad'}]}))
   assert.throws(() => assistantDefinition({...definition, basePreset:'standard\n'}))
   assert.throws(() => assistantDefinition({...definition, onboarding:[{key:'role\n',label:'bad',prompt:'bad'}]}))
+})
+
+test('designer and custom-created professions use the same generic registry; name alone cannot claim designer identity', async t => {
+  const h = await setup(t)
+  const designer = await h.registry.draft({ templateId: 'designer' }, signal)
+  const custom = await h.registry.draft({ definition: { ...designer.definition, role: '用户自行设计的项目方案助手' } }, signal)
+  const catalog = await h.registry.catalog(signal)
+  assert.equal(catalog.drafts.find(row => row.id === designer.id).templateId, 'designer')
+  assert.equal(catalog.drafts.find(row => row.id === custom.id).templateId, undefined)
+  assert.equal(h.counts().installs, 0)
+  assert.match(assistantGuidance(custom.definition), /human_workspace_directory/)
+  assert.match(assistantGuidance(custom.definition), /human_assistant_work_get/)
+  assert.match(designer.definition.methods.join('\n'), /human_assistant_draft/)
 })
 test('preview and get never expose native install plans; approval is exact and idempotent', async t => {
   const h = await setup(t), preview = await h.approved()
@@ -73,7 +87,7 @@ test('unknown install outcome is reconciled read-only, including after reopening
   assert.equal((await r.status(p,signal)).state,'installed'); assert.equal(h.counts().installs,1)
 })
 
-for (const guidanceVersion of [1, 2]) for (const state of ['installed', 'unknown']) test(`historical V${guidanceVersion} ${state} registry reopens with the same approved plan and never reinstalls`, async t => {
+for (const guidanceVersion of [1, 2, 3]) for (const state of ['installed', 'unknown']) test(`historical V${guidanceVersion} ${state} registry reopens with the same approved plan and never reinstalls`, async t => {
   const ledger = historicalLedger(state, guidanceVersion), old = ledger.entries[0], before = structuredClone(old.plan), store = memory(ledger)
   const h = await setup(t, { store, state })
   assert.deepEqual(store.value, ledger, 'opening old approved data is read-only')
@@ -90,11 +104,11 @@ for (const guidanceVersion of [1, 2]) for (const state of ['installed', 'unknown
   const reopened = await setup(t, { store, state: 'installed' })
   assert.equal((await reopened.registry.status(old, signal)).state, 'installed')
   assert.deepEqual(reopened.counts(), { installs: 0, verifies: 1 })
-  assert.deepEqual(store.value.entries[0].plan, before, 'reconciliation must not re-render historical wording as V3')
+  assert.deepEqual(store.value.entries[0].plan, before, 'reconciliation must not re-render historical wording as V4')
   assert.deepEqual(reopened.registry.installedForPreset(old.plan.presetId).definition, old.definition)
 })
 
-for (const guidanceVersion of [1, 2]) test(`V${guidanceVersion} recovery does not accept altered definition/patch digests or carry old consent into a new version`, async t => {
+for (const guidanceVersion of [1, 2, 3]) test(`V${guidanceVersion} recovery does not accept altered definition/patch digests or carry old consent into a new version`, async t => {
   const original = historicalLedger('installed', guidanceVersion), old = original.entries[0]
   for (const mutate of [
     entry => { entry.digest = '0'.repeat(64) },
@@ -114,7 +128,7 @@ for (const guidanceVersion of [1, 2]) test(`V${guidanceVersion} recovery does no
   await assert.rejects(h.registry.install({ ...request, digest: old.digest }, signal), { code: 'assistant-version-conflict' })
   await assert.rejects(h.registry.install({ ...request, previewId: 'old-expired-preview' }, signal), { code: 'assistant-preview-expired' })
   assert.deepEqual(h.counts(), { installs: 0, verifies: 0 })
-  assert.match(h.store.value.previews[0].native.patch, /职业助手工作方法 v3/)
+  assert.match(h.store.value.previews[0].native.patch, /职业助手工作方法 v4/)
   assert.equal((await h.registry.install(request, signal)).state, 'installed')
   assert.deepEqual(h.store.value.entries.find(entry => entry.version === 1).plan, old.plan)
   assert.equal(h.registry.installedForPreset(old.plan.presetId).definition.name, old.definition.name)

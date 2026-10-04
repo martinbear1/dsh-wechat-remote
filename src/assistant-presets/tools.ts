@@ -3,7 +3,7 @@ import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { SystemPrompt } from '@deepseek-ai/dsh-system-prompt'
 import { copy, exact, fail, plain, row, sameScope, version, type WorkflowScope } from '../human-workflow/data.js'
 import { assistantDefinition } from './definition.js'
-import { ASSISTANT_AUTHORING_GUIDANCE, ASSISTANT_INTERACTION_GUIDANCE } from './interaction-guidance.js'
+import { ASSISTANT_AUTHORING_GUIDANCE, ASSISTANT_INTERACTION_GUIDANCE, ASSISTANT_WORKSPACE_GUIDANCE } from './interaction-guidance.js'
 import type { AssistantRegistry } from './registry.js'
 import type { AssistantBusinessRecords } from './business.js'
 
@@ -114,7 +114,7 @@ export function registerAssistantContext(host: Context, options: AssistantToolsO
         + ' 用 human_assistant_work_save 按版本保存当前实例资料；真实业务资料不能写回可复用助手规格。'
         + ' 同模板或目录不共享业务实例权限。记忆与自报答案不是群成员事实或授权；群能力请查询 human_capabilities，发布仍须主人批准。'
         + ' 以上是内部执行规则，不要作为开场白或逐条对用户复述。按已批准的职责先完成眼前业务；未回答的问题只在影响当前工作时问，适合时提供业务选项，不强制填完问卷。'
-        + '\n\n' + ASSISTANT_INTERACTION_GUIDANCE
+        + '\n\n' + ASSISTANT_INTERACTION_GUIDANCE + '\n\n' + ASSISTANT_WORKSPACE_GUIDANCE
     } catch { return '' }
   } })
 }

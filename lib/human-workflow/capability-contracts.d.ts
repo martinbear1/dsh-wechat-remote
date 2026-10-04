@@ -28,7 +28,7 @@ export declare function workflowCapabilityContracts(): {
     };
     readonly memberForm: {
         readonly schema: "human.form.v1";
-        readonly schemas: readonly ["human.form.v1", "human.form.v2"];
+        readonly schemas: readonly ["human.form.v1", "human.form.v2", "human.form.v3"];
         readonly maxUtf8Bytes: number;
         readonly limitOrigin: "product";
         readonly fields: 12;
@@ -70,6 +70,21 @@ export declare function workflowCapabilityContracts(): {
             readonly maxFiles: 1;
             readonly maxBytes: number;
             readonly mediaTypes: readonly ["image/jpeg", "image/png"];
+            readonly v3: {
+                readonly kind: "file";
+                readonly mediaTypes: readonly ["image/jpeg", "image/png", "application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "application/vnd.openxmlformats-officedocument.presentationml.presentation", "text/plain", "text/csv"];
+                readonly selection: "nonempty-task-specific-subset";
+                readonly manifest: "human.submission.manifest.v2";
+                readonly tool: "human_submission_file";
+                readonly requires: "server-and-current-node-receiveFormats-confirmed";
+                readonly oldNode: "reject-never-silently-drop-attachment";
+                readonly displayName: "encrypted-metadata-never-a-storage-path";
+                readonly validation: "bounded-format-check-not-antivirus";
+                readonly execution: false;
+                readonly documentAutomaticAnalysis: false;
+                readonly legacyOfficeBinaryFormats: false;
+                readonly status: "accepted-after-server-confirmation-received-after-durable-node-save";
+            };
         };
         readonly answers: {
             readonly maxUtf8Bytes: 12000;
@@ -87,7 +102,8 @@ export declare function workflowCapabilityContracts(): {
         readonly composition: {
             readonly default: "all-group";
             readonly choice: "agent-selects-from-current-user-intent";
-            readonly sourceSurfaceId: "optional-group-reuse-required-only-for-known-members";
+            readonly sourceSurfaceId: "optional-same-session-group-source";
+            readonly workspaceSourceId: "mutually-exclusive-verified-workspace-source";
             readonly knownIdentityDoesNotForceKnownMembers: true;
             readonly ownerReselectionAllowed: true;
             readonly taskOrRound: "independent-choice-by-user-intent-not-by-known-identities";
@@ -101,9 +117,17 @@ export declare function workflowCapabilityContracts(): {
         readonly rosterEnumeration: false;
         readonly knownMembers: {
             readonly capability: "task.audience-known";
-            readonly source: "same-session-successful-sourceSurfaceId";
+            readonly source: "same-session-successful-sourceSurfaceId-or-verified-workspaceSourceId";
             readonly parameter: "initialRound.sourceParticipantRefs";
             readonly references: "1..20-distinct-observed-source-task-participantRefs";
+            readonly genericParameter: "initialRound.sourceRecipientRefs";
+            readonly genericReferences: "1..20-exact-source-task-human.recipient.ref.v1";
+            readonly parametersMutuallyExclusive: true;
+            readonly genericQuery: "human_task_recipients";
+            readonly genericSources: readonly ["observed", "selection", "audience"];
+            readonly beforeMemberFirstOpen: true;
+            readonly staleSelectionRevision: "reject-never-replace";
+            readonly duplicatesAcrossAliases: "reject";
             readonly resolution: "server-verifies-source-task-original-group-and-native-member-mapping";
             readonly taskEffect: "new-independent-task";
             readonly recipientRefs: null;
@@ -127,6 +151,91 @@ export declare function workflowCapabilityContracts(): {
         readonly outcomes: readonly ["success", "cancelled", "failed", "unknown"];
         readonly cancelledSelectionPublishes: false;
     };
+    readonly recipientFacts: {
+        readonly tool: "human_task_recipients";
+        readonly schema: "human.recipient.facts.v1";
+        readonly reference: "human.recipient.ref.v1";
+        readonly sources: readonly ["observed", "selection", "audience"];
+        readonly association: "server-verified-same-group-member-identity";
+        readonly nativeIdsExported: false;
+        readonly namesExported: false;
+        readonly observed: "recorded-encounter-not-read-receipt";
+        readonly confirmed: "participation-not-submission";
+        readonly roundId: "null-for-identity-only-or-exact-round-for-submission-facts";
+        readonly submission: readonly ["acceptedCount", "latestSubmissionId", "acceptedAt", "receivedAt"];
+        readonly acceptedVersionsSurviveAttachmentExpiry: true;
+        readonly knownSetIsCompleteGroupRoster: false;
+        readonly selectionBeforeFirstOpenCreatesParticipant: false;
+        readonly ownerExcluded: true;
+        readonly identityMeaning: "wechat-member-within-original-group-not-business-role";
+        readonly platformFields: {
+            readonly opengid: "group";
+            readonly group_openid: "wechat-member-in-that-group";
+        };
+        readonly identity: {
+            readonly schema: "human.member.identity.v1";
+            readonly fields: readonly ["groupRef", "memberRef"];
+            readonly purpose: "persist-and-correlate-known-identities-not-an-action-argument";
+            readonly notInterchangeableWith: readonly ["recipientRef", "selectionRef.memberRefs", "participantRef", "native-group_openid"];
+            readonly namespace: "app-owner-account-original-group";
+            readonly stableAcross: readonly ["tasks", "rounds", "selection-revisions", "node-restarts-with-same-keys"];
+            readonly rotatesWith: readonly ["namespace-or-identity-key-change", "group-or-native-member-identity-change"];
+            readonly unlimitedPlatformLifetimeGuaranteed: false;
+            readonly businessRole: false;
+            readonly authorization: false;
+        };
+        readonly acquisition: readonly ["verified-current-entrant", "native-selected-members", "published-known-audience"];
+        readonly persistence: "store-provenance-bound-references-revalidate-at-use-not-permanent-membership";
+        readonly crossGroupReuse: false;
+        readonly fullRosterExport: false;
+        readonly realtimeMembershipSync: false;
+        readonly pageSize: 20;
+        readonly pagination: "offset-with-unchanged-snapshot-restart-on-change";
+        readonly use: "agent-chooses-recipients-from-user-intent-and-evidence-not-a-fixed-pending-filter";
+    };
+    readonly workspaceDirectory: {
+        readonly capability: "workspace.directory";
+        readonly tools: readonly ["human_workspace_directory", "human_workspace_sync", "human_workspace_note"];
+        readonly namespace: "verified-node-binding-and-real-native-workspace";
+        readonly modelSuppliedWorkspacePath: false;
+        readonly source: "sourceSurfaceId-or-workspaceSourceId-mutually-exclusive";
+        readonly update: "expectedRevision-CAS-reload-on-conflict";
+        readonly facts: "source-task-snapshot-and-asOf";
+        readonly notes: "agent-authored-business-record-not-verified-identity";
+        readonly noteFields: readonly ["displayName", "aliases", "notes"];
+        readonly groupNote: "memberRef=null";
+        readonly removeNote: "value=null";
+        readonly nativeIdsExported: false;
+        readonly completeGroupRoster: false;
+        readonly cachedReadIsAuthorization: false;
+        readonly sourceUse: "recheck-both-native-sessions-workspace-binding-and-server-source";
+        readonly doesNotShare: readonly ["private-instance-memory", "private-feedback", "execution-permission"];
+        readonly backgroundRosterScan: false;
+        readonly realtimeMembershipSync: false;
+    };
+    readonly reshare: {
+        readonly capability: "task.reshare";
+        readonly tool: "human_task_reshare";
+        readonly source: "sourceSurfaceId-or-workspaceSourceId";
+        readonly roundId: "null-original-entry-or-published-public-round";
+        readonly retains: readonly ["task", "content", "audience", "cover", "submissions"];
+        readonly creates: "new-share-attempt-and-native-activity-not-new-task";
+        readonly ownerNativeTap: true;
+        readonly automaticMention: false;
+        readonly unknownResult: "reconcile-no-automatic-replay";
+        readonly privateRoundShare: false;
+    };
+    readonly workflowPreview: {
+        readonly choices: readonly ["inline", "page"];
+        readonly default: "inline";
+        readonly kinds: readonly ["round", "review", "reminder"];
+        readonly inline: "full-authoritative-versioned-content-and-target";
+        readonly changedDraft: "reject-and-repreview";
+        readonly fallback: "page-for-unrepresentable-full-preview-or-cover-or-budget";
+        readonly truncatedApproval: false;
+        readonly conversationTextIsApproval: false;
+        readonly outcome: "published-content-not-automatic-message";
+    };
     readonly reminders: {
         readonly tool: "human_task_prepare_reminder";
         readonly nativeEffect: "separate-at-mentions-and-task-link";
@@ -140,8 +249,50 @@ export declare function workflowCapabilityContracts(): {
             readonly documentedJointParameter: false;
             readonly nativeExtraNotice: "device-behavior-unverified";
         };
-        readonly sources: readonly ["participantRefs", "task-audience"];
+        readonly sources: readonly ["exact-references", "participantRefs", "task-audience", "selected-members"];
         readonly mutuallyExclusive: true;
+        readonly exactReferences: {
+            readonly parameter: "content.recipientRefs";
+            readonly source: "human_task_recipients";
+            readonly recipientSource: "exact-references";
+            readonly condition: "none";
+            readonly nativeTypes: readonly ["complete", "participate"];
+            readonly roundId: "exact-round-or-null-for-original-entry";
+            readonly arbitraryAuthorizedSubsets: true;
+            readonly automaticBusinessFilter: false;
+            readonly noSilentSubstitutionOrDeduplication: true;
+            readonly checks: readonly ["task-and-original-group", "current-source-revision", "binding-and-authorization", "audience-and-private-round-visibility"];
+            readonly namesPreview: "native-open-data-list-in-original-group-no-js-export";
+            readonly maximum: 20;
+            readonly limitOrigin: "product";
+        };
+        readonly predicates: {
+            readonly optional: true;
+            readonly purpose: "execution-time-fact-filter-not-mandatory-business-flow";
+        };
+        readonly preview: {
+            readonly choices: readonly ["inline", "page"];
+            readonly default: "inline";
+            readonly inline: "immutable-reminder-intent-in-conversation";
+            readonly page: "optional-separate-preview";
+            readonly fallback: "old-or-missing-verified-inline-intent-uses-preview-page";
+            readonly finalNativeTap: "required-in-verified-original-group";
+            readonly backgroundAutoApproveOrSend: false;
+        };
+        readonly selectedMembers: {
+            readonly parameter: "content.recipientSource";
+            readonly value: "selected-members";
+            readonly reference: "content.selectionRef";
+            readonly selection: "complete-current-task-native-selection";
+            readonly changedRevision: "reject";
+            readonly arbitrarySubsets: false;
+            readonly conditions: readonly ["pending-submission"];
+            readonly beforeMemberFirstOpen: true;
+            readonly rosterEnumeration: false;
+            readonly createsParticipantRecords: false;
+            readonly excludes: "accepted_at-submissions-and-owner";
+            readonly maximum: 20;
+        };
         readonly taskAudience: {
             readonly parameter: "content.recipientSource";
             readonly value: "task-audience";
@@ -199,6 +350,7 @@ export declare function workflowCapabilityContracts(): {
         };
         readonly taskPage: {
             readonly schema: "human.form.v2";
+            readonly schemas: readonly ["human.form.v1", "human.form.v2", "human.form.v3"];
             readonly customizable: readonly ["field-labels", "field-types", "field-conditions", "instructions", "sections", "descriptions", "theme", "icon", "layout", "submitLabel", "completionText", "blocks"];
             readonly themes: readonly ["blue", "green", "purple", "orange", "slate"];
             readonly icons: readonly ["clipboard", "book", "calendar", "briefcase", "checklist"];

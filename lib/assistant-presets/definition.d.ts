@@ -22,6 +22,8 @@ export declare function definitionDigest(value: AssistantDefinition): string;
 export declare function legacyAssistantGuidanceV1(definition: AssistantDefinition): string;
 /** Frozen RC9 native persona for already approved persisted plans. */
 export declare function legacyAssistantGuidanceV2(definition: AssistantDefinition): string;
-/** New previews use V3. Previously approved native patches remain immutable;
+/** Frozen V3 native persona for already approved persisted plans. */
+export declare function legacyAssistantGuidanceV3(definition: AssistantDefinition): string;
+/** New previews use V4. Previously approved native patches remain immutable;
  * adopting new persona wording requires a new owner-reviewed preview. */
 export declare function assistantGuidance(definition: AssistantDefinition): string;

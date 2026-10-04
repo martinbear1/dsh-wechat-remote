@@ -3,6 +3,8 @@
 import { exact, plain, row } from '../human-workflow/data.js'
 import { HUMAN_FORM_MAX_BYTES, HUMAN_ROUND_MAX_BYTES } from './capacity.js'
 import { HUMAN_FORM_V2_KINDS, HUMAN_FORM_V2_FIELD_KEYS, humanFormV2Field, humanFormPresentation } from './form-v2.js'
+import { SUBMISSION_FILE_TYPES, SUBMISSION_FILE_MAX } from '../human-workflow/submission-file-contract.js'
+import { humanRecipientRef, type HumanRecipientRef } from './protocol.js'
 export interface HumanInitialRound {
   title: string; instructions: string; form: Record<string, unknown>; closesAt: number | null; recipientRefs: null
   /** Missing retains the original all-group wire representation and digest. */
@@ -10,6 +12,9 @@ export interface HumanInitialRound {
   /** Opaque participants of the successful source task, never native member
    * IDs. Only known-members accepts this; the server resolves their identity. */
   sourceParticipantRefs?: string[]
+  /** Current exact references may also describe selected/audience members who
+   * have never opened the source task. Mutually exclusive with the legacy list. */
+  sourceRecipientRefs?: HumanRecipientRef[]
 }
 function condition(value: unknown, previous: string[], choices: Map<string, unknown[]>, depth = 0, budget = { count: 0 }): boolean {
   if (++budget.count > 32 || depth > 4 || !row(value)) return false
@@ -24,10 +29,10 @@ function condition(value: unknown, previous: string[], choices: Map<string, unkn
     && typeof value.field === 'string' && previous.includes(value.field)
 }
 export function humanForm(value: unknown): Record<string, unknown> | undefined {
-  if (!row(value) || !['human.form.v1', 'human.form.v2'].includes(String(value.schema))
-    || !exact(value, ['schema', 'fields', 'attachment'], value.schema === 'human.form.v2' ? ['presentation'] : [])
+  if (!row(value) || !['human.form.v1', 'human.form.v2', 'human.form.v3'].includes(String(value.schema))
+    || !exact(value, ['schema', 'fields', 'attachment'], value.schema !== 'human.form.v1' ? ['presentation'] : [])
     || !Array.isArray(value.fields) || value.fields.length > 12 || Buffer.byteLength(JSON.stringify(value)) > HUMAN_FORM_MAX_BYTES) return
-  const v2 = value.schema === 'human.form.v2', previous: string[] = [], choices = new Map<string, unknown[]>()
+  const v2 = value.schema !== 'human.form.v1', previous: string[] = [], choices = new Map<string, unknown[]>()
   if (value.presentation !== undefined && !humanFormPresentation(value.presentation)) return
   for (const field of value.fields) {
     if (!row(field) || !exact(field, ['key', 'label', 'kind', 'required'], ['maxLength', 'choices', 'min', 'max', 'when', ...(v2 ? HUMAN_FORM_V2_FIELD_KEYS : [])])
@@ -49,22 +54,30 @@ export function humanForm(value: unknown): Record<string, unknown> | undefined {
     if (v2 && field.kind === 'multi-choice') choices.set(field.key, field.choices as unknown[])
   }
   const a = value.attachment
-  if (a !== null && (!row(a) || !exact(a, ['kind', 'required', 'maxBytes', 'mediaTypes']) || a.kind !== 'image' || typeof a.required !== 'boolean'
-    || !Number.isSafeInteger(a.maxBytes) || Number(a.maxBytes) < 1 || Number(a.maxBytes) > 10 * 1024 * 1024
-    || !Array.isArray(a.mediaTypes) || !a.mediaTypes.length || a.mediaTypes.length > 2 || new Set(a.mediaTypes).size !== a.mediaTypes.length
-    || !a.mediaTypes.every(item => ['image/jpeg', 'image/png'].includes(String(item))))) return
+  const allowed = value.schema === 'human.form.v3' && row(a) && a.kind === 'file' ? [...SUBMISSION_FILE_TYPES] : ['image/jpeg', 'image/png']
+  if (a !== null && (!row(a) || !exact(a, ['kind', 'required', 'maxBytes', 'mediaTypes'])
+    || !(a.kind === 'image' || value.schema === 'human.form.v3' && a.kind === 'file') || typeof a.required !== 'boolean'
+    || !Number.isSafeInteger(a.maxBytes) || Number(a.maxBytes) < 1 || Number(a.maxBytes) > SUBMISSION_FILE_MAX
+    || !Array.isArray(a.mediaTypes) || !a.mediaTypes.length || a.mediaTypes.length > allowed.length || new Set(a.mediaTypes).size !== a.mediaTypes.length
+    || !a.mediaTypes.every(item => allowed.includes(String(item))))) return
   return structuredClone(value)
 }
 export function humanInitialRound(value: unknown): HumanInitialRound | undefined {
-  if (!row(value) || !exact(value, ['title', 'instructions', 'form', 'closesAt', 'recipientRefs'], ['audience', 'sourceParticipantRefs']) || !plain(value.title, 80)
+  if (!row(value) || !exact(value, ['title', 'instructions', 'form', 'closesAt', 'recipientRefs'], ['audience', 'sourceParticipantRefs', 'sourceRecipientRefs']) || !plain(value.title, 80)
     || !plain(value.instructions, 2000) || !humanForm(value.form) || value.recipientRefs !== null
     || value.audience !== undefined && !['all-group', 'owner-select', 'known-members'].includes(String(value.audience))
-    || (value.audience === 'known-members'
-      ? !Array.isArray(value.sourceParticipantRefs) || value.sourceParticipantRefs.length < 1 || value.sourceParticipantRefs.length > 20
-        || new Set(value.sourceParticipantRefs).size !== value.sourceParticipantRefs.length
-        || !value.sourceParticipantRefs.every(ref => typeof ref === 'string' && /^[A-Za-z0-9_-]{24,64}(?![\s\S])/.test(ref))
-      : Object.hasOwn(value, 'sourceParticipantRefs'))
     || value.closesAt !== null && (!Number.isSafeInteger(value.closesAt) || Number(value.closesAt) <= 0)
     || Buffer.byteLength(JSON.stringify(value)) > HUMAN_ROUND_MAX_BYTES) return
+  const participants = Object.hasOwn(value, 'sourceParticipantRefs'), recipients = Object.hasOwn(value, 'sourceRecipientRefs')
+  if (value.audience !== 'known-members') { if (participants || recipients) return }
+  else {
+    if (participants === recipients) return
+    if (participants && (!Array.isArray(value.sourceParticipantRefs) || value.sourceParticipantRefs.length < 1 || value.sourceParticipantRefs.length > 20
+      || new Set(value.sourceParticipantRefs).size !== value.sourceParticipantRefs.length
+      || !value.sourceParticipantRefs.every(ref => typeof ref === 'string' && /^[A-Za-z0-9_-]{24,64}(?![\s\S])/.test(ref)))) return
+    if (recipients && (!Array.isArray(value.sourceRecipientRefs) || value.sourceRecipientRefs.length < 1 || value.sourceRecipientRefs.length > 20
+      || !value.sourceRecipientRefs.every(humanRecipientRef)
+      || new Set(value.sourceRecipientRefs.map(ref => JSON.stringify(humanRecipientRef(ref)))).size !== value.sourceRecipientRefs.length)) return
+  }
   return structuredClone(value) as unknown as HumanInitialRound
 }

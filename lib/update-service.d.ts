@@ -57,7 +57,7 @@ export declare class PluginUpdateService {
     nativeRelease(): Promise<{
         advice: UpdateAdvice;
         release: Release | undefined;
-        channel: "stable" | "preview";
+        channel: "preview" | "stable";
     }>;
     private eligibility;
     private begin;

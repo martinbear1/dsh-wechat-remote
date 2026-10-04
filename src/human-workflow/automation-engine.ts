@@ -306,7 +306,8 @@ export class WorkflowAutomation {
       } catch (cause) {
         signal.throwIfAborted(); this.options.authority.assertIdentity()
         const code = (cause as { code?: string })?.code ?? ''
-        if (denied(cause) || /capacity|processor/.test(code)) await this.block(scope, taskRef, '任务授权、会话或预算已不可用，请核对后重新批准')
+        if (code === 'automation-document-reading-unavailable') await this.block(scope, taskRef, '文档已接收；自动读取和分析尚未接通，请先在会话中查看文件')
+        else if (denied(cause) || /capacity|processor/.test(code)) await this.block(scope, taskRef, '任务授权、会话或预算已不可用，请核对后重新批准')
         // Offline/query errors leave undispatched work parked until a later
         // successful standard sync. There is no immediate retry loop.
       }

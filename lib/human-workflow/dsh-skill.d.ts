@@ -1,5 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis';
-export declare const HUMAN_WORKFLOW_SKILL_REVISION = "2026-10-05-receipt-recovery-v7";
+export declare const HUMAN_WORKFLOW_SKILL_REVISION = "2026-10-05-private-confirmation-v8";
 /** Trusted package instructions, not generated executable code. Profession
  * templates may reference this skill; task data never rewrites its protocol. */
 export declare const HUMAN_WORKFLOW_SKILL: {

@@ -1,7 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { ASSISTANT_AUTHORING_GUIDANCE, ASSISTANT_WORKSPACE_GUIDANCE, ASSISTANT_RELIABILITY_GUIDANCE, ASSISTANT_IDENTITY_INTENT_GUIDANCE, ASSISTANT_TOOL_RECOVERY_GUIDANCE, HUMAN_TASK_CONTENT_GUIDANCE } from '../assistant-presets/interaction-guidance.js'
 
-export const HUMAN_WORKFLOW_SKILL_REVISION = '2026-10-05-receipt-recovery-v7'
+export const HUMAN_WORKFLOW_SKILL_REVISION = '2026-10-05-private-confirmation-v8'
 /** Trusted package instructions, not generated executable code. Profession
  * templates may reference this skill; task data never rewrites its protocol. */
 export const HUMAN_WORKFLOW_SKILL = {
@@ -198,7 +198,11 @@ human_task_prepare_reminder 的 preview 默认 inline：气泡展示本次准确
 
 human_task_prepare_review 准备针对一个已收件提交作者的私密反馈；主人确认并由服务端发布后，对应成员才可在自己的任务页查看，不会自动收到通知。只有要求他重新提交时才附带 correction，不能把独立新作业塞进订正。human_task_prepare_round 延续既有任务，增加本次补交或补充资料要求，旧提交不覆盖，也不会因此另发一张群卡。human_task_prepare_reminder 可按明确身份引用准备提示，也可选择提交/反馈事实筛选，不能加入确认后才符合的新成员；准备方案或确认对象不等于提醒已发出。
 
-三者都返回真实操作入口；主人仍须查看内容与对象，并以自己的微信身份明确确认，Agent 没有自批接口。内部草稿、版本与权限校验不省略，但对外说清本次效果，例如“确认后对方可查看反馈”或“查看补交要求”，不要笼统要求用户“审核任务方案”“批准版本”。不把查看页面当成已确认；收到 workflow-approve 的 success 后，仍要查询任务事实核实是否已生效，不能把这种回执当成微信已发消息。
+三者都返回真实操作入口；主人仍须查看内容与对象，并以自己的微信身份明确确认，Agent 没有自批接口。针对准确一份提交的私人反馈（可附带要求同一作者重交的 correction），可以在支持的新小程序中通过正常聊天输入“确认更新”来确认当前唯一、完整展示的方案：可信客户端重新核对准确版本、主人身份和当前会话后，复用同一个发布接口，不再要求重复点击发布按钮。不是解析任意聊天就自动批准，不是你自行填 approved=true；原生问答工具的回答、引用、附件、含糊答复或夹带内容修改不能代替这次精确确认。多个方案、未完整展示、公开范围、旧客户端或桌面未实现此输入方式时保留原按钮，不猜选哪一份。独立 prepare_round 目前只展示对象人数、不能据此准确识别人，仍保留按钮；不要把人数说成已展示名单。要用这条方式时先用原工具准备完整方案，简短请主人在聊天里确认；不要另问一遍处理意图再要求去页内确认。主人此前表达同意但系统没接上时，应说清是产品入口限制，不声称主人从未授权或微信永久禁止。
+
+对话确认和点击确认都是可选择的用户输入方式，不是新的固定工作流水线。不能将本次确认升级为以后无人值守发布、给其他人发布或批量自动批改。用户同时要修改正文/对象/期限时，先按新要求准备准确方案，旧确认不沿用。结果未知只查询原草稿，不造新稿重发；实际 published 后才能说“已更新，对方打开原作业页就能看到”。随后按用户已经明确的提醒意图准备独立 @ 入口，不再重复问“要不要提醒”，也不自动发送。
+
+内部草稿、版本与权限校验不省略，但对外说清本次效果，例如“确认后对方可查看反馈”或“查看补交要求”，不要笼统要求用户“审核任务方案”“批准版本”。不把查看页面、用户文字或成功返回聊天当成已发布；收到 workflow-approve 的 success 后，仍要查询任务事实核实是否已生效，不能把这种回执当成微信已发消息。
 
 用 human_task_lifecycle 返回的 drafts[].effects 区分内容是否生效、是否产生新群卡及提醒实际执行状态。draft 的 published 可能只是内容已发布或提醒计划获准，不代表群通知已发出；记忆与回复都不能把它或 surface success 改写成“已提醒”。notificationState=succeeded 也只按真实调用结果说已发出提醒，不说对方已收到或已读；旧服务缺少执行状态时保持未知，不能补猜成功。只向用户讲与本次有关的业务结果，不念 effects 枚举或核查清单。
 

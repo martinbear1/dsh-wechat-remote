@@ -157,6 +157,26 @@ test('skill decision guidance keeps notification facts, user intent and unsuppor
   assert.match(text, /没有已批准且实际运行的处理规则或通知机制，不承诺/)
 })
 
+test('private publication offers trusted conversation confirmation without granting an Agent self-approval or native sending', () => {
+  const tools = lifecycleTools({ nodeId: 'test_node', core: {}, lifecycle: {}, assertAgent() {} })
+  assert(!tools.some(tool => /publish|approve/.test(tool.name)), 'a language claim must not introduce a node-side owner impersonation tool')
+  for (const name of ['human_task_prepare_review', 'human_task_prepare_round']) {
+    const tool = tools.find(tool => tool.name === name)
+    assert.match(tool.description, /trusted client performs the SAME owner-authenticated approval/)
+    assert.match(tool.description, /确认更新/)
+    assert.match(tool.description, /query human_task_lifecycle to verify publication/)
+    assert(!Object.hasOwn(tool.parameters.properties, 'approved'))
+  }
+  assert.match(tools.find(tool => tool.name === 'human_task_prepare_reminder').description, /real native send tap/)
+  const skill = HUMAN_WORKFLOW_SKILL.content
+  assert.match(skill, /可信客户端重新核对准确版本、主人身份和当前会话/)
+  assert.match(skill, /原生问答工具的回答、引用、附件、含糊答复或夹带内容修改不能代替/)
+  assert.match(skill, /产品入口限制，不声称主人从未授权/)
+  assert.match(skill, /不能将本次确认升级为以后无人值守发布/)
+  assert.match(skill, /结果未知只查询原草稿/)
+  assert.match(skill, /不再重复问“要不要提醒”，也不自动发送/)
+})
+
 test('generic collection results preserve project context instead of assigning a teacher identity', async t => {
   const { core } = await fixture(t)
   const surface = await core.createCollection(origin, '项目本周进展', '请提交进展。', initial(), signal)

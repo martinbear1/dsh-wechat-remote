@@ -274,6 +274,18 @@ export declare function workflowCapabilityContracts(): {
         readonly fallback: "page-for-unrepresentable-full-preview-or-cover-or-budget";
         readonly truncatedApproval: false;
         readonly conversationTextIsApproval: false;
+        readonly ownerConversationConfirmation: {
+            readonly surface: "updated-wechat-mini-conversation-composer";
+            readonly kinds: readonly ["review-with-optional-correction"];
+            readonly prerequisites: readonly ["unique-latest-complete-displayed-proposal", "same-node-session-workspace-connection", "fresh-owner-wechat-login", "exact-unchanged-draft"];
+            readonly input: "explicit-owner-confirmation-phrase-not-arbitrary-model-interpreted-text";
+            readonly example: "确认更新";
+            readonly effect: "same-owner-approval-endpoint-no-node-publish-authority";
+            readonly exclusions: readonly ["standalone-round-without-identifiable-recipient-preview", "public-round", "share", "reminder", "question-answer", "attachments", "ambiguous-or-edited-proposal", "background-automation"];
+            readonly fallback: "existing-owner-button-on-unsupported-clients-or-unrepresentable-preview";
+            readonly unknownResult: "query-the-original-draft-never-automatically-republish";
+            readonly agentNext: "query-human_task_lifecycle-before-reporting-updated-or-preparing-requested-reminder";
+        };
         readonly outcome: "published-content-not-automatic-message";
     };
     readonly reminders: {

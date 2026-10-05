@@ -129,7 +129,9 @@ export function lifecycleTools(options: LifecycleToolsOptions): ToolDefinition[]
     description: `Prepare a REAL owner confirmation action for ${kind === 'round' ? 'further submissions within an existing task' : kind === 'review' ? 'private feedback and optional correction for exactly one submission author' : 'a separate @members + original-task-link message to <=20 exact verified recipients, with optional user-requested fact filters'}. `
       + workflowOperationGuidance[kind] + ' '
       + 'Read human_task_lifecycle first and pass its expectedRevision. The cloud validates schema, ownership, references and current conditions. This tool only drafts; only the owner can approve with fresh WeChat identity. '
-      + 'No private evaluation goes in public card title/body. Finish your reply so the owner can click the native structured approval action. Never forge JSON buttons, self-approve, announce publication, or retry an uncertain reminder. '
+      + (kind === 'reminder' ? 'The reminder still needs the owner\'s real native send tap. '
+        : 'On an updated WeChat mini conversation client, a uniquely displayed complete private review (including its optional correction for the exact submission author) can also be confirmed by the owner typing 确认更新 in the normal composer. The trusted client performs the SAME owner-authenticated approval; this is not a model approval or a new publish tool. Standalone rounds currently show recipient counts rather than an identifiable list and retain the existing button, as do public rounds, ambiguous/changed/unshown proposals, question answers and unsupported clients. Do not claim a text request always publishes or that a second button is universally mandatory. After any claimed confirmation, query human_task_lifecycle to verify publication before reporting the member page updated or preparing a requested reminder. ')
+      + 'No private evaluation goes in public card title/body. Finish your reply so the owner can confirm the exact structured proposal using a supported input. Never forge JSON buttons, self-approve, announce publication, or retry an uncertain reminder. '
       + (kind === 'round' ? 'Optional content.cover is the exact public 5:4 asset returned by human_card_cover_prepare, allowed only with recipientRefs:null. The exact image digest is included in owner approval; changing it needs a new draft. ' : 'No cover is accepted for private feedback, its correction, or reminders. ')
       + (kind === 'review' ? 'Use the exact latest received submission version, and base feedback on actually read form/image/document content. Receiving a file or its path is not reading it; use a real compatible document reader before discussing its contents. Cloud holds published private feedback plaintext under participant ACL; do not claim end-to-end encrypted results.' : 'Forms use fixed supported field schemas; no code, URL, file paths, remote widgets or authority fields.')
       + (kind !== 'reminder' ? ' The form has the same attachment support as human_task_create: v1/v2 images, v3 kind=file for JPEG/PNG/PDF/DOCX/XLSX/PPTX/TXT/CSV, ONE attachment <=10MiB. Presentation belongs inside content.form.presentation (or content.correction.form.presentation), not beside form. Parameter errors must not silently downgrade a requested document to an image.' : ''),
@@ -139,9 +141,9 @@ export function lifecycleTools(options: LifecycleToolsOptions): ToolDefinition[]
     output: { schema: { type: 'object' }, render(_input, value) {
       const surface = row(value) && humanSurface(value.surface); if (!surface) throw fail('human-surface-invalid', '审核卡片无效')
       const next = kind === 'review'
-        ? '请主人查看反馈，确认后仅对应成员与主人可在任务页查看；这不会自动通知对方。'
+        ? '请主人查看反馈，确认后仅对应成员与主人可在任务页查看；这不会自动通知对方。支持的新小程序可在唯一完整方案后由主人直接回复“确认更新”，通过原有主人身份核验发布；不支持或未显示完整方案时仍用原按钮，不宣称必须再次跳页。'
         : kind === 'round'
-          ? '请主人查看原任务的补充提交要求；确认后更新原任务页面，不会另建任务或自动发出新群卡。'
+          ? '请主人查看原任务的补充提交要求；确认后更新原任务页面，不会另建任务或自动发出新群卡。此独立补充要求目前仍用原按钮；不要将它与针对准确提交的私人反馈及附带重交要求的文字确认混淆。'
           : '请主人查看提醒内容和对象，按页面提示发送；提醒准备好或方案已确认均不能当作提醒已发出。'
       return [{ type: 'text', text: `内部执行事实（不是给用户照读的文案）：${surface.title}已准备好，尚未生效，也未发送微信群消息。${next} 真实操作已附上；沿用职业身份，用一句业务结果和下一步说明，不说“审核任务方案”“批准版本”，不朗读 ID、轮次协议或整份工具结果。仍由主人核对内容与对象并明确确认，不绕过权限。只有查询到真实发布状态或对应发送回执才能报告结果；不把页面更新说成已通知，不承诺无执行依据的持续跟进。` }]
     }, presentationMeta(_input, value) {

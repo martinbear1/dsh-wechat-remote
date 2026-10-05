@@ -85,7 +85,7 @@ test('native skill discovery alone does not reload changed bodies with an unchan
   second()
 })
 
-for (const revision of ['2026-10-04-composable-targets-v1', '2026-10-04-profession-scope-v2', '2026-10-05-workspace-composition-v4', '2026-10-05-evidence-recovery-v5']) test(`a session that loaded ${revision} discovers the current business capability methods`, async t => {
+for (const revision of ['2026-10-04-composable-targets-v1', '2026-10-04-profession-scope-v2', '2026-10-05-workspace-composition-v4', '2026-10-05-evidence-recovery-v5', '2026-10-05-receipt-recovery-v7']) test(`a session that loaded ${revision} discovers the current business capability methods`, async t => {
   const f = await fixture(t)
   const remove = f.skills.register({ ...HUMAN_WORKFLOW_SKILL,
     description: `修订 ${revision}：按用户意图组合群任务、新事项/补交、已知对象和单独提醒；用业务语言交互。旧会话参与相关工作时按需重新加载。`,
@@ -106,6 +106,8 @@ for (const revision of ['2026-10-04-composable-targets-v1', '2026-10-04-professi
   assert.match(latest.content[0].text, /totalKnown=0 只说明该查询尚无已知收件人/)
   assert.match(latest.content[0].text, /不因选人工具返回 selectionRef 就默认接它/)
   assert.match(latest.content[0].text, /exact-references \+ condition:'none'/)
+  assert.match(latest.content[0].text, /正常聊天输入“确认更新”/)
+  assert.match(latest.content[0].text, /不是新的固定工作流水线/)
   assert(!latest.content[0].text.includes('PREVIOUS_COMPOSABLE_TARGETS_BODY'))
   assert.equal((await f.step()).messages.length, 0)
 })

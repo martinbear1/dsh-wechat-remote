@@ -278,6 +278,9 @@ test('live tool-recovery methods are inherited by new profession and designer in
     assert(section, template)
     assert(section.text.includes(ASSISTANT_TOOL_RECOVERY_GUIDANCE), template)
     assert.equal(section.text.split(ASSISTANT_TOOL_RECOVERY_GUIDANCE).length - 1, 1)
+    assert.match(section.text, /唯一完整方案后输入的“确认更新”/)
+    assert.match(section.text, /未支持的客户端仍用现有按钮/)
+    assert.match(section.text, /页面更新不等于已经通知/)
   }
   assert.equal(f.recordStore.writes, 0, 'working methods do not rewrite any business instance')
   assert.deepEqual(f.host.session.events, beforeEvents, 'assembling common tool guidance does not fabricate user turns')

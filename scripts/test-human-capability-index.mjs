@@ -62,6 +62,21 @@ test('file discovery exposes all collection paths and unambiguous versioned Word
   assert.match(form.validation.repair, /without dropping user requirements/)
   assert.deepEqual(form.attachment.mediaTypes, ['image/jpeg', 'image/png'], 'legacy compatibility fields are preserved and explicitly labelled')
 })
+
+test('owner conversation confirmation is a constrained client input, not raw text or Agent publish authority', () => {
+  const contract = manifest().contracts.workflowPreview
+  assert.equal(contract.conversationTextIsApproval, false)
+  const input = contract.ownerConversationConfirmation
+  assert.equal(input.surface, 'updated-wechat-mini-conversation-composer')
+  assert.deepEqual(input.kinds, ['review-with-optional-correction'])
+  assert(input.prerequisites.includes('fresh-owner-wechat-login'))
+  assert(input.prerequisites.includes('exact-unchanged-draft'))
+  assert(input.exclusions.includes('reminder'))
+  assert(input.exclusions.includes('background-automation'))
+  assert.match(input.effect, /no-node-publish-authority/)
+  assert.match(input.fallback, /unsupported-clients/)
+  assert.match(input.unknownResult, /never-automatically-republish/)
+})
 test('targeted details do not leak unrelated contracts or claim participation is a submission', () => {
   const result = capabilityCatalog(manifest(), 'facts', 'full')
   assert(result.entries.every(item => item.category === 'facts'))

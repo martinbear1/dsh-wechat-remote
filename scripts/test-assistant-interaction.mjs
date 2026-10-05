@@ -4,7 +4,7 @@ import { mkdtemp, writeFile, readdir, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { randomBytes } from 'node:crypto'
-import { ASSISTANT_INTERACTION_GUIDANCE, ASSISTANT_AUTHORING_GUIDANCE, ASSISTANT_WORKSPACE_GUIDANCE, ASSISTANT_RELIABILITY_GUIDANCE, ASSISTANT_IDENTITY_INTENT_GUIDANCE, HUMAN_TASK_CONTENT_GUIDANCE } from '../lib/assistant-presets/interaction-guidance.js'
+import { ASSISTANT_INTERACTION_GUIDANCE, ASSISTANT_AUTHORING_GUIDANCE, ASSISTANT_WORKSPACE_GUIDANCE, ASSISTANT_RELIABILITY_GUIDANCE, ASSISTANT_IDENTITY_INTENT_GUIDANCE, ASSISTANT_TOOL_RECOVERY_GUIDANCE, HUMAN_TASK_CONTENT_GUIDANCE } from '../lib/assistant-presets/interaction-guidance.js'
 import { assistantDefinition, assistantGuidance } from '../lib/assistant-presets/definition.js'
 import { assistantTemplates } from '../lib/assistant-presets/catalog.js'
 import { assistantTools, registerAssistantContext } from '../lib/assistant-presets/tools.js'
@@ -174,6 +174,21 @@ test('identity availability is evidence-based in new personas, runtime skill and
   assert.match(save.description, /do not turn totalKnown=0, redacted raw IDs, or one failed action into a lasting cannot-obtain\/cannot-store rule/)
   assert.match(save.parameters.properties.content.properties.memory.description, /verified tool facts with source\/time/)
   assert.match(save.parameters.properties.content.properties.memory.description, /Never persist unverified capability denial as fact/)
+})
+
+test('current tool guidance treats receipt lag as recoverable evidence, not capability denial or authority to resend', () => {
+  includesOnce(HUMAN_WORKFLOW_SKILL.content, ASSISTANT_TOOL_RECOVERY_GUIDANCE)
+  for (const phrase of ['记录尚未对齐', '不推断微信不支持选人或提醒', '不要求重新发卡',
+    '恢复只读状态或补记原回执，不是重新发送', '不能假装已提醒', '具体重试与可用恢复入口以当前工具合同为准',
+    '不能用相同无效参数反复试', '更不能把真实记忆改成“测试保存”', '不是某个班级的流程']) {
+    assert(ASSISTANT_TOOL_RECOVERY_GUIDANCE.includes(phrase), phrase)
+  }
+  const tools = assistantTools({ nodeId: 'test_node', registry: {}, business: {}, assertIdentity: unreachable, composedPreset: unreachable })
+  const save = tools.find(item => item.name === 'human_assistant_work_save')
+  for (const phrase of ['title, answers and memory must be nested INSIDE content', 'Structural example:',
+    'do not repeat unchanged arguments', 'replace real memory with an experiment/test note']) assert(save.description.includes(phrase), phrase)
+  assert(!assistantGuidance(definition()).includes(ASSISTANT_TOOL_RECOVERY_GUIDANCE),
+    'updating the tool contract must not alter already approved V6 native bundle bytes')
 })
 
 test('selected recipients do not imply legacy unconfirmed filtering or a mandatory registration pipeline', () => {

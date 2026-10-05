@@ -8,6 +8,7 @@ import { SystemPrompt, renderContextSections } from '@deepseek-ai/dsh-system-pro
 import { AssistantRegistry } from '../lib/assistant-presets/registry.js'
 import { AssistantBusinessRecords } from '../lib/assistant-presets/business.js'
 import { assistantGuidance } from '../lib/assistant-presets/definition.js'
+import { ASSISTANT_TOOL_RECOVERY_GUIDANCE } from '../lib/assistant-presets/interaction-guidance.js'
 import { assistantTools, nativeComposedPreset, registerAssistantContext, ASSISTANT_DEFINITION_SCHEMA, ASSISTANT_BUSINESS_SCHEMA } from '../lib/assistant-presets/tools.js'
 
 const signal = new AbortController().signal
@@ -174,6 +175,68 @@ test('official ToolRuntime accepts schemas, projects no native plans, and expose
   assert.equal(f.original.installs, 1, 'all Agent calls were definition/data operations only')
 })
 
+test('misplaced work-save fields report their nested paths through the native runtime and never overwrite real memory', async t => {
+  const f = await toolsFixture(t)
+  await f.direct('human_assistant_work_start')
+  await f.direct('human_assistant_work_save', { expectedRevision: 1, content: contents() })
+  const before = f.recordStore.value, writes = f.recordStore.writes
+  // Reproduce the actual shape error, using only synthetic content. No coercion
+  // or retry-with-a-test-memory is permitted to make this invalid call succeed.
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const result = await f.run('human_assistant_work_save', { expectedRevision: 2, title: 'PRIVATE_VALUE_NOT_FOR_ERRORS', content: contents() })
+    assert.equal(result.isError, true)
+    const text = result.content.map(item => item.text || '').join('\n')
+    assert.match(text, /arguments\.title/)
+    assert.match(text, /应放在 content\.title/)
+    assert(!text.includes('PRIVATE_VALUE_NOT_FOR_ERRORS'))
+    assert.deepEqual(f.recordStore.value, before)
+  }
+  for (const key of ['answers', 'memory']) {
+    await assert.rejects(f.direct('human_assistant_work_save', { expectedRevision: 2, content: contents(), [key]: 'do not echo' }),
+      error => error.code === 'assistant-arguments-invalid' && error.message.includes(`content.${key}`) && !error.message.includes('do not echo'))
+  }
+  assert.equal(f.recordStore.writes, writes)
+  const result = await f.direct('human_assistant_work_save', { expectedRevision: 2,
+    content: { ...before.records[0].content, memory: before.records[0].content.memory + '\n用户补充：按周汇总。' } })
+  assert.equal(result.revision, 3)
+  assert.deepEqual(result.content.answers, contents().answers)
+  assert(result.content.memory.startsWith(contents().memory))
+})
+
+test('work-save validation names missing, invalid and unsupported field paths with no value leakage or persistence', async t => {
+  const f = await toolsFixture(t); await f.direct('human_assistant_work_start')
+  const before = f.recordStore.value, writes = f.recordStore.writes
+  const cases = [
+    [null, 'arguments'],
+    [{ expectedRevision: 1 }, 'arguments.content'],
+    [{ expectedRevision: '1', content: contents() }, 'expectedRevision'],
+    [{ expectedRevision: 0, content: contents() }, 'expectedRevision'],
+    [{ expectedRevision: 1, content: [] }, 'content'],
+    [{ expectedRevision: 1, content: { answers: {}, memory: '' } }, 'content.title'],
+    [{ expectedRevision: 1, content: { ...contents(), title: ' ' } }, 'content.title'],
+    [{ expectedRevision: 1, content: { ...contents(), title: 'x'.repeat(81) } }, 'content.title'],
+    [{ expectedRevision: 1, content: { ...contents(), memory: {} } }, 'content.memory'],
+    [{ expectedRevision: 1, content: { ...contents(), answers: [] } }, 'content.answers'],
+    [{ expectedRevision: 1, content: { ...contents(), answers: { unknown_key: 'PRIVATE_VALUE_NOT_FOR_ERRORS' } } }, 'content.answers.unknown_key'],
+    [{ expectedRevision: 1, content: { ...contents(), answers: { teacher_role: '' } } }, 'content.answers.teacher_role'],
+    [{ expectedRevision: 1, content: { ...contents(), answers: { teacher_role: 'x'.repeat(1001) } } }, 'content.answers.teacher_role'],
+    [{ expectedRevision: 1, content: { ...contents(), participantRef: 'PRIVATE_VALUE_NOT_FOR_ERRORS' } }, 'content.participantRef'],
+  ]
+  for (const [input, path] of cases) {
+    const result = await f.run('human_assistant_work_save', input)
+    assert.equal(result.isError, true, JSON.stringify(input))
+    const text = result.content.map(item => item.text || '').join('\n')
+    assert(text.includes(path), text)
+    assert(!text.includes('PRIVATE_VALUE_NOT_FOR_ERRORS'))
+    assert.deepEqual(f.recordStore.value, before)
+  }
+  // Unknown field names cannot introduce multiline diagnostics or unbounded output.
+  const odd = await f.run('human_assistant_work_save', { expectedRevision: 1, content: contents(), ['bad\n' + 'x'.repeat(1000)]: 'private' })
+  const oddText = odd.content.map(item => item.text || '').join('\n')
+  assert(!oddText.includes('bad\n')); assert(oddText.length < 1000)
+  assert.equal(f.recordStore.writes, writes)
+})
+
 test('native composed-preset helper consults the actual scope API, never headers; forged Agent is denied', async t => {
   const host = sdk(); t.after(() => host.ctx.fiber.dispose())
   host.agent.session = { id: host.session.id, header: { ...host.session.header, agentPreset: 'header-is-not-current' } }
@@ -195,11 +258,29 @@ test('fixed context is exact-agent scoped, never embeds private answers and does
   await f.business.save(scope, f.presetId, { expectedRevision: 1, content: contents() }, signal)
   const text = (await sections({ agent: f.host.agent, scope: f.host.agent }))[0].text
   assert.match(text, /revision 2/); assert.match(text, /work_get/)
+  assert(text.includes(ASSISTANT_TOOL_RECOVERY_GUIDANCE), 'current tool recovery methods reach an already installed assistant without replacing its signed persona')
   for (const secret of ['五年级语文教师', '甲班工作', '本周整理阅读计划']) assert.equal(text.includes(secret), false)
   assert.deepEqual(await sections({ agent: f.host.agent, scope: {} }), [])
   const forged = { ...f.host.agent }; assert.deepEqual(await sections({ agent: forged, scope: forged }), [])
   assert.deepEqual(f.host.session.events, before)
   remove(); assert.deepEqual(await sections({ agent: f.host.agent, scope: f.host.agent }), [])
+})
+
+test('live tool-recovery methods are inherited by new profession and designer instances, not one repaired test Agent', async t => {
+  const f = await toolsFixture(t), remove = registerAssistantContext(f.host.ctx, f.settings)
+  t.after(remove)
+  const prompt = f.host.ctx.get('systemPrompt'), beforeEvents = structuredClone(f.host.session.events)
+  for (const template of ['teacher', 'project', 'sales', 'general', 'designer']) {
+    const { presetId } = template === 'teacher' ? f : await f.install(template)
+    f.host.preset = presetId
+    const section = renderContextSections(await prompt.assemble({ agent: f.host.agent, scope: f.host.agent }))
+      .find(item => item.name === 'harness-remote.assistant-business')
+    assert(section, template)
+    assert(section.text.includes(ASSISTANT_TOOL_RECOVERY_GUIDANCE), template)
+    assert.equal(section.text.split(ASSISTANT_TOOL_RECOVERY_GUIDANCE).length - 1, 1)
+  }
+  assert.equal(f.recordStore.writes, 0, 'working methods do not rewrite any business instance')
+  assert.deepEqual(f.host.session.events, beforeEvents, 'assembling common tool guidance does not fabricate user turns')
 })
 
 test('delayed business writes never return old data after node withdrawal, Agent replacement or preset change', async t => {

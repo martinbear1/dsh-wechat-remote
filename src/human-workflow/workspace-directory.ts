@@ -24,7 +24,7 @@ export class WorkspaceDirectory {
   readonly authority: WorkspaceAuthority
   private persisted = false
   private constructor(private readonly state: StateQueue<Ledger>, private readonly options: { transport: WorkflowTransport; host: WorkspaceHost;
-    published(scope: WorkflowScope, surfaceId: string): { origin: WorkflowScope; taskRef: HumanTaskRef; title: string }; now?: () => number }, secret: string) {
+    published(scope: WorkflowScope, surfaceId: string, signal: AbortSignal): { origin: WorkflowScope; taskRef: HumanTaskRef; title: string } | Promise<{ origin: WorkflowScope; taskRef: HumanTaskRef; title: string }>; now?: () => number }, secret: string) {
     this.authority = new WorkspaceAuthority(options.transport, options.host, secret)
   }
   static async open(store: WorkflowDataStore, options: WorkspaceDirectory['options']) {
@@ -124,7 +124,7 @@ export class WorkspaceDirectory {
     const previous = input.workspaceSourceId ? this.source(context, input.workspaceSourceId)
       : this.partition(context)?.sources.find(s => s.origin.sessionId === scope.sessionId && s.origin.sessionGeneration === scope.sessionGeneration && s.sourceSurfaceId === input.sourceSurfaceId)
     if ((previous?.revision ?? 0) !== input.expectedRevision) throw fail('workspace-version-conflict', '共享来源已变化，请重新查询后更新')
-    const evidence = previous ? { origin: previous.origin, taskRef: previous.taskRef, title: previous.title } : this.options.published(scope, input.sourceSurfaceId!)
+    const evidence = previous ? { origin: previous.origin, taskRef: previous.taskRef, title: previous.title } : await this.options.published(scope, input.sourceSurfaceId!, signal)
     const sourceScope = evidence.origin
     // Persist the random workspace namespace before the first registration.
     // Merely mounting the service or reading an empty directory writes nothing.

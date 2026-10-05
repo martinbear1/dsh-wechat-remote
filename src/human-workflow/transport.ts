@@ -3,7 +3,7 @@ import type { AgentIdentity } from '../public-relay-agent.js'
 import { fail, row } from './data.js'
 import { HUMAN_CARD_REQUEST_MAX_BYTES, HUMAN_LIFECYCLE_RESPONSE_MAX_BYTES } from '../human-tools/capacity.js'
 
-export type WorkflowOperation = 'grant' | 'sync' | 'workspace' | 'receiver-key' | 'lifecycle' | 'objects/claim' | 'objects/ack' | 'cover-assets/prepare' | 'cover-assets/finalize' | 'cover-assets/download'
+export type WorkflowOperation = 'grant' | 'sync' | 'action-result' | 'workspace' | 'receiver-key' | 'lifecycle' | 'objects/claim' | 'objects/ack' | 'cover-assets/prepare' | 'cover-assets/finalize' | 'cover-assets/download'
 export interface WorkflowTransport {
   readonly nodeId: string
   assertIdentity(): void
@@ -14,9 +14,10 @@ export interface WorkflowTransport {
  * any 401, or an unreadable/unrecognized 403 remains fail-closed. */
 const RESOURCE_DENIAL_OPERATIONS: Readonly<Record<string, readonly WorkflowOperation[]>> = {
   invalid_recipients: ['lifecycle'],
-  workspace_registration_required: ['grant', 'workspace', 'lifecycle', 'objects/claim', 'objects/ack'],
-  workspace_scope_mismatch: ['grant', 'workspace', 'lifecycle', 'objects/claim', 'objects/ack'],
-  source_scope_mismatch: ['workspace', 'lifecycle', 'objects/claim', 'objects/ack'],
+  workspace_registration_required: ['grant', 'workspace', 'lifecycle', 'objects/claim', 'objects/ack', 'action-result'],
+  workspace_scope_mismatch: ['grant', 'workspace', 'lifecycle', 'objects/claim', 'objects/ack', 'action-result'],
+  source_scope_mismatch: ['workspace', 'lifecycle', 'objects/claim', 'objects/ack', 'action-result'],
+  action_source_mismatch: ['action-result'],
 }
 const FORBIDDEN_ERROR_MAX_BYTES = 16 * 1024
 export function workflowErrorMessage(code: string): string {
@@ -36,6 +37,9 @@ export function workflowErrorMessage(code: string): string {
     workspace_registration_required: '当前工作区尚未登记这份会话来源。请通过工作区工具核对并登记真实来源；不修改会话标识或借用其他工作区资料。',
     workspace_scope_mismatch: '会话来源不属于所请求的工作区。本次访问被拒绝，请回到正确工作区核对来源；不会切换工作区或扩大权限。',
     source_scope_mismatch: '任务来源不属于本次授权的节点、会话或共享工作区。本次访问被拒绝，请核对准确来源；不改写身份或扩大权限。',
+    action_source_mismatch: '操作结果与这次会话的原始内容不一致，未采用其他记录，也未重新发送。请核对原操作；这不表示节点配对已撤销。',
+    invalid_action_recovery: '操作结果查询参数无效，尚未核实原操作；不据此否定成员选择或提醒能力。',
+    action_result_unavailable: '原操作结果暂不可核对，尚未重新发送。请保留原入口，连接恢复后核对结果。',
     invalid_lifecycle: '任务参数结构未通过校验。请核对字段层级、类型及当前工具合同；不据此判断附件不支持，也不静默改变用户要求。',
     invalid_form: '表单参数未通过校验。请核对版本、字段及附件合同；参数错误不代表接收电脑不支持文档。',
     download_ticket_expired: '附件下载凭证已过期；请由主人在任务管理中明确重试收件，不会自动申请新下载。',
@@ -81,14 +85,25 @@ export class WorkflowHttpTransport implements WorkflowTransport {
   }
   async request(operation: WorkflowOperation, body: Record<string, unknown>, signal: AbortSignal): Promise<unknown> {
     this.assertIdentity(); signal.throwIfAborted()
-    if (!['grant', 'sync', 'workspace', 'receiver-key', 'lifecycle', 'objects/claim', 'objects/ack', 'cover-assets/prepare', 'cover-assets/finalize', 'cover-assets/download'].includes(operation)) throw fail('workflow-request-invalid', '群任务操作不受支持')
+    if (!['grant', 'sync', 'action-result', 'workspace', 'receiver-key', 'lifecycle', 'objects/claim', 'objects/ack', 'cover-assets/prepare', 'cover-assets/finalize', 'cover-assets/download'].includes(operation)) throw fail('workflow-request-invalid', '群任务操作不受支持')
     const pathname = `/api/human-tasks/v1/node/${operation}`
     const serialized = JSON.stringify({ ...body, audience: 'human.workflow.node.v1' })
-    const requestLimit = ['grant', 'lifecycle'].includes(operation) ? HUMAN_CARD_REQUEST_MAX_BYTES : 16384
+    const requestLimit = ['grant', 'lifecycle', 'action-result'].includes(operation) ? HUMAN_CARD_REQUEST_MAX_BYTES : 16384
     if (Buffer.byteLength(serialized) > requestLimit) throw fail('workflow-request-invalid', '群任务请求过大')
     const combined = AbortSignal.any([signal, AbortSignal.timeout(10_000)])
-    const response = await this.fetcher(`${this.origin}${pathname}`, { method: 'POST', redirect: 'error', signal: combined,
-      headers: { 'content-type': 'application/json', ...createAgentHttpProof(this.identity(), 'POST', pathname, serialized) }, body: serialized })
+    const options = { method: 'POST', redirect: 'error' as const, signal: combined,
+      headers: { 'content-type': 'application/json', ...createAgentHttpProof(this.identity(), 'POST', pathname, serialized) }, body: serialized }
+    let response: Response
+    try { response = await this.fetcher(`${this.origin}${pathname}`, options) }
+    catch (cause) {
+      this.assertIdentity(); signal.throwIfAborted()
+      // Only this fixed, read-only recovery route may reconcile an already
+      // durable phone ACK after a failed optional read. Mark genuine fetch
+      // failures at the I/O boundary, not arbitrary parser/authorization errors.
+      if (operation === 'action-result' && combined.aborted) throw fail('workflow-timeout', workflowErrorMessage('workflow-timeout'))
+      if (operation === 'action-result' && cause instanceof TypeError) throw fail('workflow-network-unavailable', workflowErrorMessage('workflow-network-unavailable'))
+      throw cause
+    }
     this.assertIdentity(); combined.throwIfAborted()
     const revoked = () => Object.assign(fail('binding_revoked', '节点授权已失效，任务缓存已停止使用'), { status: response.status })
     if (response.status === 401) {
@@ -104,14 +119,18 @@ export class WorkflowHttpTransport implements WorkflowTransport {
         const { done, value } = await reader.read()
         if (done) break
         size += value.byteLength
-        const limit = response.status === 403 ? FORBIDDEN_ERROR_MAX_BYTES
+        const limit = response.status === 403 || operation === 'action-result' ? FORBIDDEN_ERROR_MAX_BYTES
           : operation === 'lifecycle' ? HUMAN_LIFECYCLE_RESPONSE_MAX_BYTES : 2 * 1024 * 1024
         if (size > limit) throw response.status === 403 ? revoked() : fail('workflow-response-invalid', '群任务响应过大')
         chunks.push(value)
       }
     } catch (error) {
-      this.assertIdentity(); combined.throwIfAborted()
+      this.assertIdentity(); signal.throwIfAborted()
       if (response.status === 403) throw revoked()
+      if (operation === 'action-result' && response.ok && combined.aborted) throw fail('workflow-timeout', workflowErrorMessage('workflow-timeout'))
+      combined.throwIfAborted()
+      if (operation === 'action-result' && response.ok && error instanceof TypeError)
+        throw fail('workflow-network-unavailable', workflowErrorMessage('workflow-network-unavailable'))
       throw error
     } finally { await reader.cancel().catch(() => {}); reader.releaseLock() }
     this.assertIdentity(); combined.throwIfAborted()

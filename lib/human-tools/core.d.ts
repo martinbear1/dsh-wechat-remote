@@ -29,6 +29,13 @@ export interface HumanStore {
     load(): Promise<unknown>;
     save(ledger: HumanLedger): Promise<void>;
 }
+/** Adapter-owned, read-only lookup of an already claimed operation. It must
+ * verify the current binding and exact persisted source; never execute it. */
+export type HumanReceiptRecovery = (source: {
+    surface: HumanSurface;
+    origin: HumanOrigin;
+    attemptId: string;
+}, signal: AbortSignal) => Promise<HumanAckRequest | undefined>;
 export declare const HUMAN_MAX_RECORDS = 128;
 export declare const HUMAN_RETENTION_MS: number;
 export declare const HUMAN_CONTEXT_LIMIT = 8;
@@ -37,11 +44,14 @@ export declare class HumanToolsCore {
     private randomId;
     private now;
     private coverAuthority?;
+    private recovery?;
     private ledger;
     private tail;
     private stopped;
+    private recoveryLifetime;
+    private recoveryFlights;
     private constructor();
-    static open(store: HumanStore, randomId: () => string, now?: () => number, coverAuthority?: (origin: HumanOrigin, asset: HumanCardAsset) => void): Promise<HumanToolsCore>;
+    static open(store: HumanStore, randomId: () => string, now?: () => number, coverAuthority?: (origin: HumanOrigin, asset: HumanCardAsset) => void, recovery?: HumanReceiptRecovery): Promise<HumanToolsCore>;
     /** Stop admission immediately; callers must await the already-started write
      * before another instance opens this ledger during a plugin reload. */
     close(): Promise<void>;
@@ -70,12 +80,23 @@ export declare class HumanToolsCore {
     createWorkflow(origin: HumanOrigin, taskRef: HumanTaskRef, draftRef: HumanWorkflowDraftRef, signal: AbortSignal, reminderPreview?: HumanReminderPreview, workflowPreview?: HumanWorkflowInlinePreview): Promise<HumanSurface>;
     private source;
     private publishedSource;
+    private hasSourceEvidence;
+    /** Read an exact existing operation only when its local ACK is missing.
+     * Source consumers already holding durable evidence keep their existing
+     * offline behavior. Explicit status reads still reconcile missing attempts.
+     * Network I/O stays outside the serial writer: a late phone ACK is allowed to
+     * complete meanwhile. ack() rechecks and never replaces conflicting history.
+     * No task listing, model text, current group or other session is a fallback. */
+    private recoverSource;
+    /** Owner status may reconcile a missing ACK, but never obtain a new claim,
+     * publish a draft, select people or invoke a native action. */
+    reconcileStatus(scope: string, surfaceId: string, generation: string, signal: AbortSignal): Promise<unknown>;
     /** Host-only admission of a source into the explicit shared directory. */
     publishedEvidence(scope: {
         nodeId: string;
         sessionId: string;
         sessionGeneration: string;
-    }, sourceSurfaceId: string): {
+    }, sourceSurfaceId: string, signal: AbortSignal): Promise<{
         origin: {
             nodeId: string;
             sessionId: string;
@@ -83,7 +104,7 @@ export declare class HumanToolsCore {
         };
         taskRef: HumanTaskRef;
         title: string;
-    };
+    }>;
     createMembers(origin: HumanOrigin, sourceSurfaceId: string, signal: AbortSignal): Promise<HumanSurface>;
     createReminder(origin: HumanOrigin, sourceSurfaceId: string, title: string, signal: AbortSignal, memberRefs?: readonly string[]): Promise<HumanSurface>;
     private createAction;

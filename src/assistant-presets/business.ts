@@ -3,6 +3,7 @@ import { assertScope, bounded, copy, exact, fail, plain, row, sameScope, scopeVa
   type WorkflowDataStore, type WorkflowScope } from '../human-workflow/data.js'
 import { assistantDefinition } from './definition.js'
 import type { AssistantRef, AssistantRegistry } from './registry.js'
+import { assistantFieldPath, assistantObject } from './validation.js'
 
 /** Local business memory is neither a reusable preset nor a verified group fact. */
 export interface AssistantBusinessContent { title: string; answers: Record<string, string>; memory: string }
@@ -18,12 +19,19 @@ export interface AssistantBusinessOptions {
 const sameRef = (a: AssistantRef, b: AssistantRef) => a.id === b.id && a.version === b.version && a.digest === b.digest
 const textOrEmpty = (value: unknown, max: number): value is string => value === '' || plain(value, max)
 function content(value: unknown, keys: readonly string[]): AssistantBusinessContent {
-  if (!row(value) || !exact(value, ['title', 'answers', 'memory']) || !plain(value.title, 80)
-    || !row(value.answers) || !textOrEmpty(value.memory, 8000) || Object.keys(value.answers).length > 12
-    || Object.keys(value.answers).some(key => !keys.includes(key) || !plain((value.answers as Record<string, unknown>)[key], 1000)))
-    throw fail('assistant-business-content-invalid', '业务资料只能包含本助手的已回答问题与有界工作记忆，不能修改模板或任务事实')
-  bounded(value, 24 * 1024)
-  return copy(value) as unknown as AssistantBusinessContent
+  const code = 'assistant-business-content-invalid'
+  const checked = assistantObject(value, ['title', 'answers', 'memory'], [], { path: 'content', code })
+  if (!plain(checked.title, 80)) throw fail(code, 'content.title 必须是 1–80 字符的非空文本，不能包含控制字符。')
+  if (!row(checked.answers)) throw fail(code, 'content.answers 必须是本助手引导问题的答案对象；没有答案可用 {}，不能用数组或空值。')
+  if (Object.keys(checked.answers).length > 12) throw fail(code, 'content.answers 最多包含 12 个本助手的问题键；请先读取 human_assistant_work_get 核对。')
+  for (const [key, answer] of Object.entries(checked.answers)) {
+    const path = assistantFieldPath('content.answers', key)
+    if (!keys.includes(key)) throw fail(code, `${path} 不是本助手的问题键；请用 human_assistant_work_get 核对已有答案和待答问题，不要改用猜测的字段。`)
+    if (!plain(answer, 1000)) throw fail(code, `${path} 必须是 1–1000 字符的非空文本，不能包含控制字符。`)
+  }
+  if (!textOrEmpty(checked.memory, 8000)) throw fail(code, 'content.memory 必须是最多 8000 字符的文本，可为空字符串，不能包含控制字符；修改时保留无关的已有记忆。')
+  bounded(checked, 24 * 1024)
+  return copy(checked) as unknown as AssistantBusinessContent
 }
 export class AssistantBusinessRecords {
   private readonly now: () => number
@@ -84,8 +92,11 @@ export class AssistantBusinessRecords {
   }
   save(scope: WorkflowScope, presetId: string, request: { expectedRevision: number; content: unknown }, signal: AbortSignal) {
     signal.throwIfAborted(); this.checkedRecord(scope, presetId)
-    if (!row(request) || !exact(request, ['expectedRevision', 'content']) || !version(request.expectedRevision))
-      throw fail('assistant-business-save-invalid', '保存需要当前版本与完整业务内容')
+    assistantObject(request, ['expectedRevision', 'content'], [], { code: 'assistant-business-save-invalid', moveTo: {
+      title: 'content.title', answers: 'content.answers', memory: 'content.memory',
+    } })
+    if (!version(request.expectedRevision))
+      throw fail('assistant-business-save-invalid', 'expectedRevision 必须是当前记录的正整数版本；请先读取当前记录，不要猜版本。')
     return this.state.update(ledger => {
       const installed = this.current(scope, presetId), record = ledger.records.find(item => sameScope(item.scope, scope))
       if (!record || record.presetId !== presetId || !sameRef(record.assistant, installed.ref))

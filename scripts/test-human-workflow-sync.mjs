@@ -278,9 +278,10 @@ test('authenticated resource denials keep accurate scoped error codes without ex
   const pair = generateKeyPairSync('ed25519'), identity = { nodeId, privateKeyPem: pair.privateKey.export({ type: 'pkcs8', format: 'pem' }) }
   const cases = [
     ['invalid_recipients', ['lifecycle'], /指定对象/],
-    ['workspace_registration_required', ['grant', 'workspace', 'lifecycle', 'objects/claim', 'objects/ack'], /尚未登记/],
-    ['workspace_scope_mismatch', ['grant', 'workspace', 'lifecycle', 'objects/claim', 'objects/ack'], /不属于所请求的工作区/],
-    ['source_scope_mismatch', ['workspace', 'lifecycle', 'objects/claim', 'objects/ack'], /任务来源不属于/],
+    ['workspace_registration_required', ['grant', 'workspace', 'lifecycle', 'objects/claim', 'objects/ack', 'action-result'], /尚未登记/],
+    ['workspace_scope_mismatch', ['grant', 'workspace', 'lifecycle', 'objects/claim', 'objects/ack', 'action-result'], /不属于所请求的工作区/],
+    ['source_scope_mismatch', ['workspace', 'lifecycle', 'objects/claim', 'objects/ack', 'action-result'], /任务来源不属于/],
+    ['action_source_mismatch', ['action-result'], /操作结果与这次会话/],
   ]
   for (const [code, operations, message] of cases) for (const operation of operations) {
     let attempts = 0
@@ -306,6 +307,7 @@ test('the resource-denial allowlist cannot soften 401, unrelated routes, invalid
     ['sync', 403, JSON.stringify({ error: { code: 'invalid_recipients' } })],
     ['receiver-key', 403, JSON.stringify({ error: { code: 'workspace_scope_mismatch' } })],
     ['grant', 403, JSON.stringify({ error: { code: 'source_scope_mismatch' } })],
+    ['sync', 403, JSON.stringify({ error: { code: 'action_source_mismatch' } })],
     ...[null, '', 'Forbidden', '{', '{"ok":true}', JSON.stringify({ error: { code: 'invalid_recipients', message: 'x'.repeat(16 * 1024) } })]
       .map(body => ['lifecycle', 403, body]),
   ]
@@ -324,6 +326,61 @@ test('a truncated forbidden stream fails closed and is cancelled without leaking
     start(controller) { controller.error(new Error('secret stream failure')) },
   }), { status: 403 }))
   await assert.rejects(client.request('lifecycle', {}, signal()), error => error.code === 'binding_revoked' && !error.message.includes('secret'))
+})
+
+test('only read-only action recovery classifies fetch failures; identity, abort and HTTP errors remain distinct', async () => {
+  const pair = generateKeyPairSync('ed25519'), identity = { nodeId, privateKeyPem: pair.privateKey.export({ type: 'pkcs8', format: 'pem' }) }
+  const failedFetch = new TypeError('secret network failure'), rawFailure = new Error('unclassified failure')
+  const client = new WorkflowHttpTransport('https://relay.example', () => identity, async () => { throw failedFetch })
+  await assert.rejects(client.request('action-result', {}, signal()), error => error.code === 'workflow-network-unavailable'
+    && error.status === undefined && !error.message.includes('secret'))
+  await assert.rejects(client.request('sync', {}, signal()), error => error === failedFetch)
+  const unclassified = new WorkflowHttpTransport('https://relay.example', () => identity, async () => { throw rawFailure })
+  await assert.rejects(unclassified.request('action-result', {}, signal()), error => error === rawFailure)
+  const controller = new AbortController(), cancellation = new Error('user cancelled')
+  const cancelled = new WorkflowHttpTransport('https://relay.example', () => identity, async () => { controller.abort(cancellation); throw failedFetch })
+  await assert.rejects(cancelled.request('action-result', {}, controller.signal), error => error === cancellation)
+  let current = identity
+  const changed = new WorkflowHttpTransport('https://relay.example', () => current, async () => { current = { ...identity, nodeId: 'changed' }; throw failedFetch })
+  await assert.rejects(changed.request('action-result', {}, signal()), { code: 'binding_revoked' })
+  const serverFailure = new WorkflowHttpTransport('https://relay.example', () => identity, async () =>
+    new Response(JSON.stringify({ error: { code: 'workflow-network-unavailable' } }), { status: 503 }))
+  await assert.rejects(serverFailure.request('action-result', {}, signal()), error => error.code === 'workflow-network-unavailable' && error.status === 503)
+  const malformed = new WorkflowHttpTransport('https://relay.example', () => identity, async () => new Response('{'))
+  await assert.rejects(malformed.request('action-result', {}, signal()), { code: 'workflow-response-invalid' })
+})
+
+test('recovery stream failures are transport-only for successful responses, never unreadable authentication or HTTP failures', async () => {
+  const pair = generateKeyPairSync('ed25519'), identity = { nodeId, privateKeyPem: pair.privateKey.export({ type: 'pkcs8', format: 'pem' }) }
+  for (const status of [200, 401, 403, 503]) {
+    const streamFailure = new TypeError('secret truncated stream')
+    const client = new WorkflowHttpTransport('https://relay.example', () => identity, async () => new Response(new ReadableStream({
+      start(controller) { controller.error(streamFailure) },
+    }), { status }))
+    await assert.rejects(client.request('action-result', {}, signal()), error => status === 200
+      ? error.code === 'workflow-network-unavailable' && error.status === undefined && !error.message.includes('secret')
+      : status === 503 ? error === streamFailure : error.code === 'binding_revoked' && error.status === status)
+  }
+})
+
+test('recovery read timeouts do not soften unreadable 403 or non-success HTTP results', async t => {
+  const pair = generateKeyPairSync('ed25519'), identity = { nodeId, privateKeyPem: pair.privateKey.export({ type: 'pkcs8', format: 'pem' }) }
+  for (const status of [200, 403, 503]) {
+    const deadline = new AbortController(), expiry = new DOMException('request timeout', 'TimeoutError')
+    const timeout = t.mock.method(AbortSignal, 'timeout', () => deadline.signal)
+    let stream
+    const client = new WorkflowHttpTransport('https://relay.example', () => identity, async () => new Response(new ReadableStream({
+      start(controller) { stream = controller },
+    }), { status }))
+    const requested = client.request('action-result', {}, signal())
+    const rejected = assert.rejects(requested, error => status === 200
+      ? error.code === 'workflow-timeout' && error.status === undefined
+      : status === 403 ? error.code === 'binding_revoked' && error.status === 403 : error === expiry)
+    await new Promise(resolve => setImmediate(resolve))
+    deadline.abort(expiry); stream.error(new TypeError('secret timeout stream'))
+    await rejected
+    timeout.mock.restore()
+  }
 })
 
 test('a resource denial does not poison valid replica identity or cached task facts', async () => {

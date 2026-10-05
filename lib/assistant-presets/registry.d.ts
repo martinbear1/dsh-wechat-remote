@@ -42,14 +42,14 @@ export declare class AssistantRegistry {
         drafts: {
             presetId?: string | undefined;
             templateId?: string | undefined;
-            nativeState?: "unknown" | "disabled" | "installed" | "uninstalled" | "stale" | undefined;
+            nativeState?: "unknown" | "disabled" | "stale" | "installed" | "uninstalled" | undefined;
             reason?: string | undefined;
             id: string;
             version: number;
             digest: string;
             name: string;
             description: string;
-            state: "unknown" | "installed" | "draft" | "installing";
+            state: "unknown" | "draft" | "installed" | "installing";
         }[];
     }>;
     draft(request: {
@@ -67,7 +67,7 @@ export declare class AssistantRegistry {
         version: number;
         digest: string;
         definition: AssistantDefinition;
-        state: "unknown" | "installed" | "draft" | "installing";
+        state: "unknown" | "draft" | "installed" | "installing";
     };
     preview(ref: {
         id: string;
@@ -128,7 +128,7 @@ export declare class AssistantRegistry {
         version: number;
         digest: string;
         definition: AssistantDefinition;
-        state: "unknown" | "installed" | "draft" | "installing";
+        state: "unknown" | "draft" | "installed" | "installing";
     } | undefined;
     close(): Promise<void>;
 }

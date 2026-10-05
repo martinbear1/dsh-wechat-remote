@@ -1,9 +1,10 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { SystemPrompt } from '@deepseek-ai/dsh-system-prompt'
-import { copy, exact, fail, plain, row, sameScope, version, type WorkflowScope } from '../human-workflow/data.js'
+import { copy, fail, plain, sameScope, version, type WorkflowScope } from '../human-workflow/data.js'
 import { assistantDefinition } from './definition.js'
-import { ASSISTANT_AUTHORING_GUIDANCE, ASSISTANT_INTERACTION_GUIDANCE, ASSISTANT_WORKSPACE_GUIDANCE, ASSISTANT_IDENTITY_INTENT_GUIDANCE } from './interaction-guidance.js'
+import { ASSISTANT_AUTHORING_GUIDANCE, ASSISTANT_INTERACTION_GUIDANCE, ASSISTANT_WORKSPACE_GUIDANCE, ASSISTANT_IDENTITY_INTENT_GUIDANCE, ASSISTANT_TOOL_RECOVERY_GUIDANCE } from './interaction-guidance.js'
+import { assistantObject } from './validation.js'
 import type { AssistantRegistry } from './registry.js'
 import type { AssistantBusinessRecords } from './business.js'
 
@@ -37,10 +38,7 @@ export function nativeComposedPreset(host: Context, agent: ToolRunContext['agent
   const result = native.composedPreset(agent.ctx)
   return plain(result, 128) ? result : undefined
 }
-function args(value: unknown, required: string[], optional: string[] = []): Record<string, unknown> {
-  if (!row(value) || !exact(value, required, optional)) throw fail('assistant-arguments-invalid', '工具参数包含未支持字段或缺少必要内容')
-  return value
-}
+const args = assistantObject
 function projection(value: { id: string; version: number; digest: string; definition: unknown; state: string; presetId?: string }) {
   return { id: value.id, version: value.version, digest: value.digest, definition: assistantDefinition(value.definition),
     state: value.state, ...(value.presetId ? { presetId: value.presetId } : {}) }
@@ -82,10 +80,12 @@ export function assistantTools(options: AssistantToolsOptions): ToolDefinition[]
       args(input, []); const { origin, presetId } = work(exec)
       return options.business.get(origin, presetId)
     }),
-    tool('human_assistant_work_save', 'CAS-save the FULL desired content of this session business instance. Read first, supply expectedRevision, preserve existing answers/memory when merging, and distinguish user information from inference. Capability claims need current tool evidence; do not turn totalKnown=0, redacted raw IDs, or one failed action into a lasting cannot-obtain/cannot-store rule. Correct contradicted hypotheses without overwriting unrelated user facts. title<=80, answers only current assistant onboarding keys with strings<=1000, memory<=8000; whole content<=24KiB. Does not modify the assistant template, participant facts, permissions, task delivery or another session.',
+    tool('human_assistant_work_save', 'CAS-save the FULL desired content of this session business instance. Read first, supply expectedRevision, preserve existing answers/memory when merging, and distinguish user information from inference. Only expectedRevision and content belong at the top level; title, answers and memory must be nested INSIDE content. Structural example: {expectedRevision: current.revision, content: {title: current.content.title, answers: mergedAnswers, memory: mergedMemory}}. The example names are placeholders, not business values. On validation failure, fix the reported path; do not repeat unchanged arguments or replace real memory with an experiment/test note. Capability claims need current tool evidence; do not turn totalKnown=0, redacted raw IDs, or one failed action into a lasting cannot-obtain/cannot-store rule. Correct contradicted hypotheses without overwriting unrelated user facts. title<=80, answers only current assistant onboarding keys with strings<=1000, memory<=8000; whole content<=24KiB. Does not modify the assistant template, participant facts, permissions, task delivery or another session.',
       object({ expectedRevision: number, content: ASSISTANT_BUSINESS_SCHEMA }, ['expectedRevision', 'content']), async (input, exec) => {
-        const request = args(input, ['expectedRevision', 'content']), { origin, presetId } = work(exec)
-        if (!version(request.expectedRevision)) throw fail('assistant-arguments-invalid', '保存需要有效的当前版本')
+        const request = args(input, ['expectedRevision', 'content'], [], { moveTo: {
+          title: 'content.title', answers: 'content.answers', memory: 'content.memory',
+        } }), { origin, presetId } = work(exec)
+        if (!version(request.expectedRevision)) throw fail('assistant-arguments-invalid', 'expectedRevision 必须是当前记录的正整数版本；请先用 human_assistant_work_get 读取，不要猜版本。')
         return options.business.save(origin, presetId, { expectedRevision: request.expectedRevision, content: request.content }, exec.signal)
       }),
   ].map(definition => ({ ...definition, execute: async (input, exec) => {
@@ -116,6 +116,7 @@ export function registerAssistantContext(host: Context, options: AssistantToolsO
         + ' 以上是内部执行规则，不要作为开场白或逐条对用户复述。按已批准的职责先完成眼前业务；未回答的问题只在影响当前工作时问，适合时提供业务选项，不强制填完问卷。'
         + '\n\n' + ASSISTANT_INTERACTION_GUIDANCE + '\n\n' + ASSISTANT_WORKSPACE_GUIDANCE
         + '\n\n' + ASSISTANT_IDENTITY_INTENT_GUIDANCE
+        + '\n\n' + ASSISTANT_TOOL_RECOVERY_GUIDANCE
     } catch { return '' }
   } })
 }

@@ -57,6 +57,13 @@ export const ASSISTANT_IDENTITY_INTENT_GUIDANCE = `## 身份事实与提醒意�
 选人成功、提醒准备好、微信提醒实际成功是不同结果。选人回执只是有了对象，不是已经提醒；使用最新引用准备对应操作，以真实执行回执报告是否发出，未知不重发。用户只要带原事项链接的提醒，不新建事项、不补发卡片，不把普通对话变成审批教程；需要真实点击时用一句业务语言讲清这次会提醒哪些人做什么。
 设计可复用模式时保留这些判断方法，让新建教师、项目及其他职业 Agent 都能在实际工作中查询身份、维护有来源的记录并正确选工具；不把一次测试的群、名单、故障或固定提醒顺序塞进预设。`
 
+/** Current tool contract guidance, not bytes in an approved native persona.
+ * Available to every checked assistant instance without rewriting its preset. */
+export const ASSISTANT_TOOL_RECOVERY_GUIDANCE = `## 当前工具调用与结果恢复
+保存工作记忆时先读当前记录，human_assistant_work_save 只在最外层放 expectedRevision 和 content；title、answers、memory 都放在 content 内。保存是完整替换而非局部补丁，要合并保留已有资料。参数校验失败时按报错的字段路径修正，不能用相同无效参数反复试，更不能把真实记忆改成“测试保存”来试接口；冲突时重读合并。
+任务查询已显示发送成功、后续动作却说缺少成功回执时，先把它视为这次操作的记录尚未对齐，不推断微信不支持选人或提醒，也不要求重新发卡。按工具给出的恢复方式核对原动作，沿用同一个来源；恢复只读状态或补记原回执，不是重新发送。核对后仍缺依据就简短说明“作业已经发出，但后续提醒暂时没接上”，保留用户原目标和准确错误，不能假装已提醒、盲目重建任务或把故障写成长期能力限制。具体重试与可用恢复入口以当前工具合同为准，不自己猜接口。
+这是所有职业、定制模式和模式设计者共同适用的工具工作方法，不是某个班级的流程；对外仍按职业身份简洁说明结果与必要的下一步，不把这些参数或诊断说明逐条念给用户。`
+
 /** Shared by every newly generated profession/custom/designer preset. */
 export const ASSISTANT_WORKSPACE_GUIDANCE = `## 工作记忆与共享人员资料
 先恢复当前会话的工作记录；涉及长期协作的群或人员时，可用 human_workspace_directory 查询当前真实工作区已保存的资料。没有记录就按本次需要让用户选群、选人，或商量用登记/日常提交积累资料，不强制全员签到，不要求用户理解身份标识。

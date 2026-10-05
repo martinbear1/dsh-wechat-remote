@@ -45,7 +45,7 @@ export function workspaceTools(options: { nodeId: string; directory: WorkspaceDi
           || !plain(exec.callId, 256) || !plain(exec.rootCallId, 256)) throw fail('workspace-input-invalid', '请提供一个准确的原任务来源')
         const target = value.workspaceSourceId !== undefined
           ? await options.directory.resolveSource(origin, String(value.workspaceSourceId), exec.signal)
-          : options.core.publishedEvidence(origin, String(value.sourceSurfaceId))
+          : await options.core.publishedEvidence(origin, String(value.sourceSurfaceId), exec.signal)
         const roundId = value.roundId === undefined ? null : value.roundId
         if (roundId !== null && !plain(roundId, 128)) throw fail('workspace-input-invalid', '公开提交要求引用无效')
         const content = await options.lifecycle.reshare(origin, target.taskRef, roundId, exec.signal)

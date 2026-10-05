@@ -11,6 +11,7 @@ import { HumanToolsService } from '../lib/human-tools/service.js'
 import { TYPERT } from '../lib/typert.host.js'
 import { invokeLegacyRpc, parseLegacyClientRequest } from '../lib/dsh-protocol-compat.js'
 import { assistantGuidance } from '../lib/assistant-presets/definition.js'
+import { canonicalSubmission, sha256 } from '../lib/human-workflow/submission-crypto.js'
 
 const nodeId = 'node_' + 'a'.repeat(32), sessionId = 'session_service', signal = new AbortController().signal
 function deferred() { let resolve; return { promise: new Promise(done => { resolve = done }), resolve: value => resolve(value) } }
@@ -400,4 +401,54 @@ test('all registered workflow tools generate Code Mode schemas using the install
   })
   const rendered = renderToolsSdk(schemas)
   for (const name of names) assert(rendered.includes(name))
+})
+
+test('native registered member tool repairs a missing phone ACK through exact cloud evidence without any re-share or Agent wake', async t => {
+  const taskRef = { schema: 'human.task.ref.v1', taskId: 'task_service_recovery_12345', deliveryId: 'delivery_service_recovery_12345' }
+  const binding = { schema: 'human.node.binding.v1', nodeId, ownerSubject: 'owner', accountInstance: 'account', generation: 'generation' }
+  const reads = []
+  const host = await setup(t, { request: async (operation, body) => {
+    assert.equal(operation, 'action-result'); reads.push(structuredClone(body))
+    return { ok: true, schema: 'human.action.recovery.v1', binding, origin: { scope: body.scope, sessionGeneration: body.sessionGeneration,
+      surfaceId: body.surfaceId, attemptId: body.attemptId }, actionId: 'share', surfaceId: body.surfaceId, attemptId: body.attemptId,
+      surfaceDigest: sha256(canonicalSubmission(body.surface)), phase: 'completed', outcome: 'success', taskRef }
+  } })
+  unwrap(await host.service.capabilities({ scope: sessionId }, signal))
+  const shared = await host.run('human_surface_share', { title: '作文', body: '提交作文' })
+  assert.equal(shared.isError, false, JSON.stringify(shared))
+  const surface = shared.meta.humanSurface
+  const claim = { scope: sessionId, surfaceId: surface.id, revision: 1, actionId: 'share', attemptId: 'attempt_service_recovery_12345' }
+  unwrap(await host.service.claim(claim, signal))
+  assert.equal(host.coreStore.value.records[0].attempts[0].receipt, undefined)
+  const members = await host.run('human_task_select_members', { sourceSurfaceId: surface.id })
+  assert.equal(members.isError, false, JSON.stringify(members))
+  assert.deepEqual(members.meta.humanSurface.targetTaskRef, taskRef)
+  assert.equal(reads.length, 1); assert.equal(reads[0].sessionGeneration, '100')
+  assert.deepEqual(host.coreStore.value.records[0].attempts[0].receipt.taskRef, taskRef)
+  const context = renderContextSections(await host.ctx.get('systemPrompt').assemble({ agent: host.agent, scope: host.agent }))
+    .find(section => section.name === 'harness-remote.human-actions').text
+  assert(context.includes(surface.id)); assert(context.includes('success'))
+  const status = unwrap(await host.service.status({ scope: sessionId, surfaceId: surface.id }, signal))
+  assert.equal(status.receipts[0].outcome, 'success'); assert.equal(reads.length, 1)
+})
+
+test('native source reuse stays offline with durable success and a later missing attempt, but cannot bypass node revocation', async t => {
+  const host = await setup(t)
+  unwrap(await host.service.capabilities({ scope: sessionId }, signal))
+  const shared = await host.run('human_surface_share', { title: '作文', body: '提交作文' })
+  const surface = shared.meta.humanSurface
+  const claim = { scope: sessionId, surfaceId: surface.id, revision: 1, actionId: 'share', attemptId: 'attempt_service_success_12345' }
+  const taskRef = { schema: 'human.task.ref.v1', taskId: 'task_service_reuse_123456', deliveryId: 'delivery_service_reuse_123456' }
+  unwrap(await host.service.claim(claim, signal))
+  unwrap(await host.service.ack({ ...claim, outcome: 'success', taskRef }, signal))
+  unwrap(await host.service.claim({ ...claim, attemptId: 'attempt_service_missing_12345' }, signal))
+  const reused = await host.run('human_task_select_members', { sourceSurfaceId: surface.id })
+  assert.equal(reused.isError, false, JSON.stringify(reused)); assert.deepEqual(reused.meta.humanSurface.targetTaskRef, taskRef)
+  assert.equal(host.networkCalls, 0, 'source consumption does not query unrelated incomplete attempts')
+  const before = host.coreStore.value
+  host.rotate()
+  assert.equal((await host.run('human_task_select_members', { sourceSurfaceId: surface.id })).isError, true)
+  assert.equal((await host.run('human_surface_share', { title: '不允许', body: '不可用节点' })).isError, true)
+  assert.equal((await host.service.status({ scope: sessionId, surfaceId: surface.id }, signal)).error.code, 'binding_revoked')
+  assert.deepEqual(host.coreStore.value, before); assert.equal(host.networkCalls, 0)
 })

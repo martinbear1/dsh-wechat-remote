@@ -7,6 +7,7 @@ import type { SessionId, SessionStore } from '@deepseek-ai/dsh-session'
 import { defaultGateStatePath } from '../agent-metadata.js'
 import { HumanToolsCore, type HumanStore } from './core.js'
 import { HumanFileStore } from './store.js'
+import { actionReceiptRecovery } from './receipt-recovery.js'
 import { registerHumanContext, dshHumanToolsAvailable, humanShareTool, humanMembersTool, humanRemindTool } from './dsh.js'
 import { object, humanTaskRef, type HumanTaskRef, type HumanAckWireRequest, type HumanActionRequest, type HumanSurface } from './protocol.js'
 import { createCapabilityManifest } from '../human-workflow/capabilities.js'
@@ -109,10 +110,15 @@ export class HumanToolsService extends TypertRemoteService {
     // Resolve the actual host profile, including linked/native installations.
     // Web and Desktop must never share one action ledger on the same computer.
     const store = config.store || new HumanFileStore(path.join(path.dirname(defaultGateStatePath(this.host)), 'human-tools-v1.json'))
+    const readRecovery = config.workflow && actionReceiptRecovery(config.workflow.transport, async (scope, generation, signal) => {
+      const active = AbortSignal.any([signal, this.lifetime.signal])
+      if (await this.claimGeneration(scope, active) !== generation) throw originUnavailable()
+      active.throwIfAborted()
+    })
     const core = await HumanToolsCore.open(store, () => randomBytes(16).toString('hex'), Date.now, (origin, asset) => {
       if (!this.covers || !this.workflow) throw fail('cover-unavailable', '此节点尚不能准备封面图片')
       this.covers.assertAsset({ nodeId: this.workflow.transport.nodeId, sessionId: origin.scope, sessionGeneration: origin.generation }, asset)
-    })
+    }, readRecovery && ((source, signal) => readRecovery(source, AbortSignal.any([signal, this.lifetime.signal]))))
     if (this.lifetime.signal.aborted) { core.close(); return }
     this.core = core
     const unregisterTools: (() => void)[] = []
@@ -181,7 +187,7 @@ export class HumanToolsService extends TypertRemoteService {
           try {
             const attachments = this.host.get('attachments') as AttachmentStore | undefined
             this.directory = await WorkspaceDirectory.open(config.workflow.workspaceStore || new WorkflowFileStore(path.join(path.dirname(defaultGateStatePath(this.host)), `human-workflow-${transport.nodeId}-workspace-directory.json`), 16 * 1024 * 1024), {
-              transport, published: (scope, id) => core.publishedEvidence(scope, id), host: {
+              transport, published: (scope, id, signal) => core.publishedEvidence(scope, id, signal), host: {
                 header: (id, signal) => this.workspaceHeader(id, signal),
                 workspaces: () => {
                   const registry = this.host.get('workspaceRegistry') as any
@@ -312,8 +318,15 @@ export class HumanToolsService extends TypertRemoteService {
           replica.start()
         } catch (cause) { await Promise.all([replica.close(), modes?.close(), records?.close()]); this.workflow = undefined; throw cause }
       }
-      for (const tool of [humanShareTool(core), humanMembersTool(core), humanRemindTool(core)])
-        unregisterTools.push((this.host.get('tools') as ToolRuntime).register(tool))
+      for (const tool of [humanShareTool(core), humanMembersTool(core), humanRemindTool(core)]) {
+        const execute = tool.execute
+        unregisterTools.push((this.host.get('tools') as ToolRuntime).register({ ...tool, execute: async (args, exec) => {
+          this.lifetime.signal.throwIfAborted(); config.workflow?.transport.assertIdentity()
+          const result = await execute(args, { ...exec, signal: AbortSignal.any([exec.signal, this.lifetime.signal]) })
+          this.lifetime.signal.throwIfAborted(); config.workflow?.transport.assertIdentity()
+          return result
+        } }))
+      }
       const unregisterContext = registerHumanContext(this.host, core)
       this.unregister = () => { unregisterContext(); unregisterTools.reverse().forEach(remove => remove()) }
     } catch (cause) { unregisterTools.reverse().forEach(remove => remove()); await Promise.all([core.close(), this.workflow?.modes.close(), this.workflow?.records.close(), this.workflow?.replica.close(), this.closeAssistants(), this.closeLifecycle(), this.covers?.close(), this.directory?.close()]); this.core = undefined; this.workflow = undefined; throw cause }
@@ -654,7 +667,13 @@ export class HumanToolsService extends TypertRemoteService {
   }
   @Remote('status')
   async status(request: { scope: string; surfaceId: string }, signal: AbortSignal): Promise<HumanResult> {
-    return this.result(async () => (await this.use(signal)).status(request.scope, request.surfaceId))
+    return this.result(async () => {
+      const active = AbortSignal.any([signal, this.lifetime.signal]), core = await this.use(active)
+      // Resolve the saved source before inspecting the host; unrelated or
+      // fabricated status reads cannot probe its session directory.
+      core.status(request.scope, request.surfaceId)
+      return core.reconcileStatus(request.scope, request.surfaceId, await this.claimGeneration(request.scope, active), active)
+    })
   }
 }
 

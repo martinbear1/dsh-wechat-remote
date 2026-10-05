@@ -20,6 +20,9 @@ export interface HumanRecord {
 }
 export interface HumanLedger { schemaVersion: 1; records: HumanRecord[] }
 export interface HumanStore { load(): Promise<unknown>; save(ledger: HumanLedger): Promise<void> }
+/** Adapter-owned, read-only lookup of an already claimed operation. It must
+ * verify the current binding and exact persisted source; never execute it. */
+export type HumanReceiptRecovery = (source: { surface: HumanSurface; origin: HumanOrigin; attemptId: string }, signal: AbortSignal) => Promise<HumanAckRequest | undefined>
 export const HUMAN_MAX_RECORDS = 128
 export const HUMAN_RETENTION_MS = 7 * 24 * 60 * 60_000
 export const HUMAN_CONTEXT_LIMIT = 8
@@ -70,16 +73,19 @@ export class HumanToolsCore {
   private ledger: HumanLedger = { schemaVersion: 1, records: [] }
   private tail: Promise<unknown> = Promise.resolve()
   private stopped = false
+  private recoveryLifetime = new AbortController()
+  private recoveryFlights = new Map<string, Promise<HumanAckRequest | undefined>>()
   private constructor(private store: HumanStore, private randomId: () => string, private now: () => number,
-    private coverAuthority?: (origin: HumanOrigin, asset: HumanCardAsset) => void) {}
-  static async open(store: HumanStore, randomId: () => string, now = Date.now, coverAuthority?: (origin: HumanOrigin, asset: HumanCardAsset) => void): Promise<HumanToolsCore> {
-    const core = new HumanToolsCore(store, randomId, now, coverAuthority)
+    private coverAuthority?: (origin: HumanOrigin, asset: HumanCardAsset) => void, private recovery?: HumanReceiptRecovery) {}
+  static async open(store: HumanStore, randomId: () => string, now = Date.now, coverAuthority?: (origin: HumanOrigin, asset: HumanCardAsset) => void,
+    recovery?: HumanReceiptRecovery): Promise<HumanToolsCore> {
+    const core = new HumanToolsCore(store, randomId, now, coverAuthority, recovery)
     core.ledger = validateLedger(await store.load())
     return core
   }
   /** Stop admission immediately; callers must await the already-started write
    * before another instance opens this ledger during a plugin reload. */
-  close(): Promise<void> { this.stopped = true; return this.tail.then(() => {}) }
+  close(): Promise<void> { this.stopped = true; this.recoveryLifetime.abort(); return this.tail.then(() => {}) }
   private available(): void { if (this.stopped) throw error('human-tools-disabled', '群任务功能已关闭') }
   private serial<T>(work: () => Promise<T>): Promise<T> {
     const result = this.tail.then(() => { this.available(); return work() })
@@ -126,12 +132,14 @@ export class HumanToolsCore {
     if (record.surface.cover) this.cover(record.surface.cover, record.origin)
     return { surface: clone(record.surface), origin: clone(record.origin) }
   }
-  create(origin: HumanOrigin, title: string, body: string, signal: AbortSignal, sourceSurfaceId?: string, cover?: HumanCardAsset): Promise<HumanSurface> {
+  async create(origin: HumanOrigin, title: string, body: string, signal: AbortSignal, sourceSurfaceId?: string, cover?: HumanCardAsset): Promise<HumanSurface> {
+    if (sourceSurfaceId !== undefined) await this.recoverSource(origin, sourceSurfaceId, 'share', signal)
     return this.createAction(origin, signal, () => ({ title, body,
       ...(cover === undefined ? {} : { cover: this.cover(cover, origin) }),
       ...(sourceSurfaceId !== undefined ? { targetTaskRef: this.publishedSource(origin, sourceSurfaceId).taskRef } : {}), actions: [{ ...HUMAN_ACTION }] }))
   }
-  createCollection(origin: HumanOrigin, title: string, body: string, initialRound: HumanInitialRound, signal: AbortSignal, sourceSurfaceId?: string, cover?: HumanCardAsset, workspaceSource?: WorkspaceSourceProof): Promise<HumanSurface> {
+  async createCollection(origin: HumanOrigin, title: string, body: string, initialRound: HumanInitialRound, signal: AbortSignal, sourceSurfaceId?: string, cover?: HumanCardAsset, workspaceSource?: WorkspaceSourceProof): Promise<HumanSurface> {
+    if (sourceSurfaceId !== undefined) await this.recoverSource(origin, sourceSurfaceId, 'share', signal)
     return this.createAction(origin, signal, () => {
       if (!humanInitialRound(initialRound)) throw error('human-surface-invalid', '首轮收集表单无效')
       if (workspaceSource !== undefined && (sourceSurfaceId !== undefined || !validWorkspaceSource(workspaceSource, origin)))
@@ -190,20 +198,93 @@ export class HumanToolsCore {
     if (!taskRef) throw error('human-source-unavailable', '此卡片尚无可复用的成功发布记录')
     return { record, taskRef: clone(taskRef) }
   }
+  private hasSourceEvidence(source: HumanRecord, actionId: string): boolean {
+    return source.attempts.some(({ receipt }) => receipt?.outcome === 'success'
+      && (actionId === 'share' ? Boolean(receipt.taskRef) : actionId === 'select-members' && Boolean(receipt.selectionRef)))
+  }
+  /** Read an exact existing operation only when its local ACK is missing.
+   * Source consumers already holding durable evidence keep their existing
+   * offline behavior. Explicit status reads still reconcile missing attempts.
+   * Network I/O stays outside the serial writer: a late phone ACK is allowed to
+   * complete meanwhile. ack() rechecks and never replaces conflicting history.
+   * No task listing, model text, current group or other session is a fallback. */
+  private async recoverSource(origin: HumanOrigin, sourceSurfaceId: string, actionId: string, signal: AbortSignal, checkAll = false): Promise<void> {
+    signal.throwIfAborted(); this.available()
+    const source = this.source(origin, sourceSurfaceId, actionId)
+    if (!this.recovery || !checkAll && this.hasSourceEvidence(source, actionId)) return
+    const pending = source.attempts.filter(attempt => !attempt.receipt).map(attempt => attempt.id)
+    for (const attemptId of pending) {
+      signal.throwIfAborted(); this.available()
+      const current = this.source(origin, sourceSurfaceId, actionId)
+      if (!checkAll && this.hasSourceEvidence(current, actionId)) return
+      if (current.attempts.find(attempt => attempt.id === attemptId)?.receipt) continue
+      const key = JSON.stringify([origin.scope, origin.generation, sourceSurfaceId, attemptId])
+      let flight = this.recoveryFlights.get(key)
+      if (!flight) {
+        // Concurrent status/tool readers share only the bounded read. Cancelling
+        // one reader must not cancel another or let an abandoned read write.
+        flight = Promise.resolve().then(() => this.recovery!({ surface: clone(current.surface), origin: clone(current.origin), attemptId }, this.recoveryLifetime.signal))
+          .finally(() => { if (this.recoveryFlights.get(key) === flight) this.recoveryFlights.delete(key) })
+        this.recoveryFlights.set(key, flight)
+      }
+      let recovered: HumanAckRequest | undefined
+      try { recovered = await waitRecovery(flight, signal) }
+      catch (cause) {
+        signal.throwIfAborted(); this.available()
+        // A phone ACK may have won while this optional read was in flight. A
+        // transport-only failure must not hide already durable success. Wait
+        // behind pending writers and recheck the exact receipt, not just the
+        // source's latest success. Authorization/validation/HTTP denials and
+        // cancellation are never softened by this race reconciliation.
+        if (!object(cause) || !['workflow-network-unavailable', 'workflow-timeout'].includes(String(cause.code))
+          || cause.status !== undefined) throw cause
+        const recorded = await this.serial(async () => {
+          signal.throwIfAborted()
+          const saved = this.source(origin, sourceSurfaceId, actionId)
+            .attempts.find(attempt => attempt.id === attemptId)?.receipt
+          return saved?.outcome === 'success'
+            && (actionId !== 'share' || Boolean(saved.taskRef))
+            && (actionId !== 'select-members' || Boolean(saved.selectionRef))
+        })
+        if (!recorded) throw cause
+        continue
+      }
+      signal.throwIfAborted(); this.available()
+      this.source(origin, sourceSurfaceId, actionId)
+      if (!recovered) continue
+      if (recovered.scope !== origin.scope || recovered.surfaceId !== sourceSurfaceId || recovered.attemptId !== attemptId
+        || recovered.actionId !== actionId || recovered.revision !== current.surface.revision)
+        throw error('human-recovery-invalid', '操作结果与原记录不一致，未更新或重新发送')
+      await this.ack(recovered, signal)
+    }
+  }
+  /** Owner status may reconcile a missing ACK, but never obtain a new claim,
+   * publish a draft, select people or invoke a native action. */
+  async reconcileStatus(scope: string, surfaceId: string, generation: string, signal: AbortSignal): Promise<unknown> {
+    this.assertGeneration(scope, surfaceId, generation)
+    const record = this.record(this.ledger, scope, surfaceId), actionId = record.surface.actions[0].id
+    if (['share', 'select-members', 'remind', 'reshare'].includes(actionId))
+      await this.recoverSource({ scope, generation, callId: 'owner-status', rootCallId: 'owner-status' }, surfaceId, actionId, signal, true)
+    signal.throwIfAborted()
+    return this.status(scope, surfaceId)
+  }
   /** Host-only admission of a source into the explicit shared directory. */
-  publishedEvidence(scope: { nodeId: string; sessionId: string; sessionGeneration: string }, sourceSurfaceId: string) {
+  async publishedEvidence(scope: { nodeId: string; sessionId: string; sessionGeneration: string }, sourceSurfaceId: string, signal: AbortSignal) {
     this.available()
+    await this.recoverSource({ scope: scope.sessionId, generation: scope.sessionGeneration, callId: 'workspace-source', rootCallId: 'workspace-source' }, sourceSurfaceId, 'share', signal)
     const { record, taskRef } = this.publishedSource({ scope: scope.sessionId, generation: scope.sessionGeneration, callId: 'workspace-source', rootCallId: 'workspace-source' }, sourceSurfaceId)
     return { origin: { ...scope }, taskRef, title: record.surface.title }
   }
-  createMembers(origin: HumanOrigin, sourceSurfaceId: string, signal: AbortSignal): Promise<HumanSurface> {
+  async createMembers(origin: HumanOrigin, sourceSurfaceId: string, signal: AbortSignal): Promise<HumanSurface> {
+    await this.recoverSource(origin, sourceSurfaceId, 'share', signal)
     return this.createAction(origin, signal, () => {
       const { record, taskRef } = this.publishedSource(origin, sourceSurfaceId)
       return { title: record.surface.title, body: `为任务“${record.surface.title}”选择提醒成员。仅用于之后经主人批准的提醒，不授予私密内容或电脑访问权限。\n任务说明：${record.surface.body}`.slice(0, 1000),
         targetTaskRef: taskRef, actions: [{ ...HUMAN_MEMBERS_ACTION }] }
     })
   }
-  createReminder(origin: HumanOrigin, sourceSurfaceId: string, title: string, signal: AbortSignal, memberRefs?: readonly string[]): Promise<HumanSurface> {
+  async createReminder(origin: HumanOrigin, sourceSurfaceId: string, title: string, signal: AbortSignal, memberRefs?: readonly string[]): Promise<HumanSurface> {
+    await this.recoverSource(origin, sourceSurfaceId, 'select-members', signal)
     return this.createAction(origin, signal, () => {
       if (!humanReminderTitle(title) || memberRefs !== undefined && !humanMemberRefs(memberRefs)) throw error('human-surface-invalid', '提醒标题或成员范围无效')
       const source = this.source(origin, sourceSurfaceId, 'select-members')
@@ -338,4 +419,15 @@ export class HumanToolsCore {
       .filter(attempt => attempt.receipt).map(attempt => ({ ...clone(attempt.receipt!),
         delivery: attempt.receipt!.delivery === 'dispatching' ? 'uncertain' : attempt.receipt!.delivery })) }
   }
+}
+
+function waitRecovery<T>(flight: Promise<T>, signal: AbortSignal): Promise<T> {
+  signal.throwIfAborted()
+  return new Promise((resolve, reject) => {
+    const cleanup = () => signal.removeEventListener('abort', abort)
+    const abort = () => { cleanup(); reject(signal.reason) }
+    signal.addEventListener('abort', abort, { once: true })
+    flight.then(value => { cleanup(); resolve(value) }, cause => { cleanup(); reject(cause) })
+    if (signal.aborted) abort()
+  })
 }

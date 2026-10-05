@@ -6,9 +6,11 @@ import { type WorkflowDataStore } from '../human-workflow/data.js';
 import type { WorkflowTransport } from '../human-workflow/transport.js';
 import type { NativeAssistantAdapter } from '../assistant-presets/types.js';
 import type { AutomationConfig, NativeAutomationAdapter } from '../human-workflow/automation-types.js';
+import type { PrivateInputNative } from '../human-workflow/private-input-native.js';
 export interface HumanToolsConfig {
     readonly enabled?: boolean;
     readonly store?: HumanStore;
+    readonly privateInput?: PrivateInputNative;
     readonly assistants?: false | {
         native?: NativeAssistantAdapter;
         registryStore?: WorkflowDataStore;

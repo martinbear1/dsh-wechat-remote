@@ -48,8 +48,10 @@ import type { AgentResourcesService } from '../agent-resources.js'
 import type { WechatAttachmentService } from '../attachment-service.js'
 import { WorkspaceDirectory } from '../human-workflow/workspace-directory.js'
 import { workspaceTools } from '../human-workflow/workspace-tools.js'
+import type { PrivateInputNative } from '../human-workflow/private-input-native.js'
 
 export interface HumanToolsConfig { readonly enabled?: boolean; readonly store?: HumanStore
+  readonly privateInput?: PrivateInputNative
   readonly assistants?: false | { native?: NativeAssistantAdapter; registryStore?: WorkflowDataStore; businessStore?: WorkflowDataStore; sessionIntentStore?: WorkflowDataStore }
   readonly workflow?: { transport: WorkflowTransport; modeStore?: WorkflowDataStore; recordStore?: WorkflowDataStore; replicaStore?: WorkflowDataStore
     lifecycleStore?: WorkflowDataStore; receiverKeyStore?: WorkflowDataStore; receiverRoot?: string
@@ -136,6 +138,7 @@ export class HumanToolsService extends TypertRemoteService {
         let modes: ModeRegistry | undefined, records: WorkflowRecords | undefined
         try {
           const capabilities = () => { transport.assertIdentity(); const automation = this.automation?.capability(); return createCapabilityManifest(transport.nodeId, { 'task.query': { status: 'available' },
+            'task.private-publish': this.lifecycle && config.privateInput?.supported() ? { status: 'available' } : { status: 'blocked', reason: '当前宿主尚不能核对真实用户输入；可继续准备内容并使用确认按钮。' },
             'assistant.design': this.assistants && !this.lifetime.signal.aborted
               && ['human_assistant_catalog', 'human_assistant_draft', 'human_assistant_get'].every(name => Boolean((this.host.get('tools') as ToolRuntime).get(name)))
               ? { status: 'available' } : { status: 'blocked', reason: '助手设计服务未启用或所需工具尚未注册；原生安装支持须另行核对。' },
@@ -254,6 +257,8 @@ export class HumanToolsService extends TypertRemoteService {
             for (const tool of workspaceTools({ nodeId: transport.nodeId, directory: this.directory, lifecycle: runtime, core, assertAgent }))
               unregisterTools.push((this.host.get('tools') as ToolRuntime).register(tool))
             for (const tool of lifecycleTools({ nodeId: transport.nodeId, lifecycle: runtime, core, directory: this.directory,
+              ...(config.privateInput ? { ownerInput: (exec, taskRef, draftRef) => config.privateInput!.ownerInput(exec, taskRef, draftRef),
+                ownerInputStatus: (exec: import('@deepseek-ai/dsh-tools').ToolRunContext) => config.privateInput!.ownerInputStatus(exec) } : {}),
               assertAgent: exec => {
                 this.lifetime.signal.throwIfAborted(); transport.assertIdentity()
                 const agents = this.host.get('agents') as { get(id: string): unknown } | undefined

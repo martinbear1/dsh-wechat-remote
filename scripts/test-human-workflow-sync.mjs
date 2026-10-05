@@ -278,6 +278,9 @@ test('authenticated resource denials keep accurate scoped error codes without ex
   const pair = generateKeyPairSync('ed25519'), identity = { nodeId, privateKeyPem: pair.privateKey.export({ type: 'pkcs8', format: 'pem' }) }
   const cases = [
     ['invalid_recipients', ['lifecycle'], /指定对象/],
+    ['private_updates_disabled', ['lifecycle'], /私人更新尚未开启或已关闭/],
+    ['invalid_private_input_proof', ['lifecycle'], /私人更新权限无法核对/],
+    ['private_publication_only', ['lifecycle'], /私人/],
     ['workspace_registration_required', ['grant', 'workspace', 'lifecycle', 'objects/claim', 'objects/ack', 'action-result'], /尚未登记/],
     ['workspace_scope_mismatch', ['grant', 'workspace', 'lifecycle', 'objects/claim', 'objects/ack', 'action-result'], /不属于所请求的工作区/],
     ['source_scope_mismatch', ['workspace', 'lifecycle', 'objects/claim', 'objects/ack', 'action-result'], /任务来源不属于/],
@@ -299,12 +302,17 @@ test('authenticated resource denials keep accurate scoped error codes without ex
 
 test('the resource-denial allowlist cannot soften 401, unrelated routes, invalid codes or malformed 403 bodies', async () => {
   const pair = generateKeyPairSync('ed25519'), identity = { nodeId, privateKeyPem: pair.privateKey.export({ type: 'pkcs8', format: 'pem' }) }
-  const unrecognized = ['node_not_authorized', 'binding_revoked', 'invalid_node_proof', 'future_denial', '__proto__', 'constructor',
+  const unrecognized = ['node_not_authorized', 'node_not_owned', 'binding_revoked', 'invalid_node_proof', 'future_denial', '__proto__', 'constructor',
     null, {}, 'invalid_recipients\n', 'x'.repeat(81)]
   const cases = [
     ...unrecognized.map(code => ['lifecycle', 403, JSON.stringify({ error: { code, message: 'secret-denial' } })]),
     ['lifecycle', 401, JSON.stringify({ error: { code: 'invalid_recipients' } })],
     ['sync', 403, JSON.stringify({ error: { code: 'invalid_recipients' } })],
+    ...['private_updates_disabled', 'invalid_private_input_proof', 'private_publication_only'].flatMap(code => [
+      ['sync', 403, JSON.stringify({ error: { code } })],
+      ['action-result', 403, JSON.stringify({ error: { code } })],
+      ['lifecycle', 401, JSON.stringify({ error: { code } })],
+    ]),
     ['receiver-key', 403, JSON.stringify({ error: { code: 'workspace_scope_mismatch' } })],
     ['grant', 403, JSON.stringify({ error: { code: 'source_scope_mismatch' } })],
     ['sync', 403, JSON.stringify({ error: { code: 'action_source_mismatch' } })],

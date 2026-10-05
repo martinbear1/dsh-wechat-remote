@@ -12,6 +12,7 @@ import { HUMAN_ROUND_MAX_BYTES, HUMAN_SURFACE_MAX_BYTES, HUMAN_LIFECYCLE_RESPONS
 import { lifecycleCoverValid, humanCardAsset, type HumanCardAsset } from '../human-tools/card-cover.js'
 import { recipientFacts, recipientSnapshot } from './recipient-facts.js'
 import type { WorkspaceTaskAccess } from './workspace-directory.js'
+import { humanRoundIssue } from '../human-tools/form.js'
 
 export interface NodeBinding { schema: 'human.node.binding.v1'; nodeId: string; ownerSubject: string; accountInstance: string; generation: string }
 export function receiverBinding(value: unknown, nodeId: string): { binding: NodeBinding; bindingKey: string } {
@@ -26,6 +27,11 @@ export interface LifecycleDraft {
   currentRevision?: number; approvalStatus?: 'ready' | 'published' | 'stale' | 'expired'
   context?: { taskTitle: string; roundTitle?: string; submissionCreatedAt?: number; reminderTargetCount?: number }
   execution?: { operationId: string; phase: 'prepared' | 'invoked' | 'settled'; outcome: string | null; reason: string | null }
+}
+/** Host-derived input authority; never a model tool parameter or tool output. */
+export interface PrivatePublishInput {
+  inputProof: string; inputId: string; contentDigest: string; nativeMessageId: string; idempotencyKey: string
+  assertCurrent(): void
 }
 export type LifecycleReminderContent = { roundId: string | null; title: string } & (
   { condition: 'pending-submission' | 'result-published'; participantRefs: string[]; recipientSource?: never }
@@ -71,7 +77,17 @@ export function lifecycleReminderPreview(draft: LifecycleDraft): HumanReminderPr
 interface Analysis { scope: WorkflowScope; taskRef: HumanTaskRef; submissionId: string; submissionVersion: number; revision: number; text: string; updatedAt: number }
 interface ReceiptAttempt { scope: WorkflowScope; taskRef: HumanTaskRef; submissionId: string; submissionVersion: number
   revision: number; requestId: string; state: 'pending' | 'received' | 'blocked'; errorCode?: string; updatedAt: number }
-interface Ledger { schema: 'human.lifecycle.local.v1'; nodeId: string; analyses: Analysis[]; receipts?: ReceiptAttempt[] }
+interface PrivatePublicationAttempt { scope: WorkflowScope; taskRef: HumanTaskRef; draftRef: HumanWorkflowDraftRef
+  operationId: string; inputIdDigest: string; nativeMessageDigest: string; state: 'attempted' | 'published' | 'rejected'; rejection?: string; updatedAt: number }
+interface Ledger { schema: 'human.lifecycle.local.v1'; nodeId: string; analyses: Analysis[]; receipts?: ReceiptAttempt[]; publications?: PrivatePublicationAttempt[] }
+const PRIVATE_PUBLICATION_LIMIT = 256
+// These authenticated structured responses guarantee this request added no
+// private content. They do NOT prove another earlier operation did not publish.
+const PRIVATE_PUBLICATION_REJECTIONS: Record<string, number> = {
+  private_updates_disabled: 403, invalid_private_input_proof: 403, private_publication_only: 403, source_scope_mismatch: 403,
+  private_input_expired: 410, draft_expired: 410, private_input_replayed: 409, draft_changed: 409,
+  lifecycle_conflict: 409, idempotency_conflict: 409, private_update_capacity: 429, lifecycle_capacity: 429,
+}
 const receiptRetryableCodes = new Set(['download_ticket_expired', 'attachment_download_quota', 'usage_ledger_capacity', 'metering_unavailable', 'receiver-capacity', 'receiver_format_unsupported'])
 const receiptBlockedCodes = new Set([...receiptRetryableCodes, 'submission-file-invalid', 'submission-image-invalid', 'submission-manifest-invalid',
   'submission-integrity-invalid', 'submission-context-invalid', 'receiver-file-mismatch'])
@@ -142,8 +158,9 @@ function draftRecovery(draft: LifecycleDraft) {
       : approvalStatus === 'published' ? 'check-operation-effects'
         : approvalStatus === 'ready' ? 'await-owner-action' : 'query-current-status' }
 }
-/** Local receiver and draft tools never approve. Only the authenticated owner
- * WeChat endpoint can publish a draft. No Agent restoration or execution here. */
+/** Drafts and reception remain separate from the narrowly scoped private
+ * publication path. That path requires trusted host input plus cloud grants;
+ * no Agent restoration, model invocation, public sharing or notification here. */
 export class WorkflowLifecycle {
   private readonly lifetime = new AbortController()
   private readonly registered = new Set<string>()
@@ -158,7 +175,7 @@ export class WorkflowLifecycle {
     const raw = await options.store.load(), nodeId = options.transport.nodeId
     let ledger: Ledger = { schema: 'human.lifecycle.local.v1', nodeId, analyses: [] }
     if (raw !== undefined) {
-      if (!row(raw) || !exact(raw, ['schema', 'nodeId', 'analyses'], ['receipts']) || raw.schema !== ledger.schema || raw.nodeId !== nodeId
+      if (!row(raw) || !exact(raw, ['schema', 'nodeId', 'analyses'], ['receipts', 'publications']) || raw.schema !== ledger.schema || raw.nodeId !== nodeId
         || !Array.isArray(raw.analyses) || raw.analyses.length > 2048) throw fail('lifecycle-store-invalid', '任务处理账本无效')
       const ids = new Set<string>()
       for (const entry of raw.analyses) {
@@ -168,6 +185,21 @@ export class WorkflowLifecycle {
         const key = canonicalSubmission([entry.scope, entry.submissionId]); if (ids.has(key)) throw fail('lifecycle-store-invalid', '任务分析记录重复'); ids.add(key)
       }
       ledger = copy(raw) as unknown as Ledger
+      if (raw.publications !== undefined) {
+        if (!Array.isArray(raw.publications) || raw.publications.length > PRIVATE_PUBLICATION_LIMIT) throw fail('lifecycle-store-invalid', '私人更新记录无效')
+        const publications = new Set<string>()
+        for (const p of raw.publications) {
+          const ref = row(p) && humanWorkflowDraftRef(p.draftRef)
+          if (!row(p) || !exact(p, ['scope', 'taskRef', 'draftRef', 'operationId', 'inputIdDigest', 'nativeMessageDigest', 'state', 'updatedAt'], ['rejection'])
+            || !scopeValid(p.scope) || p.scope.nodeId !== nodeId || !humanTaskRef(p.taskRef) || !ref || ref.kind === 'reminder'
+            || !/^[A-Za-z0-9:_-]{16,128}$/.test(String(p.operationId)) || !['attempted', 'published', 'rejected'].includes(String(p.state))
+            || !/^[a-f0-9]{64}$/.test(String(p.inputIdDigest)) || !/^[a-f0-9]{64}$/.test(String(p.nativeMessageDigest))
+            || (p.state === 'rejected' ? typeof p.rejection !== 'string' || !Object.hasOwn(PRIVATE_PUBLICATION_REJECTIONS, p.rejection) : p.rejection !== undefined)
+            || !revision(p.updatedAt)) throw fail('lifecycle-store-invalid', '私人更新记录无效')
+          const key = canonicalSubmission([p.scope, p.taskRef, ref.draftId])
+          if (publications.has(key)) throw fail('lifecycle-store-invalid', '私人更新记录重复'); publications.add(key)
+        }
+      }
       if (raw.receipts !== undefined) {
         if (!Array.isArray(raw.receipts) || raw.receipts.length > 4096) throw fail('lifecycle-store-invalid', '收件意图账本无效')
         const receipts = new Set<string>()
@@ -213,10 +245,10 @@ export class WorkflowLifecycle {
     if (this.options.receiver && result.receiveFormats !== undefined) this.fileRegistered.add(bindingKey)
     return bindingKey
   }
-  private async get(scope: WorkflowScope, taskRef: HumanTaskRef, signal: AbortSignal, extra: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
+  private async get(scope: WorkflowScope, taskRef: HumanTaskRef, signal: AbortSignal, extra: Record<string, unknown> = {}, allowShared = true): Promise<Record<string, unknown>> {
     assertScope(scope, this.options.transport.nodeId); if (!humanTaskRef(taskRef)) throw fail('lifecycle-query-invalid', '任务引用无效')
     const active = this.active(signal)
-    const shared = await this.options.workspaceAccess?.(scope, taskRef, active), expectedOrigin = shared?.sourceScope ?? scope
+    const shared = allowShared ? await this.options.workspaceAccess?.(scope, taskRef, active) : undefined, expectedOrigin = shared?.sourceScope ?? scope
     const result = await this.options.transport.request('lifecycle', { operation: 'get', scope: scope.sessionId,
       sessionGeneration: scope.sessionGeneration, taskRef, ...extra, ...(shared ? { workspaceRef: shared.workspaceRef } : {}) }, active)
     this.options.transport.assertIdentity(); active.throwIfAborted()
@@ -316,6 +348,92 @@ export class WorkflowLifecycle {
     if (!draft) throw fail('lifecycle-draft-unavailable', '原任务方案已不可用；不能替换成其他版本')
     return { schema: 'human.workflow.preview.v1', ref: copy(ref), taskRef: copy(taskRef),
       revision: page.revision, asOf: page.asOf, draft }
+  }
+  async publishPrivate(scope: WorkflowScope, taskRef: HumanTaskRef, ref: HumanWorkflowDraftRef, input: PrivatePublishInput, signal: AbortSignal) {
+    const active = this.active(signal)
+    assertScope(scope, this.options.transport.nodeId)
+    if (!humanTaskRef(taskRef) || !humanWorkflowDraftRef(ref) || ref.kind === 'reminder')
+      throw fail('private-publication-invalid', '只能更新准确任务的私人反馈或指定对象要求，不能发送群卡或提醒')
+    if (!input || !plain(input.inputProof, 512) || !plain(input.inputId, 128) || !plain(input.nativeMessageId, 256)
+      || !/^[a-f0-9]{64}$/.test(input.contentDigest) || !/^[A-Za-z0-9:_-]{16,128}$/.test(input.idempotencyKey)
+      || typeof input.assertCurrent !== 'function') throw fail('private-input-required', '缺少当前真实对话输入的授权依据；未更新私人页面')
+    input.assertCurrent()
+    // Do not apply the workspace read-sharing grant to private writes.
+    const page = await this.get(scope, taskRef, active, { draftId: ref.draftId }, false)
+    input.assertCurrent()
+    const draft = (page.drafts as unknown[]).map(lifecycleDraft).find(item => canonicalSubmission(item.draftRef) === canonicalSubmission(ref))
+    if (!draft || draft.draftRef.kind === 'reminder' || draft.draftRef.kind === 'round'
+      && (!Array.isArray(draft.content.recipientRefs) || !draft.content.recipientRefs.length || draft.content.cover !== undefined || humanRoundIssue(draft.content, 'content', 'round')))
+      throw fail('private-publication-invalid', '当前方案不是原会话中准确对象的私人更新；公开内容仍用原操作入口')
+    const sameAttempt = (p: PrivatePublicationAttempt) => sameScope(p.scope, scope) && sameTaskRef(p.taskRef, taskRef) && p.draftRef.draftId === ref.draftId
+    const inputIdDigest = sha256(input.inputId), nativeMessageDigest = sha256(input.nativeMessageId)
+    const checkPrevious = (p?: PrivatePublicationAttempt) => {
+      if (!p) return
+      if (p.state === 'rejected') {
+        if (p.operationId === input.idempotencyKey || p.inputIdDigest === inputIdDigest || p.nativeMessageDigest === nativeMessageDigest)
+          throw fail('private-new-input-required', '此前这次更新已被明确拒绝；纠正权限或条件后，须由用户在当前会话重新提出要求，不能自动重试')
+      } else throw fail('private-publication-unknown', '此前已尝试更新这份方案；当前尚未核实生效，只能查询原任务，不能再次发布')
+    }
+    if (draft.state === 'published') {
+      if (this.state.current().publications?.some(p => sameAttempt(p) && p.state !== 'published'))
+        await this.state.update(next => { const p = next.publications?.find(sameAttempt); if (p) { p.state = 'published'; delete p.rejection; p.updatedAt = (this.options.now ?? Date.now)() } }, active)
+      input.assertCurrent(); this.options.transport.assertIdentity(); active.throwIfAborted()
+      return { schema: 'human.private.publication.v1', taskRef: copy(taskRef), draftRef: copy(ref),
+        state: 'published', effects: draftEffects(draft), alreadyPublished: true }
+    }
+    checkPrevious(this.state.current().publications?.find(sameAttempt))
+    if (draft.approvalStatus !== 'ready' || draft.expiresAt <= (this.options.now ?? Date.now)())
+      throw fail('private-draft-not-ready', '私人方案版本已变化、过期或尚未核实；先读取当前任务，不沿用旧请求')
+    input.assertCurrent(); active.throwIfAborted()
+    // Save intent before mutation. A lost response, process restart or concurrent
+    // call can only read the same draft; never replay a possibly completed write.
+    // No proof, user text or input lease is persisted. Unresolved attempts are
+    // never evicted to make room; only verified published tombstones may expire.
+    await this.state.update(next => {
+      input.assertCurrent(); this.options.transport.assertIdentity()
+      const entries = next.publications ??= []
+      const previous = entries.find(sameAttempt); checkPrevious(previous)
+      if (previous) entries.splice(entries.indexOf(previous), 1)
+      if (entries.length >= PRIVATE_PUBLICATION_LIMIT) {
+        const index = entries.findIndex(p => p.state === 'published')
+        if (index < 0) throw fail('private-publication-capacity', '待核实的私人更新已达上限；先核对已有结果，不会重复执行')
+        entries.splice(index, 1)
+      }
+      entries.push({ scope: copy(scope), taskRef: copy(taskRef), draftRef: copy(ref), operationId: input.idempotencyKey, inputIdDigest, nativeMessageDigest,
+        state: 'attempted', updatedAt: (this.options.now ?? Date.now)() })
+    }, active)
+    input.assertCurrent(); active.throwIfAborted(); this.options.transport.assertIdentity()
+    let result: unknown
+    try {
+      result = await this.options.transport.request('lifecycle', { operation: 'private-publish', scope: scope.sessionId,
+        sessionGeneration: scope.sessionGeneration, taskRef, draftRef: ref, idempotencyKey: input.idempotencyKey,
+        inputProof: input.inputProof, inputId: input.inputId, contentDigest: input.contentDigest, nativeMessageId: input.nativeMessageId }, active)
+    } catch (error) {
+      if (row(error) && typeof error.code === 'string' && Object.hasOwn(PRIVATE_PUBLICATION_REJECTIONS, error.code)
+        && error.status === PRIVATE_PUBLICATION_REJECTIONS[error.code]) {
+        const code = error.code
+        await this.state.update(next => {
+          const p = next.publications?.find(sameAttempt)
+          if (p?.operationId === input.idempotencyKey) { p.state = 'rejected'; p.rejection = code; p.updatedAt = (this.options.now ?? Date.now)() }
+        }, active)
+      }
+      throw error
+    }
+    this.options.transport.assertIdentity(); active.throwIfAborted(); input.assertCurrent()
+    const id = (value: unknown) => typeof value === 'string' && /^[A-Za-z0-9_-]{20,80}$/.test(value)
+    if (!row(result) || result.schema !== 'human.private.publication.v1' || result.state !== 'published'
+      || !sameTaskRef(humanTaskRef(result.taskRef), taskRef) || canonicalSubmission(result.draftRef) !== canonicalSubmission(ref)
+      || result.inputId !== input.inputId || result.nativeMessageId !== input.nativeMessageId || result.operationId !== input.idempotencyKey
+      || !row(result.result) || (ref.kind === 'review'
+        ? !exact(result.result, ['resultId', 'correctionRoundId']) || !id(result.result.resultId)
+          || (draft.content.correction === null ? result.result.correctionRoundId !== null : !id(result.result.correctionRoundId))
+        : !exact(result.result, ['roundId']) || !id(result.result.roundId)))
+      throw fail('private-publication-unknown', '更新结果尚不能与本次请求核对；请查询原任务，不要重新发布')
+    await this.state.update(next => { const p = next.publications?.find(sameAttempt); if (p) { p.state = 'published'; p.updatedAt = (this.options.now ?? Date.now)() } }, active)
+    // Re-project only public operation facts, never bearer authority, message
+    // content, account binding or an unexpected server field.
+    return { schema: 'human.private.publication.v1', taskRef: copy(taskRef), draftRef: copy(ref), state: 'published',
+      operationId: input.idempotencyKey, result: copy(result.result), effects: draftEffects({ ...draft, state: 'published' }) }
   }
   private receipt(scope: WorkflowScope, taskRef: HumanTaskRef, submissionId: string, submissionVersion: number) {
     return this.state.current().receipts?.find(r => sameScope(r.scope, scope) && sameTaskRef(r.taskRef, taskRef)

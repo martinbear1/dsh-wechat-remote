@@ -272,7 +272,7 @@ export declare function capabilityCatalog(manifest: CapabilityManifest, category
             readonly privateRoundShare: false;
         };
         readonly workflowPreview: {
-            readonly choices: readonly ["inline", "page"];
+            readonly choices: readonly ["inline", "page", "none"];
             readonly default: "inline";
             readonly kinds: readonly ["round", "review", "reminder"];
             readonly inline: "full-authoritative-versioned-content-and-target";
@@ -280,16 +280,28 @@ export declare function capabilityCatalog(manifest: CapabilityManifest, category
             readonly fallback: "page-for-unrepresentable-full-preview-or-cover-or-budget";
             readonly truncatedApproval: false;
             readonly conversationTextIsApproval: false;
-            readonly ownerConversationConfirmation: {
-                readonly surface: "updated-wechat-mini-conversation-composer";
-                readonly kinds: readonly ["review-with-optional-correction"];
-                readonly prerequisites: readonly ["unique-latest-complete-displayed-proposal", "same-node-session-workspace-connection", "fresh-owner-wechat-login", "exact-unchanged-draft"];
-                readonly input: "explicit-owner-confirmation-phrase-not-arbitrary-model-interpreted-text";
-                readonly example: "确认更新";
-                readonly effect: "same-owner-approval-endpoint-no-node-publish-authority";
-                readonly exclusions: readonly ["standalone-round-without-identifiable-recipient-preview", "public-round", "share", "reminder", "question-answer", "attachments", "ambiguous-or-edited-proposal", "background-automation"];
-                readonly fallback: "existing-owner-button-on-unsupported-clients-or-unrepresentable-preview";
-                readonly unknownResult: "query-the-original-draft-never-automatically-republish";
+            readonly none: "draft-only-with-exact-draftRef-no-surface-private-review-or-nonempty-targeted-round-only";
+            readonly privatePublication: {
+                readonly capability: "task.private-publish";
+                readonly tool: "human_task_publish_private";
+                readonly parameters: readonly ["taskRef", "draftRef"];
+                readonly readiness: {
+                    readonly tool: "human_private_update_status";
+                    readonly states: readonly ["ready", "unavailable", "no-current-input"];
+                    readonly meaning: "current-host-input-proof-not-user-intent-or-fresh-cloud-permission";
+                    readonly cloudPermission: "revalidated-at-publication";
+                    readonly unavailableProofMeansDisabled: false;
+                };
+                readonly kinds: readonly ["review-with-optional-correction", "round-with-nonempty-recipientRefs"];
+                readonly intent: "agent-understands-current-real-user-request-no-fixed-phrase-or-required-extra-turn";
+                readonly evidence: "host-derived-current-user-input-not-model-approved-flag";
+                readonly permission: "owner-enabled-revocable-session-private-page-updates-up-to-seven-days";
+                readonly scope: "original-node-session-generation-and-task-only-no-workspace-write-sharing";
+                readonly exclusions: readonly ["public-round", "share", "reminder", "background-automation"];
+                readonly nonInstructions: readonly ["attachments", "quoted-text", "tool-output"];
+                readonly draftOnly: readonly ["questions", "preview-request", "negation", "unclear-intent-or-recipient"];
+                readonly fallback: "existing-owner-button-when-runtime-or-permission-unavailable";
+                readonly unknownResult: "durable-no-replay-query-the-original-draft";
                 readonly agentNext: "query-human_task_lifecycle-before-reporting-updated-or-preparing-requested-reminder";
             };
             readonly outcome: "published-content-not-automatic-message";
@@ -934,7 +946,7 @@ export declare function capabilityCatalog(manifest: CapabilityManifest, category
             };
         };
         workflowPreview: {
-            readonly choices: readonly ["inline", "page"];
+            readonly choices: readonly ["inline", "page", "none"];
             readonly default: "inline";
             readonly kinds: readonly ["round", "review", "reminder"];
             readonly inline: "full-authoritative-versioned-content-and-target";
@@ -942,16 +954,28 @@ export declare function capabilityCatalog(manifest: CapabilityManifest, category
             readonly fallback: "page-for-unrepresentable-full-preview-or-cover-or-budget";
             readonly truncatedApproval: false;
             readonly conversationTextIsApproval: false;
-            readonly ownerConversationConfirmation: {
-                readonly surface: "updated-wechat-mini-conversation-composer";
-                readonly kinds: readonly ["review-with-optional-correction"];
-                readonly prerequisites: readonly ["unique-latest-complete-displayed-proposal", "same-node-session-workspace-connection", "fresh-owner-wechat-login", "exact-unchanged-draft"];
-                readonly input: "explicit-owner-confirmation-phrase-not-arbitrary-model-interpreted-text";
-                readonly example: "确认更新";
-                readonly effect: "same-owner-approval-endpoint-no-node-publish-authority";
-                readonly exclusions: readonly ["standalone-round-without-identifiable-recipient-preview", "public-round", "share", "reminder", "question-answer", "attachments", "ambiguous-or-edited-proposal", "background-automation"];
-                readonly fallback: "existing-owner-button-on-unsupported-clients-or-unrepresentable-preview";
-                readonly unknownResult: "query-the-original-draft-never-automatically-republish";
+            readonly none: "draft-only-with-exact-draftRef-no-surface-private-review-or-nonempty-targeted-round-only";
+            readonly privatePublication: {
+                readonly capability: "task.private-publish";
+                readonly tool: "human_task_publish_private";
+                readonly parameters: readonly ["taskRef", "draftRef"];
+                readonly readiness: {
+                    readonly tool: "human_private_update_status";
+                    readonly states: readonly ["ready", "unavailable", "no-current-input"];
+                    readonly meaning: "current-host-input-proof-not-user-intent-or-fresh-cloud-permission";
+                    readonly cloudPermission: "revalidated-at-publication";
+                    readonly unavailableProofMeansDisabled: false;
+                };
+                readonly kinds: readonly ["review-with-optional-correction", "round-with-nonempty-recipientRefs"];
+                readonly intent: "agent-understands-current-real-user-request-no-fixed-phrase-or-required-extra-turn";
+                readonly evidence: "host-derived-current-user-input-not-model-approved-flag";
+                readonly permission: "owner-enabled-revocable-session-private-page-updates-up-to-seven-days";
+                readonly scope: "original-node-session-generation-and-task-only-no-workspace-write-sharing";
+                readonly exclusions: readonly ["public-round", "share", "reminder", "background-automation"];
+                readonly nonInstructions: readonly ["attachments", "quoted-text", "tool-output"];
+                readonly draftOnly: readonly ["questions", "preview-request", "negation", "unclear-intent-or-recipient"];
+                readonly fallback: "existing-owner-button-when-runtime-or-permission-unavailable";
+                readonly unknownResult: "durable-no-replay-query-the-original-draft";
                 readonly agentNext: "query-human_task_lifecycle-before-reporting-updated-or-preparing-requested-reminder";
             };
             readonly outcome: "published-content-not-automatic-message";
@@ -1090,7 +1114,7 @@ export declare function capabilityCatalog(manifest: CapabilityManifest, category
         status: string;
         tools: string[];
     } | {
-        requires: ("task.audience-known" | "workspace.directory" | "task.reshare" | "surface.reading-confirmation" | "surface.cover-image" | "action.select-members" | "action.remind-selected-pending" | "surface.form-collection" | "task.audience-select" | "task.lifecycle" | "task.query" | "recipient.query" | "assistant.design" | "mode.packages" | "workflow.records" | "submission.receive" | "submission.file-receive" | "result.private" | "automation.run")[];
+        requires: ("task.audience-known" | "workspace.directory" | "task.reshare" | "task.private-publish" | "surface.reading-confirmation" | "surface.cover-image" | "action.select-members" | "action.remind-selected-pending" | "surface.form-collection" | "task.audience-select" | "task.lifecycle" | "task.query" | "recipient.query" | "assistant.design" | "mode.packages" | "workflow.records" | "submission.receive" | "submission.file-receive" | "result.private" | "automation.run")[];
         inputs: string[];
         result: string;
         userAction: string;

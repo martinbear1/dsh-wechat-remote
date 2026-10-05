@@ -948,7 +948,16 @@ function planLegacyRpc(request) {
     if (!namespace || !remoteMethod || remoteMethod.includes("/")) {
       throw new Error(`unsupported Remote endpoint: ${method}`);
     }
-    const supplied = recordOf(payload.args);
+    let supplied = recordOf(payload.args);
+    if (namespace === "session" && remoteMethod === "prompt" && supplied) {
+      const { ownerInput: _credential, ...clean } = supplied;
+      const nested = recordOf(clean.request);
+      if (nested) {
+        const { ownerInput: _nestedCredential, ...nativeRequest } = nested;
+        clean.request = nativeRequest;
+      }
+      supplied = clean;
+    }
     if (namespace === "commands" && remoteMethod === "execute") {
       const args = supplied ?? {};
       const line = typeof args.line === "string" ? args.line.trim() : "";
@@ -986,6 +995,7 @@ function planLegacyRpc(request) {
   }
   if (method === "session.selectModel") return { kind: "session-select-model", request: payload };
   if (method === "session.prompt") {
+    const { ownerInput: _ownerInput, ...nativePayload } = payload;
     const parts = Array.isArray(payload.content) ? payload.content : [];
     const first = recordOf(parts[0]);
     const text = first?.type === "text" && typeof first.text === "string" ? first.text.trim() : "";
@@ -1002,7 +1012,7 @@ function planLegacyRpc(request) {
       };
     }
     return requestInvocation(method, {
-      ...payload,
+      ...nativePayload,
       requestId: typeof payload.requestId === "string" && payload.requestId ? payload.requestId : request.rpcId
     });
   }

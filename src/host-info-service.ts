@@ -36,6 +36,7 @@ export interface WechatGateRuntimeInfo {
 
 export interface WechatHostInfoConfig {
   readonly gateRuntime?: () => WechatGateRuntimeInfo
+  readonly privateUpdatesReady?: () => boolean
 }
 
 export interface WechatHostDescribeValue {
@@ -82,10 +83,12 @@ function installedPluginVersion(): string {
 /** Host-only, authenticated, read-only metadata for the WeChat client. */
 export class WechatHostInfoService extends TypertRemoteService {
   private readonly gateRuntime?: WechatHostInfoConfig['gateRuntime']
+  private readonly privateUpdatesReady?: WechatHostInfoConfig['privateUpdatesReady']
 
   constructor(ctx: Context, config: WechatHostInfoConfig = {}) {
     super(ctx, 'wechatHost')
     this.gateRuntime = config.gateRuntime
+    this.privateUpdatesReady = config.privateUpdatesReady
   }
 
   @Remote('describe')
@@ -112,7 +115,7 @@ export class WechatHostInfoService extends TypertRemoteService {
         agentName: descriptor.agentName,
         agentVersion: descriptor.agentVersion,
         hostPlatform: descriptor.hostPlatform,
-        capabilities: descriptor.capabilities,
+        capabilities: [...descriptor.capabilities, ...(this.privateUpdatesReady?.() ? [{ id: 'human.private-updates', version: 1 }] : [])],
         ...(this.gateRuntime ? { gate: this.gateRuntime() } : {}),
       },
     }

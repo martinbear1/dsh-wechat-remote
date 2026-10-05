@@ -63,19 +63,23 @@ test('file discovery exposes all collection paths and unambiguous versioned Word
   assert.deepEqual(form.attachment.mediaTypes, ['image/jpeg', 'image/png'], 'legacy compatibility fields are preserved and explicitly labelled')
 })
 
-test('owner conversation confirmation is a constrained client input, not raw text or Agent publish authority', () => {
+test('private execution is discoverable but node readiness is not current-session authorization', () => {
   const contract = manifest().contracts.workflowPreview
   assert.equal(contract.conversationTextIsApproval, false)
-  const input = contract.ownerConversationConfirmation
-  assert.equal(input.surface, 'updated-wechat-mini-conversation-composer')
-  assert.deepEqual(input.kinds, ['review-with-optional-correction'])
-  assert(input.prerequisites.includes('fresh-owner-wechat-login'))
-  assert(input.prerequisites.includes('exact-unchanged-draft'))
+  const input = contract.privatePublication
+  assert.equal(input.tool, 'human_task_publish_private')
+  assert.deepEqual(input.parameters, ['taskRef', 'draftRef'])
+  assert.deepEqual(input.kinds, ['review-with-optional-correction', 'round-with-nonempty-recipientRefs'])
+  assert.match(input.evidence, /host-derived-current-user-input/)
+  assert.match(input.permission, /revocable-session/)
   assert(input.exclusions.includes('reminder'))
   assert(input.exclusions.includes('background-automation'))
-  assert.match(input.effect, /no-node-publish-authority/)
-  assert.match(input.fallback, /unsupported-clients/)
-  assert.match(input.unknownResult, /never-automatically-republish/)
+  assert.match(input.scope, /no-workspace-write-sharing/)
+  assert.match(input.fallback, /runtime-or-permission-unavailable/)
+  assert.match(input.unknownResult, /no-replay/)
+  assert.equal(capabilityCatalog(manifest(), 'feedback').entries.find(item => item.id === 'feedback.private-execution').status, 'blocked')
+  const ready = createCapabilityManifest('node_test', { 'task.private-publish': { status: 'available' } })
+  assert.equal(capabilityCatalog(ready, 'feedback').entries.find(item => item.id === 'feedback.private-execution').status, 'available')
 })
 test('targeted details do not leak unrelated contracts or claim participation is a submission', () => {
   const result = capabilityCatalog(manifest(), 'facts', 'full')

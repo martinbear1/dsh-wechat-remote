@@ -3,7 +3,7 @@ import { workflowCapabilityContracts } from './capability-contracts.js'
 
 export type CapabilityStatus = 'available' | 'blocked' | 'planned'
 export const CAPABILITY_IDS = ['surface.reading-confirmation', 'surface.cover-image', 'action.select-members', 'action.remind-selected-pending',
-  'surface.form-collection', 'task.audience-select', 'task.audience-known', 'task.lifecycle', 'task.query', 'recipient.query', 'task.reshare', 'workspace.directory', 'assistant.design', 'mode.packages', 'workflow.records', 'submission.receive', 'submission.file-receive', 'result.private', 'automation.run'] as const
+  'surface.form-collection', 'task.audience-select', 'task.audience-known', 'task.lifecycle', 'task.private-publish', 'task.query', 'recipient.query', 'task.reshare', 'workspace.directory', 'assistant.design', 'mode.packages', 'workflow.records', 'submission.receive', 'submission.file-receive', 'result.private', 'automation.run'] as const
 export type CapabilityId = typeof CAPABILITY_IDS[number]
 export interface WorkflowCapability {
   id: CapabilityId; version: 1; status: CapabilityStatus; description: string; tools: string[]
@@ -17,7 +17,7 @@ export interface CapabilityManifest {
   contracts: ReturnType<typeof workflowCapabilityContracts>
 }
 export type CapabilityAvailability = Partial<Record<'surface.reading-confirmation' | 'surface.cover-image' | 'action.select-members'
-  | 'action.remind-selected-pending' | 'task.query' | 'recipient.query' | 'task.reshare' | 'workspace.directory' | 'assistant.design' | 'surface.form-collection' | 'task.audience-select' | 'task.audience-known' | 'task.lifecycle' | 'submission.receive' | 'submission.file-receive' | 'result.private' | 'automation.run', { status: CapabilityStatus; reason?: string }>>
+  | 'action.remind-selected-pending' | 'task.query' | 'recipient.query' | 'task.reshare' | 'workspace.directory' | 'assistant.design' | 'surface.form-collection' | 'task.audience-select' | 'task.audience-known' | 'task.lifecycle' | 'task.private-publish' | 'submission.receive' | 'submission.file-receive' | 'result.private' | 'automation.run', { status: CapabilityStatus; reason?: string }>>
 const catalog: WorkflowCapability[] = [
   { id: 'surface.reading-confirmation', version: 1, status: 'available', description: '准备公开阅读确认群卡；可引用已准备的公开封面，原生发送仍由主人批准。', tools: ['human_surface_share', 'human_mode_prepare_card'], ownerApproval: true },
   { id: 'surface.cover-image', version: 1, status: 'blocked', description: '安全接入明确选择的当前会话或工作区PNG/JPEG成品，核验格式、去元数据并保存准确图片摘要，上传私有临时封面；Agent可用电脑实际工具制作图片，插件不提供字体、绘制引擎或模板。主人须预览最终图片批准公开，不是自动发群。', tools: ['human_card_cover_prepare'], ownerApproval: true, reason: '需要本机封面资产账本、图片校验与云端临时对象服务。' },
@@ -28,6 +28,7 @@ const catalog: WorkflowCapability[] = [
   { id: 'task.audience-select', version: 1, status: 'blocked', description: '首发也可由主人先选群再原生选人，本任务仅所选成员参与；后续轮次不扩大范围，非全群名册。最多20人为当前产品限额。', tools: ['human_task_create'], ownerApproval: true, reason: '需要任务生命周期服务和支持原生名单选择的小程序/云端。' },
   { id: 'task.audience-known', version: 1, status: 'blocked', description: '向来源任务中已明确对应的1..20名成员新建独立任务：来源可为同会话成功任务，或同一真实工作区目录中显式共享、经宿主与云端重新核验的来源任务。复用原群及服务端核实的群身份；无需重复选群选人，仍须主人确认内容和原生发送。共享来源不等于任意跨会话或跨工作区权限。不是成员选择器预选，不枚举全群，不自动@；取得群ID不等于取得群名单。', tools: ['human_task_create', 'human_task_lifecycle'], ownerApproval: true, reason: '需要来源任务、真实成员映射，以及支持known-members的小程序/云端；跨会话来源还须真实工作区目录与新鲜授权核验。' },
   { id: 'task.lifecycle', version: 1, status: 'blocked', description: '查询准确轮次与提交、保存本地分析、准备新轮次审批；服务端在线核验。', tools: ['human_task_lifecycle', 'human_submission_analysis_save', 'human_submission_analysis_list', 'human_task_prepare_round'], ownerApproval: true, reason: '需要任务生命周期服务。' },
+  { id: 'task.private-publish', version: 1, status: 'blocked', description: '依当前真实用户对话执行原会话准确私人方案：个人反馈或有明确对象的补充要求；不发送群卡或@，不用于后台自动发布。宿主验证输入来源，云端验证可撤销会话许可与任务归属。available只表示实现已接入，本回合输入先查human_private_update_status；状态ready不替代云端本次许可核验，不接收模型自报approved。', tools: ['human_private_update_status', 'human_task_publish_private'], ownerApproval: true, reason: '需要可信当前用户输入接入和私人发布服务；当前会话另须主人开启按对话更新私人页面（可关闭，最长7天）。' },
   { id: 'recipient.query', version: 1, status: 'blocked', description: '查询当前任务已知成员的核实身份引用、来源、观察/确认及提交/送达事实。Agent根据用户意图选择准确对象再准备提醒，不强制未交筛选；另提供可选执行时条件筛选。不会导出全群名单、猜姓名或伪造已读。查询只读，发送须主人真实点击。', tools: ['human_task_recipients', 'human_task_prepare_reminder'], ownerApproval: true, reason: '需要任务生命周期服务与对应提醒实现。' },
   { id: 'mode.packages', version: 1, status: 'available', description: '版本化数据模式、预览、主人批准及回退；不增加宿主权限。', tools: ['human_capabilities', 'human_mode_draft', 'human_mode_list', 'human_mode_get', 'human_mode_preview'], ownerApproval: true },
   { id: 'workflow.records', version: 1, status: 'available', description: '持久保存会话内计划和分析引用；不改写参与者事实。', tools: ['human_workflow_save', 'human_workflow_get', 'human_workflow_list'], ownerApproval: false },

@@ -1,5 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis';
 import { DshRealtimeCompatibility, type LegacyRealtimePeer } from './dsh-realtime-compat.js';
+import type { PrivateInputNative } from './human-workflow/private-input-native.js';
 export interface CompatibilityHttpRequest {
     readonly method: string;
     readonly path: string;
@@ -25,6 +26,8 @@ export declare class DshCompatibilityApi implements DshCompatibilityTransport {
     private readonly maintaining;
     /** Optional observer owned by the authenticated gate; no native host API replacement. */
     taskNotificationRequest?: (args: unknown) => Promise<unknown>;
+    /** Owned by the gate; credentials are removed before any native dispatch. */
+    privateInput?: PrivateInputNative;
     readonly realtime: DshRealtimeCompatibility;
     private inFlight;
     hasInFlightRequests(): boolean;

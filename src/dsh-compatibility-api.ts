@@ -3,6 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { invokeLegacyRpc, invokeLegacyPermissionRpc, parseLegacyClientRequest, resolveTypertGateway, type TypertGatewayLike } from './dsh-protocol-compat.js'
 import { DshRealtimeCompatibility, type LegacyRealtimePeer } from './dsh-realtime-compat.js'
 import { objectRpcBudget } from './object-transfer-budget.js'
+import type { PrivateInputNative } from './human-workflow/private-input-native.js'
 
 export interface CompatibilityHttpRequest {
   readonly method: string
@@ -37,6 +38,8 @@ function response(statusCode: number, value: unknown): CompatibilityHttpResponse
 export class DshCompatibilityApi implements DshCompatibilityTransport {
   /** Optional observer owned by the authenticated gate; no native host API replacement. */
   taskNotificationRequest?: (args: unknown) => Promise<unknown>
+  /** Owned by the gate; credentials are removed before any native dispatch. */
+  privateInput?: PrivateInputNative
   readonly realtime: DshRealtimeCompatibility
   private inFlight = 0
   hasInFlightRequests(): boolean { return this.inFlight > 0 }
@@ -46,6 +49,7 @@ export class DshCompatibilityApi implements DshCompatibilityTransport {
   }
 
   handlesPath(path: string): boolean {
+    if (this.privateInput && path === '/api/wechatPrivateUpdates') return true
     if (this.taskNotificationRequest && path === '/api/wechatTaskNotifications') return true
     if (this.maintaining()) return true
     if (resolveTypertGateway(this.ctx)) return true
@@ -102,6 +106,10 @@ export class DshCompatibilityApi implements DshCompatibilityTransport {
         return response(404, { error: 'Unknown DSH API path' })
       }
       const body = JSON.parse(Buffer.from(request.body).toString('utf8'))
+      if (url.pathname === '/api/wechatPrivateUpdates' && this.privateInput) {
+        return response(200, { type: 'server-response', rpcId: body.rpcId,
+          result: { ok: true, value: await this.privateInput.describe(body.payload, request.signal) } })
+      }
       if (url.pathname === '/api/wechatTaskNotifications' && this.taskNotificationRequest) {
         return response(200, { type: 'server-response', rpcId: body.rpcId,
           result: { ok: true, value: await this.taskNotificationRequest(body.payload) } })
@@ -110,6 +118,8 @@ export class DshCompatibilityApi implements DshCompatibilityTransport {
         return response(200, await this.realtime.respond(body))
       }
       const legacy = parseLegacyClientRequest(decodeURIComponent(url.pathname.slice(5)), body)
+      const ownerInput = legacy.payload.ownerInput
+      delete legacy.payload.ownerInput
       if(legacy.method==='session.prompt' && Array.isArray(legacy.payload.content)) {
         if(legacy.payload.content.filter(part=>part?.type==='file').length>6)throw Error('每条消息最多 6 个文件')
         const inputs=this.ctx.get('agentInputs') as {resolve:(scope:string,token:string)=>unknown}|undefined
@@ -131,7 +141,7 @@ export class DshCompatibilityApi implements DshCompatibilityTransport {
         }, sessionId => this.flushPermission(sessionId))
         // Non-command prompts keep the old Host's own semantics. Never forward
         // an invalid/failed permission command as ordinary model text.
-        return reply ? response(200, reply) : this.nativeRequest('session.prompt', request.body, signal)
+        return reply ? response(200, reply) : this.nativeRequest('session.prompt', Buffer.from(JSON.stringify(legacy)), signal)
       }
       // 配合临时占用误报规避：先记录手机操作，再订阅/派发，finally 中释放。
       // 这只供通知分类使用；真实 RPC 返回值和失败不改写，也不接管原生会话。
@@ -139,11 +149,13 @@ export class DshCompatibilityApi implements DshCompatibilityTransport {
       let reply
       try {
         this.realtime.subscribeSession(legacy.payload.sessionId)
-        reply = await invokeLegacyRpc(gateway, legacy, {
+        const invoke = () => invokeLegacyRpc(gateway, legacy, {
           signal: AbortSignal.any([request.signal, AbortSignal.timeout(objectRpcBudget(legacy.method, legacy.payload) ?? 90_000)]),
           describeHost: () => ({ cwd: process.cwd() }),
           flushPermission: sessionId => this.flushPermission(sessionId),
         })
+        reply = legacy.method === 'session.prompt' && this.privateInput
+          ? await this.privateInput.run(legacy.payload, ownerInput, invoke, legacy.rpcId) : await invoke()
       } finally { releaseRequest() }
       if (legacy.method === 'session.create' && reply.result.ok) {
         const value = reply.result.value as { readonly sessionId?: unknown } | null

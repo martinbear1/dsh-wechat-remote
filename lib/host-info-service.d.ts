@@ -20,6 +20,7 @@ export interface WechatGateRuntimeInfo {
 }
 export interface WechatHostInfoConfig {
     readonly gateRuntime?: () => WechatGateRuntimeInfo;
+    readonly privateUpdatesReady?: () => boolean;
 }
 export interface WechatHostDescribeValue {
     readonly startupDirectory: {
@@ -55,6 +56,7 @@ declare module '@deepseek-ai/cordis' {
 /** Host-only, authenticated, read-only metadata for the WeChat client. */
 export declare class WechatHostInfoService extends TypertRemoteService {
     private readonly gateRuntime?;
+    private readonly privateUpdatesReady?;
     constructor(ctx: Context, config?: WechatHostInfoConfig);
     describe(request: WechatHostDescribeRequest, signal: AbortSignal): Promise<WechatHostDescribeResult>;
 }

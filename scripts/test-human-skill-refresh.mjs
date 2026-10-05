@@ -106,7 +106,7 @@ for (const revision of ['2026-10-04-composable-targets-v1', '2026-10-04-professi
   assert.match(latest.content[0].text, /totalKnown=0 只说明该查询尚无已知收件人/)
   assert.match(latest.content[0].text, /不因选人工具返回 selectionRef 就默认接它/)
   assert.match(latest.content[0].text, /exact-references \+ condition:'none'/)
-  assert.match(latest.content[0].text, /正常聊天输入“确认更新”/)
+  assert.match(latest.content[0].text, /human_task_publish_private/)
   assert.match(latest.content[0].text, /不是新的固定工作流水线/)
   assert(!latest.content[0].text.includes('PREVIOUS_COMPOSABLE_TARGETS_BODY'))
   assert.equal((await f.step()).messages.length, 0)

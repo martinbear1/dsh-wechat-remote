@@ -40,6 +40,15 @@ export interface LifecycleDraft {
         reason: string | null;
     };
 }
+/** Host-derived input authority; never a model tool parameter or tool output. */
+export interface PrivatePublishInput {
+    inputProof: string;
+    inputId: string;
+    contentDigest: string;
+    nativeMessageId: string;
+    idempotencyKey: string;
+    assertCurrent(): void;
+}
 export type LifecycleReminderContent = {
     roundId: string | null;
     title: string;
@@ -88,8 +97,9 @@ export interface LifecycleOptions {
 }
 export declare const RECEIVER_SYNC_MAX_FILES = 4;
 export declare const RECEIVER_SYNC_TIMEOUT_MS = 120000;
-/** Local receiver and draft tools never approve. Only the authenticated owner
- * WeChat endpoint can publish a draft. No Agent restoration or execution here. */
+/** Drafts and reception remain separate from the narrowly scoped private
+ * publication path. That path requires trusted host input plus cloud grants;
+ * no Agent restoration, model invocation, public sharing or notification here. */
 export declare class WorkflowLifecycle {
     private readonly options;
     private readonly state;
@@ -140,6 +150,33 @@ export declare class WorkflowLifecycle {
     }>;
     prepare(scope: WorkflowScope, taskRef: HumanTaskRef, kind: HumanWorkflowDraftRef['kind'], expectedRevision: number, content: Record<string, unknown>, idempotencyKey: string, signal: AbortSignal): Promise<LifecycleDraft>;
     preview(scope: WorkflowScope, taskRef: HumanTaskRef, ref: HumanWorkflowDraftRef, signal: AbortSignal): Promise<unknown>;
+    publishPrivate(scope: WorkflowScope, taskRef: HumanTaskRef, ref: HumanWorkflowDraftRef, input: PrivatePublishInput, signal: AbortSignal): Promise<{
+        schema: string;
+        taskRef: HumanTaskRef;
+        draftRef: HumanWorkflowDraftRef;
+        state: string;
+        effects: {
+            contentState: string;
+            groupCardState: string;
+            notificationState: string;
+        };
+        alreadyPublished: boolean;
+        operationId?: undefined;
+        result?: undefined;
+    } | {
+        schema: string;
+        taskRef: HumanTaskRef;
+        draftRef: HumanWorkflowDraftRef;
+        state: string;
+        operationId: string;
+        result: Record<string, unknown>;
+        effects: {
+            contentState: string;
+            groupCardState: string;
+            notificationState: string;
+        };
+        alreadyPublished?: undefined;
+    }>;
     private receipt;
     receiptStatus(scope: WorkflowScope, taskRef: HumanTaskRef, signal: AbortSignal, offset?: number): Promise<{
         schema: string;

@@ -109,6 +109,7 @@ try {
     'human-workflow/receiver-download.ts',
     'human-workflow/receiver.ts',
     'human-workflow/lifecycle.ts',
+    'human-workflow/private-input-native.ts',
     'human-workflow/lifecycle-tools.ts',
     'human-workflow/automation-types.ts',
     'human-workflow/automation-engine.ts',

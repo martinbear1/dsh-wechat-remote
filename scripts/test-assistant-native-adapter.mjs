@@ -8,7 +8,7 @@ import { dump, load } from 'js-yaml'
 import { entryListSchema, applyEntryPatches } from '@deepseek-ai/cordis-plugin-include'
 import { isJsExpr } from '@deepseek-ai/cordis-plugin-loader'
 import { createNativeAssistantAdapter, validateNativeAssistantPreview } from '../lib/assistant-presets/native-adapter.js'
-import { assistantGuidance, legacyAssistantGuidanceV1, legacyAssistantGuidanceV2, legacyAssistantGuidanceV3, legacyAssistantGuidanceV4 } from '../lib/assistant-presets/definition.js'
+import { assistantGuidance, legacyAssistantGuidanceV1, legacyAssistantGuidanceV2, legacyAssistantGuidanceV3, legacyAssistantGuidanceV4, legacyAssistantGuidanceV5 } from '../lib/assistant-presets/definition.js'
 import { assistantTemplates } from '../lib/assistant-presets/catalog.js'
 import { renderPrompt, renderContextSnapshot } from '@deepseek-ai/dsh-system-prompt'
 
@@ -28,6 +28,9 @@ const V2_GUIDANCE_SHA256 = '133c2ccc3dbb1d5109bf9a3bc75b74945d265c699094751515be
 const V3_GUIDANCE_SHA256 = 'ae3c37a9a0cf78f9ba7dc46ca759b825527c4cfc6e8ab4e23e7aad45a9744e70'
 // Independently evaluated from RC14 2dfba42277f889e97ab25f28b1e73c39bc1638bf.
 const V4_GUIDANCE_SHA256 = '68f050c33dbf547a1637977e6ce3d39e8c1952d068612a2acacab804680511d4'
+// Independently evaluated from RC15 d399a45b535be942132ea1d21db7f991022865a6,
+// before editing its generator. Existing installed V5 bytes remain frozen.
+const V5_GUIDANCE_SHA256 = '3d4e2d1d8734fb24445a73ea41845b7386afac33a600cf8c0d02625ddaef77a4'
 const stockIdentity = 'You are a coding agent powered by the {{model}} model.'
 const neutralIdentity = 'You are an AI assistant powered by the {{model}} model.'
 const sha256 = value => createHash('sha256').update(value).digest('hex')
@@ -96,9 +99,9 @@ async function fixture(t, options = {}) {
 }
 
 async function historicalPreview(f, version = 1) {
-  const preview = await f.preview(), guidance = [null, legacyAssistantGuidanceV1, legacyAssistantGuidanceV2, legacyAssistantGuidanceV3, legacyAssistantGuidanceV4][version](definition())
-  assert.equal(Buffer.byteLength(guidance), [0, 1191, 3704, 4819, 7742][version])
-  assert.equal(sha256(guidance), [null, LEGACY_GUIDANCE_SHA256, V2_GUIDANCE_SHA256, V3_GUIDANCE_SHA256, V4_GUIDANCE_SHA256][version])
+  const preview = await f.preview(), guidance = [null, legacyAssistantGuidanceV1, legacyAssistantGuidanceV2, legacyAssistantGuidanceV3, legacyAssistantGuidanceV4, legacyAssistantGuidanceV5][version](definition())
+  assert.equal(Buffer.byteLength(guidance), [0, 1191, 3704, 4819, 7742, 10305][version])
+  assert.equal(sha256(guidance), [null, LEGACY_GUIDANCE_SHA256, V2_GUIDANCE_SHA256, V3_GUIDANCE_SHA256, V4_GUIDANCE_SHA256, V5_GUIDANCE_SHA256][version])
   const patch = JSON.parse(preview.patch)
   patch[0].insert[0].config.plugins[0].config.prefix = (version === 3 ? stockIdentity : 'Base {{model}}') + '\n\n' + guidance
   const oldPatch = JSON.stringify(patch, null, 2) + '\n'
@@ -131,7 +134,7 @@ async function seedHistoricalArtifact(f, preview, state) {
   return { snapshot, publishNativeState }
 }
 
-for (const version of [1, 2, 3, 4]) for (const state of ['installed', 'unknown']) test(`historical V${version} ${state} artifact survives a fresh adapter without rewriting bytes or reinstalling`, async t => {
+for (const version of [1, 2, 3, 4, 5]) for (const state of ['installed', 'unknown']) test(`historical V${version} ${state} artifact survives a fresh adapter without rewriting bytes or reinstalling`, async t => {
   const f = await fixture(t, version === 3 ? { prefix: stockIdentity } : {}), preview = await historicalPreview(f, version), saved = await seedHistoricalArtifact(f, preview, state)
   assert.deepEqual(validateNativeAssistantPreview(preview), preview)
   const before = await saved.snapshot(); await f.adapter.close()
@@ -147,7 +150,7 @@ for (const version of [1, 2, 3, 4]) for (const state of ['installed', 'unknown']
   assert.equal(f.calls.length, 0); await f.assertUnchanged()
 })
 
-for (const version of [1, 2, 3, 4]) test(`V${version} compatibility accepts only exact guidance and cannot replace an approved old artifact with a valid new plan`, async t => {
+for (const version of [1, 2, 3, 4, 5]) test(`V${version} compatibility accepts only exact guidance and cannot replace an approved old artifact with a valid new plan`, async t => {
   const f = await fixture(t, version === 3 ? { prefix: stockIdentity } : {}), current = await f.preview(), old = await historicalPreview(f, version)
   const saved = await seedHistoricalArtifact(f, old, 'installed'), before = await saved.snapshot()
   for (const change of [
@@ -165,8 +168,8 @@ for (const version of [1, 2, 3, 4]) test(`V${version} compatibility accepts only
   assert.equal((await f.adapter.verify(old, signal)).state, 'installed')
 })
 
-test('a historical V2 preview without an install receipt cannot silently install current V5 wording', async t => {
-  const f = await fixture(t), old = await historicalPreview(f, 2)
+for (const version of [2, 5]) test(`a historical V${version} preview without an install receipt cannot silently install current V6 wording`, async t => {
+  const f = await fixture(t), old = await historicalPreview(f, version)
   await assert.rejects(f.adapter.install(old, signal), { code: 'assistant-native-preview-stale' })
   assert.equal(f.calls.length, 0)
   assert.deepEqual((await readdir(f.profile)).sort(), ['cordis.patch.yml', 'package.json'])
@@ -237,7 +240,7 @@ test('custom base policy is never stripped, including quoted stock identity and 
 })
 
 test('professional presets are not offered as bases and cannot stack a second profession, while historical verification still works', async t => {
-  for (const guidance of [legacyAssistantGuidanceV1, legacyAssistantGuidanceV2, legacyAssistantGuidanceV3, legacyAssistantGuidanceV4, assistantGuidance]) {
+  for (const guidance of [legacyAssistantGuidanceV1, legacyAssistantGuidanceV2, legacyAssistantGuidanceV3, legacyAssistantGuidanceV4, legacyAssistantGuidanceV5, assistantGuidance]) {
     const f = await fixture(t), derived = base()
     derived[0].config.prefix = stockIdentity + '\n\n' + guidance(definition())
     // Detect composition rather than relying solely on a package/preset naming convention.

@@ -1,5 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis';
-export declare const HUMAN_WORKFLOW_SKILL_REVISION = "2026-10-05-evidence-recovery-v5";
+export declare const HUMAN_WORKFLOW_SKILL_REVISION = "2026-10-05-identity-intent-v6";
 /** Trusted package instructions, not generated executable code. Profession
  * templates may reference this skill; task data never rewrites its protocol. */
 export declare const HUMAN_WORKFLOW_SKILL: {

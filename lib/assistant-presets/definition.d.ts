@@ -26,6 +26,8 @@ export declare function legacyAssistantGuidanceV2(definition: AssistantDefinitio
 export declare function legacyAssistantGuidanceV3(definition: AssistantDefinition): string;
 /** Frozen V4: existing installed or approved native patches stay verifiable. */
 export declare function legacyAssistantGuidanceV4(definition: AssistantDefinition): string;
+/** Frozen V5: do not replace a previously approved native artifact in place. */
+export declare function legacyAssistantGuidanceV5(definition: AssistantDefinition): string;
 /** Every newly authored profession, custom or creator preset inherits the
- * same reliability method. No mutation of an existing Agent or approved plan. */
+ * same method. No mutation of an existing Agent or approved native plan. */
 export declare function assistantGuidance(definition: AssistantDefinition): string;

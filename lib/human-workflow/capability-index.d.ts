@@ -227,6 +227,10 @@ export declare function capabilityCatalog(manifest: CapabilityManifest, category
                 readonly authorization: false;
             };
             readonly acquisition: readonly ["verified-current-entrant", "native-selected-members", "published-known-audience"];
+            readonly nativeIdentityHandling: "verified-native-group-and-member-identities-held-by-service-agent-uses-scoped-references";
+            readonly hiddenRawIdsMeanUnavailable: false;
+            readonly selectedMembersRequireFirstOpen: false;
+            readonly zeroObservedParticipantsMeansNoSelectedIdentities: false;
             readonly persistence: "store-provenance-bound-references-revalidate-at-use-not-permanent-membership";
             readonly crossGroupReuse: false;
             readonly fullRosterExport: false;
@@ -303,6 +307,9 @@ export declare function capabilityCatalog(manifest: CapabilityManifest, category
                 readonly arbitraryAuthorizedSubsets: true;
                 readonly automaticBusinessFilter: false;
                 readonly noSilentSubstitutionOrDeduplication: true;
+                readonly selectionScope: "all-current-selected-members-or-explicit-subset-from-current-facts";
+                readonly requiresFirstOpen: false;
+                readonly excludesConfirmedOrSubmitted: false;
                 readonly checks: readonly ["task-and-original-group", "current-source-revision", "binding-and-authorization", "audience-and-private-round-visibility"];
                 readonly namesPreview: "native-open-data-list-in-original-group-no-js-export";
                 readonly maximum: 20;
@@ -311,6 +318,14 @@ export declare function capabilityCatalog(manifest: CapabilityManifest, category
             readonly predicates: {
                 readonly optional: true;
                 readonly purpose: "execution-time-fact-filter-not-mandatory-business-flow";
+            };
+            readonly legacyParticipation: {
+                readonly tool: "human_task_remind";
+                readonly compatibilityOnly: true;
+                readonly condition: "unconfirmed-participation";
+                readonly use: "only-when-user-requests-this-filter";
+                readonly notEquivalentTo: readonly ["all-selected-members", "all-group-members", "pending-submission"];
+                readonly genericReplacement: "human_task_prepare_reminder:exact-references:condition=none";
             };
             readonly preview: {
                 readonly choices: readonly ["inline", "page"];
@@ -534,6 +549,10 @@ export declare function capabilityCatalog(manifest: CapabilityManifest, category
                 readonly authorization: false;
             };
             readonly acquisition: readonly ["verified-current-entrant", "native-selected-members", "published-known-audience"];
+            readonly nativeIdentityHandling: "verified-native-group-and-member-identities-held-by-service-agent-uses-scoped-references";
+            readonly hiddenRawIdsMeanUnavailable: false;
+            readonly selectedMembersRequireFirstOpen: false;
+            readonly zeroObservedParticipantsMeansNoSelectedIdentities: false;
             readonly persistence: "store-provenance-bound-references-revalidate-at-use-not-permanent-membership";
             readonly crossGroupReuse: false;
             readonly fullRosterExport: false;
@@ -601,6 +620,9 @@ export declare function capabilityCatalog(manifest: CapabilityManifest, category
                 readonly arbitraryAuthorizedSubsets: true;
                 readonly automaticBusinessFilter: false;
                 readonly noSilentSubstitutionOrDeduplication: true;
+                readonly selectionScope: "all-current-selected-members-or-explicit-subset-from-current-facts";
+                readonly requiresFirstOpen: false;
+                readonly excludesConfirmedOrSubmitted: false;
                 readonly checks: readonly ["task-and-original-group", "current-source-revision", "binding-and-authorization", "audience-and-private-round-visibility"];
                 readonly namesPreview: "native-open-data-list-in-original-group-no-js-export";
                 readonly maximum: 20;
@@ -609,6 +631,14 @@ export declare function capabilityCatalog(manifest: CapabilityManifest, category
             readonly predicates: {
                 readonly optional: true;
                 readonly purpose: "execution-time-fact-filter-not-mandatory-business-flow";
+            };
+            readonly legacyParticipation: {
+                readonly tool: "human_task_remind";
+                readonly compatibilityOnly: true;
+                readonly condition: "unconfirmed-participation";
+                readonly use: "only-when-user-requests-this-filter";
+                readonly notEquivalentTo: readonly ["all-selected-members", "all-group-members", "pending-submission"];
+                readonly genericReplacement: "human_task_prepare_reminder:exact-references:condition=none";
             };
             readonly preview: {
                 readonly choices: readonly ["inline", "page"];
@@ -994,6 +1024,10 @@ export declare function capabilityCatalog(manifest: CapabilityManifest, category
                 readonly authorization: false;
             };
             readonly acquisition: readonly ["verified-current-entrant", "native-selected-members", "published-known-audience"];
+            readonly nativeIdentityHandling: "verified-native-group-and-member-identities-held-by-service-agent-uses-scoped-references";
+            readonly hiddenRawIdsMeanUnavailable: false;
+            readonly selectedMembersRequireFirstOpen: false;
+            readonly zeroObservedParticipantsMeansNoSelectedIdentities: false;
             readonly persistence: "store-provenance-bound-references-revalidate-at-use-not-permanent-membership";
             readonly crossGroupReuse: false;
             readonly fullRosterExport: false;
@@ -1032,7 +1066,7 @@ export declare function capabilityCatalog(manifest: CapabilityManifest, category
         status: string;
         tools: string[];
     } | {
-        requires: ("task.audience-known" | "workspace.directory" | "task.reshare" | "surface.reading-confirmation" | "surface.cover-image" | "action.select-members" | "action.remind-selected-pending" | "surface.form-collection" | "task.audience-select" | "task.lifecycle" | "task.query" | "recipient.query" | "mode.packages" | "workflow.records" | "submission.receive" | "submission.file-receive" | "result.private" | "automation.run")[];
+        requires: ("task.audience-known" | "workspace.directory" | "task.reshare" | "surface.reading-confirmation" | "surface.cover-image" | "action.select-members" | "action.remind-selected-pending" | "surface.form-collection" | "task.audience-select" | "task.lifecycle" | "task.query" | "recipient.query" | "assistant.design" | "mode.packages" | "workflow.records" | "submission.receive" | "submission.file-receive" | "result.private" | "automation.run")[];
         inputs: string[];
         result: string;
         userAction: string;

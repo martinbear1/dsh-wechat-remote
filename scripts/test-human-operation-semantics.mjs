@@ -175,7 +175,7 @@ test('participation reminders and collection reminders are discoverably differen
   const capability = createCapabilityManifest('test_node').capabilities.find(item => item.id === 'action.remind-selected-pending')
   assert.match(capability.description, /参与确认不是表单提交/)
   assert.match(HUMAN_WORKFLOW_SKILL.content, /这个分支判断的是参与确认，不是某次表单是否提交/)
-  assert.match(HUMAN_WORKFLOW_SKILL.content, /无需为提醒再强制选人/)
+  assert.match(HUMAN_WORKFLOW_SKILL.content, /已掌握准确引用时无须为组合这些工具再次选人/)
 })
 
 test('optional rule-package memory does not become a mandatory replacement for the profession assistant work instance', () => {

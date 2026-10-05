@@ -4,7 +4,7 @@ import { mkdtemp, writeFile, readdir, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { randomBytes } from 'node:crypto'
-import { ASSISTANT_INTERACTION_GUIDANCE, ASSISTANT_AUTHORING_GUIDANCE, ASSISTANT_WORKSPACE_GUIDANCE, ASSISTANT_RELIABILITY_GUIDANCE, HUMAN_TASK_CONTENT_GUIDANCE } from '../lib/assistant-presets/interaction-guidance.js'
+import { ASSISTANT_INTERACTION_GUIDANCE, ASSISTANT_AUTHORING_GUIDANCE, ASSISTANT_WORKSPACE_GUIDANCE, ASSISTANT_RELIABILITY_GUIDANCE, ASSISTANT_IDENTITY_INTENT_GUIDANCE, HUMAN_TASK_CONTENT_GUIDANCE } from '../lib/assistant-presets/interaction-guidance.js'
 import { assistantDefinition, assistantGuidance } from '../lib/assistant-presets/definition.js'
 import { assistantTemplates } from '../lib/assistant-presets/catalog.js'
 import { assistantTools, registerAssistantContext } from '../lib/assistant-presets/tools.js'
@@ -85,7 +85,8 @@ test('real assistant guidance includes shared rules once without replacing profe
     includesOnce(text, ASSISTANT_INTERACTION_GUIDANCE)
     includesOnce(text, ASSISTANT_WORKSPACE_GUIDANCE)
     includesOnce(text, ASSISTANT_RELIABILITY_GUIDANCE)
-    assert.match(text, /职业助手工作方法 v5/)
+    includesOnce(text, ASSISTANT_IDENTITY_INTENT_GUIDANCE)
+    assert.match(text, /职业助手工作方法 v6/)
     assert(text.includes(d.role))
     for (const method of d.methods) assert(text.includes(method))
     assert.match(text, /候选问题按需询问，缺项不阻挡无关任务/)
@@ -97,6 +98,7 @@ test('real assistant guidance includes shared rules once without replacing profe
   assert(assistantGuidance(custom).includes(custom.methods[0]))
   includesOnce(assistantGuidance(custom), ASSISTANT_WORKSPACE_GUIDANCE)
   includesOnce(assistantGuidance(custom), ASSISTANT_RELIABILITY_GUIDANCE)
+  includesOnce(assistantGuidance(custom), ASSISTANT_IDENTITY_INTENT_GUIDANCE)
   assert.deepEqual(assistantDefinition(custom).onboarding, [])
 })
 
@@ -121,11 +123,22 @@ test('native preview really appends new interaction guidance and retains inherit
     assert.equal(plugins[0].config.prefix, 'Inherited native policy\n\n' + assistantGuidance(d))
     includesOnce(plugins[0].config.prefix, ASSISTANT_INTERACTION_GUIDANCE)
     includesOnce(plugins[0].config.prefix, ASSISTANT_RELIABILITY_GUIDANCE)
+    includesOnce(plugins[0].config.prefix, ASSISTANT_IDENTITY_INTENT_GUIDANCE)
     assert.equal(plugins[0].config.suffix, 'Inherited safety suffix')
     assert.equal(plugins[0].config.complete, false)
     assert.equal(plugins[0].config.includeRuntimeContext, true)
     assert.deepEqual(plugins.slice(1), base.slice(1))
     assert.equal(base[0].config.prefix, 'Inherited native policy')
+    // Use the actual native generator, not just the shared text helper, for
+    // every built-in profession plus a newly authored creator/custom mode.
+    for (const [index, item] of [...assistantTemplates().map(item => item.definition),
+      { ...definition(), name: '任意行业的模式创造者', role: '帮助用户设计其他工作方式' }].entries()) {
+      const generated = await adapter.preview({ presetId: `assistant-identity-contract-${index}`, definition: item }, signal)
+      const prefix = JSON.parse(generated.patch)[0].insert[0].config.plugins[0].config.prefix
+      includesOnce(prefix, ASSISTANT_IDENTITY_INTENT_GUIDANCE)
+      assert.match(prefix, /职业助手工作方法 v6/)
+      assert(prefix.includes(item.role))
+    }
     assert.deepEqual(await readdir(directory), ['installation.json'])
   } finally { await adapter.close() }
 })
@@ -145,6 +158,37 @@ test('new professions and creator presets share recovery methods, not a teacher-
     const generated = assistantGuidance({ ...definition(), name, role: '按用户目标设计不同工作方式', onboarding: [] })
     includesOnce(generated, text)
     assert(!generated.includes('dshtest'))
+  }
+})
+
+test('identity availability is evidence-based in new personas, runtime skill and work-memory tool', () => {
+  const shared = ASSISTANT_IDENTITY_INTENT_GUIDANCE
+  for (const expected of ['群已识别、当前操作者已识别、部分成员已知和完整群名单是四件事',
+    'totalKnown=0 只说明该查询尚无已知收件人', '不向模型暴露原始 ID 不等于三端没有获取或保存',
+    '不把推测写成“平台不支持/不保存”的长期记忆', '不要求那些成员先打开卡片、签到或提交',
+    '选人成功、提醒准备好、微信提醒实际成功是不同结果', '不新建事项、不补发卡片']) assert(shared.includes(expected), expected)
+  includesOnce(HUMAN_WORKFLOW_SKILL.content, shared)
+  for (const item of assistantTemplates()) includesOnce(assistantGuidance(item.definition), shared)
+  const tools = assistantTools({ nodeId: 'test_node', registry: {}, business: {}, assertIdentity: unreachable, composedPreset: unreachable })
+  const save = tools.find(item => item.name === 'human_assistant_work_save')
+  assert.match(save.description, /do not turn totalKnown=0, redacted raw IDs, or one failed action into a lasting cannot-obtain\/cannot-store rule/)
+  assert.match(save.parameters.properties.content.properties.memory.description, /verified tool facts with source\/time/)
+  assert.match(save.parameters.properties.content.properties.memory.description, /Never persist unverified capability denial as fact/)
+})
+
+test('selected recipients do not imply legacy unconfirmed filtering or a mandatory registration pipeline', () => {
+  const text = HUMAN_WORKFLOW_SKILL.content
+  const exact = text.indexOf('先按用户要求决定提醒对象与条件')
+  const legacy = text.indexOf('兼容工具 human_task_remind')
+  assert(exact >= 0 && legacy > exact, 'the intent-preserving general method precedes the narrowly compatible legacy method')
+  for (const expected of ["exact-references + condition:'none'", "type:'participate'", '不能自动加未交或未确认过滤',
+    '成功回执之后重新查 human_task_recipients', '不把 selectionRef.memberRefs 字符串直接塞进 recipientRefs',
+    '不因选人工具返回 selectionRef 就默认接它', '不是每次提醒都要走同一条选人流水线',
+    'wx.selectGroupMembers 返回用户实际选中的成员 group_openid', '无需这些成员先打开卡片或提交',
+    'totalKnown=0 与 groupRef 缺失不能互相代替', '没有全群枚举或无名单@所有人的已实现合同']) assert(text.includes(expected), expected)
+  for (const expected of ["recipientSource:'observed'", "recipientSource:'task-audience'", "recipientSource:'selected-members'"]) {
+    // Exact targeting is not a ban on explicit user-requested state filters.
+    assert(expected === "recipientSource:'observed'" ? text.includes('observed 使用 participantRefs') : text.includes(expected))
   }
 })
 
@@ -189,6 +233,7 @@ test('registered current-agent context asks on demand and keeps memory separate 
     registry: { installedForPreset: () => ({}) }, business: { get: () => ({ revision: 2, memory: 'PRIVATE_MEMORY_DO_NOT_INLINE' }) } })
   const text = context.text({ agent, scope: agent })
   includesOnce(text, ASSISTANT_INTERACTION_GUIDANCE)
+  includesOnce(text, ASSISTANT_IDENTITY_INTENT_GUIDANCE)
   assert.match(text, /未回答的问题只在影响当前工作时问/)
   assert.match(text, /适合时提供业务选项，不强制填完问卷/)
   assert.match(text, /不要作为开场白或逐条对用户复述/)
@@ -300,7 +345,7 @@ test('actual task output is brief and truthful while presentation metadata prese
 test('current persona, drafting tool and skill teach task selection rather than a mandatory teacher page', () => {
   const teacher = assistantTemplates().find(item => item.id === 'teacher').definition
   const persona = assistantGuidance(teacher)
-  assert.match(persona, /职业助手工作方法 v5/)
+  assert.match(persona, /职业助手工作方法 v6/)
   assert.match(persona, /你就是老师身边的教学与班级事务助理/)
   assert.match(persona, /不问“是否创建任务卡”/)
   assert.match(persona, /不自行增加|不顺手添加/)

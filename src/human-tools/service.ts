@@ -130,6 +130,9 @@ export class HumanToolsService extends TypertRemoteService {
         let modes: ModeRegistry | undefined, records: WorkflowRecords | undefined
         try {
           const capabilities = () => { transport.assertIdentity(); const automation = this.automation?.capability(); return createCapabilityManifest(transport.nodeId, { 'task.query': { status: 'available' },
+            'assistant.design': this.assistants && !this.lifetime.signal.aborted
+              && ['human_assistant_catalog', 'human_assistant_draft', 'human_assistant_get'].every(name => Boolean((this.host.get('tools') as ToolRuntime).get(name)))
+              ? { status: 'available' } : { status: 'blocked', reason: '助手设计服务未启用或所需工具尚未注册；原生安装支持须另行核对。' },
             'workspace.directory': this.directory && typeof (this.host.get('workspaceRegistry') as any)?.list === 'function'
               && Array.isArray((this.host.get('workspaceRegistry') as any)?.archivedSessionIds)
               ? { status: 'available' } : { status: 'blocked', reason: '需要宿主可核对的真实工作区及会话状态；不能用Agent提供的路径或普通记忆代替。' },

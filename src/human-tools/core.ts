@@ -1,6 +1,6 @@
 import { ATTEMPT_ID, HUMAN_ACTION, HUMAN_RESHARE_ACTION, HUMAN_MEMBERS_ACTION, HUMAN_REMIND_ACTION, HUMAN_WORKFLOW_ACTION, HUMAN_SURFACE_MAX_BYTES, humanWorkflowDraftRef, HUMAN_ID, humanSurface, humanTaskRef,
   humanSelectionRef, humanMemberRefs, humanReminderTitle, humanReminderPreview, humanReceiptData, sameTaskRef, sameSelectionRef, object, text,
-  type HumanAckRequest, type HumanAckWireRequest, type HumanActionRequest, type HumanReceipt, type HumanSurface, type HumanTaskRef, type HumanWorkflowDraftRef, type HumanReminderPreview } from './protocol.js'
+  type HumanAckRequest, type HumanAckWireRequest, type HumanActionRequest, type HumanReceipt, type HumanReceiptReason, type HumanSurface, type HumanTaskRef, type HumanWorkflowDraftRef, type HumanReminderPreview } from './protocol.js'
 import { humanInitialRound, type HumanInitialRound } from './form.js'
 import { humanCardAsset, type HumanCardAsset } from './card-cover.js'
 import { validWorkspaceSource, type WorkspaceSourceProof } from '../human-workflow/workspace-source.js'
@@ -304,7 +304,7 @@ export class HumanToolsCore {
       const next = clone(this.ledger), record = this.request(next, request)
       if (!humanReceiptData(record.surface, request as unknown as Record<string, unknown>))
         throw error('human-action-invalid', '回执引用或原因与已保存动作不符')
-      const selectionRef = humanSelectionRef(request.selectionRef), reason = request.reason as 'no_pending_members' | undefined
+      const selectionRef = humanSelectionRef(request.selectionRef), reason = request.reason as HumanReceiptReason | undefined
       const attempt = record.attempts.find(row => row.id === request.attemptId)
       if (!attempt) throw error('human-action-not-claimed', '请先打开此卡片的分享操作')
       if (attempt.receipt && (attempt.receipt.outcome !== request.outcome || !sameTaskRef(attempt.receipt.taskRef, taskRef)

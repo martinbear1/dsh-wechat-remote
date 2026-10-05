@@ -34,6 +34,18 @@ test('file capability remains blocked unless genuine local implementation is adv
   assert.equal(capabilityCatalog(ready, 'files').entries.find(item => item.id === 'file.multiple').status, 'planned')
 })
 
+test('assistant design catalog requires registered implementation, independently of native preset installation', () => {
+  const blocked = capabilityCatalog(manifest(), 'workspace', 'full').entries.find(item => item.id === 'workspace.assistant-design')
+  assert.equal(blocked.status, 'blocked')
+  assert.deepEqual(blocked.requires, ['assistant.design'])
+  assert.match(blocked.reason, /未启用或所需工具尚未注册/)
+  const ready = createCapabilityManifest('node_test', { 'assistant.design': { status: 'available' } })
+  const design = capabilityCatalog(ready, 'workspace', 'full').entries.find(item => item.id === 'workspace.assistant-design')
+  assert.equal(design.status, 'available')
+  assert.match(design.boundary, /实际安装取决于原生宿主支持/)
+  assert.match(ready.capabilities.find(item => item.id === 'assistant.design').description, /不要求先安装教师模式/)
+})
+
 test('file discovery exposes all collection paths and unambiguous versioned Word support', () => {
   const files = capabilityCatalog(manifest(), 'files', 'full')
   for (const id of ['file.image', 'file.document']) for (const tool of ['human_task_create', 'human_task_prepare_round', 'human_task_prepare_review'])
@@ -73,6 +85,22 @@ test('targeted details do not leak unrelated contracts or claim participation is
 test('invalid discovery query rejects rather than silently changing scope', () => {
   for (const category of ['', 'teacher', '__proto__', null, {}, []]) assert.throws(() => capabilityCatalog(manifest(), category), { code: 'capability-query-invalid' })
   for (const detail of ['all', {}, null, 0]) assert.throws(() => capabilityCatalog(manifest(), 'groups', detail), { code: 'capability-query-invalid' })
+})
+test('discovery distinguishes hidden native IDs, selected identities and general unfiltered reminders', () => {
+  const members = capabilityCatalog(manifest(), 'members', 'full')
+  const contract = members.contracts.recipientFacts
+  assert.equal(contract.hiddenRawIdsMeanUnavailable, false)
+  assert.equal(contract.selectedMembersRequireFirstOpen, false)
+  assert.equal(contract.zeroObservedParticipantsMeansNoSelectedIdentities, false)
+  assert.match(contract.nativeIdentityHandling, /held-by-service/)
+  const messages = capabilityCatalog(manifest(), 'messages', 'full')
+  const exactIndex = messages.entries.findIndex(item => item.id === 'message.remind-exact')
+  const legacyIndex = messages.entries.findIndex(item => item.id === 'message.remind-participation')
+  assert(exactIndex < legacyIndex, 'the general capability is discoverable before the specialized compatibility filter')
+  assert.match(messages.entries[exactIndex].purpose, /全部已选成员或明确子集/)
+  assert.equal(messages.contracts.reminders.exactReferences.excludesConfirmedOrSubmitted, false)
+  assert.equal(messages.contracts.reminders.exactReferences.requiresFirstOpen, false)
+  assert.deepEqual(messages.contracts.reminders.legacyParticipation.notEquivalentTo, ['all-selected-members', 'all-group-members', 'pending-submission'])
 })
 test('native tool discovery preserves legacy calls, validates inputs and has no side effects', async () => {
   let reads = 0

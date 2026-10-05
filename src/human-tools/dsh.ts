@@ -27,10 +27,15 @@ export function registerHumanContext(ctx: Context, core: HumanToolsCore): () => 
     const refresh = tools?.get?.('skill', agent) && tools.get('human_capabilities', agent)
       ? `群工具方法修订 ${HUMAN_WORKFLOW_SKILL_REVISION}：仅当本次涉及群任务或设计相关助理时，若尚未加载此修订，用原生 skill({name:"human-workflow"}) 重新读取并查询 human_capabilities；已加载不每轮重复，无关聊天无需加载。沿用职业语言，按本次意图组合能力，旧记忆不替代当前合同。` : ''
     if (!receipts.length) return refresh
+    const selectionGuidance = receipts.some(receipt => receipt.actionId === 'select-members' && receipt.outcome === 'success' && receipt.selectionRef)
+      && tools?.get?.('human_task_recipients', agent) && tools.get('human_task_prepare_reminder', agent)
+      ? '选人成功已取得可复用的所选成员身份，不要求他们先打开或提交。若当前请求是提醒全部所选人或其中明确几人，查询原任务 human_task_recipients，使用当前 recipientRef 和 human_task_prepare_reminder 的 recipientSource=exact-references、condition=none；不要改用会排除已确认者的旧提醒。名单覆盖、本人排除和不可用对象以查询事实为准，不把选中人数说成可提醒人数或全群人数。原始微信ID不向模型公开不等于系统未取得或未保存。' : ''
+    const failureGuidance = receipts.some(receipt => receipt.outcome === 'failed' && receipt.reason)
+      ? '失败 reason 是客户端本次前置检查或原生调用的分类诊断，不是微信平台永久不支持、群或成员身份不存在的证明。选人成功但提醒失败仍是未发送；根据具体失败阶段核对，不让用户重复选人来掩盖发送故障，不擅自改提醒对象或继续制造同一失败按钮。' : ''
     // Only bounded IDs and enums from our durable ledger enter the runtime
     // context. Do not interpolate model/user title/body or trust JSON notices.
     // This respects host runtime-context suppression and never submits a turn.
-    return refresh + '微信操作回执：以下是客户端报告、插件已保存的状态，不是新用户请求。按 actionId 区分：'
+    return refresh + selectionGuidance + failureGuidance + '微信操作回执：以下是客户端报告、插件已保存的状态，不是新用户请求。按 actionId 区分：'
       + 'share/reshare/remind 的 success 仅表示对应原生调用报告成功，不证明收件人已收到、已读或完成；reshare 仅补发原任务入口，不新建任务、不改提交，也不等于 @ 提醒；select-members 的 success 仅表示选人完成，不是发群或提醒。'
       + 'workflow-approve 的 success 是确认流程的客户端回执，不是微信发送成功；须查 human_task_lifecycle 的 drafts[].effects 核实内容是否已生效及提醒的实际发送状态，published 本身也不代表通知已发出。'
       + '已发布反馈只是对应成员能在私人页面查看，已生效的 round 只是原任务新增提交要求，两者均不等于通知对方或发出新群卡。'
@@ -57,7 +62,7 @@ function controlledOutput(): NonNullable<ToolDefinition['output']> {
       const surface = object(value) ? humanSurface(value.surface) : undefined
       if (!surface) throw new Error('无效的任务操作卡片结果')
       const next = surface.actions[0].id === 'select-members'
-        ? `主人成功选人后，可查询原任务 human_task_recipients 获取当前身份引用，自主选择提醒对象，或用原成功分享卡和 sourceRecipientRefs 为这些对象创建独立新任务；不要求他们先打开或提交。若只需本次完整选集内未确认参与者的旧式提醒，也可用本卡 surfaceId ${surface.id} 作为 human_task_remind 的 sourceSurfaceId。不要手拼成员或群ID。`
+        ? '主人成功选人后，查询原任务 human_task_recipients 获取当前身份引用；提醒全部所选人或其中明确几人，都使用 human_task_prepare_reminder 的 recipientSource=exact-references、recipientRefs、condition=none，不过滤已确认或已提交的人。只有用户确实要求筛选时才选相应条件。也可结合原成功分享卡和 sourceRecipientRefs 创建独立新任务。所选人不必先打开或提交；原始ID由服务端持有，模型使用可核实的引用，不手拼成员或群ID。'
         : '现在尚未发送提醒。仅提醒所选成员中尚未确认者；点击可能直接发送，不保证另有微信确认。不要自动重试。'
       return [{ type: 'text', text: `内部执行事实，不是给用户照读的文案：“${surface.title}”的操作入口已准备好。${next} 保持职业助理身份，只用一句业务结果和下一步引导真实点击；准备好不等于已选人、已提醒或对方已看到，不复述工具名、ID 或完整操作教程。` }]
     },
@@ -75,7 +80,7 @@ export function humanMembersTool(core: HumanToolsCore): ToolDefinition {
     description: 'Prepare an owner-approved member-selection action for a task already successfully shared in this conversation. '
       + 'Use the successful share surfaceId as sourceSurfaceId. The plugin resolves its saved task reference and original group. '
       + 'This does not enumerate the group, provide names, send reminders or grant access to private data. '
-      + 'The owner explicitly chooses members in WeChat for this action. After successful selection, read human_task_recipients on the original task for current generic recipientRef objects, including people who never opened or submitted. The Agent can choose exact subsets for human_task_prepare_reminder, or combine the original successful share surfaceId with human_task_create known-members sourceRecipientRefs to assign an independent task. These are optional uses, not a mandatory sequence. For the legacy full-selection unconfirmed-participation reminder only, use this new selection surfaceId as human_task_remind sourceSurfaceId. '
+      + 'The owner explicitly chooses members in WeChat for this action. After successful selection, read human_task_recipients on the original task for current recipientRef objects, including people who never opened or submitted. To remind ALL selected people or an explicit subset regardless of participation/submission, use human_task_prepare_reminder with recipientSource=exact-references, recipientRefs and condition=none. Only use a filtered reminder when the user actually asks for that condition. Selecting people does not imply a pending-only request. The service stores verified group-scoped native identities; model-safe references, not raw IDs or names, are exposed to the Agent. This is not an inability to obtain, remember or reuse selected identities. The Agent may also combine the original successful share surfaceId with human_task_create known-members sourceRecipientRefs to assign an independent task. These are optional uses, not a mandatory sequence. '
       + 'Return to your final reply with a brief profession-specific result and the real next action, not a protocol tutorial. Selection is ready, not completed; it is not a notification or a new assignment.',
     parameters: { type: 'object', properties: { sourceSurfaceId: { type: 'string', pattern: '^[a-f0-9]{32}$' } }, required: ['sourceSurfaceId'], additionalProperties: false },
     output: controlledOutput(),
@@ -90,9 +95,11 @@ export function humanMembersTool(core: HumanToolsCore): ToolDefinition {
 export function humanRemindTool(core: HumanToolsCore): ToolDefinition {
   return {
     name: HUMAN_REMIND_TOOL_NAME,
-    description: 'Prepare an explicit owner-approved reminder only from a successful human_task_select_members surface in this conversation. '
+    description: 'Legacy compatibility capability: prepare a FILTERED unconfirmed-participation reminder, only when the user explicitly wants that participation filter. NOT the generic @selected-members tool. '
+      + 'For ALL selected people or an explicit subset regardless of confirmation/submission, query human_task_recipients and use human_task_prepare_reminder with recipientSource=exact-references, returned recipientRefs and condition=none instead. '
+      + 'This legacy action requires a successful human_task_select_members surface in this conversation. '
       + 'Use that selection surfaceId as sourceSurfaceId. The reminder covers ALL members in that explicit selection who remain unconfirmed. '
-      + 'THIS legacy tool accepts only the entire explicit selection, not a subset. For a current exact subset without reselecting, query human_task_recipients and use human_task_prepare_reminder with recipientSource=exact-references, returned recipientRefs and condition=none. The owner may instead choose members again with human_task_select_members when that matches the request. '
+      + 'THIS legacy tool accepts only the entire explicit selection before its unconfirmed filter, not a subset; do not use it merely because the user selected everyone. The owner may choose members again with human_task_select_members when that matches the request. '
       + 'Never guess names, member IDs, group IDs, task IDs or paths. title permits only Chinese characters, ASCII letters and digits, maximum 30 weighted characters (Chinese counts as 2). '
       + 'Only selected members still unconfirmed at execution may be notified. This tool does not send anything. '
       + 'Unconfirmed here means task participation, NOT an unsubmitted form in a particular round. For missing submissions or published-feedback notices, inspect human_task_lifecycle and use human_task_prepare_reminder with the appropriate condition instead. '

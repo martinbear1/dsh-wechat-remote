@@ -32,11 +32,14 @@ function draft(value = content(), changes = {}) {
   return { ...item, draftRef: { schema: 'human.lifecycle.draft.ref.v1', draftId: 'f'.repeat(24), version: 1, kind: 'reminder',
     digest: sha256(canonicalSubmission({ taskRef: item.taskRef, kind: 'reminder', expectedRevision: item.expectedRevision, content: item.content })) } }
 }
-async function fixture(t, { change, noContext = false, deny = false } = {}) {
+async function fixture(t, { change, noContext = false, deny = false, facts } = {}) {
   const requests = [], keys = await ReceiverKeyring.open(store(), scope.nodeId)
   const transport = { nodeId: scope.nodeId, assertIdentity() {}, async request(endpoint, input) {
     requests.push(structuredClone({ endpoint, input }))
     if (endpoint === 'receiver-key') return { binding, bindingKey, key: input.key }
+    if (endpoint === 'lifecycle' && input.operation === 'recipients' && facts) {
+      const value = factsReply(input, facts.count); facts.change?.(value); return value
+    }
     if (endpoint === 'lifecycle' && input.operation === 'get') return { taskRef, origin: { scope: scope.sessionId, sessionGeneration: scope.sessionGeneration },
       binding, bindingKey, revision: 1, asOf: 100, rounds: [], participants: [], submissions: [], drafts: [], nextOffset: null }
     if (endpoint === 'lifecycle' && input.operation === 'reminder-draft') {
@@ -165,6 +168,7 @@ test('real DSH schema and execution offer inline default, explicit page and no-c
   const tool = definitions.find(item => item.name === 'human_task_prepare_reminder'), branches = tool.parameters.properties.content.oneOf
   const generic = branches.find(item => item.properties.recipientSource?.const === 'exact-references')
   assert(generic); assert.equal(generic.properties.condition.const, 'none')
+  assert.equal(branches[0], generic, 'the general unfiltered branch is presented before optional business predicates')
   assert.deepEqual(generic.properties.type.enum, ['complete', 'participate'])
   assert.deepEqual(tool.parameters.properties.preview.enum, ['inline', 'page'])
   for (const preview of [undefined, 'inline', 'page']) {
@@ -182,6 +186,48 @@ test('real DSH schema and execution offer inline default, explicit page and no-c
   await assert.rejects(tool.execute({ taskRef, expectedRevision: 1, content: content(), preview: 'auto-send' },
     { agent, signal, callId: 'bad-preview', rootCallId: 'bad-preview' }), { code: 'lifecycle-arguments-invalid' })
   assert.equal(f.requests.length, before)
+})
+
+test('DSH selected-member facts compose into one exact reminder for all selected people without prior opens or silent status filtering', async t => {
+  const ctx = new Context(); new SystemPrompt(ctx, {})
+  const registry = new ToolRuntime(ctx, { mode: 'native' }), sessions = new SessionStore(ctx)
+  ctx.on('session/flush', async () => {})
+  const session = sessions.create(SessionId(scope.sessionId), { meta: { createdAt: 100 } }), agent = { id: session.id, session, ctx }
+  const selected = ['a', 'b', 'c', 'd'].map(id => ref('selection', id))
+  const f = await fixture(t, { facts: { count: 4, change: value => {
+    value.recipients = selected.map((item, index) => {
+      const value = factRow('selection', ['a', 'b', 'c', 'd'][index])
+      if (index < 2) {
+        value.participantRef = item.ref; value.sources.push('observed')
+        value.observedAt = 10; value.identityVerifiedAt = 9; value.confirmedAt = index === 0 ? 15 : null
+      }
+      return value
+    })
+  } } })
+  const core = await HumanToolsCore.open(store({ schemaVersion: 1, records: [] }), () => randomBytes(16).toString('hex'))
+  t.after(async () => { await core.close(); await ctx.fiber.dispose() })
+  const definitions = lifecycleTools({ nodeId: scope.nodeId, lifecycle: f.runtime, core, assertAgent: exec => assert.equal(exec.agent, agent) })
+  for (const tool of definitions) registry.register(tool)
+  const evidence = await registry.execute({ name: 'human_task_recipients', arguments: { taskRef }, agent, callId: 'read-selected', signal })
+  assert.equal(evidence.isError, false, JSON.stringify(evidence))
+  const current = JSON.parse(evidence.content[0].text)
+  assert.equal(current.recipients.length, 4)
+  assert.equal(current.recipients[0].confirmedAt, 15)
+  assert(current.recipients.slice(2).every(item => item.observedAt === null && item.participantRef === null && item.canTarget))
+  assert.equal(current.coverage.completeGroupRoster, false)
+  const requested = { ...content(), recipientRefs: current.recipients.map(item => item.recipientRef) }
+  const prepared = await registry.execute({ name: 'human_task_prepare_reminder', arguments: { taskRef, expectedRevision: 1, content: requested },
+    agent, callId: 'remind-all-selected', signal })
+  assert.equal(prepared.isError, false, JSON.stringify(prepared))
+  const sentToCloud = f.requests.filter(item => item.input.operation === 'reminder-draft')
+  assert.equal(sentToCloud.length, 1)
+  assert.deepEqual(sentToCloud[0].input.content.recipientRefs, selected, 'all four selected identities remain in the exact action')
+  assert.equal(sentToCloud[0].input.content.condition, 'none')
+  assert.equal(sentToCloud[0].input.content.roundId, null)
+  assert.equal(prepared.meta.humanSurface.reminderPreview.recipientCount, 4)
+  assert.equal(prepared.meta.humanSurface.actions[0].id, 'workflow-approve')
+  assert(!f.requests.some(item => /publish|claim|notify|share|select/.test(item.input.operation || '')), 'preparation does not send or repeat member selection')
+  assert.equal(core.contextSnapshot(scope.sessionId, scope.sessionGeneration).length, 0, 'no fabricated native success receipt')
 })
 
 test('late generic preparation withholds action after session replacement or cancellation', async t => {

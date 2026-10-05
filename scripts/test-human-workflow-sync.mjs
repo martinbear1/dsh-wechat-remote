@@ -274,6 +274,76 @@ test('transport sanitizes server errors and bounds response body', async () => {
   await assert.rejects(oversized.request('sync', {}, signal()), /过大/)
 })
 
+test('authenticated resource denials keep accurate scoped error codes without exposing response data or retrying', async () => {
+  const pair = generateKeyPairSync('ed25519'), identity = { nodeId, privateKeyPem: pair.privateKey.export({ type: 'pkcs8', format: 'pem' }) }
+  const cases = [
+    ['invalid_recipients', ['lifecycle'], /指定对象/],
+    ['workspace_registration_required', ['grant', 'workspace', 'lifecycle', 'objects/claim', 'objects/ack'], /尚未登记/],
+    ['workspace_scope_mismatch', ['grant', 'workspace', 'lifecycle', 'objects/claim', 'objects/ack'], /不属于所请求的工作区/],
+    ['source_scope_mismatch', ['workspace', 'lifecycle', 'objects/claim', 'objects/ack'], /任务来源不属于/],
+  ]
+  for (const [code, operations, message] of cases) for (const operation of operations) {
+    let attempts = 0
+    const client = new WorkflowHttpTransport('https://relay.example', () => identity, async () => {
+      attempts++
+      return new Response(JSON.stringify({ error: { code, message: 'secret-content-group-id', memberId: 'private' } }), { status: 403 })
+    })
+    await assert.rejects(client.request(operation, {}, signal()), error => {
+      assert.equal(error.code, code); assert.equal(error.status, 403); assert.match(error.message, message)
+      assert(!/secret|private|group-id/.test(error.message)); assert.equal(error.memberId, undefined); return true
+    })
+    assert.equal(attempts, 1, 'a denied operation is never retried or reauthorized')
+  }
+})
+
+test('the resource-denial allowlist cannot soften 401, unrelated routes, invalid codes or malformed 403 bodies', async () => {
+  const pair = generateKeyPairSync('ed25519'), identity = { nodeId, privateKeyPem: pair.privateKey.export({ type: 'pkcs8', format: 'pem' }) }
+  const unrecognized = ['node_not_authorized', 'binding_revoked', 'invalid_node_proof', 'future_denial', '__proto__', 'constructor',
+    null, {}, 'invalid_recipients\n', 'x'.repeat(81)]
+  const cases = [
+    ...unrecognized.map(code => ['lifecycle', 403, JSON.stringify({ error: { code, message: 'secret-denial' } })]),
+    ['lifecycle', 401, JSON.stringify({ error: { code: 'invalid_recipients' } })],
+    ['sync', 403, JSON.stringify({ error: { code: 'invalid_recipients' } })],
+    ['receiver-key', 403, JSON.stringify({ error: { code: 'workspace_scope_mismatch' } })],
+    ['grant', 403, JSON.stringify({ error: { code: 'source_scope_mismatch' } })],
+    ...[null, '', 'Forbidden', '{', '{"ok":true}', JSON.stringify({ error: { code: 'invalid_recipients', message: 'x'.repeat(16 * 1024) } })]
+      .map(body => ['lifecycle', 403, body]),
+  ]
+  for (const [operation, status, body] of cases) {
+    const client = new WorkflowHttpTransport('https://relay.example', () => identity, async () => new Response(body, { status }))
+    await assert.rejects(client.request(operation, {}, signal()), error => {
+      assert.equal(error.code, 'binding_revoked'); assert.equal(error.status, status)
+      assert(!/secret|invalid_recipients|workspace_scope/.test(error.message)); return true
+    })
+  }
+})
+
+test('a truncated forbidden stream fails closed and is cancelled without leaking its payload', async () => {
+  const pair = generateKeyPairSync('ed25519'), identity = { nodeId, privateKeyPem: pair.privateKey.export({ type: 'pkcs8', format: 'pem' }) }
+  const client = new WorkflowHttpTransport('https://relay.example', () => identity, async () => new Response(new ReadableStream({
+    start(controller) { controller.error(new Error('secret stream failure')) },
+  }), { status: 403 }))
+  await assert.rejects(client.request('lifecycle', {}, signal()), error => error.code === 'binding_revoked' && !error.message.includes('secret'))
+})
+
+test('a resource denial does not poison valid replica identity or cached task facts', async () => {
+  const pair = generateKeyPairSync('ed25519'), identity = { nodeId, privateKeyPem: pair.privateKey.export({ type: 'pkcs8', format: 'pem' }) }
+  const disk = store(); let syncs = 0
+  const client = new WorkflowHttpTransport('https://relay.example', () => identity, async url => {
+    if (url.endsWith('/lifecycle')) return new Response(JSON.stringify({ error: { code: 'invalid_recipients' } }), { status: 403 })
+    assert(url.endsWith('/sync')); return new Response(JSON.stringify(++syncs === 1 ? snap([task('t1')]) : events()))
+  })
+  const replica = await WorkflowReplica.open(disk, client, () => now)
+  try {
+    await replica.refresh(signal()); const before = structuredClone(disk.data)
+    await assert.rejects(client.request('lifecycle', {}, signal()), { code: 'invalid_recipients' })
+    assert.deepEqual(disk.data, before)
+    const query = await replica.query(scope, {}, signal())
+    assert.equal(query.records.length, 1); assert.equal(query.records[0].taskRef.taskId, 't1')
+    assert.deepEqual(disk.data.binding, binding)
+  } finally { await replica.close() }
+})
+
 test('large card transport budgets include envelopes and do not loosen unrelated endpoints', async () => {
   const pair = generateKeyPairSync('ed25519'), identity = { nodeId, privateKeyPem: pair.privateKey.export({ type: 'pkcs8', format: 'pem' }) }
   let calls = 0
@@ -336,6 +406,8 @@ test('unknown or malformed server codes stay neutral while known transport failu
   assert.match(workflowErrorMessage('workflow-network-unavailable'), /网络连接暂不可用/)
   assert.match(workflowErrorMessage('workflow-timeout'), /请求超时/)
   assert.match(workflowErrorMessage('unknown'), /^操作未完成/)
+  assert.match(workflowErrorMessage('constructor'), /^操作未完成/)
+  assert.match(workflowErrorMessage('__proto__'), /^操作未完成/)
 })
 test('empty or HTML authentication failures clear the replica instead of returning stale facts', async () => {
   for (const body of [null, 'Forbidden']) for (const status of [401, 403]) {

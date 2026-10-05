@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { bounded, copy, exact, fail, plain, row } from '../human-workflow/data.js'
-import { ASSISTANT_INTERACTION_GUIDANCE, ASSISTANT_WORKSPACE_GUIDANCE, ASSISTANT_RELIABILITY_GUIDANCE, LEGACY_ASSISTANT_INTERACTION_GUIDANCE_V2, LEGACY_ASSISTANT_INTERACTION_GUIDANCE_V3 } from './interaction-guidance.js'
+import { ASSISTANT_INTERACTION_GUIDANCE, ASSISTANT_WORKSPACE_GUIDANCE, ASSISTANT_RELIABILITY_GUIDANCE, ASSISTANT_IDENTITY_INTENT_GUIDANCE, LEGACY_ASSISTANT_INTERACTION_GUIDANCE_V2, LEGACY_ASSISTANT_INTERACTION_GUIDANCE_V3 } from './interaction-guidance.js'
 
 /** Reusable, data-only working method. Real class/project/member data belongs
  * to a business instance, never this reusable native preset definition. */
@@ -108,9 +108,15 @@ export function legacyAssistantGuidanceV4(definition: AssistantDefinition): stri
   ].join('\n\n').replace(/\{\{/g, '｛｛').replace(/\}\}/g, '｝｝')
 }
 
-/** Every newly authored profession, custom or creator preset inherits the
- * same reliability method. No mutation of an existing Agent or approved plan. */
-export function assistantGuidance(definition: AssistantDefinition): string {
+/** Frozen V5: do not replace a previously approved native artifact in place. */
+export function legacyAssistantGuidanceV5(definition: AssistantDefinition): string {
   return legacyAssistantGuidanceV4(definition).replace('职业助手工作方法 v4：', '职业助手工作方法 v5：')
     + '\n\n' + ASSISTANT_RELIABILITY_GUIDANCE
+}
+
+/** Every newly authored profession, custom or creator preset inherits the
+ * same method. No mutation of an existing Agent or approved native plan. */
+export function assistantGuidance(definition: AssistantDefinition): string {
+  return legacyAssistantGuidanceV5(definition).replace('职业助手工作方法 v5：', '职业助手工作方法 v6：')
+    + '\n\n' + ASSISTANT_IDENTITY_INTENT_GUIDANCE
 }

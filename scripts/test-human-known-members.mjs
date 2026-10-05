@@ -239,7 +239,7 @@ test('Agent tool schema exposes optional generic reuse and legacy reminder descr
   const members = humanMembersTool(core), reminder = humanRemindTool(core)
   assert.match(members.description, /human_task_recipients/); assert.match(members.description, /never opened or submitted/)
   assert.match(members.description, /sourceRecipientRefs/); assert.match(reminder.description, /THIS legacy tool accepts only/)
-  assert.match(reminder.description, /exact subset without reselecting/); assert.match(reminder.description, /condition=none/)
+  assert.match(reminder.description, /ALL selected people or an explicit subset regardless/); assert.match(reminder.description, /condition=none/)
 })
 
 test('known-member capability separates local availability from original-group proof and never promises roster enumeration or automatic mention', () => {
@@ -274,4 +274,19 @@ test('known-member capability separates local availability from original-group p
   assert.match(HUMAN_WORKFLOW_SKILL.content, /participant 只是指定参与范围，不是@字段/)
   assert.match(HUMAN_WORKFLOW_SKILL.content, /用户想重新选人仍用 owner-select/)
   assert.match(HUMAN_WORKFLOW_SKILL.content, /不增加固定必问清单/)
+})
+
+test('shared-source guidance matches verified workspace access without widening private analysis or file scope', () => {
+  const tools = lifecycleTools({ core: {}, nodeId: 'test_node', assertAgent() {}, lifecycle: {}, async saveImage() { assert.fail('discovery must not read images') } })
+  const query = tools.find(item => item.name === 'human_task_lifecycle')
+  assert.match(query.description, /explicitly shared source returned by human_workspace_directory in the same real workspace/)
+  assert.match(query.description, /revalidate both actual sessions/)
+  assert.match(query.description, /not a blanket grant for local analysis\/files or automation/)
+  for (const key of ['workspaceRef', 'workspacePath', 'sessionId']) assert(!Object.hasOwn(query.parameters.properties, key))
+  assert.match(tools.find(item => item.name === 'human_submission_analysis_list').description, /No cross-session access/)
+  assert.match(tools.find(item => item.name === 'human_submission_image').description, /Cannot download arbitrary URLs or access other sessions/)
+  const description = createCapabilityManifest('test_node').capabilities.find(item => item.id === 'task.audience-known').description
+  assert.match(description, /同会话成功任务/)
+  assert.match(description, /同一真实工作区目录中显式共享、经宿主与云端重新核验/)
+  assert.match(description, /不等于任意跨会话或跨工作区权限/)
 })

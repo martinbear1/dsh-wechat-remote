@@ -14,7 +14,7 @@ import { TypertRegistry } from '@deepseek-ai/dsh-typert-registry'
 import { TypertGatewayService } from '@deepseek-ai/dsh-api-gateway'
 import { HumanToolsCore, HUMAN_RETENTION_MS, HUMAN_MAX_RECORDS, HUMAN_CONTEXT_LIMIT } from '../lib/human-tools/core.js'
 import { HumanFileStore } from '../lib/human-tools/store.js'
-import { humanSurface, humanTaskRef, humanSelectionRef, humanReminderTitle, HUMAN_TOOL_NAME, HUMAN_MEMBERS_TOOL_NAME, HUMAN_REMIND_TOOL_NAME } from '../lib/human-tools/protocol.js'
+import { humanSurface, humanTaskRef, humanSelectionRef, humanReminderTitle, humanReceiptData, HUMAN_ACTION_FAILURE_REASONS, HUMAN_TOOL_NAME, HUMAN_MEMBERS_TOOL_NAME, HUMAN_REMIND_TOOL_NAME } from '../lib/human-tools/protocol.js'
 import { humanShareTool, humanMembersTool, humanRemindTool, registerHumanContext, HUMAN_CONTEXT_NAME } from '../lib/human-tools/dsh.js'
 import { HumanToolsService } from '../lib/human-tools/service.js'
 import { WechatHistoryService } from '../lib/history-service.js'
@@ -71,6 +71,121 @@ async function selectionFlow(now) {
   const selected = await flow.core.ack({ ...membersReq, outcome: 'success', selectionRef }, signal)
   return { ...flow, members, membersReq, selected }
 }
+
+test('member selection offers exact all-or-subset reminder guidance instead of implicitly filtering participation', async t => {
+  const { core, members } = await selectionFlow()
+  t.after(() => core.close())
+  const selection = humanMembersTool(core), legacy = humanRemindTool(core)
+  assert.match(selection.description, /ALL selected people or an explicit subset/)
+  assert.match(selection.description, /does not imply a pending-only request/)
+  const text = selection.output.render({}, { surface: members }).map(item => item.text).join('\n')
+  assert.match(text, /condition=none/)
+  assert.match(text, /不必先打开或提交/)
+  assert(!text.includes('human_task_remind'), 'a completed selection must not be routed to the legacy pending-only tool')
+  assert.match(legacy.description, /only when the user explicitly wants that participation filter/)
+  assert.match(legacy.description, /ALL selected people or an explicit subset regardless/)
+  const reminder = await core.createReminder({ ...origin, rootCallId: 'legacy-compatible' }, members.id, '请确认', signal)
+  assert.deepEqual(reminder.selectionRef, selectionRef, 'existing legacy surfaces keep their approved semantics')
+})
+
+test('successful selection runtime evidence exposes the exact continuation only when the actual tools exist', async t => {
+  const host = sdk(), { core, members } = await selectionFlow()
+  t.after(async () => { await core.close(); await host.ctx.fiber.dispose() })
+  registerHumanContext(host.ctx, core)
+  const context = async () => renderContextSections(await host.ctx.get('systemPrompt').assemble({ agent: host.agent, scope: host.agent }))
+    .find(section => section.name === HUMAN_CONTEXT_NAME).text
+  assert(!(await context()).includes('condition=none'), 'no nonexistent generic tools are advertised')
+  for (const name of ['human_task_recipients', 'human_task_prepare_reminder']) host.tools.register({ name,
+    description: 'Read-only test registration for available contract discovery', parameters: { type: 'object', properties: {}, required: [], additionalProperties: false },
+    output: { schema: { type: 'object' }, render: () => [] }, execute: () => assert.fail('context assembly must never execute a tool') })
+  const before = structuredClone(host.session.events), observed = await context()
+  assert.match(observed, /全部所选人或其中明确几人/)
+  assert.match(observed, /recipientSource=exact-references、condition=none/)
+  assert.match(observed, /原始微信ID不向模型公开不等于系统未取得或未保存/)
+  const facts = JSON.parse(observed.slice(observed.indexOf('\n') + 1))
+  assert.deepEqual(facts.receipts.find(receipt => receipt.surfaceId === members.id).selectionRef, selectionRef)
+  assert.deepEqual(host.session.events, before)
+  assert.equal(host.sent.length, 0)
+})
+
+test('failed member/reminder diagnostics are strictly whitelisted, outcome-scoped and compatible with no-pending cancellation', async t => {
+  assert.deepEqual(HUMAN_ACTION_FAILURE_REASONS, ['native_unavailable', 'member_preview_unavailable', 'reminder_mismatch',
+    'lease_expiry_missing', 'action_preparation_failed', 'native_gesture_required', 'native_call_failed', 'result_capacity', 'group_identity_unavailable'])
+  const { core, surface: share, members } = await selectionFlow()
+  t.after(() => core.close())
+  const remind = await core.createReminder({ ...origin, rootCallId: 'diagnostic-remind' }, members.id, '请确认', signal)
+  const workflow = async kind => core.createWorkflow({ ...origin, rootCallId: 'diagnostic-' + kind }, taskRef,
+    { schema: 'human.lifecycle.draft.ref.v1', draftId: kind.padEnd(24, 'x'), version: 1, kind, digest: 'a'.repeat(64) }, signal)
+  const generic = await workflow('reminder'), round = await workflow('round'), review = await workflow('review')
+  for (const reason of HUMAN_ACTION_FAILURE_REASONS) {
+    for (const surface of [members, remind, generic]) {
+      assert.equal(humanReceiptData(surface, { outcome: 'failed', reason }), true)
+      for (const outcome of ['success', 'unknown', 'cancelled']) assert.equal(humanReceiptData(surface, { outcome, reason }), false)
+    }
+    for (const surface of [share, round, review]) assert.equal(humanReceiptData(surface, { outcome: 'failed', reason }), false)
+  }
+  for (const reason of [null, undefined, '', 'native_unavailable\n', 'wx.notifyGroupMembers:fail token=private',
+    'roomid-private', { code: 'native_unavailable' }, ['native_unavailable'], 1])
+    for (const surface of [members, remind, generic]) assert.equal(humanReceiptData(surface, { outcome: 'failed', reason }), false)
+  assert.equal(humanReceiptData(remind, { outcome: 'cancelled', reason: 'no_pending_members' }), true)
+  assert.equal(humanReceiptData(remind, { outcome: 'failed', reason: 'no_pending_members' }), false)
+  for (const surface of [share, members, generic, round, review])
+    assert.equal(humanReceiptData(surface, { outcome: 'cancelled', reason: 'no_pending_members' }), false)
+})
+
+test('every failed diagnostic survives ACK replay and durable reload without overwriting evidence or leaking new fields', async t => {
+  for (const reason of HUMAN_ACTION_FAILURE_REASONS) {
+    const { core, surface: share, members, store } = await selectionFlow()
+    const nextMembers = await core.createMembers({ ...origin, rootCallId: 'failure-members' }, share.id, signal)
+    const reminder = await core.createReminder({ ...origin, rootCallId: 'failure-remind' }, members.id, '请参与', signal)
+    const generic = await core.createWorkflow({ ...origin, rootCallId: 'failure-generic' }, taskRef,
+      { schema: 'human.lifecycle.draft.ref.v1', draftId: 'd'.repeat(24), version: 1, kind: 'reminder', digest: 'a'.repeat(64) }, signal)
+    const receipts = []
+    for (const surface of [nextMembers, reminder, generic]) {
+      const req = request(surface), ack = { ...req, outcome: 'failed', reason }
+      await core.claim(req, signal)
+      const receipt = await core.ack(ack, signal)
+      assert.equal(receipt.reason, reason); assert.equal(receipt.outcome, 'failed')
+      assert.deepEqual(await core.ack(ack, signal), receipt)
+      await assert.rejects(core.ack({ ...ack, reason: HUMAN_ACTION_FAILURE_REASONS.find(value => value !== reason) }, signal), { code: 'human-receipt-conflict' })
+      receipts.push(receipt)
+    }
+    await core.close()
+    const reopened = await HumanToolsCore.open(store, store.id)
+    t.after(() => reopened.close())
+    for (const receipt of receipts) assert.deepEqual(reopened.contextSnapshot(origin.scope, origin.generation).find(item => item.receiptId === receipt.receiptId), receipt)
+    const corrupt = await store.load()
+    corrupt.records.at(-1).attempts[0].receipt.reason = 'unbounded provider message'
+    await assert.rejects(HumanToolsCore.open({ load: async () => corrupt, save: store.save }, store.id), { code: 'human-store-invalid' })
+  }
+})
+
+test('generated RPC forwards safe failure reasons, rejects native detail text, and runtime explains diagnostics without auto-retry', async t => {
+  const host = sdk(), store = memory()
+  t.after(() => host.ctx.fiber.dispose())
+  const registry = new TypertRegistry(host.ctx); registry.register(TYPERT)
+  const gateway = new TypertGatewayService(host.ctx), service = new HumanToolsService(host.ctx, { enabled: true, store })
+  assert.equal((await service.capabilities({ scope: origin.scope }, signal)).ok, true)
+  const invoke = (method, req) => gateway.invoke({ namespace: 'humanTools', method, args: { request: req }, signal })
+  const prepare = async (name, args, callId) => {
+    const result = await host.tools.execute({ name, arguments: args, callId, agent: host.agent, signal })
+    assert.equal(result.isError, false, JSON.stringify(result)); return result.meta.humanSurface
+  }
+  const share = await prepare(HUMAN_TOOL_NAME, input, 'diag-share')
+  await invoke('claim', request(share)); await invoke('ack', { ...request(share), outcome: 'success', taskRef })
+  const members = await prepare(HUMAN_MEMBERS_TOOL_NAME, { sourceSurfaceId: share.id }, 'diag-members')
+  await invoke('claim', request(members))
+  const before = structuredClone(host.session.events)
+  assert.equal((await invoke('ack', { ...request(members), outcome: 'failed', reason: 'wx raw identity failure' })).ok, false)
+  assert.equal((await invoke('ack', { ...request(members), outcome: 'failed', reason: 'native_unavailable' })).ok, true)
+  const context = renderContextSections(await host.ctx.get('systemPrompt').assemble({ agent: host.agent, scope: host.agent }))
+    .find(section => section.name === HUMAN_CONTEXT_NAME).text
+  assert.match(context, /客户端本次前置检查或原生调用的分类诊断/)
+  assert.match(context, /不是微信平台永久不支持/)
+  const receipt = JSON.parse(context.slice(context.indexOf('\n') + 1)).receipts.find(item => item.surfaceId === members.id)
+  assert.equal(receipt.reason, 'native_unavailable'); assert.equal(receipt.outcome, 'failed')
+  assert.deepEqual(host.session.events, before); assert.equal(host.sent.length, 0)
+})
 
 test('member references and weighted reminder titles enforce exact bounded protocol', async () => {
   assert(humanSelectionRef(selectionRef))

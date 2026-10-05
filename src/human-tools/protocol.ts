@@ -68,6 +68,13 @@ export function humanRecipientRef(value: unknown): HumanRecipientRef | undefined
     source: value.source as HumanRecipientRef['source'], ref: value.ref, revision: value.revision as number }
 }
 export type HumanOutcome = 'success' | 'cancelled' | 'failed' | 'unknown'
+/** Bounded client diagnostics, not provider messages, identities or capability grants. */
+export const HUMAN_ACTION_FAILURE_REASONS = Object.freeze([
+  'native_unavailable', 'member_preview_unavailable', 'reminder_mismatch', 'lease_expiry_missing',
+  'action_preparation_failed', 'native_gesture_required', 'native_call_failed', 'result_capacity', 'group_identity_unavailable',
+] as const)
+export type HumanActionFailureReason = typeof HUMAN_ACTION_FAILURE_REASONS[number]
+export type HumanReceiptReason = 'no_pending_members' | HumanActionFailureReason
 export interface HumanActionRequest {
   readonly scope: string
   readonly surfaceId: string
@@ -89,7 +96,7 @@ export interface HumanSelectionRef {
 }
 export interface HumanAckRequest extends HumanActionRequest {
   readonly outcome: HumanOutcome; readonly taskRef?: HumanTaskRef; readonly selectionRef?: HumanSelectionRef
-  readonly reason?: 'no_pending_members'
+  readonly reason?: HumanReceiptReason
 }
 /** Keep the untrusted nested value intact across generated RPC codecs so the
  * core can reject extra identity/credential fields instead of stripping them. */
@@ -106,7 +113,7 @@ export interface HumanReceipt {
   readonly outcome: HumanOutcome
   readonly taskRef?: HumanTaskRef
   readonly selectionRef?: HumanSelectionRef
-  readonly reason?: 'no_pending_members'
+  readonly reason?: HumanReceiptReason
   /** recorded means durable plugin state, not a message queued for another turn.
    * COMPAT(human-inbox-m0): legacy values remain readable until Inbox-based
    * research ledgers/clients have retired; never replay them into DSH Inbox. */
@@ -169,7 +176,11 @@ export function humanReceiptData(surface: HumanSurface, value: Record<string, un
     if (action !== 'select-members' || value.outcome !== 'success' || !selection || !target
       || selection.taskId !== target.taskId || selection.deliveryId !== target.deliveryId) return false
   }
-  return !Object.hasOwn(value, 'reason') || action === 'remind' && value.outcome === 'cancelled' && value.reason === 'no_pending_members'
+  if (!Object.hasOwn(value, 'reason')) return true
+  if (value.reason === 'no_pending_members') return action === 'remind' && value.outcome === 'cancelled'
+  return value.outcome === 'failed' && typeof value.reason === 'string'
+    && HUMAN_ACTION_FAILURE_REASONS.includes(value.reason as HumanActionFailureReason)
+    && (action === 'select-members' || action === 'remind' || action === 'workflow-approve' && surface.workflowRef?.kind === 'reminder')
 }
 export function object(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)

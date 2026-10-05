@@ -104,6 +104,38 @@ function provideAutomationServices(ctx) {
 }
 const automationCapability = async host => unwrap(await host.service.capabilities({ scope: sessionId }, signal)).workflow.capabilities.find(c => c.id === 'automation.run')
 
+test('disabled assistant service is blocked in both live manifest and Agent capability catalog', async t => {
+  const host = await setup(t)
+  const response = unwrap(await host.service.capabilities({ scope: sessionId }, signal))
+  assert.equal(response.workflow.capabilities.find(item => item.id === 'assistant.design').status, 'blocked')
+  for (const name of ['human_assistant_catalog', 'human_assistant_draft', 'human_assistant_get']) assert.equal(host.tools.get(name), undefined)
+  const catalog = JSON.parse((await host.run('human_capabilities', { view: 'catalog', category: 'workspace', detail: 'full' })).content[0].text)
+  assert.equal(catalog.entries.find(item => item.id === 'workspace.assistant-design').status, 'blocked')
+  assert.equal(host.networkCalls, 0)
+})
+
+test('registered assistant design is usable without native install support or a teacher preset; missing tools block discovery', async t => {
+  let probes = 0
+  const native = { async probe() { probes++; return { supported: false, basePresets: [], reason: '测试宿主不提供原生安装' } },
+    async preview() { assert.fail('discovery must not preview') }, async install() { assert.fail('discovery must not install') },
+    async verify() { assert.fail('no installed presets exist') }, async close() {} }
+  const host = await setup(t, { assistants: { native, registryStore: store(), businessStore: store(), sessionIntentStore: store() } })
+  const capability = () => host.service.workflow.modes.manifest().capabilities.find(item => item.id === 'assistant.design')
+  unwrap(await host.service.capabilities({ scope: sessionId }, signal))
+  assert.equal(capability().status, 'available'); assert.equal(probes, 0, 'ordinary capability discovery must not probe native installation')
+  for (const name of ['human_assistant_catalog', 'human_assistant_draft', 'human_assistant_get']) assert(host.tools.get(name))
+  const catalog = JSON.parse((await host.run('human_capabilities', { view: 'catalog', category: 'workspace', detail: 'full' })).content[0].text)
+  assert.equal(catalog.entries.find(item => item.id === 'workspace.assistant-design').status, 'available')
+  const assistants = unwrap(await host.service.assistantCatalog({}, signal))
+  assert.equal(assistants.native.supported, false); assert.deepEqual(assistants.drafts, [])
+  assert.equal(capability().status, 'available', 'data-only design is distinct from native install support')
+  const originalGet = host.tools.get.bind(host.tools)
+  host.tools.get = name => name === 'human_assistant_draft' ? undefined : originalGet(name)
+  try { assert.equal(capability().status, 'blocked', 'service existence does not substitute for actual tool registration') }
+  finally { host.tools.get = originalGet }
+  assert.equal(host.networkCalls, 0)
+})
+
 test('phone capability discovery projects live readiness within its RPC budget without dropping Agent contracts', async t => {
   const host = await setup(t), registry = new TypertRegistry(host.ctx)
   registry.register(TYPERT)

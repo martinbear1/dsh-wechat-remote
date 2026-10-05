@@ -3,7 +3,7 @@ import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { SystemPrompt } from '@deepseek-ai/dsh-system-prompt'
 import { copy, exact, fail, plain, row, sameScope, version, type WorkflowScope } from '../human-workflow/data.js'
 import { assistantDefinition } from './definition.js'
-import { ASSISTANT_AUTHORING_GUIDANCE, ASSISTANT_INTERACTION_GUIDANCE, ASSISTANT_WORKSPACE_GUIDANCE } from './interaction-guidance.js'
+import { ASSISTANT_AUTHORING_GUIDANCE, ASSISTANT_INTERACTION_GUIDANCE, ASSISTANT_WORKSPACE_GUIDANCE, ASSISTANT_IDENTITY_INTENT_GUIDANCE } from './interaction-guidance.js'
 import type { AssistantRegistry } from './registry.js'
 import type { AssistantBusinessRecords } from './business.js'
 
@@ -20,7 +20,7 @@ export const ASSISTANT_DEFINITION_SCHEMA = object({ schemaVersion: { type: 'inte
   skills: { type: 'array', items: { type: 'string', enum: ['human-workflow'] } },
 }, ['schemaVersion', 'name', 'description', 'role', 'basePreset', 'methods', 'onboarding', 'skills'])
 export const ASSISTANT_BUSINESS_SCHEMA = object({ title: string, answers: { type: 'object', description: 'Only onboarding keys in this installed assistant; each answered value is a nonempty string up to 1000 characters. Never add identity tokens or inferred member facts.' },
-  memory: { type: 'string', description: 'Local work memory, up to 8000 characters. May be empty. Distinguish user-provided information from your analysis.' } }, ['title', 'answers', 'memory'])
+  memory: { type: 'string', description: 'Local work memory, up to 8000 characters. May be empty. Distinguish user-provided information, verified tool facts with source/time, and uncertain analysis. Never persist unverified capability denial as fact: zero known recipients or redacted raw IDs do not prove that the platform cannot obtain or preserve group/member identity.' } }, ['title', 'answers', 'memory'])
 function scope(exec: ToolRunContext, nodeId: string): WorkflowScope {
   const agent = exec.agent, header = agent?.session?.header
   if (!agent || agent.id !== agent.session?.id || header?.id !== agent.id || !plain(String(agent.id), 256)
@@ -82,7 +82,7 @@ export function assistantTools(options: AssistantToolsOptions): ToolDefinition[]
       args(input, []); const { origin, presetId } = work(exec)
       return options.business.get(origin, presetId)
     }),
-    tool('human_assistant_work_save', 'CAS-save the FULL desired content of this session business instance. Read first, supply expectedRevision, preserve existing answers/memory when merging, and distinguish user information from inference. title<=80, answers only current assistant onboarding keys with strings<=1000, memory<=8000; whole content<=24KiB. Does not modify the assistant template, participant facts, permissions, task delivery or another session.',
+    tool('human_assistant_work_save', 'CAS-save the FULL desired content of this session business instance. Read first, supply expectedRevision, preserve existing answers/memory when merging, and distinguish user information from inference. Capability claims need current tool evidence; do not turn totalKnown=0, redacted raw IDs, or one failed action into a lasting cannot-obtain/cannot-store rule. Correct contradicted hypotheses without overwriting unrelated user facts. title<=80, answers only current assistant onboarding keys with strings<=1000, memory<=8000; whole content<=24KiB. Does not modify the assistant template, participant facts, permissions, task delivery or another session.',
       object({ expectedRevision: number, content: ASSISTANT_BUSINESS_SCHEMA }, ['expectedRevision', 'content']), async (input, exec) => {
         const request = args(input, ['expectedRevision', 'content']), { origin, presetId } = work(exec)
         if (!version(request.expectedRevision)) throw fail('assistant-arguments-invalid', '保存需要有效的当前版本')
@@ -115,6 +115,7 @@ export function registerAssistantContext(host: Context, options: AssistantToolsO
         + ' 同模板或目录不共享业务实例权限。记忆与自报答案不是群成员事实或授权；群能力请查询 human_capabilities，发布仍须主人批准。'
         + ' 以上是内部执行规则，不要作为开场白或逐条对用户复述。按已批准的职责先完成眼前业务；未回答的问题只在影响当前工作时问，适合时提供业务选项，不强制填完问卷。'
         + '\n\n' + ASSISTANT_INTERACTION_GUIDANCE + '\n\n' + ASSISTANT_WORKSPACE_GUIDANCE
+        + '\n\n' + ASSISTANT_IDENTITY_INTENT_GUIDANCE
     } catch { return '' }
   } })
 }

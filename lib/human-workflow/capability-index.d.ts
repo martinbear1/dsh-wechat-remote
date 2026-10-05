@@ -35,6 +35,42 @@ export declare function capabilityCatalog(manifest: CapabilityManifest, category
         readonly memberForm: {
             readonly schema: "human.form.v1";
             readonly schemas: readonly ["human.form.v1", "human.form.v2", "human.form.v3"];
+            readonly schemaMeaning: "schema and legacy top-level kinds/mediaTypes describe v1 compatibility, not the maximum current capability; choose bySchema for the requested data";
+            readonly tools: readonly ["human_task_create", "human_task_prepare_round", "human_task_prepare_review"];
+            readonly paths: {
+                readonly initial: "initialRound.form";
+                readonly additional: "content.form";
+                readonly correction: "content.correction.form";
+                readonly presentation: "inside the chosen form at form.presentation, never beside form";
+            };
+            readonly bySchema: {
+                readonly 'human.form.v1': {
+                    readonly attachmentKinds: readonly ["image"];
+                    readonly mediaTypes: readonly ["image/jpeg", "image/png"];
+                    readonly presentation: false;
+                };
+                readonly 'human.form.v2': {
+                    readonly attachmentKinds: readonly ["image"];
+                    readonly mediaTypes: readonly ["image/jpeg", "image/png"];
+                    readonly presentation: true;
+                };
+                readonly 'human.form.v3': {
+                    readonly inherits: "human.form.v2";
+                    readonly attachmentKinds: readonly ["image", "file"];
+                    readonly imageMediaTypes: readonly ["image/jpeg", "image/png"];
+                    readonly fileMediaTypes: readonly ["image/jpeg", "image/png", "application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "application/vnd.openxmlformats-officedocument.presentationml.presentation", "text/plain", "text/csv"];
+                    readonly presentation: true;
+                    readonly word: "DOCX (.docx), not legacy DOC (.doc) or macro-enabled documents";
+                    readonly maxFiles: 1;
+                    readonly maxBytes: number;
+                };
+            };
+            readonly validation: {
+                readonly issueSchema: "human.form.issue.v1";
+                readonly fields: readonly ["path", "code", "message", "expected?", "correctPath?"];
+                readonly repair: "repair the exact parameter without dropping user requirements; schema validation does not test receiver readiness";
+                readonly receiverFailure: "receiver-file-unavailable or receiver_format_unsupported, never inferred from a form validation error";
+            };
             readonly maxUtf8Bytes: number;
             readonly limitOrigin: "product";
             readonly fields: 12;
@@ -670,6 +706,42 @@ export declare function capabilityCatalog(manifest: CapabilityManifest, category
         memberForm: {
             readonly schema: "human.form.v1";
             readonly schemas: readonly ["human.form.v1", "human.form.v2", "human.form.v3"];
+            readonly schemaMeaning: "schema and legacy top-level kinds/mediaTypes describe v1 compatibility, not the maximum current capability; choose bySchema for the requested data";
+            readonly tools: readonly ["human_task_create", "human_task_prepare_round", "human_task_prepare_review"];
+            readonly paths: {
+                readonly initial: "initialRound.form";
+                readonly additional: "content.form";
+                readonly correction: "content.correction.form";
+                readonly presentation: "inside the chosen form at form.presentation, never beside form";
+            };
+            readonly bySchema: {
+                readonly 'human.form.v1': {
+                    readonly attachmentKinds: readonly ["image"];
+                    readonly mediaTypes: readonly ["image/jpeg", "image/png"];
+                    readonly presentation: false;
+                };
+                readonly 'human.form.v2': {
+                    readonly attachmentKinds: readonly ["image"];
+                    readonly mediaTypes: readonly ["image/jpeg", "image/png"];
+                    readonly presentation: true;
+                };
+                readonly 'human.form.v3': {
+                    readonly inherits: "human.form.v2";
+                    readonly attachmentKinds: readonly ["image", "file"];
+                    readonly imageMediaTypes: readonly ["image/jpeg", "image/png"];
+                    readonly fileMediaTypes: readonly ["image/jpeg", "image/png", "application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "application/vnd.openxmlformats-officedocument.presentationml.presentation", "text/plain", "text/csv"];
+                    readonly presentation: true;
+                    readonly word: "DOCX (.docx), not legacy DOC (.doc) or macro-enabled documents";
+                    readonly maxFiles: 1;
+                    readonly maxBytes: number;
+                };
+            };
+            readonly validation: {
+                readonly issueSchema: "human.form.issue.v1";
+                readonly fields: readonly ["path", "code", "message", "expected?", "correctPath?"];
+                readonly repair: "repair the exact parameter without dropping user requirements; schema validation does not test receiver readiness";
+                readonly receiverFailure: "receiver-file-unavailable or receiver_format_unsupported, never inferred from a form validation error";
+            };
             readonly maxUtf8Bytes: number;
             readonly limitOrigin: "product";
             readonly fields: 12;

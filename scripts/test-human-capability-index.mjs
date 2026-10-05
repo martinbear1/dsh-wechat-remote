@@ -33,6 +33,23 @@ test('file capability remains blocked unless genuine local implementation is adv
   assert.equal(capabilityCatalog(ready).platformReadiness, 'per-operation-unknown')
   assert.equal(capabilityCatalog(ready, 'files').entries.find(item => item.id === 'file.multiple').status, 'planned')
 })
+
+test('file discovery exposes all collection paths and unambiguous versioned Word support', () => {
+  const files = capabilityCatalog(manifest(), 'files', 'full')
+  for (const id of ['file.image', 'file.document']) for (const tool of ['human_task_create', 'human_task_prepare_round', 'human_task_prepare_review'])
+    assert(files.entries.find(entry => entry.id === id).tools.includes(tool))
+  const form = files.contracts.memberForm
+  assert.deepEqual(form.bySchema['human.form.v2'].attachmentKinds, ['image'])
+  assert(form.bySchema['human.form.v3'].attachmentKinds.includes('file'))
+  assert(form.bySchema['human.form.v3'].fileMediaTypes.includes('application/vnd.openxmlformats-officedocument.wordprocessingml.document'))
+  assert(!form.bySchema['human.form.v3'].fileMediaTypes.includes('application/msword'))
+  assert.match(form.bySchema['human.form.v3'].word, /not legacy DOC/)
+  assert.equal(form.paths.initial, 'initialRound.form'); assert.equal(form.paths.correction, 'content.correction.form')
+  assert.match(form.paths.presentation, /never beside form/)
+  assert.equal(form.validation.issueSchema, 'human.form.issue.v1')
+  assert.match(form.validation.repair, /without dropping user requirements/)
+  assert.deepEqual(form.attachment.mediaTypes, ['image/jpeg', 'image/png'], 'legacy compatibility fields are preserved and explicitly labelled')
+})
 test('targeted details do not leak unrelated contracts or claim participation is a submission', () => {
   const result = capabilityCatalog(manifest(), 'facts', 'full')
   assert(result.entries.every(item => item.category === 'facts'))

@@ -7,7 +7,8 @@ import os from 'node:os'
 import path from 'node:path'
 import nacl from 'tweetnacl'
 import { assertSupportedJsonSchema } from '@deepseek-ai/dsh-tools'
-import { humanForm } from '../lib/human-tools/form.js'
+import { humanForm, humanInitialRound, humanFormIssue, humanRoundIssue, humanFormError } from '../lib/human-tools/form.js'
+import { lifecycleTools } from '../lib/human-workflow/lifecycle-tools.js'
 import { HUMAN_MEMBER_FORM_SCHEMA } from '../lib/human-workflow/member-form-schema.js'
 import { SUBMISSION_FILE_TYPES, SUBMISSION_FILE_MAX, SUBMISSION_RECEIVE_FORMATS, safeSubmissionName } from '../lib/human-workflow/submission-file-contract.js'
 import { validateSubmissionFile } from '../lib/human-workflow/submission-file.js'
@@ -86,6 +87,108 @@ test('v3 is a generic optional one-file alternative; legacy form wire representa
   assert.deepEqual(humanForm(v3), v3)
   for (const mediaTypes of [[], ['application/msword'], ['image/png', 'image/png'], ['application/zip']]) assert.equal(humanForm({ ...v3, attachment: { ...v3.attachment, mediaTypes } }), undefined)
   assert.equal(humanForm({ ...v3, attachment: { ...v3.attachment, maxBytes: SUBMISSION_FILE_MAX + 1 } }), undefined)
+})
+
+const diagnosticForm = () => ({ schema: 'human.form.v3', fields: [{ key: 'name', label: '姓名', kind: 'short-text', required: true, maxLength: 40 }],
+  attachment: { kind: 'file', required: true, maxBytes: SUBMISSION_FILE_MAX, mediaTypes: ['image/jpeg', 'image/png', 'application/pdf', docx] } })
+const diagnosticRound = () => ({ title: '作文', instructions: '写好后交照片或 Word（.docx）。', form: diagnosticForm(), closesAt: null, recipientRefs: null })
+const diagnosticStyle = { theme: 'orange', icon: 'book', submitLabel: '提交作文', completionText: '作文已提交，谢谢！' }
+
+test('form diagnostics locate structural, schema, field, attachment and presentation failures without changing requirements', () => {
+  const cases = [
+    [f => ({ ...f, theme: 'orange' }), 'form.theme', 'misplaced-field', 'form.presentation.theme'],
+    [f => ({ ...f, schema: 'invented' }), 'form.schema', 'schema-unsupported'],
+    [f => ({ ...f, fields: 'wrong' }), 'form.fields', 'type-invalid'],
+    [f => ({ ...f, fields: [{ ...f.fields[0], required: 'yes' }] }), 'form.fields[0].required', 'type-invalid'],
+    [f => ({ ...f, fields: [{ ...f.fields[0], maxLength: 0 }] }), 'form.fields[0].maxLength', 'value-invalid'],
+    [f => ({ ...f, fields: [{ ...f.fields[0], description: '' }] }), 'form.fields[0].description', 'value-invalid'],
+    [f => ({ ...f, fields: [{ key: 'day', label: '日期', kind: 'date', required: true, start: '2026-02-30' }] }), 'form.fields[0].start', 'value-invalid'],
+    [f => ({ ...f, fields: [{ key: 'items', label: '选项', kind: 'multi-choice', required: true, choices: ['一'], minSelected: 1, maxSelected: 2 }] }), 'form.fields[0].maxSelected', 'value-invalid'],
+    [f => ({ ...f, presentation: { theme: 'unsupported' } }), 'form.presentation.theme', 'value-invalid'],
+    [f => ({ ...f, presentation: { blocks: [{ type: 'paragraph', text: '' }] } }), 'form.presentation.blocks[0].text', 'value-invalid'],
+    [f => ({ ...f, schema: 'human.form.v2' }), 'form.attachment.kind', 'schema-feature-mismatch'],
+    [f => ({ ...f, attachment: { ...f.attachment, kind: 'image' } }), 'form.attachment.mediaTypes[2]', 'attachment-kind-mismatch'],
+    [f => ({ ...f, attachment: { ...f.attachment, mediaTypes: ['application/msword'] } }), 'form.attachment.mediaTypes[0]', 'attachment-format-unsupported'],
+    [f => ({ ...f, attachment: { ...f.attachment, mediaTypes: ['image/png', 'image/png'] } }), 'form.attachment.mediaTypes', 'value-invalid'],
+    [f => ({ ...f, attachment: { ...f.attachment, maxBytes: SUBMISSION_FILE_MAX + 1 } }), 'form.attachment.maxBytes', 'limit-exceeded'],
+  ]
+  for (const [change, path, code, correctPath] of cases) {
+    const form = change(diagnosticForm()), before = structuredClone(form), problem = humanFormIssue(form)
+    assert.equal(humanForm(form), undefined)
+    assert.equal(problem.schema, 'human.form.issue.v1'); assert.equal(problem.path, path); assert.equal(problem.code, code)
+    assert.equal(problem.correctPath, correctPath); assert.deepEqual(form, before)
+    const error = humanFormError(problem); assert.equal(error.code, 'lifecycle-form-invalid'); assert.deepEqual(error.validation, problem)
+    assert(error.message.includes(path)); assert.match(error.message, /尚未判定接收端能力/)
+  }
+  const privateValue = 'private attachment name or student feedback must never be echoed'
+  const input = { ...diagnosticForm(), [privateValue]: privateValue }, serialized = JSON.stringify(humanFormIssue(input))
+  assert(!serialized.includes(privateValue)); assert(serialized.includes('[unsupported-key]'))
+  for (const schema of ['human.form.v1', 'human.form.v2', 'human.form.v3']) {
+    const legacy = { schema, fields: [], attachment: { kind: 'image', required: false, maxBytes: 1024, mediaTypes: ['image/png'] } }
+    assert.deepEqual(humanForm(legacy), legacy); assert.equal(humanFormIssue(legacy), undefined)
+  }
+  const styled = { ...diagnosticForm(), presentation: diagnosticStyle }
+  assert.deepEqual(humanForm(styled), styled); assert.equal(humanFormIssue(styled), undefined)
+})
+
+test('actual create execute diagnoses misplaced presentation before any service call; moving only nesting preserves DOCX', async () => {
+  let prepares = 0, created = 0
+  const tool = lifecycleTools({ nodeId: scope.nodeId, assertAgent() {}, lifecycle: { async prepareInitial(_signal, attachment, file) {
+    prepares++; assert.equal(attachment, true); assert.equal(file, true)
+  } }, core: { async createCollection(_origin, _title, _body, initial) { created++; return { initialRound: initial } } } }).find(t => t.name === 'human_task_create')
+  assertSupportedJsonSchema(tool.parameters)
+  const exec = { signal, callId: 'diagnostic-create', rootCallId: 'diagnostic-create', agent: { id: scope.sessionId, session: { id: scope.sessionId, header: { id: scope.sessionId, createdAt: 100 } } } }
+  const initial = diagnosticRound(), bad = { title: '作文', body: '请提交作文', initialRound: { ...initial, presentation: diagnosticStyle } }, before = structuredClone(bad)
+  await assert.rejects(tool.execute(bad, exec), error => error.code === 'lifecycle-form-invalid'
+    && error.validation.path === 'initialRound.presentation' && error.validation.correctPath === 'initialRound.form.presentation'
+    && error.message.includes('initialRound.form.presentation'))
+  assert.equal(prepares, 0); assert.equal(created, 0); assert.deepEqual(bad, before)
+  const fixed = { ...bad, initialRound: { ...initial, form: { ...initial.form, presentation: diagnosticStyle } } }
+  const result = await tool.execute(fixed, exec)
+  assert.equal(prepares, 1); assert.equal(created, 1)
+  assert.deepEqual(result.surface.initialRound, fixed.initialRound)
+  assert.equal(result.surface.initialRound.form.schema, 'human.form.v3')
+  assert(result.surface.initialRound.form.attachment.mediaTypes.includes(docx))
+  assert.equal(humanInitialRound(bad.initialRound), undefined)
+  assert.deepEqual(humanInitialRound(fixed.initialRound), fixed.initialRound)
+})
+
+test('additional collection and private correction receive the same path diagnostics and preserve valid document requests', async () => {
+  const calls = [], created = []
+  const tools = lifecycleTools({ nodeId: scope.nodeId, assertAgent() {}, lifecycle: { async prepare(_scope, _ref, kind, _revision, content) {
+    calls.push({ kind, content: structuredClone(content) }); return { draftRef: {} }
+  } }, core: { async createWorkflow(...args) { created.push(args); return {} } } })
+  const exec = { signal, callId: 'diagnostic-round', rootCallId: 'diagnostic-round', agent: { id: scope.sessionId, session: { id: scope.sessionId, header: { id: scope.sessionId, createdAt: 100 } } } }
+  const round = diagnosticRound(), { recipientRefs: _refs, ...correction } = round
+  const cases = [
+    ['round', { ...round, presentation: diagnosticStyle }, { ...round, form: { ...round.form, presentation: diagnosticStyle } }, 'content'],
+    ['review', { submissionId: 's'.repeat(24), submissionVersion: 1, title: '反馈', body: '请补充', correction: { ...correction, presentation: diagnosticStyle } },
+      { submissionId: 's'.repeat(24), submissionVersion: 1, title: '反馈', body: '请补充', correction: { ...correction, form: { ...round.form, presentation: diagnosticStyle } } }, 'content.correction'],
+  ]
+  for (const [kind, bad, fixed, path] of cases) {
+    const tool = tools.find(t => t.name === `human_task_prepare_${kind}`), count = calls.length
+    assertSupportedJsonSchema(tool.parameters)
+    await assert.rejects(tool.execute({ taskRef, expectedRevision: 1, content: bad, preview: 'page' }, exec), error => error.validation.path === `${path}.presentation`
+      && error.validation.correctPath === `${path}.form.presentation`)
+    assert.equal(calls.length, count)
+    await tool.execute({ taskRef, expectedRevision: 1, content: fixed, preview: 'page' }, exec)
+    assert.deepEqual(calls.at(-1).content, fixed)
+    assert.equal(calls.length, count + 1)
+  }
+  assert.equal(created.length, 2)
+  assert.equal(humanRoundIssue(round, 'content', 'round'), undefined)
+  assert.equal(humanRoundIssue(correction, 'content.correction', 'correction'), undefined)
+})
+
+test('valid form does not turn a real receiver failure into a schema error or retry with a downgraded attachment', async () => {
+  let attempts = 0
+  const tool = lifecycleTools({ nodeId: scope.nodeId, assertAgent() {}, lifecycle: { async prepareInitial() {
+    attempts++; throw Object.assign(new Error('接收节点与服务端尚未共同确认文档收件能力'), { code: 'receiver-file-unavailable' })
+  } }, core: { createCollection() { assert.fail('must not publish without receiver') } } }).find(t => t.name === 'human_task_create')
+  const exec = { signal, callId: 'receiver-check', rootCallId: 'receiver-check', agent: { id: scope.sessionId, session: { id: scope.sessionId, header: { id: scope.sessionId, createdAt: 100 } } } }
+  const input = { title: '作文', body: '请提交', initialRound: diagnosticRound() }, before = structuredClone(input)
+  await assert.rejects(tool.execute(input, exec), error => error.code === 'receiver-file-unavailable' && error.validation === undefined)
+  assert.equal(attempts, 1); assert.deepEqual(input, before)
 })
 test('bounded admission accepts JPEG/PNG, PDF, UTF8 TXT/CSV and distinct DOCX/XLSX/PPTX containers', () => {
   validateSubmissionFile(png, 'image/png'); validateSubmissionFile(Buffer.from([255, 216, 255, 217]), 'image/jpeg')

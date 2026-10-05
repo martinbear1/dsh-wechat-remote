@@ -362,6 +362,38 @@ test('published reminder plans expose real delivery facts without routing secret
   await assert.rejects(effects(), { code: 'lifecycle-response-invalid' })
 })
 
+test('draft diagnostics expose exact recoverability and retain legacy unknown without leaking content', async t => {
+  const content = { title: '补充资料', instructions: '提交需要的资料', form: form(), closesAt: null, recipientRefs: null }
+  const ref = { schema: 'human.lifecycle.draft.ref.v1', draftId: 'a'.repeat(24), kind: 'round', version: 1,
+    digest: sha256(canonicalSubmission({ taskRef, kind: 'round', expectedRevision: 1, content })) }
+  const draft = { draftRef: ref, taskRef, expectedRevision: 1, content, expiresAt: Date.now() + 60000, state: 'draft' }
+  const page = { drafts: [draft], submissions: [], nextOffset: null }, f = await lifecycleFixture(t, { page })
+  const read = async () => (await f.runtime.query(scope, taskRef, signal)).drafts[0]
+  assert.equal((await read()).approvalStatus, 'unknown')
+  assert.equal((await read()).currentRevision, null)
+  assert.equal((await read()).recovery, 'query-current-status')
+  for (const [status, revision, expected] of [['ready', 1, 'await-owner-action'], ['stale', 2, 'read-task-and-prepare-new-draft'],
+    ['expired', 1, 'read-task-and-prepare-new-draft'], ['published', 2, 'check-operation-effects']]) {
+    draft.approvalStatus = status; draft.currentRevision = revision; draft.state = status === 'published' ? 'published' : 'draft'
+    const record = await read()
+    assert.equal(record.approvalStatus, status); assert.equal(record.currentRevision, revision)
+    assert.equal(record.expectedRevision, 1); assert.equal(record.recovery, expected)
+    assert.equal(record.content, undefined); assert.deepEqual(record.draftRef, ref)
+  }
+  const preview = await f.runtime.preview(scope, taskRef, ref, signal)
+  assert.equal(preview.revision, 1); assert.equal(preview.asOf, 100)
+  assert.deepEqual(preview.draft.draftRef, ref)
+  for (const invalid of [{ approvalStatus: 'ready', currentRevision: 2, state: 'draft' },
+    { approvalStatus: 'stale', currentRevision: 0, state: 'draft' },
+    { approvalStatus: 'stale', currentRevision: 1, state: 'draft' },
+    { approvalStatus: 'published', currentRevision: 2, state: 'draft' },
+    { approvalStatus: 'expired', currentRevision: 2, state: 'published' },
+    { approvalStatus: 'ready', currentRevision: undefined, state: 'draft' }]) {
+    Object.assign(draft, invalid)
+    await assert.rejects(read(), { code: 'lifecycle-response-invalid' })
+  }
+})
+
 test('fixed initial forms and approval surfaces reject authority smuggling and remain origin/digest bound', async () => {
   assert(humanForm(form()))
   for (const extra of [{ url: 'https://evil' }, { script: 'run()' }]) assert.equal(humanForm({ ...form(), ...extra }), undefined)

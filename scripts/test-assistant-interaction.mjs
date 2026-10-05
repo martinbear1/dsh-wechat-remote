@@ -4,7 +4,7 @@ import { mkdtemp, writeFile, readdir, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { randomBytes } from 'node:crypto'
-import { ASSISTANT_INTERACTION_GUIDANCE, ASSISTANT_AUTHORING_GUIDANCE, ASSISTANT_WORKSPACE_GUIDANCE, HUMAN_TASK_CONTENT_GUIDANCE } from '../lib/assistant-presets/interaction-guidance.js'
+import { ASSISTANT_INTERACTION_GUIDANCE, ASSISTANT_AUTHORING_GUIDANCE, ASSISTANT_WORKSPACE_GUIDANCE, ASSISTANT_RELIABILITY_GUIDANCE, HUMAN_TASK_CONTENT_GUIDANCE } from '../lib/assistant-presets/interaction-guidance.js'
 import { assistantDefinition, assistantGuidance } from '../lib/assistant-presets/definition.js'
 import { assistantTemplates } from '../lib/assistant-presets/catalog.js'
 import { assistantTools, registerAssistantContext } from '../lib/assistant-presets/tools.js'
@@ -84,6 +84,8 @@ test('real assistant guidance includes shared rules once without replacing profe
     const d = assistantDefinition(template.definition), text = assistantGuidance(d)
     includesOnce(text, ASSISTANT_INTERACTION_GUIDANCE)
     includesOnce(text, ASSISTANT_WORKSPACE_GUIDANCE)
+    includesOnce(text, ASSISTANT_RELIABILITY_GUIDANCE)
+    assert.match(text, /职业助手工作方法 v5/)
     assert(text.includes(d.role))
     for (const method of d.methods) assert(text.includes(method))
     assert.match(text, /候选问题按需询问，缺项不阻挡无关任务/)
@@ -94,6 +96,7 @@ test('real assistant guidance includes shared rules once without replacing profe
   assert(assistantGuidance(custom).includes(custom.role))
   assert(assistantGuidance(custom).includes(custom.methods[0]))
   includesOnce(assistantGuidance(custom), ASSISTANT_WORKSPACE_GUIDANCE)
+  includesOnce(assistantGuidance(custom), ASSISTANT_RELIABILITY_GUIDANCE)
   assert.deepEqual(assistantDefinition(custom).onboarding, [])
 })
 
@@ -117,6 +120,7 @@ test('native preview really appends new interaction guidance and retains inherit
     const plugins = JSON.parse(preview.patch)[0].insert[0].config.plugins
     assert.equal(plugins[0].config.prefix, 'Inherited native policy\n\n' + assistantGuidance(d))
     includesOnce(plugins[0].config.prefix, ASSISTANT_INTERACTION_GUIDANCE)
+    includesOnce(plugins[0].config.prefix, ASSISTANT_RELIABILITY_GUIDANCE)
     assert.equal(plugins[0].config.suffix, 'Inherited safety suffix')
     assert.equal(plugins[0].config.complete, false)
     assert.equal(plugins[0].config.includeRuntimeContext, true)
@@ -124,6 +128,24 @@ test('native preview really appends new interaction guidance and retains inherit
     assert.equal(base[0].config.prefix, 'Inherited native policy')
     assert.deepEqual(await readdir(directory), ['installation.json'])
   } finally { await adapter.close() }
+})
+
+test('new professions and creator presets share recovery methods, not a teacher-only script or test-agent memory', () => {
+  const text = ASSISTANT_RELIABILITY_GUIDANCE
+  for (const expected of ['不擅自删掉用户要求', '最小修正', '服务器明确拒绝和网络丢回执是两类状态',
+    '不反复造相同按钮', '不能凭版本号不同猜测', '不把一次错误或推测写成长期能力限制',
+    '不为绕过工具的会话边界', '不宣称能代替宿主的文件权限隔离']) assert(text.includes(expected), expected)
+  includesOnce(HUMAN_WORKFLOW_SKILL.content, text)
+  assert.match(HUMAN_WORKFLOW_SKILL.content, /initialRound.form.presentation/)
+  assert.match(HUMAN_WORKFLOW_SKILL.content, /approvalStatus/)
+  assert.match(HUMAN_WORKFLOW_SKILL.content, /不固定所有职业/)
+  const designer = assistantTemplates().find(item => item.id === 'designer')
+  assert.match(designer.definition.methods.join('\n'), /用新建工作实例的能力组合来验收/)
+  for (const name of ['活动协调助理', '模式创造者']) {
+    const generated = assistantGuidance({ ...definition(), name, role: '按用户目标设计不同工作方式', onboarding: [] })
+    includesOnce(generated, text)
+    assert(!generated.includes('dshtest'))
+  }
 })
 
 test('registered workflow skill carries deduplication and round meaning, not a mandatory profession pipeline', () => {
@@ -202,7 +224,9 @@ test('real lifecycle tool schema separates short summary, complete instructions 
   assert.match(initial.properties.sourceRecipientRefs.description, /selected people who never opened the task/)
   assert(!tool.parameters.required.includes('sourceSurfaceId'))
   const schema = tool.parameters.properties.initialRound.properties.form
-  assert.equal(schema, HUMAN_MEMBER_FORM_SCHEMA)
+  const { description: formDescription, ...formStructure } = schema
+  assert.deepEqual(formStructure, HUMAN_MEMBER_FORM_SCHEMA)
+  assert.match(formDescription, /INSIDE this form object/)
   assert.deepEqual(schema.required, ['schema', 'fields', 'attachment'])
   assert.deepEqual(schema.properties.fields.items.required, ['key', 'label', 'kind', 'required'])
   assert.match(schema.properties.fields.items.properties.label.description, /required\/type are rendered separately/)
@@ -276,7 +300,7 @@ test('actual task output is brief and truthful while presentation metadata prese
 test('current persona, drafting tool and skill teach task selection rather than a mandatory teacher page', () => {
   const teacher = assistantTemplates().find(item => item.id === 'teacher').definition
   const persona = assistantGuidance(teacher)
-  assert.match(persona, /职业助手工作方法 v4/)
+  assert.match(persona, /职业助手工作方法 v5/)
   assert.match(persona, /你就是老师身边的教学与班级事务助理/)
   assert.match(persona, /不问“是否创建任务卡”/)
   assert.match(persona, /不自行增加|不顺手添加/)

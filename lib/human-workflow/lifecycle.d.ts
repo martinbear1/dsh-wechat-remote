@@ -25,6 +25,8 @@ export interface LifecycleDraft {
     expiresAt: number;
     state: 'draft' | 'published';
     result?: unknown;
+    currentRevision?: number;
+    approvalStatus?: 'ready' | 'published' | 'stale' | 'expired';
     context?: {
         taskTitle: string;
         roundTitle?: string;

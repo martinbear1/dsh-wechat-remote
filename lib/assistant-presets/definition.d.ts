@@ -24,6 +24,8 @@ export declare function legacyAssistantGuidanceV1(definition: AssistantDefinitio
 export declare function legacyAssistantGuidanceV2(definition: AssistantDefinition): string;
 /** Frozen V3 native persona for already approved persisted plans. */
 export declare function legacyAssistantGuidanceV3(definition: AssistantDefinition): string;
-/** New previews use V4. Previously approved native patches remain immutable;
- * adopting new persona wording requires a new owner-reviewed preview. */
+/** Frozen V4: existing installed or approved native patches stay verifiable. */
+export declare function legacyAssistantGuidanceV4(definition: AssistantDefinition): string;
+/** Every newly authored profession, custom or creator preset inherits the
+ * same reliability method. No mutation of an existing Agent or approved plan. */
 export declare function assistantGuidance(definition: AssistantDefinition): string;

@@ -23,6 +23,7 @@ export function receiverBinding(value: unknown, nodeId: string): { binding: Node
 export interface LifecycleDraft {
   draftRef: HumanWorkflowDraftRef; taskRef: HumanTaskRef; expectedRevision: number; content: Record<string, unknown>
   expiresAt: number; state: 'draft' | 'published'; result?: unknown
+  currentRevision?: number; approvalStatus?: 'ready' | 'published' | 'stale' | 'expired'
   context?: { taskTitle: string; roundTitle?: string; submissionCreatedAt?: number; reminderTargetCount?: number }
   execution?: { operationId: string; phase: 'prepared' | 'invoked' | 'settled'; outcome: string | null; reason: string | null }
 }
@@ -86,6 +87,16 @@ function lifecycleDraft(value: unknown): LifecycleDraft {
   if (!row(value) || !humanWorkflowDraftRef(value.draftRef) || !humanTaskRef(value.taskRef) || !revision(value.expectedRevision)
     || !row(value.content) || !Number.isSafeInteger(value.expiresAt) || !['draft', 'published'].includes(String(value.state))) throw fail('lifecycle-response-invalid', '任务方案格式无效')
   bounded(value, HUMAN_SURFACE_MAX_BYTES)
+  // New servers add a paired, authenticated status. An old server omitting
+  // both fields is unknown, not implicit permission to approve/retry.
+  if (value.currentRevision !== undefined || value.approvalStatus !== undefined) {
+    if (!revision(value.currentRevision) || !['ready', 'published', 'stale', 'expired'].includes(String(value.approvalStatus))
+      || Number(value.currentRevision) < value.expectedRevision
+      || (value.state === 'published') !== (value.approvalStatus === 'published')
+      || value.approvalStatus === 'ready' && value.currentRevision !== value.expectedRevision
+      || value.approvalStatus === 'stale' && value.currentRevision === value.expectedRevision)
+      throw fail('lifecycle-response-invalid', '任务方案的当前状态不一致')
+  }
   const ref = humanWorkflowDraftRef(value.draftRef)!
   if (ref.kind === 'reminder' && Object.hasOwn(value.content, 'recipientSource') && !lifecycleReminderContent(value.content))
     throw fail('lifecycle-response-invalid', '提醒对象来源无效')
@@ -123,6 +134,13 @@ function draftEffects(draft: LifecycleDraft) {
   return { contentState: !published ? 'not-published' : kind === 'review' ? 'private-feedback-visible'
     : kind === 'round' ? 'existing-task-updated' : 'unchanged',
   groupCardState: 'not-sent-by-this-action', notificationState }
+}
+function draftRecovery(draft: LifecycleDraft) {
+  const approvalStatus = draft.approvalStatus ?? (draft.state === 'published' ? 'published' : 'unknown')
+  return { expectedRevision: draft.expectedRevision, currentRevision: draft.currentRevision ?? null, approvalStatus,
+    recovery: approvalStatus === 'stale' || approvalStatus === 'expired' ? 'read-task-and-prepare-new-draft'
+      : approvalStatus === 'published' ? 'check-operation-effects'
+        : approvalStatus === 'ready' ? 'await-owner-action' : 'query-current-status' }
 }
 /** Local receiver and draft tools never approve. Only the authenticated owner
  * WeChat endpoint can publish a draft. No Agent restoration or execution here. */
@@ -237,7 +255,7 @@ export class WorkflowLifecycle {
       roundRefs: rounds.map(item => ({ id: item.id, number: item.number, title: item.title })), submissions: copy(submissions),
       participants: copy(page.participants), drafts: (page.drafts as unknown[]).map(value => {
         const draft = lifecycleDraft(value); return { draftRef: draft.draftRef, state: draft.state, expiresAt: draft.expiresAt,
-          effects: draftEffects(draft) }
+          ...draftRecovery(draft), effects: draftEffects(draft) }
       }), nextOffset: submissions.length < (page.submissions as unknown[]).length ? offset + submissions.length : page.nextOffset, asOf: (this.options.now ?? Date.now)() }
   }
   async recipients(scope: WorkflowScope, taskRef: HumanTaskRef, signal: AbortSignal, roundId: string | null = null, offset = 0, snapshot?: string) {
@@ -296,7 +314,8 @@ export class WorkflowLifecycle {
     const page = await this.get(scope, taskRef, signal, { draftId: ref.draftId })
     const draft = (page.drafts as unknown[]).map(lifecycleDraft).find(item => canonicalSubmission(item.draftRef) === canonicalSubmission(ref))
     if (!draft) throw fail('lifecycle-draft-unavailable', '原任务方案已不可用；不能替换成其他版本')
-    return { schema: 'human.workflow.preview.v1', ref: copy(ref), taskRef: copy(taskRef), draft }
+    return { schema: 'human.workflow.preview.v1', ref: copy(ref), taskRef: copy(taskRef),
+      revision: page.revision, asOf: page.asOf, draft }
   }
   private receipt(scope: WorkflowScope, taskRef: HumanTaskRef, submissionId: string, submissionVersion: number) {
     return this.state.current().receipts?.find(r => sameScope(r.scope, scope) && sameTaskRef(r.taskRef, taskRef)

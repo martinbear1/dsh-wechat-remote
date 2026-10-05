@@ -16,3 +16,20 @@ export interface HumanInitialRound {
 }
 export declare function humanForm(value: unknown): Record<string, unknown> | undefined;
 export declare function humanInitialRound(value: unknown): HumanInitialRound | undefined;
+/** Diagnostic data, not a second permissive parser. Never rewrite the request,
+ * remove a requested format, echo submitted values, or infer runtime readiness. */
+export interface HumanFormIssue {
+    schema: 'human.form.issue.v1';
+    path: string;
+    code: 'object-required' | 'required' | 'unsupported-field' | 'misplaced-field' | 'schema-unsupported' | 'schema-feature-mismatch' | 'type-invalid' | 'value-invalid' | 'limit-exceeded' | 'attachment-format-unsupported' | 'attachment-kind-mismatch';
+    message: string;
+    expected?: string;
+    correctPath?: string;
+}
+export declare function humanFormIssue(value: unknown, path?: string): HumanFormIssue | undefined;
+export declare function humanRoundIssue(value: unknown, path?: string, mode?: 'initial' | 'round' | 'correction'): HumanFormIssue | undefined;
+/** Message carries the safe path too: some native hosts display only Error.message. */
+export declare function humanFormError(problem: HumanFormIssue): Error & {
+    code: string;
+    validation: HumanFormIssue;
+};

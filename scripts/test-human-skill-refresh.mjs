@@ -85,7 +85,7 @@ test('native skill discovery alone does not reload changed bodies with an unchan
   second()
 })
 
-for (const revision of ['2026-10-04-composable-targets-v1', '2026-10-04-profession-scope-v2']) test(`a session that loaded ${revision} discovers the current business capability methods`, async t => {
+for (const revision of ['2026-10-04-composable-targets-v1', '2026-10-04-profession-scope-v2', '2026-10-05-workspace-composition-v4']) test(`a session that loaded ${revision} discovers the current business capability methods`, async t => {
   const f = await fixture(t)
   const remove = f.skills.register({ ...HUMAN_WORKFLOW_SKILL,
     description: `修订 ${revision}：按用户意图组合群任务、新事项/补交、已知对象和单独提醒；用业务语言交互。旧会话参与相关工作时按需重新加载。`,

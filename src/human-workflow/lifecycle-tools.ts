@@ -5,7 +5,7 @@ import { humanSurface, humanTaskRef, type HumanTaskRef, type HumanWorkflowDraftR
 import { exact, fail, plain, row, sameScope, type WorkflowScope } from './data.js'
 import { sha256 } from './submission-crypto.js'
 import { lifecycleReminderPreview, type WorkflowLifecycle } from './lifecycle.js'
-import { humanInitialRound } from '../human-tools/form.js'
+import { humanInitialRound, humanRoundIssue, humanFormError } from '../human-tools/form.js'
 import { HUMAN_MEMBER_FORM_SCHEMA } from './member-form-schema.js'
 import { HUMAN_CARD_ASSET_SCHEMA, humanCardAsset } from '../human-tools/card-cover.js'
 import type { WorkspaceDirectory } from './workspace-directory.js'
@@ -16,7 +16,8 @@ const text = { type: 'string' }, integer = { type: 'integer' }
 const task = object({ schema: { type: 'string', const: 'human.task.ref.v1' }, taskId: text, deliveryId: text })
 const recipient = object({ schema: { type: 'string', const: 'human.recipient.ref.v1' }, taskId: text, deliveryId: text,
   source: { type: 'string', enum: ['observed', 'selection', 'audience'] }, ref: text, revision: integer })
-const roundFields = { title: { type: 'string', description: 'At most 80 characters. A short business title, not a protocol/round label.' }, instructions: { type: 'string', description: 'At most 2000 characters. The authoritative concise participant requirements. Do not duplicate them in body, field help and presentation.blocks; include all materially needed requirements, not a tool tutorial.' }, form: HUMAN_MEMBER_FORM_SCHEMA,
+const roundFields = { title: { type: 'string', description: 'At most 80 characters. A short business title, not a protocol/round label.' }, instructions: { type: 'string', description: 'At most 2000 characters. The authoritative concise participant requirements. Do not duplicate them in body, field help and form.presentation.blocks; include all materially needed requirements, not a tool tutorial.' }, form: { ...HUMAN_MEMBER_FORM_SCHEMA,
+  description: 'The complete versioned form. fields, attachment and optional presentation belong INSIDE this form object, never beside it. v3 file supports image/document alternatives (including DOCX, not legacy DOC) for initial tasks, additional rounds and private corrections alike. A validation error is not proof of receiver limitations; repair the reported field without dropping requested formats.' },
   closesAt: { oneOf: [integer, { type: 'null' }], description: 'UTC epoch milliseconds, or null.' } }
 const round = object({ ...roundFields, recipientRefs: { oneOf: [{ type: 'null' }, { type: 'array', items: text }], description: 'null means allowed group participants; a list must contain 1..100 exact observed participantRefs. cover is allowed only with null for a public round.' }, cover: HUMAN_CARD_ASSET_SCHEMA }, [...Object.keys(roundFields), 'recipientRefs'])
 const initialRoundSchema = object({ ...roundFields, recipientRefs: { type: 'null' }, audience: {
@@ -81,7 +82,7 @@ export function lifecycleTools(options: LifecycleToolsOptions): ToolDefinition[]
           || value.workspaceSourceId !== undefined && (typeof value.workspaceSourceId !== 'string' || !/^[a-f0-9]{32}$/.test(value.workspaceSourceId))
           || value.sourceSurfaceId !== undefined && (typeof value.sourceSurfaceId !== 'string' || !/^[a-f0-9]{32}$/.test(value.sourceSurfaceId))
           || !plain(exec.callId, 256) || !plain(exec.rootCallId, 256)) throw fail('lifecycle-arguments-invalid', '首轮任务参数无效')
-        const initial = humanInitialRound(value.initialRound); if (!initial) throw fail('lifecycle-form-invalid', '首轮表单不受支持')
+        const initial = humanInitialRound(value.initialRound); if (!initial) throw humanFormError(humanRoundIssue(value.initialRound)!)
         if (initial.audience === 'known-members' && value.sourceSurfaceId === undefined && value.workspaceSourceId === undefined)
           throw fail('human-source-required', '向已登记成员安排新任务需要同会话已成功发送的来源任务')
         await options.lifecycle.prepareInitial(exec.signal, initial.form.attachment !== null, row(initial.form.attachment) && initial.form.attachment.kind === 'file')
@@ -130,7 +131,8 @@ export function lifecycleTools(options: LifecycleToolsOptions): ToolDefinition[]
       + 'Read human_task_lifecycle first and pass its expectedRevision. The cloud validates schema, ownership, references and current conditions. This tool only drafts; only the owner can approve with fresh WeChat identity. '
       + 'No private evaluation goes in public card title/body. Finish your reply so the owner can click the native structured approval action. Never forge JSON buttons, self-approve, announce publication, or retry an uncertain reminder. '
       + (kind === 'round' ? 'Optional content.cover is the exact public 5:4 asset returned by human_card_cover_prepare, allowed only with recipientRefs:null. The exact image digest is included in owner approval; changing it needs a new draft. ' : 'No cover is accepted for private feedback, its correction, or reminders. ')
-      + (kind === 'review' ? 'Use the exact latest received submission version, and base feedback on actual image/form content. Cloud holds published private feedback plaintext under participant ACL; do not claim end-to-end encrypted results.' : 'Forms use fixed supported field schemas; no code, URL, file paths, remote widgets or authority fields.'),
+      + (kind === 'review' ? 'Use the exact latest received submission version, and base feedback on actually read form/image/document content. Receiving a file or its path is not reading it; use a real compatible document reader before discussing its contents. Cloud holds published private feedback plaintext under participant ACL; do not claim end-to-end encrypted results.' : 'Forms use fixed supported field schemas; no code, URL, file paths, remote widgets or authority fields.')
+      + (kind !== 'reminder' ? ' The form has the same attachment support as human_task_create: v1/v2 images, v3 kind=file for JPEG/PNG/PDF/DOCX/XLSX/PPTX/TXT/CSV, ONE attachment <=10MiB. Presentation belongs inside content.form.presentation (or content.correction.form.presentation), not beside form. Parameter errors must not silently downgrade a requested document to an image.' : ''),
     parameters: object({ taskRef: task, expectedRevision: integer, content,
       preview: { type: 'string', enum: ['inline', 'page'], description: 'Defaults inline when the exact current draft can be fully rendered. Shows actual content and target in the owner conversation; click explicitly confirms only this immutable version. page opens a separate complete preview. Unsupported inline content (for example a cover not visibly rendered) falls back to page, never drops details. Neither choice sends automatically, approves unseen content or bypasses a real native send tap.' },
     }, ['taskRef', 'expectedRevision', 'content']),
@@ -149,6 +151,9 @@ export function lifecycleTools(options: LifecycleToolsOptions): ToolDefinition[]
       const a = args(value, ['taskRef', 'expectedRevision', 'content'], ['preview']), origin = scope(exec, options.nodeId)
       if (a.preview !== undefined && !['inline', 'page'].includes(String(a.preview))) throw fail('lifecycle-arguments-invalid', '提醒预览方式无效')
       if (!row(a.content) || !plain(exec.callId, 256) || !plain(exec.rootCallId, 256)) throw fail('lifecycle-arguments-invalid', '任务草稿或调用身份无效')
+      const problem = kind === 'round' ? humanRoundIssue(a.content, 'content', 'round')
+        : kind === 'review' && a.content.correction !== null ? humanRoundIssue(a.content.correction, 'content.correction', 'correction') : undefined
+      if (problem) throw humanFormError(problem)
       const draft = await options.lifecycle.prepare(origin, a.taskRef, kind as HumanWorkflowDraftRef['kind'], a.expectedRevision as number, a.content,
         sha256(JSON.stringify([origin, exec.rootCallId, kind])), exec.signal)
       const surface = await options.core.createWorkflow({ scope: origin.sessionId, generation: origin.sessionGeneration, callId: String(exec.callId), rootCallId: String(exec.rootCallId) },

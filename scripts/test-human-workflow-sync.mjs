@@ -6,7 +6,7 @@ import { WorkflowFileStore } from '../lib/human-workflow/persistence.js'
 import { mkdtemp, unlink, rmdir, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { WorkflowHttpTransport } from '../lib/human-workflow/transport.js'
+import { WorkflowHttpTransport, workflowErrorMessage } from '../lib/human-workflow/transport.js'
 import { HUMAN_CARD_REQUEST_MAX_BYTES, HUMAN_LIFECYCLE_RESPONSE_MAX_BYTES } from '../lib/human-tools/capacity.js'
 import { registerHumanWorkflowSkill, HUMAN_WORKFLOW_SKILL } from '../lib/human-workflow/dsh-skill.js'
 import { Context } from '@deepseek-ai/cordis'
@@ -304,6 +304,38 @@ test('attachment quota and ticket errors expose only safe fixed messages and nev
     await assert.rejects(client.request('objects/claim', {}, signal()), cause => cause.code === code && cause.code !== 'binding_revoked'
       && !/secret|private|token/.test(cause.message) && cause.message !== '群任务服务暂不可用')
   }
+})
+
+test('stale reminder conditions and invalid form errors remain actionable, safe and distinct from service outages', async () => {
+  const pair = generateKeyPairSync('ed25519'), identity = { nodeId, privateKeyPem: pair.privateKey.export({ type: 'pkcs8', format: 'pem' }) }
+  for (const [code, fragment] of [['recipients_changed', /提醒条件/], ['invalid_lifecycle', /参数结构/], ['invalid_form', /表单参数/], ['receiver_format_unsupported', /接收电脑/],
+    ['lifecycle_conflict', /任务状态已更新/], ['draft_expired', /已过期/], ['draft_changed', /原版本不一致/], ['future_business_error', /操作未完成/]]) {
+    let attempts = 0
+    const client = new WorkflowHttpTransport('https://relay.example', () => identity, async () => {
+      attempts++; return new Response(JSON.stringify({ error: { code, message: 'private-user-content-or-token' } }), { status: 409 })
+    })
+    await assert.rejects(client.request('lifecycle', {}, signal()), error => {
+      assert.equal(error.code, code); assert.equal(error.status, 409); assert.match(error.message, fragment)
+      assert(!error.message.includes('private-user-content-or-token')); assert.notEqual(error.message, '群任务服务暂不可用'); return true
+    })
+    assert.equal(attempts, 1, 'no widening, recipient change, retry, or form downgrade')
+  }
+})
+
+test('unknown or malformed server codes stay neutral while known transport failures keep their precise meaning', async () => {
+  const pair = generateKeyPairSync('ed25519'), identity = { nodeId, privateKeyPem: pair.privateKey.export({ type: 'pkcs8', format: 'pem' }) }
+  for (const code of [null, {}, 'C:/private/token', 'bad\nmessage', 'x'.repeat(81)]) {
+    const client = new WorkflowHttpTransport('https://relay.example', () => identity, async () =>
+      new Response(JSON.stringify({ error: { code, message: 'private-user-content-or-token' } }), { status: 400 }))
+    await assert.rejects(client.request('lifecycle', {}, signal()), error => {
+      assert.equal(error.code, 'workflow-request-failed'); assert.match(error.message, /^操作未完成/)
+      assert(!/private|token|bad\nmessage/.test(error.message)); return true
+    })
+  }
+  assert.match(workflowErrorMessage('workflow-unavailable'), /服务暂不可用/)
+  assert.match(workflowErrorMessage('workflow-network-unavailable'), /网络连接暂不可用/)
+  assert.match(workflowErrorMessage('workflow-timeout'), /请求超时/)
+  assert.match(workflowErrorMessage('unknown'), /^操作未完成/)
 })
 test('empty or HTML authentication failures clear the replica instead of returning stale facts', async () => {
   for (const body of [null, 'Forbidden']) for (const status of [401, 403]) {

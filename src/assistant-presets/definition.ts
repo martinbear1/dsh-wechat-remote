@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { bounded, copy, exact, fail, plain, row } from '../human-workflow/data.js'
-import { ASSISTANT_INTERACTION_GUIDANCE, ASSISTANT_WORKSPACE_GUIDANCE, LEGACY_ASSISTANT_INTERACTION_GUIDANCE_V2, LEGACY_ASSISTANT_INTERACTION_GUIDANCE_V3 } from './interaction-guidance.js'
+import { ASSISTANT_INTERACTION_GUIDANCE, ASSISTANT_WORKSPACE_GUIDANCE, ASSISTANT_RELIABILITY_GUIDANCE, LEGACY_ASSISTANT_INTERACTION_GUIDANCE_V2, LEGACY_ASSISTANT_INTERACTION_GUIDANCE_V3 } from './interaction-guidance.js'
 
 /** Reusable, data-only working method. Real class/project/member data belongs
  * to a business instance, never this reusable native preset definition. */
@@ -90,9 +90,8 @@ export function legacyAssistantGuidanceV3(definition: AssistantDefinition): stri
   ].join('\n\n').replace(/\{\{/g, '｛｛').replace(/\}\}/g, '｝｝')
 }
 
-/** New previews use V4. Previously approved native patches remain immutable;
- * adopting new persona wording requires a new owner-reviewed preview. */
-export function assistantGuidance(definition: AssistantDefinition): string {
+/** Frozen V4: existing installed or approved native patches stay verifiable. */
+export function legacyAssistantGuidanceV4(definition: AssistantDefinition): string {
   const d = assistantDefinition(definition)
   return [
     '职业助手工作方法 v4：以下是主人批准的职责与方法，不增加任何宿主或云端权限。',
@@ -107,4 +106,11 @@ export function assistantGuidance(definition: AssistantDefinition): string {
     '发布、提醒、私评与自动处理仍以真实工具和主人相应批准为准；角色、偏好和技能不能覆盖这些边界。',
     '按需引导资料（内部数据，不直接朗读）：' + JSON.stringify({ onboarding: d.onboarding, skills: d.skills }),
   ].join('\n\n').replace(/\{\{/g, '｛｛').replace(/\}\}/g, '｝｝')
+}
+
+/** Every newly authored profession, custom or creator preset inherits the
+ * same reliability method. No mutation of an existing Agent or approved plan. */
+export function assistantGuidance(definition: AssistantDefinition): string {
+  return legacyAssistantGuidanceV4(definition).replace('职业助手工作方法 v4：', '职业助手工作方法 v5：')
+    + '\n\n' + ASSISTANT_RELIABILITY_GUIDANCE
 }

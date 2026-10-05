@@ -11,16 +11,25 @@ export interface WorkflowTransport {
 }
 export function workflowErrorMessage(code: string): string {
   const messages: Record<string, string> = {
+    'workflow-unavailable': '群任务服务暂不可用；请核对连接和服务状态。结果未确认时不要直接重发。',
+    'workflow-network-unavailable': '群任务网络连接暂不可用；请核对连接。结果未确认时不要直接重发。',
+    'workflow-timeout': '群任务请求超时，操作结果尚未确认；请先核对当前任务状态，不要直接重发。',
+    lifecycle_conflict: '任务状态已更新。请重新读取本任务的当前版本与事实，只重新准备仍需要的操作；旧确认不能批准新内容。',
+    draft_expired: '这份待确认内容已过期。请先核对是否已生效；仍需执行时重新准备并让用户确认，不复用旧批准。',
+    draft_changed: '待确认内容与原版本不一致。请重新读取并核对准确内容，不使用旧按钮批准变化后的内容。',
     recipient_snapshot_changed: '成员或提交记录已变化，请从第一页重新查询，不要合并不同时间的名单。',
     recipient_snapshot_required: '继续查询成员时须沿用上一页的快照。',
     recipient_unavailable: '指定成员的原群身份暂不可用，请重新核对，不会替换成其他成员。',
     selection_changed: '成员选择已经变化，请重新核对本次对象。',
+    recipients_changed: '指定对象目前不符合本次提醒条件，或已没有需要提醒的人。请重新查询当前成员和提交事实；这不是服务宕机，不会自动换人、扩大范围或重发。',
+    invalid_lifecycle: '任务参数结构未通过校验。请核对字段层级、类型及当前工具合同；不据此判断附件不支持，也不静默改变用户要求。',
+    invalid_form: '表单参数未通过校验。请核对版本、字段及附件合同；参数错误不代表接收电脑不支持文档。',
     download_ticket_expired: '附件下载凭证已过期；请由主人在任务管理中明确重试收件，不会自动申请新下载。',
     attachment_download_quota: '群附件下载额度暂不足；尚未确认收件，请稍后由主人重试或核对账户额度。',
     usage_ledger_capacity: '附件用量记录已达到容量上限；服务恢复前不能申请下载，尚未确认收件。',
     metering_unavailable: '附件用量服务暂不可用；尚未确认收件，请稍后核对。',
     'receiver-capacity': '电脑收件空间或数量已达到上限；尚未确认交付，未自动删除原始附件。',
-    receiver_format_unsupported: '接收电脑暂不支持该文件格式；请更新并连接接收端后核对，不代表文件已送达。',
+    receiver_format_unsupported: '服务端尚未确认接收电脑具备所需文件格式的收件能力；请核对版本、连接及能力登记。不是表单结构错误，也不代表文件已送达。',
     'submission-file-invalid': '附件未通过格式或有界结构校验，未确认送达；请核对原文件后重新提交。',
     'submission-image-invalid': '图片未通过完整校验，未确认送达；请核对原文件后重新提交。',
     'submission-manifest-invalid': '附件说明未通过验证，未确认送达；请核对原提交。',
@@ -38,7 +47,7 @@ export function workflowErrorMessage(code: string): string {
     cover_ticket_unknown: '封面传输凭证结果待核对，未自动重新申请或发送。',
     cover_ticket_pending: '封面传输凭证正在准备，请核对原操作。',
   }
-  return messages[code] || '群任务服务暂不可用'
+  return messages[code] || '操作未完成，请核对返回的错误类型与当前任务状态；不要据此假定服务宕机、改变用户要求或重复发送。'
 }
 /** Uses the paired node's existing identity, never owner credentials. No
  * redirects, arbitrary endpoints, model-provided URLs or plaintext fallback. */
@@ -90,7 +99,7 @@ export class WorkflowHttpTransport implements WorkflowTransport {
     if (!response.ok) {
       // Server text can contain request data. Return only a bounded safe code.
       const error = row(result) && row(result.error) ? result.error.code : row(result) ? result.error : undefined
-      const code = typeof error === 'string' && /^[a-z0-9_-]{1,80}$/.test(error) ? error : 'workflow-unavailable'
+      const code = typeof error === 'string' && /^[a-z0-9_-]{1,80}$/.test(error) ? error : 'workflow-request-failed'
       throw Object.assign(fail(code, workflowErrorMessage(code)), { status: response.status })
     }
     return result

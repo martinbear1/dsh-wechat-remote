@@ -20,16 +20,18 @@ function hostFixture(options = {}) {
   const base = [{ id: 'persona', name: '@deepseek-ai/dsh-persona', config: {
     prefix: 'You are a coding agent powered by the {{model}} model.\nKeep host policy.', suffix: 'Retain suffix.', complete: false, includeRuntimeContext: true,
   } }, { id: 'extra', name: '@deepseek-ai/dsh-tool-runtime' }]
-  const registered = new Map(), cleanups = [], services = new Map()
+  const registered = new Map(), cleanups = [], services = new Map(), scopes = new Map()
   let registrations = 0
   const registry = {
     async readDocument(id) { const plugins = id === 'standard' ? base : registered.get(id)?.plugins; if (!plugins) throw Error('missing'); return { agentPreset: id, content: JSON.stringify(plugins) } },
     async register(item) { if (registered.has(item.id)) throw Error('duplicate'); registrations++; registered.set(item.id, structuredClone(item)); return async () => registered.delete(item.id) },
     async list() { return [...registered.values()].map(item => ({ id: item.id, name: item.name })) },
+    async acquireScope(id) { assert(registered.has(id)); if (!scopes.has(id)) scopes.set(id, {}); return { key: scopes.get(id), async [Symbol.asyncDispose]() {} } },
   }
   services.set('agentPresets', registry); services.set('loader', { await: async () => options.wait });
   services.set('profileContext', { installAnchor: fileURLToPath(new URL('../package.json', import.meta.url)) })
-  services.set('skills', { get: async () => HUMAN_WORKFLOW_SKILL })
+  services.set('skills', { get: async (_name, lookup) => { assert([...scopes.values()].includes(lookup.scope)); return HUMAN_WORKFLOW_SKILL } })
+  services.set('tools', { get: (_name, scope) => { assert([...scopes.values()].includes(scope)); return {} } })
   return { registered, services, registry, base, get registrations() { return registrations },
     host: { get: name => services.get(name), provide: (name, value) => services.set(name, value), effect: callback => cleanups.push(callback()) },
     async close() { await Promise.all(cleanups.map(callback => callback())) },
@@ -49,6 +51,7 @@ test('built-in components register stable native presets after loader settles; p
     assert.match(item.plugins[0].config.prefix, /职业助手工作方法/)
     assert.equal(item.plugins[0].config.suffix, 'Retain suffix.')
     assert.deepEqual(item.plugins[1], h.base[1])
+    assert.deepEqual(item.plugins.at(-1), { id: 'harness-collaboration', name: '@harness-remote/dsh-wechat-remote/collaboration' })
   }
   await h.close(); assert.equal(h.registered.size, 0)
   assert((await Promise.all(components.map(component => component.status()))).every(item => item.state === 'unknown'))
@@ -81,6 +84,21 @@ test('unsupported host is explicit and never alters the native registry', async 
   const component = new BuiltinAssistantComponent(h.host, 'teacher'), status = await component.status()
   assert.equal(status.state, 'unknown'); assert.match(status.reason, /不支持/); assert.equal(h.registrations, 0)
 })
+
+test('registry reopening never acquires an already registered preset scope while its backend is still initializing', async t => {
+  const h = hostFixture(); t.after(() => h.close())
+  const component = new BuiltinAssistantComponent(h.host, 'teacher')
+  assert.equal((await component.status()).state, 'installed')
+  const acquireScope = h.registry.acquireScope
+  h.registry.acquireScope = () => { assert.fail('startup must not mount a component waiting on the same backend readiness') }
+  assert.equal((await component.status({ waitForReady: false })).state, 'unknown')
+  const native = createNativeAssistantAdapter(h.host), registry = await AssistantRegistry.open(memory(), { nodeId: 'fixture_node', native, assertIdentity() {} })
+  t.after(() => registry.close()); t.after(() => native.close())
+  assert.equal(registry.installedForPreset('harness-teacher'), undefined)
+  h.registry.acquireScope = acquireScope
+  assert.equal(await registry.verifyPreset('harness-teacher', signal), true)
+  assert.equal(h.registrations, 1, 'status refresh does not reregister or replace a native mode')
+})
 test('missing or mismatched working skill is not ready and recovers without registering another preset', async t => {
   const h = hostFixture(); t.after(() => h.close()); h.services.delete('skills')
   const component = new BuiltinAssistantComponent(h.host, 'teacher')
@@ -89,6 +107,14 @@ test('missing or mismatched working skill is not ready and recovers without regi
   assert.equal((await component.status()).state, 'unknown')
   h.services.set('skills', { get: async () => HUMAN_WORKFLOW_SKILL })
   assert.equal((await component.status()).state, 'installed'); assert.equal(h.registrations, 1)
+})
+test('a globally visible skill cannot masquerade as the selected preset scoped capability', async t => {
+  const h = hostFixture(); t.after(() => h.close())
+  h.services.set('skills', { get: async (_name, lookup) => lookup?.scope ? undefined : HUMAN_WORKFLOW_SKILL })
+  const component = new BuiltinAssistantComponent(h.host, 'teacher')
+  assert.equal((await component.status()).state, 'unknown')
+  h.services.set('skills', { get: async () => HUMAN_WORKFLOW_SKILL }); h.services.set('tools', { get: () => undefined })
+  assert.equal((await component.status()).state, 'unknown')
 })
 
 function plan(presetId, definition) {

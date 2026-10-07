@@ -97,6 +97,7 @@ export declare class HumanToolsService extends TypertRemoteService {
     private core?;
     private ready?;
     private readonly lifetime;
+    private readonly modelCapabilities;
     private unregister?;
     private workflow?;
     private assistants?;
@@ -106,6 +107,9 @@ export declare class HumanToolsService extends TypertRemoteService {
     private directory?;
     private automationReason;
     constructor(host: Context, config?: HumanToolsConfig);
+    /** Internal native composition API, deliberately not a Remote method.
+     * Await backend readiness without creating a session or changing a preset. */
+    mountCapabilities(ctx: Context): Promise<() => void>;
     private initialize;
     private closeLifecycle;
     private automationScope;

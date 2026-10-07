@@ -11,23 +11,53 @@ interface Host { get(name: string): any; on(name: string, listener: (...args: an
 const SOURCE = 'harness-remote-human-automation'
 interface Lease { agent: Native; messageId: string; turn?: number }
 interface AdmissionGate { leases: Set<Lease>; refs: number; dispose(): void }
+type ProducerId = string | undefined
+interface PendingSources { length: number; ids: Map<number, ProducerId> }
+interface GateProjection { current?: number; producerIds: Set<ProducerId>; producerOverflow: boolean; producerEvidenceSeq: number; nextTurn: PendingSources; nextStep: PendingSources }
+interface GateSession extends GateProjection { seq: number; coveredSeq: number; attemptedSeq?: number }
 const gates = new WeakMap<object, AdmissionGate>()
 function ourMessage(value: unknown): boolean { return row(value) && row(value.source) && value.source.kind === 'plugin' && value.source.plugin === SOURCE }
-function automationTurn(session: Native, turn: number | undefined): boolean {
-  if (turn === undefined) return false
-  const nextTurn: Native[] = [], nextStep: Native[] = []; let current: number | undefined, found = false
-  for (const event of readEvents(session)) {
-    if (event.type === 'turn/start') current = event.data.turn
-    if (event.type === 'turn/end') current = undefined
-    if (event.type === 'user/message' && current === turn && ourMessage(event.data)) found = true
-    if (event.type === 'agent/inbox/spliced') {
-      const data = event.data, target = data.target === 'next-turn' ? nextTurn : data.target === 'next-step' ? nextStep : null
-      if (!target || !revision(data.start) || !Array.isArray(data.inserted)) continue
-      const removed = target.splice(data.start, data.removedCount ?? 0, ...data.inserted)
-      if (current === turn && data.outcome !== 'canceled' && removed.some(ourMessage)) found = true
+function projection(): GateProjection {
+  return { producerIds: new Set(), producerOverflow: false, producerEvidenceSeq: -1, nextTurn: { length: 0, ids: new Map() }, nextStep: { length: 0, ids: new Map() } }
+}
+function producerId(message: Native): ProducerId { return plain(message.id, 256) ? message.id : undefined }
+function enterTurn(state: GateProjection, turn: number | undefined): void {
+  if (state.current === turn) return
+  state.current = turn; state.producerIds.clear(); state.producerOverflow = false; state.producerEvidenceSeq = -1
+}
+function retainProducer(state: GateProjection, id: ProducerId, seq: number): void {
+  // The adapter dispatches one source message per run. Keep at most two exact
+  // identities to detect an extra claim; further producer IDs fail this turn
+  // closed rather than growing a set or affecting the next ordinary turn.
+  state.producerEvidenceSeq = Math.max(state.producerEvidenceSeq, seq)
+  if (state.producerIds.has(id)) return
+  if (state.producerIds.size === 2) state.producerOverflow = true
+  else state.producerIds.add(id)
+}
+function recordProducer(state: GateProjection, turn: unknown, message: Native, seq: number): void {
+  if (revision(turn) && turn === state.current && ourMessage(message)) retainProducer(state, producerId(message), seq)
+}
+function foldGateEvent(state: GateProjection, event: Native): void {
+  const data = event.data
+  if (!row(data)) return
+  if (event.type === 'turn/start' && revision(data.turn) && (state.current === undefined || data.turn >= state.current)) enterTurn(state, data.turn)
+  if (event.type === 'turn/end' && revision(data.turn) && (state.current === data.turn || state.current === undefined)) enterTurn(state, undefined)
+  if (event.type === 'user/message') recordProducer(state, state.current, data, event.seq)
+  if (event.type === 'agent/inbox/spliced') {
+    const target = data.target === 'next-turn' ? state.nextTurn : data.target === 'next-step' ? state.nextStep : null
+    if (!target || !revision(data.start) || !Array.isArray(data.inserted) || data.removedCount !== undefined && !revision(data.removedCount)) return
+    const start = data.start, removed = data.removedCount ?? 0, added = data.inserted.length, shifted = new Map<number, ProducerId>()
+    // Only our producer IDs are retained. Ordinary messages occupy numeric
+    // positions, never copied source/content objects or even a dense array.
+    for (const [index, id] of target.ids) {
+      if (index < start) shifted.set(index, id)
+      else if (index >= start + removed) shifted.set(index + added - removed, id)
+      else if (state.current !== undefined && data.outcome !== 'canceled') retainProducer(state, id, event.seq)
     }
+    data.inserted.forEach((message: Native, index: number) => { if (ourMessage(message)) shifted.set(start + index, producerId(message)) })
+    target.length = Math.max(target.length, start + removed) + added - removed
+    target.ids = shifted
   }
-  return found
 }
 function preserveClaimedHumans(agent: Native, messages: Native[]): void {
   for (const message of messages) if (message.source?.kind === 'user') {
@@ -37,38 +67,115 @@ function preserveClaimedHumans(agent: Native, messages: Native[]): void {
     if (!pending.some(m => m.id === message.id)) agent.send(message, 'next-turn', false)
   }
 }
-/** Install synchronously with the service, before any async ledger load. Cold
- * inbox replay is denied without an exact process-local execution lease. The
- * gate intentionally remains even when the optional automation ledger fails. */
+/** Install synchronously with the service, before any async ledger load. This
+ * is a producer-specific replay gate, NOT a permission gate for all native
+ * agents. Recognized plugin work needs an exact process-local lease even when
+ * the optional ledger fails. Missing history alone cannot disable unrelated
+ * native tools/turns; admission of NEW automation still requires inspect(). */
 export function installNativeAutomationGate(host: Host): () => void {
   let gate = gates.get(host)
   if (!gate) {
     const leases = new Set<Lease>()
-    const observed = new WeakMap<object, { turn: number; human: boolean; producer: boolean }>()
-    // A fresh native turn + its claimed human message can establish ordinary
-    // provenance even on an older host without a retained-history reader.
-    // A continuation predating this gate has no such proof and stays closed.
+    const sessions = new WeakMap<object, GateSession>()
+    const recover = (session: Native, state: GateSession, through?: number) => {
+      // A missed publication / late mount is recoverable from native history.
+      // Remember failed reads at this high-water mark so an incompatible host
+      // does not trigger a full read on every ordinary tool call.
+      if (through !== undefined && through === state.attemptedSeq) return
+      state.attemptedSeq = through
+      try {
+        const log = eventSnapshot(session)
+        // This index only recognizes our producer; it never grants execution.
+        // An unrelated malformed entry must not hide valid producer evidence.
+        // New automation admission uses the strict readEvents() validator.
+        if (!Array.isArray(log)) return
+        const restored = projection(); let last = -1, complete = true, closesKnown = false
+        for (let index = 0; index < log.length; index++) {
+          const event = log[index]
+          if (!row(event) || !revision(event.seq) || typeof event.type !== 'string' || !Object.hasOwn(event, 'data') || event.seq <= last) { complete = false; continue }
+          if (event.seq !== index) complete = false
+          if (event.seq > state.producerEvidenceSeq && row(event.data) && revision(event.data.turn)
+            && (event.type === 'turn/start' && state.current !== undefined && event.data.turn > state.current || event.type === 'turn/end' && event.data.turn === state.current)) closesKnown = true
+          foldGateEvent(restored, event); last = event.seq
+        }
+        // Replay the entire metadata projection after a gap, not only entries
+        // above the last OBSERVED event (that would lose the missing prefix).
+        // Preserve live source evidence even if an incomplete snapshot omits it.
+        if (last >= state.seq) {
+          if (state.producerIds.size && restored.current !== state.current && !closesKnown) {
+            enterTurn(restored, state.current)
+          }
+          if (restored.current === state.current) {
+            for (const id of state.producerIds) retainProducer(restored, id, state.producerEvidenceSeq)
+            restored.producerOverflow ||= state.producerOverflow
+          }
+          Object.assign(state, restored); state.seq = last
+          if (complete) state.coveredSeq = last
+        }
+      } catch {
+        // Retain already recognized producer IDs. An unreadable later snapshot
+        // must never erase the lease requirement for that automatic turn.
+      }
+    }
+    const stateFor = (session: Native, checkGap = true): GateSession => {
+      let state = sessions.get(session)
+      if (state) {
+        if (checkGap) {
+          try {
+            const through = revision(session.seq) ? session.seq : state.seq + 1
+            if (through > state.coveredSeq + 1) recover(session, state, through)
+          } catch {}
+        }
+        return state
+      }
+      state = { seq: -1, coveredSeq: -1, ...projection() }
+      sessions.set(session, state)
+      // Native Session history is immutable/append-only. Seed a cold instance
+      // once, then follow its published events instead of rescanning the whole
+      // conversation at every step, model request and tool invocation.
+      let through: number | undefined
+      try { if (revision(session.seq)) through = session.seq } catch {}
+      recover(session, state, through)
+      return state
+    }
     const offEvent = host.on('session/event', (session: Native, event: Native) => {
-      if (event?.type === 'turn/start' && revision(event.data?.turn)) observed.set(session, { turn: event.data.turn, human: false, producer: false })
-      if (event?.type === 'turn/end') observed.delete(session)
+      if (!sessions.has(session) && !['turn/start', 'turn/end', 'user/message', 'agent/inbox/spliced'].includes(event?.type)) return
+      const state = stateFor(session, false)
+      if (!revision(event?.seq)) return
+      if (event.seq > state.coveredSeq + 1) recover(session, state, event.seq + 1)
+      if (event.seq <= state.seq) return
+      foldGateEvent(state, event); state.seq = event.seq
+      if (event.seq === state.coveredSeq + 1) state.coveredSeq = event.seq
     }, { global: true })
     const offClaim = host.on('agent/inbox/claimed', (payload: Native) => {
-      const current = observed.get(payload.agent?.session)
-      if (!current || current.turn !== payload.turn) return
-      current.human ||= payload.message?.source?.kind === 'user'; current.producer ||= ourMessage(payload.message)
+      if (!payload.agent?.session || !ourMessage(payload.message)) return
+      const state = stateFor(payload.agent.session)
+      if (revision(payload.turn)) enterTurn(state, payload.turn)
+      let at = state.seq
+      try { if (revision(payload.agent.session.seq)) at = Math.max(at, payload.agent.session.seq - 1) } catch {}
+      recordProducer(state, payload.turn, payload.message, at)
     })
-    const admitted = (agent: Native, turn: number) => [...leases].some(l => l.agent === agent && l.turn === turn)
-    const unleased = (agent: Native, turn: number) => {
-      if (admitted(agent, turn)) return false
-      try { return automationTurn(agent.session, turn) } catch {
-        const current = observed.get(agent.session)
-        return !(current?.turn === turn && current.human && !current.producer)
-      }
+    const admitted = (agent: Native, turn: number, messageId: unknown) => [...leases].some(l => l.agent === agent && l.turn === turn && l.messageId === messageId)
+    const unleased = (agent: Native, turn: number | undefined) => {
+      if (!agent?.session || turn === undefined) return false
+      const state = stateFor(agent.session)
+      // The native driver executes only the current turn, then publishes its
+      // end before entering a new one. Finished history is not an executable
+      // lease. A replayed SOURCE message must be claimed again in a new native
+      // turn and is therefore checked again, without retaining all past IDs.
+      return state.current === turn && (state.producerOverflow || [...state.producerIds].some(id => !admitted(agent, turn, id)))
     }
     const offStep = host.on('agent/pre-step', (payload: Native, next: () => Promise<any>) => {
       const messages = Array.isArray(payload.messages) ? payload.messages : []
       const owned = messages.filter(ourMessage)
-      if (unleased(payload.agent, payload.turn) || owned.some((m: Native) => ![...leases].some(l => l.agent === payload.agent && l.messageId === m.id && l.turn === payload.turn))) {
+      if (payload.agent?.session && owned.length) {
+        const state = stateFor(payload.agent.session)
+        if (revision(payload.turn)) enterTurn(state, payload.turn)
+        let at = state.seq
+        try { if (revision(payload.agent.session.seq)) at = Math.max(at, payload.agent.session.seq - 1) } catch {}
+        for (const message of owned) recordProducer(state, payload.turn, message, at)
+      }
+      if (unleased(payload.agent, payload.turn) || owned.some((m: Native) => !admitted(payload.agent, payload.turn, m.id))) {
         preserveClaimedHumans(payload.agent, messages); return Promise.resolve({ kind: 'reject' })
       }
       return next()
@@ -79,13 +186,8 @@ export function installNativeAutomationGate(host: Host): () => void {
     })
     const tools = host.get('tools')
     const offTools = typeof tools?.guard === 'function' ? tools.guard((exec: Native) => {
-      if (!exec.agent) return undefined
-      try { const turn = boundary(readEvents(exec.agent.session)).current
-        return turn !== undefined && unleased(exec.agent, turn) ? '历史自动处理回合已停止，不能继续调用工具' : undefined
-      } catch {
-        const current = observed.get(exec.agent.session)
-        return current?.human && !current.producer ? undefined : '无法核对原生执行回合，已停止工具调用'
-      }
+      if (!exec.agent?.session) return undefined
+      return unleased(exec.agent, stateFor(exec.agent.session).current) ? '历史自动处理回合已停止，不能继续调用工具' : undefined
     }) : () => {}
     const dispose = () => { offTools(); offRequest(); offStep(); offClaim(); offEvent() }
     gate = { leases, refs: 0, dispose }; gates.set(host, gate)
@@ -99,12 +201,14 @@ function events(value: unknown): Native[] {
   if (!Array.isArray(value) || value.some(e => !row(e) || !revision(e.seq) || typeof e.type !== 'string' || !Object.hasOwn(e, 'data'))) throw fail('automation-native-history', '无法完整核对原生会话历史')
   return value
 }
-function readEvents(session: Native): Native[] {
+function eventSnapshot(session: Native): unknown {
   // Both are documented read-only native surfaces: .events in the installed
   // dependency and snapshotEvents in the 0.2 SessionController source. Never
-  // require a fixture-only method or bypass history failure in a replay gate.
-  return events(typeof session.snapshotEvents === 'function' ? session.snapshotEvents() : session.events)
+  // require a fixture-only method or infer new automation authority from an
+  // unavailable history surface.
+  return typeof session.snapshotEvents === 'function' ? session.snapshotEvents() : session.events
 }
+function readEvents(session: Native): Native[] { return events(eventSnapshot(session)) }
 function generation(meta: Native, scope: WorkflowScope) {
   if (meta.id !== scope.sessionId || !revision(meta.createdAt) || String(meta.createdAt) !== scope.sessionGeneration || meta.origin === 'subagent') throw fail('automation-generation-changed', '原生会话代次已变化或不是独立主人会话')
 }

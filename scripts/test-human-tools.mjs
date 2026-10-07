@@ -5,6 +5,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Readable } from 'node:stream'
 import { Context } from '@deepseek-ai/cordis'
+import { createScope } from '@deepseek-ai/dsh-scope'
 import { SystemPrompt, renderContextSections } from '@deepseek-ai/dsh-system-prompt'
 import { ToolRuntime } from '@deepseek-ai/dsh-tools'
 import { SessionId, SessionStore } from '@deepseek-ai/dsh-session'
@@ -167,6 +168,7 @@ test('generated RPC forwards safe failure reasons, rejects native detail text, a
   const gateway = new TypertGatewayService(host.ctx), service = new HumanToolsService(host.ctx, { enabled: true, store })
   assert.equal((await service.capabilities({ scope: origin.scope }, signal)).ok, true)
   const invoke = (method, req) => gateway.invoke({ namespace: 'humanTools', method, args: { request: req }, signal })
+  await service.mountCapabilities(host.agent.ctx)
   const prepare = async (name, args, callId) => {
     const result = await host.tools.execute({ name, arguments: args, callId, agent: host.agent, signal })
     assert.equal(result.isError, false, JSON.stringify(result)); return result.meta.humanSurface
@@ -302,6 +304,7 @@ test('real SDK and generated gateway execute all actions, preserve strict select
   const registry = new TypertRegistry(host.ctx); registry.register(TYPERT)
   const gateway = new TypertGatewayService(host.ctx), service = new HumanToolsService(host.ctx, { enabled: true, store })
   const capability = JSON.parse((await service.capabilities({ scope: origin.scope }, signal)).valueJson)
+  await service.mountCapabilities(host.agent.ctx)
   assert.equal(capability.members, true); assert.equal(capability.remind, true)
   const invoke = (method, req) => gateway.invoke({ namespace: 'humanTools', method, args: { request: req }, signal })
   const execute = async (name, args, callId) => {
@@ -341,16 +344,17 @@ test('real SDK and generated gateway execute all actions, preserve strict select
   for (const name of [HUMAN_TOOL_NAME, HUMAN_MEMBERS_TOOL_NAME, HUMAN_REMIND_TOOL_NAME]) assert.equal(host.tools.get(name), undefined)
 })
 
-test('partial multi-tool registration conflict rolls back only this service registrations', async t => {
+test('partial scoped registration conflict rolls back only that capability mount', async t => {
   const host = sdk(), { core } = await fresh()
   t.after(() => host.ctx.fiber.dispose())
   const existing = humanMembersTool(core)
-  host.tools.register(existing)
+  host.agent.ctx.get('tools').register(existing)
   const service = new HumanToolsService(host.ctx, { enabled: true, store: memory() })
-  assert.equal((await service.capabilities({ scope: origin.scope }, signal)).ok, false)
-  assert.equal(host.tools.get(HUMAN_TOOL_NAME), undefined)
-  assert.equal(host.tools.get(HUMAN_REMIND_TOOL_NAME), undefined)
-  assert(host.tools.get(HUMAN_MEMBERS_TOOL_NAME))
+  assert.equal((await service.capabilities({ scope: origin.scope }, signal)).ok, true)
+  await assert.rejects(service.mountCapabilities(host.agent.ctx))
+  assert.equal(host.tools.get(HUMAN_TOOL_NAME, host.agent), undefined)
+  assert.equal(host.tools.get(HUMAN_REMIND_TOOL_NAME, host.agent), undefined)
+  assert(host.tools.get(HUMAN_MEMBERS_TOOL_NAME, host.agent))
 })
 
 test('core claim is scoped/versioned/idempotent, ack records once without a live delivery target', async () => {
@@ -565,6 +569,7 @@ function sdk(mode = 'native', live = true) {
   const agent = { id: session.id, session, inbox, ctx, status: 'idle', send(message, target, wakeup) {
     sent.push({ message, target, wakeup }); inbox.append(target, message)
   } }
+  agent.ctx = createScope(ctx, agent).ctx
   ctx.provide('agents', { get: id => live && id === agent.id ? agent : undefined })
   ctx.on('session/flush', async () => {})
   return { ctx, tools, session, agent, sent }
@@ -580,6 +585,7 @@ test('default persistent ledger follows the actual host profile and isolates Web
     active.push(host)
     const service = new HumanToolsService(host.ctx, { enabled: true })
     assert.equal((await service.capabilities({ scope: origin.scope }, signal)).ok, true)
+    await service.mountCapabilities(host.agent.ctx)
     return { host, service, ledger: path.join(path.dirname(defaultGateStatePath(host.ctx)), 'human-tools-v1.json') }
   }
   const web = await boot('web'), desktop = await boot('desktop')
@@ -983,9 +989,10 @@ test('disabled/late-disposed service loads no state and never registers a tool',
   assert.equal(late.tools.get(HUMAN_TOOL_NAME), undefined)
 })
 
-test('enabled owner RPC registers native tool, validates codec and survives duplicate concurrent ack', async () => {
+test('enabled owner RPC and scoped native tool validate codec and survive duplicate concurrent ack', async () => {
   const host = sdk(), store = memory(), service = new HumanToolsService(host.ctx, { enabled: true, store })
   assert.equal((await service.capabilities({ scope: origin.scope }, signal)).ok, true)
+  await service.mountCapabilities(host.agent.ctx)
   const result = await host.tools.execute({ name: HUMAN_TOOL_NAME, arguments: input, callId: 'rpc-1', agent: host.agent, signal })
   const surface = result.meta.humanSurface, req = request(surface)
   assert.deepEqual(service.present(origin.scope, 'rpc-1'), surface)
@@ -1015,6 +1022,7 @@ test('actual generated gateway preserves forbidden reference keys for rejection;
   const gateway = new TypertGatewayService(host.ctx)
   const service = new HumanToolsService(host.ctx, { enabled: true, store })
   await service.capabilities({ scope: origin.scope }, signal)
+  await service.mountCapabilities(host.agent.ctx)
   const invoke = (method, req) => gateway.invoke({ namespace: 'humanTools', method, args: { request: req }, signal })
   const made = await host.tools.execute({ name: HUMAN_TOOL_NAME, arguments: input, callId: 'gateway-source', agent: host.agent, signal })
   const surface = made.meta.humanSurface, req = request(surface)
@@ -1038,7 +1046,8 @@ test('actual generated gateway preserves forbidden reference keys for rejection;
   assert.equal(host.sent.length, 0)
   assert.equal(host.agent.inbox.nextTurn.length, 0)
   assert.equal(host.agent.inbox.nextStep.length, 0)
-  assert.deepEqual(host.tools.schemas().filter(tool => tool.name.startsWith('human_')).map(tool => tool.name), [HUMAN_TOOL_NAME, HUMAN_MEMBERS_TOOL_NAME, HUMAN_REMIND_TOOL_NAME])
+  assert.deepEqual(host.tools.schemas().filter(tool => tool.name.startsWith('human_')), [])
+  assert.deepEqual(host.tools.schemas(host.agent).filter(tool => tool.name.startsWith('human_')).map(tool => tool.name), [HUMAN_TOOL_NAME, HUMAN_MEMBERS_TOOL_NAME, HUMAN_REMIND_TOOL_NAME])
   const target = await host.tools.execute({ name: HUMAN_TOOL_NAME, arguments: { ...input, sourceSurfaceId: surface.id },
     callId: 'gateway-target', agent: host.agent, signal })
   assert.equal(target.isError, false)
@@ -1186,14 +1195,15 @@ test('cold claim cancellation or disposal cannot persist a late query result', a
   })
 })
 
-test('context registration failure rolls back only the optional tool; host context remains intact', async () => {
+test('scoped context conflict rolls back its tools and leaves the shared backend intact', async () => {
   const host = sdk(), store = memory()
-  const prompt = host.ctx.get('systemPrompt')
+  const prompt = host.agent.ctx.get('systemPrompt')
   prompt.context({ name: HUMAN_CONTEXT_NAME, order: 80, text: 'existing-owner' })
   const service = new HumanToolsService(host.ctx, { enabled: true, store })
-  assert.equal((await service.capabilities({ scope: origin.scope }, signal)).ok, false)
-  assert.equal(host.tools.get(HUMAN_TOOL_NAME), undefined)
-  assert.equal((await prompt.assemble()).contexts.find(item => item.name === HUMAN_CONTEXT_NAME).text, 'existing-owner')
+  assert.equal((await service.capabilities({ scope: origin.scope }, signal)).ok, true)
+  await assert.rejects(service.mountCapabilities(host.agent.ctx))
+  assert.equal(host.tools.get(HUMAN_TOOL_NAME, host.agent), undefined)
+  assert.equal((await prompt.assemble({ scope: host.agent })).contexts.find(item => item.name === HUMAN_CONTEXT_NAME).text, 'existing-owner')
   await host.ctx.fiber.dispose()
 })
 

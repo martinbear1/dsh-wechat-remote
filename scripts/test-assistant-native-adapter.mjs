@@ -11,6 +11,7 @@ import { createNativeAssistantAdapter, validateNativeAssistantPreview } from '..
 import { assistantGuidance, legacyAssistantGuidanceV1, legacyAssistantGuidanceV2, legacyAssistantGuidanceV3, legacyAssistantGuidanceV4, legacyAssistantGuidanceV5 } from '../lib/assistant-presets/definition.js'
 import { assistantTemplates } from '../lib/assistant-presets/catalog.js'
 import { renderPrompt, renderContextSnapshot } from '@deepseek-ai/dsh-system-prompt'
+import { HUMAN_WORKFLOW_SKILL } from '../lib/human-workflow/dsh-skill.js'
 
 const signal = new AbortController().signal
 const definition = () => ({ schemaVersion: 1, name: '项目助理', description: '协助项目日常工作', role: '了解用户职责，按明确范围辅助工作',
@@ -49,12 +50,13 @@ async function fixture(t, options = {}) {
   await writeFile(path.join(profile, 'package.json'), originalManifest); await writeFile(path.join(profile, 'cordis.patch.yml'), originalPatch)
   const originalBase = base()
   if (options.prefix !== undefined) originalBase[0].config.prefix = options.prefix
-  const declarations = new Map([['standard', { name: 'Standard', plugins: structuredClone(originalBase) }]]), bundles = [], calls = [], cancellations = [], nativeInstall = deferred()
+  const declarations = new Map([['standard', { name: 'Standard', plugins: structuredClone(originalBase) }]]), bundles = [], calls = [], cancellations = [], nativeInstall = deferred(), scopes = new Map()
   let defaultId = 'standard', behavior = options.behavior || 'applied', broken = false, delayed = false
   const presets = { get defaultId() { return defaultId },
     async list() { return [...declarations].map(([id, value]) => ({ id, name: value.name, ...(broken && id !== 'standard' ? { broken: 'bad plugin' } : {}) })) },
     async readDocument(id) { const d = declarations.get(id); if (!d) throw new Error('not found'); return { agentPreset: id, name: d.name, content: dump(d.plugins, { schema: entryListSchema, noRefs: true }) } },
     async compositionInventory() { return [] },
+    async acquireScope(id) { assert(declarations.has(id)); if (!scopes.has(id)) scopes.set(id, {}); return { key: scopes.get(id), async [Symbol.asyncDispose]() {} } },
     register() { assert.fail('must not imperatively register a nonpersistent preset') },
     recompose() { assert.fail('must not change a live Agent') }, copy() { assert.fail('must not use the retired authoring API') },
   }
@@ -85,7 +87,9 @@ async function fixture(t, options = {}) {
   }
   const gate = deferred()
   const services = { agentPresets: presets, pluginManager: manager, profileContext: { dir: profile, installAnchor: anchor },
-    skills: { async get(name) { return { name, invocation: { modelInvocable: true, userInvocable: true } } } } }
+    humanTools: { mountCapabilities() { assert.fail('authoring does not mount a component') } },
+    skills: { async get(name, lookup) { assert.equal(name, 'human-workflow'); assert([...scopes.values()].includes(lookup.scope)); return HUMAN_WORKFLOW_SKILL } },
+    tools: { get(_name, scope) { assert([...scopes.values()].includes(scope)); return {} } } }
   const host = { get: name => services[name] }, adapter = createNativeAssistantAdapter(host, { codec })
   t.after(async () => { gate.resolve(); await adapter.close(); await rm(directory, { recursive: true, force: true }) })
   return { adapter, host, services, profile, declarations, bundles, calls, cancellations, nativeInstall, gate,
@@ -103,6 +107,7 @@ async function historicalPreview(f, version = 1) {
   assert.equal(Buffer.byteLength(guidance), [0, 1191, 3704, 4819, 7742, 10305][version])
   assert.equal(sha256(guidance), [null, LEGACY_GUIDANCE_SHA256, V2_GUIDANCE_SHA256, V3_GUIDANCE_SHA256, V4_GUIDANCE_SHA256, V5_GUIDANCE_SHA256][version])
   const patch = JSON.parse(preview.patch)
+  patch[0].insert[0].config.plugins = patch[0].insert[0].config.plugins.filter(row => row.id !== 'harness-collaboration')
   patch[0].insert[0].config.plugins[0].config.prefix = (version === 3 ? stockIdentity : 'Base {{model}}') + '\n\n' + guidance
   const oldPatch = JSON.stringify(patch, null, 2) + '\n'
   assert.notEqual(oldPatch, preview.patch, 'newly prepared native bundles must use current guidance, not silently keep historical text')
@@ -139,12 +144,12 @@ for (const version of [1, 2, 3, 4, 5]) for (const state of ['installed', 'unknow
   assert.deepEqual(validateNativeAssistantPreview(preview), preview)
   const before = await saved.snapshot(); await f.adapter.close()
   const restored = createNativeAssistantAdapter(f.host, { codec }); t.after(() => restored.close())
-  assert.equal((await restored.verify(structuredClone(preview), signal)).state, state)
-  assert.equal((await restored.install(structuredClone(preview), signal)).state, state, 'a repeated old approval is reconciliation only')
+  assert.equal((await restored.verify(structuredClone(preview), signal)).state, 'unknown')
+  assert.equal((await restored.install(structuredClone(preview), signal)).state, 'unknown', 'a repeated old approval is reconciliation only; old content is not silently upgraded')
   assert.equal(f.calls.length, 0)
   if (state === 'unknown') {
     saved.publishNativeState() // A later native read confirms the old operation; do not submit it again.
-    assert.equal((await restored.verify(preview, signal)).state, 'installed')
+    assert.equal((await restored.verify(preview, signal)).nativeState, 'stale', 'native installation exists but old composition has no scoped collaboration component')
   }
   assert.deepEqual(await saved.snapshot(), before, 'manifest, approved patch and durable receipt all retain their exact old bytes')
   assert.equal(f.calls.length, 0); await f.assertUnchanged()
@@ -165,7 +170,7 @@ for (const version of [1, 2, 3, 4, 5]) test(`V${version} compatibility accepts o
   assert.deepEqual(validateNativeAssistantPreview(current), current, 'a valid new snapshot is structurally valid, but not the approved old installation')
   await assert.rejects(f.adapter.install(current, signal), { code: 'assistant-native-artifact-changed' })
   assert.deepEqual(await saved.snapshot(), before); assert.equal(f.calls.length, 0)
-  assert.equal((await f.adapter.verify(old, signal)).state, 'installed')
+  assert.equal((await f.adapter.verify(old, signal)).nativeState, 'stale')
 })
 
 for (const version of [2, 5]) test(`a historical V${version} preview without an install receipt cannot silently install current V6 wording`, async t => {
@@ -190,7 +195,8 @@ test('native preview is read-only, data-only and pins inherited plugins without 
   assert.equal(f.calls.length, 0)
   assert.deepEqual((await readdir(f.profile)).sort(), ['cordis.patch.yml', 'package.json'])
   const row = JSON.parse(preview.patch)[0].insert[0]
-  assert.deepEqual(row.config.plugins.slice(1), base().slice(1))
+  assert.deepEqual(row.config.plugins.slice(1, -1), base().slice(1))
+  assert.deepEqual(row.config.plugins.at(-1), { id: 'harness-collaboration', name: '@harness-remote/dsh-wechat-remote/collaboration' })
   assert.equal(row.config.plugins[0].config.complete, false); assert.equal(row.config.plugins[0].config.includeRuntimeContext, true)
   assert(row.config.plugins[0].config.prefix.includes('项目助理')); assert.equal(row.config.plugins[0].config.suffix, 'Directory {{cwd}}')
   assert.equal(createHash('sha256').update(preview.patch).digest('hex'), preview.patchDigest)
@@ -209,7 +215,7 @@ test('all professional templates replace only the native stock coding identity a
     assert.equal(persona.prefix, neutralIdentity + policy + '\n\n' + assistantGuidance(d))
     assert.equal(persona.suffix, 'Directory {{cwd}}')
     assert.equal(persona.complete, false); assert.equal(persona.includeRuntimeContext, true)
-    assert.deepEqual(plugins.slice(1), base().slice(1))
+    assert.deepEqual(plugins.slice(1, -1), base().slice(1))
     assert.deepEqual(validateNativeAssistantPreview(preview), preview)
     // Actual SDK interpolation, without a model call or any production session.
     const assembly = { sections: [{ name: 'deployment:persona', text: persona.prefix },
@@ -273,16 +279,42 @@ test('approved definition cannot smuggle modules, scripts, paths or prompt varia
   assert.equal(f.calls.length, 0)
 })
 
-test('base drift, missing skill and unknown/unsafe bases refuse before installation', async t => {
+test('base drift, missing component service and unknown/unsafe bases refuse before installation', async t => {
   const f = await fixture(t), preview = await f.preview()
   f.declarations.get('standard').plugins[2].disabled = true
   await assert.rejects(f.adapter.install(preview, signal), { code: 'assistant-native-preview-stale' }); assert.equal(f.calls.length, 0)
-  f.services.skills.get = async () => undefined
+  const service = f.services.humanTools; delete f.services.humanTools
   await assert.rejects(f.preview(), { code: 'assistant-skill-unavailable' })
-  f.services.skills.get = async name => ({ name, invocation: { modelInvocable: true } })
+  f.services.humanTools = service
   f.declarations.get('standard').plugins[2].name = './relative-code.js'
   assert.equal((await f.adapter.probe()).supported, false)
   await assert.rejects(f.preview(), { code: 'assistant-base-unsupported' })
+})
+
+test('authoring needs no global skill; actual installed scoped skill and tools must both be ready', async t => {
+  const f = await fixture(t), original = f.services.skills.get
+  f.services.skills.get = async () => assert.fail('preview must not read a global or future preset skill')
+  const preview = await f.preview()
+  f.services.skills.get = async () => undefined
+  assert.equal((await f.adapter.install(preview, signal)).state, 'unknown')
+  f.services.skills.get = original
+  f.services.tools.get = () => undefined
+  assert.equal((await f.adapter.verify(preview, signal)).state, 'unknown')
+  f.services.tools.get = () => ({})
+  assert.equal((await f.adapter.verify(preview, signal)).state, 'installed')
+  assert.equal(f.calls.length, 1)
+})
+
+test('old V6 plan without a scoped component stays byte-identical and requires an explicit upgrade', async t => {
+  const f = await fixture(t), current = await f.preview(), patch = JSON.parse(current.patch)
+  patch[0].insert[0].config.plugins = patch[0].insert[0].config.plugins.filter(row => row.id !== 'harness-collaboration')
+  const text = JSON.stringify(patch, null, 2) + '\n', old = { ...current, patch: text, patchDigest: sha256(text) }
+  const saved = await seedHistoricalArtifact(f, old, 'installed'), before = await saved.snapshot()
+  assert.deepEqual(validateNativeAssistantPreview(old), old)
+  const result = await f.adapter.verify(old, signal)
+  assert.equal(result.nativeState, 'stale'); assert.match(result.message, /旧版.*独立.*群协作组件/)
+  assert.equal((await f.adapter.install(old, signal)).nativeState, 'stale')
+  assert.equal(f.calls.length, 0); assert.deepEqual(await saved.snapshot(), before)
 })
 
 test('successful native install verifies exact declaration and survives a fresh adapter', async t => {
@@ -426,6 +458,24 @@ test('persisted preview validation rejects malformed or widened plans before cor
     const changed = structuredClone(preview); mutate(changed)
     assert.throws(() => validateNativeAssistantPreview(changed), { code: 'assistant-native-preview-invalid' })
   }
+})
+
+test('collaboration component is a single explicit declaration, not a disabled or configurable compatibility shortcut', async t => {
+  const f = await fixture(t), preview = await f.preview()
+  for (const change of [
+    plugins => plugins.push(structuredClone(plugins.at(-1))),
+    plugins => { plugins.at(-1).disabled = true },
+    plugins => { plugins.at(-1).config = { global: true } },
+    plugins => { plugins.at(-1).name = '@foreign/collaboration' },
+    plugins => { const component = plugins.pop(); plugins.push({ id: 'nested', name: 'cordis:group', group: true, config: [component] }) },
+  ]) {
+    const value = structuredClone(preview), patch = JSON.parse(value.patch)
+    change(patch[0].insert[0].config.plugins); value.patch = JSON.stringify(patch); value.patchDigest = sha256(value.patch)
+    assert.throws(() => validateNativeAssistantPreview(value), { code: 'assistant-native-preview-invalid' })
+  }
+  f.declarations.get('standard').plugins.push({ id: 'harness-collaboration', name: '@foreign/other' })
+  await assert.rejects(f.preview(), { code: 'assistant-base-unsupported' })
+  assert.equal(f.calls.length, 0)
 })
 
 test('a later native default selection does not invalidate an installed assistant or get reverted', async t => {

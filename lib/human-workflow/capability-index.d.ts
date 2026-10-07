@@ -1101,7 +1101,7 @@ export declare function capabilityCatalog(manifest: CapabilityManifest, category
         };
     } | undefined;
     schema: string;
-    categories: ("messages" | "groups" | "workspace" | "files" | "presentation" | "members" | "automation" | "collection" | "facts" | "feedback")[];
+    categories: ("presentation" | "workspace" | "members" | "automation" | "groups" | "messages" | "collection" | "files" | "facts" | "feedback")[];
     category: {} | null;
     statusMeaning: string;
     platformReadiness: string;
@@ -1111,7 +1111,7 @@ export declare function capabilityCatalog(manifest: CapabilityManifest, category
     entries: ({
         reason?: string | undefined;
         id: string;
-        category: "messages" | "groups" | "workspace" | "files" | "presentation" | "members" | "automation" | "collection" | "facts" | "feedback";
+        category: "presentation" | "workspace" | "members" | "automation" | "groups" | "messages" | "collection" | "files" | "facts" | "feedback";
         purpose: string;
         status: string;
         tools: string[];
@@ -1123,7 +1123,7 @@ export declare function capabilityCatalog(manifest: CapabilityManifest, category
         boundary: string;
         reason?: string | undefined;
         id: string;
-        category: "messages" | "groups" | "workspace" | "files" | "presentation" | "members" | "automation" | "collection" | "facts" | "feedback";
+        category: "presentation" | "workspace" | "members" | "automation" | "groups" | "messages" | "collection" | "files" | "facts" | "feedback";
         purpose: string;
         status: string;
         tools: string[];

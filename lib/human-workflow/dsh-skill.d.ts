@@ -14,6 +14,6 @@ export declare const HUMAN_WORKFLOW_SKILL: {
     };
     content: string;
 };
-/** Older hosts without the native skill seam retain the typed tools. Do not
- * invent filesystem roots or install another skill implementation for them. */
+/** Report missing native skill support to the composing component. It must
+ * not advertise tools without their usage contract or invent skill roots. */
 export declare function registerHumanWorkflowSkill(host: Context): (() => void) | undefined;

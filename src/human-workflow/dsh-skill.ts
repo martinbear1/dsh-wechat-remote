@@ -220,8 +220,8 @@ automation.run 可用时，用户可以在小程序当前会话的设置中打�
 `,
 }
 
-/** Older hosts without the native skill seam retain the typed tools. Do not
- * invent filesystem roots or install another skill implementation for them. */
+/** Report missing native skill support to the composing component. It must
+ * not advertise tools without their usage contract or invent skill roots. */
 export function registerHumanWorkflowSkill(host: Context): (() => void) | undefined {
   const skills = host.get('skills') as { register?: (skill: typeof HUMAN_WORKFLOW_SKILL) => () => void } | undefined
   if (typeof skills?.register !== 'function') return

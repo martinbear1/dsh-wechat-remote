@@ -4,6 +4,7 @@
  * Only our new source package is authored here; native profile configuration
  * is exclusively written by the public native manager. */
 import { createHash, randomUUID } from 'node:crypto'
+import { realpathSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { lstat, mkdir, open, readFile, readdir, realpath, rename } from 'node:fs/promises'
 import path from 'node:path'
@@ -11,6 +12,7 @@ import { pathToFileURL } from 'node:url'
 import { assistantDefinition, assistantGuidance, legacyAssistantGuidanceV1, legacyAssistantGuidanceV2, legacyAssistantGuidanceV3, legacyAssistantGuidanceV4, legacyAssistantGuidanceV5, type AssistantDefinition } from './definition.js'
 import type { NativeAssistantAdapter, NativeAssistantCapability, NativeAssistantInstallation, NativeAssistantPreview } from './types.js'
 import { BUILTIN_ASSISTANTS, builtinAssistants, type BuiltinAssistantStatus } from './builtins.js'
+import { HUMAN_WORKFLOW_SKILL } from '../human-workflow/dsh-skill.js'
 
 type Row = Record<string, unknown>
 interface Host { get(name: string): unknown }
@@ -19,6 +21,7 @@ interface Presets {
   list(): Promise<unknown>
   readDocument(id: string): Promise<unknown>
   compositionInventory(): Promise<unknown>
+  acquireScope?(id: string): Promise<{ key: object; [Symbol.asyncDispose](): Promise<void> }>
 }
 interface Manager {
   listBundles(): Promise<unknown>
@@ -45,6 +48,41 @@ const noSignal = new AbortController().signal
 const moduleName = '@deepseek-ai/dsh-agent-preset'
 const personaName = '@deepseek-ai/dsh-persona'
 const artifactRoot = 'assistant-native-bundles'
+export const COLLABORATION_COMPONENT_ID = 'harness-collaboration'
+const collaborationModules = ['dsh-wechat-remote/collaboration', '@harness-remote/dsh-wechat-remote/collaboration'] as const
+/** The Desktop bundle contains this core under native/. Its public outer
+ * self-reference must be used by separately installed preset packages; the CLI
+ * core instead owns its scoped npm name. Never infer this from another profile. */
+export function nativeCollaborationModule(): typeof collaborationModules[number] {
+  try {
+    const own = realpathSync(new URL('../collaboration.js', import.meta.url))
+    const resolve = createRequire(import.meta.url).resolve
+    for (const candidate of collaborationModules) {
+      try { if (realpathSync(resolve(candidate)) === own) return candidate }
+      catch { /* Absent export or another package is not this component. */ }
+    }
+  } catch { /* Unavailable own module is reported without filesystem details. */ }
+  throw error('assistant-native-unavailable', '无法核对群协作组件的安装来源')
+}
+/** Check the actual retained native preset scope, never host-global tools or
+ * skills and never an Agent creation. Startup probes must not call this: a
+ * collaboration component can still be waiting for its shared service. */
+export async function nativeAssistantCapabilitiesReady(host: Host, presetId: string, signal: AbortSignal): Promise<boolean> {
+  const presets = host.get('agentPresets') as Presets | undefined
+  const skills = host.get('skills') as { get?(name: string, lookup: { scope: object; signal: AbortSignal }): Promise<any> } | undefined
+  const tools = host.get('tools') as { get?(name: string, scope: object): unknown } | undefined
+  if (!presets?.acquireScope || !skills?.get || !tools?.get) return false
+  let lease: Awaited<ReturnType<NonNullable<Presets['acquireScope']>>> | undefined
+  try {
+    signal.throwIfAborted(); lease = await presets.acquireScope(presetId); signal.throwIfAborted()
+    const skill = await skills.get('human-workflow', { scope: lease.key, signal })
+    signal.throwIfAborted()
+    return skill?.content === HUMAN_WORKFLOW_SKILL.content && skill?.provider === HUMAN_WORKFLOW_SKILL.provider
+      && skill?.invocation?.modelInvocable === true && !!tools.get('human_capabilities', lease.key)
+      && !!tools.get('human_assistant_catalog', lease.key)
+  } catch { return false }
+  finally { await lease?.[Symbol.asyncDispose]() }
+}
 const boundedText = (value: unknown, bytes: number): value is string => typeof value === 'string' && Buffer.byteLength(value) <= bytes
 function plainTree(value: unknown, depth = 0, budget = { count: 0 }, ancestors = new Set<object>()): unknown {
   if (++budget.count > 12_000 || depth > 24) throw error('assistant-base-unsupported', '基础预设结构过大或过深')
@@ -107,6 +145,20 @@ function nativePersona(result: Row[]): Row {
 }
 const stockCodingIdentity = 'You are a coding agent powered by the {{model}} model.'
 const neutralAssistantIdentity = 'You are an AI assistant powered by the {{model}} model.'
+function collaborationComposition(plugins: Row[]): Row | undefined {
+  let found: Row | undefined
+  function scan(list: Row[], nested = false) {
+    for (const item of list) {
+      if (item.id === COLLABORATION_COMPONENT_ID || collaborationModules.includes(item.name as typeof collaborationModules[number])) {
+        if (found || nested || item.id !== COLLABORATION_COMPONENT_ID || !collaborationModules.includes(item.name as typeof collaborationModules[number])
+          || Object.keys(item).sort().join() !== 'id,name') throw error('assistant-base-unsupported', '群协作组件声明重复或不是受支持的原生组合')
+        found = item
+      }
+      if (item.group === true) scan(item.config as Row[], true)
+    }
+  }
+  scan(plugins); return found
+}
 export function transformNativeAssistantBase(base: Row[], definition: AssistantDefinition): Row[] {
   const result = rows(base), persona = nativePersona(result), config = persona.config as Row
   let prefix = config.prefix as string
@@ -121,6 +173,7 @@ export function transformNativeAssistantBase(base: Row[], definition: AssistantD
   if (prefix === stockCodingIdentity || prefix.startsWith(stockCodingIdentity + '\n') || prefix.startsWith(stockCodingIdentity + '\r\n'))
     prefix = neutralAssistantIdentity + prefix.slice(stockCodingIdentity.length)
   persona.config = { ...config, prefix: `${prefix}\n\n${assistantGuidance(definition)}`, complete: false, includeRuntimeContext: true }
+  if (!collaborationComposition(result)) result.push({ id: COLLABORATION_COMPONENT_ID, name: nativeCollaborationModule() })
   return result
 }
 function manifest(preview: NativeAssistantPreview): string {
@@ -153,6 +206,9 @@ export function validateNativeAssistantPreview(value: unknown): NativeAssistantP
       || !isRow(item.config) || Object.keys(item.config).sort().join() !== 'description,id,name,plugins'
       || item.config.id !== value.presetId || item.config.name !== definition.name || item.config.description !== definition.description) throw invalid()
     const plugins = rows(item.config.plugins), persona = nativePersona(plugins)
+    // Older approved plans have no component. Preserve their exact bytes;
+    // fresh verification reports that explicit migration is needed.
+    collaborationComposition(plugins)
     if (!persona || !isRow(persona.config) || typeof persona.config.prefix !== 'string'
       || persona.config.complete !== false || persona.config.includeRuntimeContext !== true) throw invalid()
     const prefix = persona.config.prefix
@@ -247,12 +303,10 @@ class Adapter implements NativeAssistantAdapter {
     if (!baseRow || baseRow.broken !== undefined) throw error('assistant-base-unavailable', '基础预设不存在或无法加载')
     if (roster.some(item => item.id === input.presetId)) throw error('assistant-preset-exists', '不能覆盖已存在的原生预设')
     const base = parseNativeAssistantBase(env.codec, await env.presets.readDocument(definition.basePreset), definition.basePreset)
-    const skillRegistry = this.host.get('skills') as { get?: (name: string) => Promise<unknown> } | undefined
-    for (const name of definition.skills) {
-      const skill = await skillRegistry?.get?.(name)
-      if (!isRow(skill) || skill.name !== name || !isRow(skill.invocation) || skill.invocation.modelInvocable !== true)
-        throw error('assistant-skill-unavailable', `原生技能 ${name} 当前不可供模型调用`)
-    }
+    // The component supplies the skill in the future preset scope. A host-
+    // global lookup would incorrectly require leaking that skill to standard.
+    const collaboration = this.host.get('humanTools') as { mountCapabilities?: unknown } | undefined
+    if (typeof collaboration?.mountCapabilities !== 'function') throw error('assistant-skill-unavailable', '群协作组件当前不可用，请检查微信连接插件')
     const rowId = `harness-assistant-${input.presetId}`, bundleName = `@harness-remote-assistants/${input.presetId}`
     const patch = JSON.stringify([{ insert: [{ id: rowId, name: moduleName, config: {
       id: input.presetId, name: definition.name, description: definition.description, plugins: transformNativeAssistantBase(base, definition),
@@ -387,6 +441,8 @@ class Adapter implements NativeAssistantAdapter {
     const document = await env.presets.readDocument(preview.presetId), actual = parseNativeAssistantBase(env.codec, document, preview.presetId)
     const patch = JSON.parse(preview.patch) as { insert: { config: { plugins: unknown } }[] }[]
     if (canonical(actual) !== canonical(patch[0]!.insert[0]!.config.plugins)) return unknown('此助手内容与确认安装的版本不一致，请核对。', 'stale')
+    if (!collaborationComposition(actual)) return unknown('此旧版助手未包含独立的群协作组件；原预设和资料保持不变，请预览并安装升级后的助手版本。', 'stale')
+    if (!await nativeAssistantCapabilitiesReady(this.host, preview.presetId, signal)) return unknown('预设已安装，但群协作工具或工作方法尚未在该模式接通；请核对组件状态。')
     signal.throwIfAborted(); this.lifetime.signal.throwIfAborted()
     return { presetId: preview.presetId, state: 'installed', nativeState: 'installed', message: `原生预设已安装并通过内容核验；请显式新建或选择空会话使用。${defaultNote}` }
   }

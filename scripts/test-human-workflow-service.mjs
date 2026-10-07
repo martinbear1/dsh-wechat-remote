@@ -2,6 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { Context } from '@deepseek-ai/cordis'
+import { createScope } from '@deepseek-ai/dsh-scope'
+import { SkillRegistry } from '@deepseek-ai/dsh-skill'
 import { ToolRuntime, assertSupportedJsonSchema, renderToolsSdk } from '@deepseek-ai/dsh-tools'
 import { SessionStore, SessionId } from '@deepseek-ai/dsh-session'
 import { SystemPrompt, renderContextSections } from '@deepseek-ai/dsh-system-prompt'
@@ -36,10 +38,11 @@ const request = preview => ({ scope: sessionId, ...ref(preview), previewId: prev
 const unwrap = response => { assert.equal(response.ok, true, JSON.stringify(response)); return JSON.parse(response.valueJson) }
 
 async function setup(t, options = {}) {
-  const ctx = new Context(); new SystemPrompt(ctx, {})
+  const ctx = new Context(); new SystemPrompt(ctx, {}); new SkillRegistry(ctx)
   const tools = new ToolRuntime(ctx, { mode: options.mode || 'native' }), sessions = new SessionStore(ctx)
   const session = sessions.create(SessionId(sessionId), { meta: { createdAt: 100 } })
   const agent = { id: session.id, session, ctx, status: 'idle', send() { assert.fail('service must not wake Agent') } }
+  agent.ctx = createScope(ctx, agent).ctx
   ctx.provide('agents', { get: id => id === agent.id ? agent : undefined }); ctx.on('session/flush', async () => {})
   options.provide?.(ctx)
   let identity = nodeId, calls = 0
@@ -47,15 +50,20 @@ async function setup(t, options = {}) {
     async request(...args) { calls++; if (options.request) return options.request(...args); assert.fail('empty local mode operations must not contact task backend') } }
   const modeStore = options.modeStore || store(), automationStore = options.automationStore || store(), recordStore = store(), replicaStore = store(), coreStore = store({ schemaVersion: 1, records: [] })
   const config = { enabled: true, assistants: options.assistants ?? false, store: coreStore, workflow: { transport, modeStore, recordStore, replicaStore,
-    receiverKeyStore: store(), lifecycleStore: store(), automationStore } }
+    receiverKeyStore: store(), lifecycleStore: store(), automationStore, coverStore: store(), workspaceStore: store() } }
   let fiber = await ctx.plugin(HumanToolsService, config), service = ctx.get('humanTools'), sequence = 0
   t.after(async () => { await ctx.fiber.dispose() })
+  const mounted = new WeakSet()
+  async function compose() {
+    if (!mounted.has(service)) { await service.mountCapabilities(agent.ctx); mounted.add(service) }
+  }
   async function run(name, args) {
+    await compose()
     return tools.execute({ name, arguments: args, callId: `service_call_${++sequence}`, agent, signal })
   }
   return { ctx, tools, session, agent, modeStore, recordStore, coreStore, replicaStore, automationStore, transport, config,
     get fiber() { return fiber }, get service() { return service }, get networkCalls() { return calls },
-    rotate() { identity = 'node_' + 'b'.repeat(32) }, run,
+    rotate() { identity = 'node_' + 'b'.repeat(32) }, run, compose,
     async draft() { const result = await run('human_mode_draft', { package: pkg() }); assert.equal(result.isError, false, JSON.stringify(result)); return JSON.parse(result.content[0].text) },
     async preview(draft) { return unwrap(await service.modePreview({ scope: sessionId, id: draft.id, version: draft.version }, signal)) },
     async reload() { fiber = await ctx.plugin(HumanToolsService, config); service = ctx.get('humanTools'); return service },
@@ -103,7 +111,11 @@ function provideAutomationServices(ctx) {
     permissionPresets: { resolve: untouched }, workspaceRegistry: { archivedSessionIds: [] },
   })) ctx.provide(name, service)
 }
-const automationCapability = async host => unwrap(await host.service.capabilities({ scope: sessionId }, signal)).workflow.capabilities.find(c => c.id === 'automation.run')
+const automationCapability = async host => {
+  const result = unwrap(await host.service.capabilities({ scope: sessionId }, signal))
+  await host.compose()
+  return result.workflow.capabilities.find(c => c.id === 'automation.run')
+}
 
 test('disabled assistant service is blocked in both live manifest and Agent capability catalog', async t => {
   const host = await setup(t)
@@ -115,7 +127,7 @@ test('disabled assistant service is blocked in both live manifest and Agent capa
   assert.equal(host.networkCalls, 0)
 })
 
-test('registered assistant design is usable without native install support or a teacher preset; missing tools block discovery', async t => {
+test('composed assistant design works without native install support or a teacher preset; stopped catalog blocks discovery', async t => {
   let probes = 0
   const native = { async probe() { probes++; return { supported: false, basePresets: [], reason: '测试宿主不提供原生安装' } },
     async preview() { assert.fail('discovery must not preview') }, async install() { assert.fail('discovery must not install') },
@@ -124,16 +136,19 @@ test('registered assistant design is usable without native install support or a 
   const capability = () => host.service.workflow.modes.manifest().capabilities.find(item => item.id === 'assistant.design')
   unwrap(await host.service.capabilities({ scope: sessionId }, signal))
   assert.equal(capability().status, 'available'); assert.equal(probes, 0, 'ordinary capability discovery must not probe native installation')
-  for (const name of ['human_assistant_catalog', 'human_assistant_draft', 'human_assistant_get']) assert(host.tools.get(name))
+  await host.compose()
+  for (const name of ['human_assistant_catalog', 'human_assistant_draft', 'human_assistant_get']) {
+    assert.equal(host.tools.get(name), undefined, 'backend must not publish global tools')
+    assert(host.tools.get(name, host.agent))
+  }
   const catalog = JSON.parse((await host.run('human_capabilities', { view: 'catalog', category: 'workspace', detail: 'full' })).content[0].text)
   assert.equal(catalog.entries.find(item => item.id === 'workspace.assistant-design').status, 'available')
   const assistants = unwrap(await host.service.assistantCatalog({}, signal))
   assert.equal(assistants.native.supported, false); assert.deepEqual(assistants.drafts, [])
   assert.equal(capability().status, 'available', 'data-only design is distinct from native install support')
-  const originalGet = host.tools.get.bind(host.tools)
-  host.tools.get = name => name === 'human_assistant_draft' ? undefined : originalGet(name)
-  try { assert.equal(capability().status, 'blocked', 'service existence does not substitute for actual tool registration') }
-  finally { host.tools.get = originalGet }
+  await host.fiber.dispose()
+  assert.equal(capability().status, 'blocked', 'stopped implementation catalog must not advertise available tools')
+  assert.equal(host.tools.get('human_assistant_draft', host.agent), undefined)
   assert.equal(host.networkCalls, 0)
 })
 
@@ -187,7 +202,7 @@ test('real Cordis late optional dependencies recover discovery without remount, 
   t.mock.timers.enable({ apis: ['setTimeout'] })
   const host = await setup(t), before = await automationCapability(host), service = host.service, ledger = service.automation
   assert.equal(before.status, 'blocked'); assert(before.reason.includes('sessionController.inspect'))
-  assert(host.tools.get('human_automation_propose'), 'draft proposal stays distinct from executable automatic capability')
+  assert(host.tools.get('human_automation_propose', host.agent), 'draft proposal stays distinct from executable automatic capability')
   const started = deferred(), ready = deferred()
   const mounting = host.ctx.plugin(async child => { provideAutomationServices(child); started.resolve(); await ready.promise })
   await started.promise
@@ -201,7 +216,7 @@ test('real Cordis late optional dependencies recover discovery without remount, 
   const other = await setup(t)
   assert.equal((await automationCapability(other)).status, 'blocked', 'another host/profile does not inherit this host native readiness')
   assert.equal(host.automationStore.writes, 0); assert.equal(host.networkCalls, 0)
-  assert.equal(host.tools.get('human_automation_save'), undefined, 'no private execution tools without an approved run')
+  assert.equal(host.tools.get('human_automation_save', host.agent), undefined, 'no private execution tools without an approved run')
   await nativeFiber.dispose()
   assert.equal((await automationCapability(host)).status, 'blocked', 'withdrawn native dependencies fail closed')
   const recovered = await host.ctx.plugin(provideAutomationServices)
@@ -209,7 +224,7 @@ test('real Cordis late optional dependencies recover discovery without remount, 
   assert.equal(host.automationStore.loads, 1); assert.equal(host.networkCalls, 0)
   await host.fiber.dispose()
   assert.equal(ledger.capability().supported, false)
-  assert.equal(host.tools.get('human_automation_propose'), undefined)
+  assert.equal(host.tools.get('human_automation_propose', host.agent), undefined)
   assert.equal((await service.capabilities({ scope: sessionId }, signal)).ok, false)
   await recovered.dispose()
   await host.ctx.plugin(provideAutomationServices)
@@ -222,7 +237,7 @@ test('automation store failure stays isolated from manual tools and does not mas
   assert.equal(cap.status, 'blocked'); assert(cap.reason.includes('账本')); assert(!cap.reason.includes('SECRET'))
   await host.ctx.plugin(provideAutomationServices)
   assert.equal((await automationCapability(host)).status, 'blocked')
-  assert.equal(host.service.automation, undefined); assert.equal(host.tools.get('human_automation_propose'), undefined)
+  assert.equal(host.service.automation, undefined); assert.equal(host.tools.get('human_automation_propose', host.agent), undefined)
   assert.equal((await host.run('human_surface_share', { title: '仍可手动', body: '没有自动授权' })).isError, false)
 })
 
@@ -235,7 +250,7 @@ test('dispose drains a pending automation load and closes its late adapter befor
   await new Promise(resolve => setImmediate(resolve)); assert.equal(disposed, false)
   await host.ctx.plugin(provideAutomationServices)
   release.resolve(); await disposal
-  assert.equal(old.automation, undefined); assert.equal(host.tools.get('human_automation_propose'), undefined)
+  assert.equal(old.automation, undefined); assert.equal(host.tools.get('human_automation_propose', host.agent), undefined)
   assert.equal((await old.capabilities({ scope: sessionId }, signal)).ok, false)
   await host.reload()
   assert.equal((await automationCapability(host)).status, 'available'); assert.equal(host.networkCalls, 0)
@@ -357,7 +372,7 @@ test('real Cordis unload waits for mode approval save and reload sees only the d
   assert.equal((await host.service.modeList({ scope: sessionId }, signal)).ok, false)
   delayed.release.resolve(); await disposal
   assert.equal((await pending).ok, false, 'disposed owner RPC never returns successful approval')
-  assert.equal(host.tools.get('human_mode_draft'), undefined)
+  assert.equal(host.tools.get('human_mode_draft', host.agent), undefined)
   const saved = host.modeStore.value
   assert.equal(saved.activations[0].revision, 1)
   await host.reload(); unwrap(await host.service.capabilities({ scope: sessionId }, signal))
@@ -392,10 +407,11 @@ test('scope and header generation are checked for owner RPC without restoring or
 
 test('all registered workflow tools generate Code Mode schemas using the installed DSH subset', async t => {
   const host = await setup(t); unwrap(await host.service.capabilities({ scope: sessionId }, signal))
+  await host.compose()
   const names = ['human_capabilities', 'human_mode_draft', 'human_mode_list', 'human_mode_get', 'human_mode_preview',
     'human_mode_prepare_card', 'human_workflow_save', 'human_workflow_get', 'human_workflow_list', 'human_task_list', 'human_task_get', 'human_task_participants']
   const schemas = names.map(name => {
-    const definition = host.tools.get(name); assert(definition)
+    const definition = host.tools.get(name, host.agent); assert(definition)
     assertSupportedJsonSchema(definition.parameters); assertSupportedJsonSchema(definition.output.schema)
     return { name, description: definition.description, parameters: definition.parameters, output: definition.output.schema }
   })

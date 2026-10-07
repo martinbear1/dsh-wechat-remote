@@ -1,7 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { BUILTIN_ASSISTANTS, builtinAssistants, type BuiltinTemplateId, type BuiltinAssistantStatus } from './builtins.js'
-import { nativeAssistantCodec, nativeAssistantCompositionDigest, parseNativeAssistantBase, transformNativeAssistantBase } from './native-adapter.js'
-import { HUMAN_WORKFLOW_SKILL } from '../human-workflow/dsh-skill.js'
+import { nativeAssistantCapabilitiesReady, nativeAssistantCodec, nativeAssistantCompositionDigest, parseNativeAssistantBase, transformNativeAssistantBase } from './native-adapter.js'
 
 type Host = { get(name: string): any; provide(name: any, service: any): unknown; effect(callback: () => () => Promise<void>, label: string): unknown }
 
@@ -70,6 +69,11 @@ export class BuiltinAssistantComponent {
     const base = { ...this.definition, source: 'builtin' as const }
     if (!this.settled) return { ...base, state: 'unknown', nativeState: 'unknown', reason: '内置助手正在准备，请稍后刷新。' }
     if (this.lifetime.signal.aborted || !this.expected) return { ...base, state: 'unknown', nativeState: 'unknown', reason: this.issue || '内置助手已停用。' }
+    // The shared backend opens its registry during every initialization, also
+    // when these preset declarations survived a backend-only reload. Acquiring
+    // their scopes here could mount a component waiting on that same backend.
+    // Defer the full scoped readiness check to an explicit status query.
+    if (options.waitForReady === false) return { ...base, state: 'unknown', nativeState: 'unknown', reason: '内置助手已包含，工作能力将在连接就绪后核对。' }
     try {
       const registry = this.host.get('agentPresets'), profile = this.host.get('profileContext')
       const roster = await registry.list(), found = roster.find((item: any) => item.id === this.definition.presetId)
@@ -78,10 +82,9 @@ export class BuiltinAssistantComponent {
       this.lifetime.signal.throwIfAborted()
       if (!found || found.broken !== undefined || nativeAssistantCompositionDigest(actual) !== this.expected || found.name !== this.definition.name)
         return { ...base, state: 'unknown', nativeState: 'stale', reason: '内置助手的当前模式需核对，未按名称猜测它已可用。' }
-      const skills = this.host.get('skills'), skill = typeof skills?.get === 'function' ? await skills.get('human-workflow') : undefined
-      this.lifetime.signal.throwIfAborted()
-      if (!skill || skill.content !== HUMAN_WORKFLOW_SKILL.content || skill.provider !== HUMAN_WORKFLOW_SKILL.provider)
+      if (!await nativeAssistantCapabilitiesReady(this.host, this.definition.presetId, this.lifetime.signal))
         return { ...base, state: 'unknown', nativeState: 'unknown', reason: '助手模式已包含，但工作方法尚未接通；请核对微信连接插件状态。' }
+      this.lifetime.signal.throwIfAborted()
       return { ...base, state: 'installed', nativeState: 'installed' }
     } catch { return { ...base, state: 'unknown', nativeState: 'unknown', reason: '暂时无法核对内置助手，请稍后刷新。' } }
   }

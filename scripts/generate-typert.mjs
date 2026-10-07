@@ -31,6 +31,7 @@ try {
   copyFileSync(path.join(root, 'package.json'), path.join(packageRoot, 'package.json'))
   const hostSources = [
     'index.ts',
+    'collaboration.ts',
     'gate-runtime.ts',
     'pairing-management.ts',
     'pairing-http.ts',
@@ -71,6 +72,7 @@ try {
     'human-tools/store.ts',
     'human-tools/dsh.ts',
     'human-tools/service.ts',
+    'human-tools/scoped-capabilities.ts',
     'assistant-presets/definition.ts',
     'assistant-presets/interaction-guidance.ts',
     'assistant-presets/catalog.ts',

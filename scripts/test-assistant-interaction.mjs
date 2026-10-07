@@ -136,7 +136,7 @@ test('native preview really appends new interaction guidance and retains inherit
       readDocument: async id => ({ agentPreset: id, content: JSON.stringify(base) }), compositionInventory: async () => [] },
     pluginManager: { listBundles: async () => [], installBundle: unreachable, cancelInstall: unreachable, waitForInstall: unreachable },
     profileContext: { dir: directory, installAnchor: anchor },
-    skills: { get: async name => name === HUMAN_WORKFLOW_SKILL.name ? HUMAN_WORKFLOW_SKILL : undefined },
+    humanTools: { mountCapabilities: unreachable },
   }
   const adapter = createNativeAssistantAdapter({ get: name => services[name] }, { codec: { load: JSON.parse } })
   try {
@@ -149,7 +149,8 @@ test('native preview really appends new interaction guidance and retains inherit
     assert.equal(plugins[0].config.suffix, 'Inherited safety suffix')
     assert.equal(plugins[0].config.complete, false)
     assert.equal(plugins[0].config.includeRuntimeContext, true)
-    assert.deepEqual(plugins.slice(1), base.slice(1))
+    assert.deepEqual(plugins.slice(1, -1), base.slice(1))
+    assert.deepEqual(plugins.at(-1), { id: 'harness-collaboration', name: '@harness-remote/dsh-wechat-remote/collaboration' })
     assert.equal(base[0].config.prefix, 'Inherited native policy')
     // Use the actual native generator, not just the shared text helper, for
     // every built-in profession plus a newly authored creator/custom mode.

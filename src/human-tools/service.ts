@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto'
 import path from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
-import type { ToolRuntime } from '@deepseek-ai/dsh-tools'
+import { ScopedCapabilities } from './scoped-capabilities.js'
 import type { SessionId, SessionStore } from '@deepseek-ai/dsh-session'
 import { defaultGateStatePath } from '../agent-metadata.js'
 import { HumanToolsCore, type HumanStore } from './core.js'
@@ -74,6 +74,7 @@ export class HumanToolsService extends TypertRemoteService {
   private core?: HumanToolsCore
   private ready?: Promise<void>
   private readonly lifetime = new AbortController()
+  private readonly modelCapabilities = new ScopedCapabilities(this.lifetime.signal)
   private unregister?: () => void
   private workflow?: { transport: WorkflowTransport; modes: ModeRegistry; records: WorkflowRecords; replica: WorkflowReplica }
   private assistants?: { registry: AssistantRegistry; business: AssistantBusinessRecords; native: NativeAssistantAdapter; sessionIntents?: AssistantSessionIntents }
@@ -90,7 +91,9 @@ export class HumanToolsService extends TypertRemoteService {
     host.effect(() => async () => {
       this.lifetime.abort(disabled())
       const drained = this.core?.close()
-      try { this.unregister?.() } finally {
+      try {
+        try { this.modelCapabilities.close() } finally { this.unregister?.() }
+      } finally {
         try {
           // Once lifecycle mounted, an automation store may still be opening.
           // Drain its aborted initializer before a replacement fiber can load.
@@ -106,6 +109,15 @@ export class HumanToolsService extends TypertRemoteService {
     this.ready = this.initialize(config)
     // Failure disables this optional experiment, never the mature gate/host.
     void this.ready.catch(cause => console.warn('[human-tools] unavailable:', cause instanceof Error ? cause.message : String(cause)))
+  }
+  /** Internal native composition API, deliberately not a Remote method.
+   * Await backend readiness without creating a session or changing a preset. */
+  async mountCapabilities(ctx: Context): Promise<() => void> {
+    if (!this.ready) throw disabled()
+    await this.ready
+    this.lifetime.signal.throwIfAborted()
+    if (!this.core) throw disabled()
+    return this.modelCapabilities.mount(ctx)
   }
   private async initialize(config: HumanToolsConfig): Promise<void> {
     if (!dshHumanToolsAvailable(this.host)) throw new Error('此DSH不支持原生工具/会话上下文')
@@ -140,7 +152,7 @@ export class HumanToolsService extends TypertRemoteService {
           const capabilities = () => { transport.assertIdentity(); const automation = this.automation?.capability(); return createCapabilityManifest(transport.nodeId, { 'task.query': { status: 'available' },
             'task.private-publish': this.lifecycle && config.privateInput?.supported() ? { status: 'available' } : { status: 'blocked', reason: '当前宿主尚不能核对真实用户输入；可继续准备内容并使用确认按钮。' },
             'assistant.design': this.assistants && !this.lifetime.signal.aborted
-              && ['human_assistant_catalog', 'human_assistant_draft', 'human_assistant_get'].every(name => Boolean((this.host.get('tools') as ToolRuntime).get(name)))
+              && ['human_assistant_catalog', 'human_assistant_draft', 'human_assistant_get'].every(name => this.modelCapabilities.has(name))
               ? { status: 'available' } : { status: 'blocked', reason: '助手设计服务未启用或所需工具尚未注册；原生安装支持须另行核对。' },
             'workspace.directory': this.directory && typeof (this.host.get('workspaceRegistry') as any)?.list === 'function'
               && Array.isArray((this.host.get('workspaceRegistry') as any)?.archivedSessionIds)
@@ -179,7 +191,7 @@ export class HumanToolsService extends TypertRemoteService {
                 return normalizeCardCoverImage(data, mediaType, signal)
               } })
             this.lifetime.signal.throwIfAborted(); transport.assertIdentity()
-            unregisterTools.push((this.host.get('tools') as ToolRuntime).register(cardCoverTool(transport.nodeId, this.covers, exec => {
+            unregisterTools.push(this.modelCapabilities.add(cardCoverTool(transport.nodeId, this.covers, exec => {
               this.lifetime.signal.throwIfAborted(); transport.assertIdentity()
               if (!exec.agent || (this.host.get('agents') as any)?.get(String(exec.agent.id)) !== exec.agent) throw fail('cover-scope-invalid', '不是当前原生Agent')
             })))
@@ -236,7 +248,7 @@ export class HumanToolsService extends TypertRemoteService {
               for (const tool of automationProposalTools({ nodeId: transport.nodeId, runtime: automation, assertAgent: exec => {
                 this.lifetime.signal.throwIfAborted(); transport.assertIdentity()
                 if (!exec.agent || (this.host.get('agents') as any)?.get(String(exec.agent.id)) !== exec.agent) throw fail('workflow-scope-invalid', '不是当前原生 Agent')
-              } })) unregisterAutomation.push((this.host.get('tools') as ToolRuntime).register(tool))
+              } })) unregisterAutomation.push(this.modelCapabilities.add(tool))
               this.automation = automation; unregisterTools.push(...unregisterAutomation)
             } catch {
               unregisterAutomation.reverse().forEach(remove => remove())
@@ -244,7 +256,7 @@ export class HumanToolsService extends TypertRemoteService {
               if (automation) await automation.close(); else await nativeAutomation.close()
               this.lifetime.signal.throwIfAborted(); transport.assertIdentity()
             }
-            if (receiver) unregisterTools.push((this.host.get('tools') as ToolRuntime).register(submissionFileTool({ nodeId: transport.nodeId, lifecycle: runtime,
+            if (receiver) unregisterTools.push(this.modelCapabilities.add(submissionFileTool({ nodeId: transport.nodeId, lifecycle: runtime,
               assertAgent: exec => {
                 this.lifetime.signal.throwIfAborted(); transport.assertIdentity()
                 const agents = this.host.get('agents') as { get(id: string): unknown } | undefined
@@ -255,7 +267,7 @@ export class HumanToolsService extends TypertRemoteService {
               if (!exec.agent || (this.host.get('agents') as any)?.get(String(exec.agent.id)) !== exec.agent) throw fail('workflow-scope-invalid', '调用者不是当前真实Agent')
             }
             for (const tool of workspaceTools({ nodeId: transport.nodeId, directory: this.directory, lifecycle: runtime, core, assertAgent }))
-              unregisterTools.push((this.host.get('tools') as ToolRuntime).register(tool))
+              unregisterTools.push(this.modelCapabilities.add(tool))
             for (const tool of lifecycleTools({ nodeId: transport.nodeId, lifecycle: runtime, core, directory: this.directory,
               ...(config.privateInput ? { ownerInput: (exec, taskRef, draftRef) => config.privateInput!.ownerInput(exec, taskRef, draftRef),
                 ownerInputStatus: (exec: import('@deepseek-ai/dsh-tools').ToolRunContext) => config.privateInput!.ownerInputStatus(exec) } : {}),
@@ -264,7 +276,7 @@ export class HumanToolsService extends TypertRemoteService {
                 const agents = this.host.get('agents') as { get(id: string): unknown } | undefined
                 if (!exec.agent || agents?.get(String(exec.agent.id)) !== exec.agent) throw fail('workflow-scope-invalid', '调用者不是当前真实Agent')
               }, ...(receiver && attachments ? { saveImage: (data: Uint8Array, mediaType: 'image/png' | 'image/jpeg') => attachments.saveImage({ data, mediaType }) } : {}) }))
-              unregisterTools.push((this.host.get('tools') as ToolRuntime).register(tool))
+              unregisterTools.push(this.modelCapabilities.add(tool))
           } catch (cause) { await Promise.all([runtime?.close(), receiver?.close()]); await keys.close(); throw cause }
           const options = { nodeId: transport.nodeId, modes, records, capabilities,
             prepareCard: (input: { scope: WorkflowScope; callId: string; rootCallId: string; title: string; body: string; sourceSurfaceId?: string }, signal: AbortSignal) => {
@@ -274,13 +286,16 @@ export class HumanToolsService extends TypertRemoteService {
             } }
           for (const tool of [...humanWorkflowTools(options), ...workflowQueryTools(transport.nodeId, replica)]) {
             const execute = tool.execute
-            unregisterTools.push((this.host.get('tools') as ToolRuntime).register({ ...tool, async execute(args, exec) {
+            unregisterTools.push(this.modelCapabilities.add({ ...tool, async execute(args, exec) {
               transport.assertIdentity(); const result = await execute(args, exec); transport.assertIdentity(); return result
             } }))
           }
-          unregisterTools.push(registerHumanWorkflowContext(this.host, options))
-          const unregisterSkill = registerHumanWorkflowSkill(this.host)
-          if (unregisterSkill) unregisterTools.push(unregisterSkill)
+          unregisterTools.push(this.modelCapabilities.contribute(ctx => registerHumanWorkflowContext(ctx, options)))
+          unregisterTools.push(this.modelCapabilities.contribute(ctx => {
+            const remove = registerHumanWorkflowSkill(ctx)
+            if (!remove) throw new Error('当前 DSH 尚不能装载协作技能，未启用该能力组件')
+            return remove
+          }))
           if (config.assistants !== false) {
             const assistantConfig = config.assistants || {}, native = assistantConfig.native || createNativeAssistantAdapter(this.host)
             let registry: AssistantRegistry | undefined, business: AssistantBusinessRecords | undefined
@@ -314,8 +329,8 @@ export class HumanToolsService extends TypertRemoteService {
               this.lifetime.signal.throwIfAborted(); transport.assertIdentity()
               const assistantOptions = { nodeId: transport.nodeId, registry, business, assertIdentity: () => transport.assertIdentity(),
                 composedPreset: (agent: Parameters<typeof nativeComposedPreset>[1]) => nativeComposedPreset(this.host, agent) }
-              for (const tool of assistantTools(assistantOptions)) unregisterTools.push((this.host.get('tools') as ToolRuntime).register(tool))
-              unregisterTools.push(registerAssistantContext(this.host, assistantOptions))
+              for (const tool of assistantTools(assistantOptions)) unregisterTools.push(this.modelCapabilities.add(tool))
+              unregisterTools.push(this.modelCapabilities.contribute(ctx => registerAssistantContext(ctx, assistantOptions)))
             } catch (cause) {
               await native.close(); await Promise.all([registry?.close(), business?.close()]); throw cause
             }
@@ -325,14 +340,14 @@ export class HumanToolsService extends TypertRemoteService {
       }
       for (const tool of [humanShareTool(core), humanMembersTool(core), humanRemindTool(core)]) {
         const execute = tool.execute
-        unregisterTools.push((this.host.get('tools') as ToolRuntime).register({ ...tool, execute: async (args, exec) => {
+        unregisterTools.push(this.modelCapabilities.add({ ...tool, execute: async (args, exec) => {
           this.lifetime.signal.throwIfAborted(); config.workflow?.transport.assertIdentity()
           const result = await execute(args, { ...exec, signal: AbortSignal.any([exec.signal, this.lifetime.signal]) })
           this.lifetime.signal.throwIfAborted(); config.workflow?.transport.assertIdentity()
           return result
         } }))
       }
-      const unregisterContext = registerHumanContext(this.host, core)
+      const unregisterContext = this.modelCapabilities.contribute(ctx => registerHumanContext(ctx, core))
       this.unregister = () => { unregisterContext(); unregisterTools.reverse().forEach(remove => remove()) }
     } catch (cause) { unregisterTools.reverse().forEach(remove => remove()); await Promise.all([core.close(), this.workflow?.modes.close(), this.workflow?.records.close(), this.workflow?.replica.close(), this.closeAssistants(), this.closeLifecycle(), this.covers?.close(), this.directory?.close()]); this.core = undefined; this.workflow = undefined; throw cause }
   }

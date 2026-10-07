@@ -125,6 +125,8 @@ check(!patch.includes('dsh-host-directory-picker-browse'), 'cordis.patch.yml 不
 
 // 4. 客户端入口必须在 exports 里可被官方扫描器发现。
 check(pkg.exports?.['./client']?.default === './lib/client.js', 'package.json exports["./client"] 未指向 lib/client.js')
+check(pkg.exports?.['./collaboration']?.default === './lib/collaboration.js', '群协作原生组合入口未导出')
+for (const entry of ['lib/collaboration.js', 'lib/collaboration.d.ts']) check(pkg.files.includes(entry), `原生组合入口未纳入发布包：${entry}`)
 check(pkg.exports?.['.']?.types === './lib/index.d.ts', 'package.json 根类型入口未指向真实 Host 入口声明')
 check(Array.isArray(pkg.files) && pkg.files.includes('lib/index.d.ts'), 'package.json files 缺少真实 Host 入口声明')
 check(pkg.exports?.['./directory']?.default === './lib/directory-service.js', 'package.json exports["./directory"] 未指向目录服务')

@@ -48,8 +48,8 @@ export declare class AssistantRegistry {
                 version: number;
                 presetId: string;
                 name: string;
-                state: "installed" | "unknown";
-                nativeState: "installed" | "unknown" | "disabled" | "stale";
+                state: "unknown" | "installed";
+                nativeState: "unknown" | "disabled" | "stale" | "installed";
             } | undefined;
             id: string;
             name: string;
@@ -66,27 +66,27 @@ export declare class AssistantRegistry {
             description: string;
             templateId: "designer" | "teacher" | "project";
             source: "builtin";
-            state: "installed" | "unknown";
-            nativeState: "installed" | "unknown" | "disabled" | "stale";
+            state: "unknown" | "installed";
+            nativeState: "unknown" | "disabled" | "stale" | "installed";
         } | {
             presetId?: string | undefined;
             replacement?: {
                 presetId: string;
                 name: string;
-                state: "installed" | "unknown";
+                state: "unknown" | "installed";
                 bundleName: string;
                 canRemoveAfterReview: boolean;
                 warning: string;
             } | undefined;
             templateId?: string | undefined;
-            nativeState?: "installed" | "unknown" | "disabled" | "stale" | "uninstalled" | undefined;
+            nativeState?: "unknown" | "disabled" | "stale" | "installed" | "uninstalled" | undefined;
             reason?: string | undefined;
             id: string;
             version: number;
             digest: string;
             name: string;
             description: string;
-            state: "installed" | "unknown" | "draft" | "installing";
+            state: "unknown" | "draft" | "installed" | "installing";
         })[];
     }>;
     draft(request: {
@@ -104,10 +104,10 @@ export declare class AssistantRegistry {
         version: number;
         digest: string;
         definition: AssistantDefinition;
-        state: "installed" | "unknown" | "draft" | "installing";
+        state: "unknown" | "draft" | "installed" | "installing";
     } | {
         source: string;
-        state: "installed" | "unknown";
+        state: "unknown" | "installed";
         id: string;
         version: number;
         digest: string;
@@ -176,7 +176,7 @@ export declare class AssistantRegistry {
         version: number;
         digest: string;
         definition: AssistantDefinition;
-        state: "installed" | "unknown" | "draft" | "installing";
+        state: "unknown" | "draft" | "installed" | "installing";
     } | undefined;
     close(): Promise<void>;
 }

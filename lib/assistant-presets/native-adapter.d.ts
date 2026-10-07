@@ -12,6 +12,16 @@ export interface NativePresetCodec {
 export interface NativeAssistantAdapterOptions {
     codec?: NativePresetCodec;
 }
+export declare const COLLABORATION_COMPONENT_ID = "harness-collaboration";
+declare const collaborationModules: readonly ["dsh-wechat-remote/collaboration", "@harness-remote/dsh-wechat-remote/collaboration"];
+/** The Desktop bundle contains this core under native/. Its public outer
+ * self-reference must be used by separately installed preset packages; the CLI
+ * core instead owns its scoped npm name. Never infer this from another profile. */
+export declare function nativeCollaborationModule(): typeof collaborationModules[number];
+/** Check the actual retained native preset scope, never host-global tools or
+ * skills and never an Agent creation. Startup probes must not call this: a
+ * collaboration component can still be waiting for its shared service. */
+export declare function nativeAssistantCapabilitiesReady(host: Host, presetId: string, signal: AbortSignal): Promise<boolean>;
 export declare const nativeAssistantCompositionDigest: (value: unknown) => string;
 export declare function parseNativeAssistantBase(codec: NativePresetCodec, document: unknown, expected: string): Row[];
 export declare function transformNativeAssistantBase(base: Row[], definition: AssistantDefinition): Row[];

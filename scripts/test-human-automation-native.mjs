@@ -165,10 +165,10 @@ test('native capability is current, bounded, non-sensitive and never restores or
   assert.equal(h.controls.restores, 0); assert.equal(h.controls.followups, 0); assert.equal(h.controls.modelCalls, 0)
   await h.adapter.close(); assert.equal(h.adapter.probe().supported, false, 'closed adapter cannot revive when services are ready')
 })
-test('without history seam only a newly witnessed real human turn passes; historical unknown and producer turns remain blocked', async t => {
+test('unreadable automation history does not govern ordinary native turns; recognized producer turns remain blocked', async t => {
   const h = await setup(t), human = humanMessage()
   h.agent.session = { id: h.session.id, header: h.session.header }
-  assert.equal((await h.pre([], 7)).kind, 'reject', 'unobservable historical continuation is not assumed human')
+  assert.equal((await h.pre([], 7)).kind, 'enter', 'unknown native provenance alone is not authority for this plugin to deny execution')
   h.ctx.emit('session/event', h.agent.session, { type: 'turn/start', seq: 200, data: { turn: 8 } })
   h.emit('agent/inbox/claimed', { agent: h.agent, message: human, turn: 8 })
   assert.equal((await h.pre([human], 8)).kind, 'enter')
@@ -178,4 +178,21 @@ test('without history seam only a newly witnessed real human turn passes; histor
   h.ctx.emit('session/event', h.agent.session, { type: 'turn/start', seq: 201, data: { turn: 9 } })
   const producer = pluginMessage(); h.emit('agent/inbox/claimed', { agent: h.agent, message: producer, turn: 9 })
   assert.equal((await h.pre([], 9)).kind, 'reject'); assert.equal((await h.call('ordinary_tool', {})).isError, true)
+})
+
+test('leased native automation cannot admit a different producer message claimed in the same turn', async t => {
+  const unexpected = pluginMessage()
+  const h = await setup(t, { beforePre: ({ agent, current, emit }) => emit('agent/inbox/claimed', { agent, message: unexpected, turn: current }) })
+  const result = await h.adapter.run(h.request(), signal)
+  assert.equal(result.state, 'cancelled'); assert.equal(h.controls.modelCalls, 0)
+})
+
+test('failed history still prevents NEW automatic execution without denying ordinary tools', async t => {
+  const h = await setup(t)
+  h.services.sessionController.inspect = async () => { throw new Error('history unavailable') }
+  let ordinaryCalls = 0
+  h.tools.register({ name: 'ordinary_tool', description: '', parameters: { type: 'object', properties: {} }, output, async execute() { ordinaryCalls++; return {} } })
+  assert.equal((await h.adapter.run(h.request(), signal)).state, 'failed')
+  assert.equal(h.controls.followups, 0); assert.equal(h.controls.modelCalls, 0)
+  assert.equal((await h.call('ordinary_tool', {})).isError, false); assert.equal(ordinaryCalls, 1)
 })

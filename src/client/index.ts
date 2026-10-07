@@ -68,6 +68,15 @@ export function apply(ctx: HarnessRemoteClientContext): void {
 
   const store = new RemotePageStore(describeHost, callManagement)
   let connectionGeneration = 0
+  const clawbotCall: import('./ClawbotPanel.tsx').ClawbotCall = async request => {
+    const generation = connectionGeneration
+    const response = await ctx.connection.rpc.call('/api', 'wechatClawbot/control', { args: { request } })
+    if (generation !== connectionGeneration) throw new Error('节点连接已变化，请刷新 ClawBot 状态')
+    if (!response.ok) throw new Error('ClawBot 组件暂不可用，请核对下方组件开关')
+    const result = response.value as import('../clawbot/service.js').ClawbotControlResult
+    if (!result?.ok) throw new Error(result?.error?.message || 'ClawBot 状态读取失败')
+    return result.value
+  }
   const assistantCall: import('./assistant-store.js').AssistantCall = async (method, request) => {
     const generation = connectionGeneration
     const response = await ctx.connection.rpc.call('/api', `humanTools/${method}`, { args: { request } })
@@ -94,7 +103,7 @@ export function apply(ctx: HarnessRemoteClientContext): void {
   }, 'wechat assistant lifecycle')
   ctx.effect(() => () => store.dispose(), 'wechat shared page')
   const openPlugin = () => openPluginPage(name => ctx.get(name))
-  const injected = () => ({ describeHost, callManagement, store, assistants })
+  const injected = () => ({ describeHost, callManagement, store, assistants, clawbotCall })
   ctx.slots.inject('settings.section', () =>
     ctx.slots.register(
       {

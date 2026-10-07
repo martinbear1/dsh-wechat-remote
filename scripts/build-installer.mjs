@@ -89,6 +89,7 @@ if (process.argv[2]) {
     fs.mkdirSync(native)
     fs.copyFileSync(path.join(stage, 'package/package.json'), path.join(native, 'package.json'))
     fs.cpSync(path.join(stage, 'package/lib'), path.join(native, 'lib'), { recursive: true })
+    fs.cpSync(path.join(stage, 'package/THIRD-PARTY-NOTICES'), path.join(native, 'THIRD-PARTY-NOTICES'), { recursive: true })
   } finally {
     if (path.dirname(stage) !== path.resolve(root, 'installer') || !path.basename(stage).startsWith('.native-build-')) throw new Error('Invalid build stage')
     fs.rmSync(stage, { recursive: true, force: true })

@@ -1,9 +1,11 @@
-# Harness Remote bundle：微信网关和三个内置工作助手组件，独立管理生命周期。
+# Harness Remote bundle：微信网关、独立 ClawBot 渠道和三个工作助手组件。
 # 不替换 DSH/WebUI 的官方 directory-picker；小程序的远程目录浏览由本包
 # Host-only Typert Remote 服务提供，不向 WebUI 注入目录 UI。
 - insert:
     - id: gate
       name: '@harness-remote/dsh-wechat-remote'
+    - id: wechat-clawbot
+      name: '@harness-remote/dsh-wechat-remote/clawbot'
     - id: harness-assistant-teacher
       name: '@harness-remote/dsh-wechat-remote/assistant-teacher'
     - id: harness-assistant-project

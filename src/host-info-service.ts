@@ -115,7 +115,8 @@ export class WechatHostInfoService extends TypertRemoteService {
         agentName: descriptor.agentName,
         agentVersion: descriptor.agentVersion,
         hostPlatform: descriptor.hostPlatform,
-        capabilities: [...descriptor.capabilities, ...(this.privateUpdatesReady?.() ? [{ id: 'human.private-updates', version: 1 }] : [])],
+        capabilities: [...descriptor.capabilities, ...(this.privateUpdatesReady?.() ? [{ id: 'human.private-updates', version: 1 }] : []),
+          ...((this.ctx.get('wechatClawbot') as { available?: () => boolean } | undefined)?.available?.() ? [{ id: 'wechat.clawbot', version: 1 }] : [])],
         ...(this.gateRuntime ? { gate: this.gateRuntime() } : {}),
       },
     }

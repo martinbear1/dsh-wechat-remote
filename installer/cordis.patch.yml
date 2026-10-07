@@ -6,6 +6,8 @@
 - insert:
     - id: gate
       name: './native/lib/index.js'
+    - id: wechat-clawbot
+      name: 'dsh-wechat-remote/clawbot'
     - id: harness-assistant-teacher
       name: 'dsh-wechat-remote/assistant-teacher'
     - id: harness-assistant-project

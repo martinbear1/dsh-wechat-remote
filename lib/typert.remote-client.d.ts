@@ -4,6 +4,8 @@ import type {
   TypertRemoteContribution,
 } from '@deepseek-ai/dsh-typert-protocol'
 import type { WechatAttachmentBatchRequest, WechatAttachmentBatchResult } from '@harness-remote/dsh-wechat-remote/attachment'
+import type { ClawbotRequest } from '@harness-remote/dsh-wechat-remote/clawbot/protocol'
+import type { ClawbotControlResult } from '@harness-remote/dsh-wechat-remote/clawbot/service'
 import type { WechatDirectoryCreateRequest, WechatDirectoryCreateResult, WechatDirectoryListRequest, WechatDirectoryListResult, WechatDirectoryRootsRequest, WechatDirectoryRootsResult } from '@harness-remote/dsh-wechat-remote/directory'
 import type { WechatHistoryWindowRequest, WechatHistoryWindowResult } from '@harness-remote/dsh-wechat-remote/history'
 import type { WechatHostDescribeRequest, WechatHostDescribeResult } from '@harness-remote/dsh-wechat-remote/host-info'
@@ -56,6 +58,9 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
   interface TypertRemoteNamespace$7765636861744174746163686d656e74 {
     prepareBatch: (request: WechatAttachmentBatchRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatAttachmentBatchResult>>
   }
+  interface TypertRemoteNamespace$776563686174436c6177626f74 {
+    control: (request: ClawbotRequest, signal?: AbortSignal) => Promise<RemoteResult<ClawbotControlResult>>
+  }
   interface TypertRemoteNamespace$7765636861744469726563746f7279 {
     create: (request: WechatDirectoryCreateRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatDirectoryCreateResult>>
     list: (request: WechatDirectoryListRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatDirectoryListResult>>
@@ -106,6 +111,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'humanTools/workflowReceiptRetry': (request: AutomationTaskRequest & { submissionId: string; submissionVersion: number; expectedRevision: number; }, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     'humanTools/workflowReceiptStatus': (request: AutomationTaskRequest & { offset?: number; }, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     'wechatAttachment/prepareBatch': (request: WechatAttachmentBatchRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatAttachmentBatchResult>>
+    'wechatClawbot/control': (request: ClawbotRequest, signal?: AbortSignal) => Promise<RemoteResult<ClawbotControlResult>>
     'wechatDirectory/create': (request: WechatDirectoryCreateRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatDirectoryCreateResult>>
     'wechatDirectory/list': (request: WechatDirectoryListRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatDirectoryListResult>>
     'wechatDirectory/roots': (request: WechatDirectoryRootsRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatDirectoryRootsResult>>
@@ -119,6 +125,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'agentResources': TypertRemoteNamespace$6167656e745265736f7572636573
     'humanTools': TypertRemoteNamespace$68756d616e546f6f6c73
     'wechatAttachment': TypertRemoteNamespace$7765636861744174746163686d656e74
+    'wechatClawbot': TypertRemoteNamespace$776563686174436c6177626f74
     'wechatDirectory': TypertRemoteNamespace$7765636861744469726563746f7279
     'wechatHistory': TypertRemoteNamespace$776563686174486973746f7279
     'wechatHost': TypertRemoteNamespace$776563686174486f7374

@@ -1,0 +1,65 @@
+{
+  "schema": "harness.clawbot-phase.v1",
+  "date": "2026-10-08",
+  "status": "local-candidate-not-device-accepted",
+  "versions": { "plugin": "1.7.14-rc.26", "mini": "1.7.11-rc.25", "cloud": "1.2.27-rc.14 unchanged" },
+  "upstream": {
+    "repository": "https://github.com/Tencent/openclaw-weixin",
+    "commit": "24de5c9eb0dd5e595d7e2d090ed8a3f82870d42c",
+    "version": "2.4.9",
+    "license": "MIT; attribution in THIRD-PARTY-NOTICES/clawbot.txt; no OpenClaw runtime dependency"
+  },
+  "architecture": {
+    "messages": "WeChat private ClawBot <-> Tencent iLink <-> standalone plugin component <-> existing native DSH Session",
+    "plugin": "Owns provider credentials, polling, durable bounded inbox/outbox and exactly selected local profile session; default paused.",
+    "mini": "Optional remote controls over the existing authenticated LAN/E2EE gateway. Local opt-in defaults off. Closing that switch hides management, sidebar markers and routing menu; it never stops the bot.",
+    "cloud": "No new message transport, bot credentials or history storage. Existing opaque E2EE control relay may be used.",
+    "native": "Uses registered session/list and session/prompt plus native observation. Does not register model tools, edit presets/defaults, start services or manage host processes.",
+    "authorization": "Native approvals and scopes remain unchanged. ClawBot does not mint mini owner-input proofs or auto-approve tools/private publication. Pairing must be confirmed in WeChat by the trusted intended operator.",
+    "scope": "One bot and one active ordinary existing session per native profile. Desktop/Web are separate nodes. No cross-node credential transfer or distributed handoff. Cold sessions and forks retain native admission checks."
+  },
+  "bindingLifecycle": [
+    { "case": "first-use-or-no-local-credentials", "behavior": "Request official QR payload. Confirm in WeChat; optional same-phone native image preview and copied official link are test paths, not proof of authorization." },
+    { "case": "valid-local-binding", "behavior": "Resume saved token directly; no new QR. A successful provider poll, not a stored token alone, establishes live connectivity." },
+    { "case": "expired-local-binding", "behavior": "Pause on provider -14. Reconfirm while retaining unfinished receipts; same user/account retains cursor and pending work without replay." },
+    { "case": "official-binded-redirect", "behavior": "Supply only this profile's own existing token in local_token_list; retain credentials when official response says already bound. Without local credentials, do not invent pairing success." },
+    { "case": "bound-elsewhere", "behavior": "Do not import another node's tokens or claim takeover is automatic. Request explicit official confirmation and warn to check WeChat's existing-binding prompt; provider effects require real-account acceptance." },
+    { "case": "different-user", "behavior": "Refuse replacing an existing local user. Explicit local disconnect is required first; old replies never move to the new identity." },
+    { "case": "disconnect-with-pending", "behavior": "Paused only, expectedRevision required, explicit abandonPending confirmation. Seal unfinished receipts, erase content/context and keep bounded dedupe metadata. In-flight native tasks continue in DSH; late results cannot revive sealed deliveries. This is not Tencent-side revocation." }
+  ],
+  "noCameraResearch": {
+    "payload": "Tencent already returns qrcode_img_content. No encode-then-decode step is necessary; qrcode is separately used for confirmation polling.",
+    "directOpen": "No documented mini API was found that accepts an arbitrary decoded QR payload and invokes ClawBot's native confirmation route. wx.scanCode returns result/rawData, not accepting them as inputs. No verified ClawBot appId/path/shortLink is published in the inspected sources.",
+    "implementedCandidate": "wx.previewImage with showmenu:true, plugin-rendered QR written to private temporary mini storage; bounded cleanup on return, exit and timeout. Copied official pairing URL is also exposed. Neither action is treated as successful pairing.",
+    "notClaimed": "No silent first-time authorization, account takeover, arbitrary private scheme or guaranteed same-phone recognition.",
+    "sources": [
+      "https://github.com/Tencent/openclaw-weixin/blob/24de5c9eb0dd5e595d7e2d090ed8a3f82870d42c/src/auth/login-qr.ts",
+      "https://raw.githubusercontent.com/wechat-miniprogram/api-typings/master/types/wx/lib.wx.api.d.ts",
+      "https://cloud.tencent.com/document/product/1831/137450"
+    ]
+  },
+  "localLimitsNotProviderGuarantees": {
+    "receipts": 1000, "serializedStateBytes": 12582912, "terminalDedupeDays": 7,
+    "inputCharacters": 8000, "outputCharacters": 12000, "textPartUtf8Bytes": 1800,
+    "observedNativeTurnMinutes": 15, "qrLocalWaitMinutes": 8,
+    "recovery": "Atomic batch+cursor; fixed request/message IDs. Interrupted native dispatch or ambiguous provider send is not automatically retried. Exact-once outside the retained dedupe window is not promised."
+  },
+  "verification": {
+    "passed": {
+      "pluginExistingSuite": "npm test exit 0; environment-specific skips in existing tests remain skips, not device acceptance",
+      "clawbotFocused": { "tests": 61, "passed": 61, "skipped": 0 },
+      "miniFullSuite": { "tests": 1504, "passed": 1504 },
+      "miniVisual": "32 source-derived layout captures at 320/390 CSS pixels in light/dark themes; not WeChat device rendering",
+      "packedCore": "316 module checks, 25 host entries and 88 strict schema equivalence checks; isolated actual tarball verification",
+      "packedInstaller": "326 exact core files verified in the dual-entry installer; native metadata, dependencies and offline CLI checks passed"
+    },
+    "automated": "Protocol, runtime lifecycle, actual TSX controller, native DSH 0.2.0-rc.1 strict schema/controller and mini-to-native RPC tests; synthetic accounts only.",
+    "nativeBoundary": "Offline native component mount/dispose/remount does not change native tools, presets, defaults or the four shipped mode YAML files. No network/model calls in that test.",
+    "limitations": [
+      "Installed native prompt lacks an atomic generation precondition. The adapter rejects observed resets and refuses mismatched replies, but cannot seal a reset inside the host's own asynchronous admission path. Pause ClawBot before resetting its target during initial acceptance.",
+      "WeChat real account login, same-phone link/long-press routing, provider rebind behavior, real text exchange and physical mobile rendering remain unverified.",
+      "A native approval or question hands control back to desktop/mini. The first candidate does not resume watching that detached turn or approve it via ClawBot.",
+      "No real installation, mini upload, cloud deployment, GitHub publication or host restart is part of this candidate build."
+    ]
+  }
+}

@@ -1,0 +1,37 @@
+Tencent/openclaw-weixin
+Source: https://github.com/Tencent/openclaw-weixin
+Revision: 24de5c9eb0dd5e595d7e2d090ed8a3f82870d42c (package version 2.4.9)
+Adapted portions: src/api/api.ts, src/api/types.ts, src/auth/login-qr.ts,
+src/messaging/send.ts and docs/protocol_zh_CN.md.
+
+This project adapts the HTTP JSON request formats, QR confirmation states, text
+message construction and lossless message-ID parser. It adds its own validation,
+bounded transport, error handling and host policy. It does not include or require
+the OpenClaw runtime. Local limits are not represented as upstream guarantees.
+The upstream software license does not constitute permission to use Tencent,
+Weixin or ClawBot branding, and no upstream brand images are included here.
+
+Tencent is pleased to support the open source community by making openclaw-weixin available.
+
+Copyright (C) 2026 Tencent.  All rights reserved.
+
+openclaw-weixin is licensed under the MIT.
+
+Terms of the MIT:
+--------------------------------------------------------------------
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+"Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.

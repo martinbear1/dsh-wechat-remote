@@ -10,7 +10,8 @@ import { TurnActivityCompatibility } from '../lib/turn-activity.js'
 import { nativeInstallSessions, quiesceNativeHost } from '../lib/install-control.js'
 
 test('final generated manifest exposes identical strict schemas to old and new loaders', () => {
-  assert.equal(TYPERT.invocations.filter(i => i.namespace !== 'humanTools').length, 17)
+  assert.equal(TYPERT.invocations.filter(i => !['humanTools', 'wechatClawbot'].includes(i.namespace)).length, 17)
+  assert.deepEqual(TYPERT.invocations.filter(i => i.namespace === 'wechatClawbot').map(i => i.method), ['control'])
   assert.deepEqual(TYPERT.invocations.filter(i => i.namespace === 'humanTools').map(i => i.method).sort(),
     ['ack', 'assistantCatalog', 'assistantDraft', 'assistantInstall', 'assistantPreview', 'assistantSessionPrepare', 'assistantSessionStatus', 'assistantStatus',
       'automationApprove', 'automationList', 'automationPause', 'automationPreview', 'automationProposals', 'automationStatus',

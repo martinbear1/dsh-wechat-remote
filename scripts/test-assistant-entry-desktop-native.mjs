@@ -4,6 +4,9 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import vm from 'node:vm'
+import path from 'node:path'
+import { createRequire } from 'node:module'
+import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
 import { transform } from 'esbuild'
 const archive = process.env.HARNESS_DSH_ASAR
@@ -26,12 +29,12 @@ const { code } = await transform(src, { loader: 'ts', format: 'esm' })
 const { nativeAssistantNavigation } = await import('data:text/javascript;base64,' + Buffer.from(code).toString('base64'))
 const snapshot = initial => { let value = initial; const listeners = new Set(); return { getSnapshot: () => value,
   set(next) { value = next; for (const callback of listeners) callback() }, subscribe(callback) { listeners.add(callback); return () => listeners.delete(callback) } } }
-const calls = [], entries = [], effects = []
+const calls = [], entries = [], effects = [], dictionaries = new Map()
 const oldChat = { id: 'existing-chat', blank: false, retainedBy: { mainView: 1 }, projectionValues: { agentPreset: 'standard' }, draft: 'preserve unsent text' }
 const list = snapshot({ phase: 'ready', ids: [oldChat.id], byId: { [oldChat.id]: oldChat } }), bindings = new Map()
 const enabled = snapshot(true)
 const ctx = {
-  locale: { register: () => () => {}, bind: () => key => key },
+  locale: { register: (namespace, value) => { dictionaries.set(namespace, value); return () => dictionaries.delete(namespace) }, bind: () => key => key },
   slots: { register(options) { const entry = { options, inject: options.inject }; entries.push(entry); return () => entries.splice(entries.indexOf(entry), 1) },
     entries: name => entries.filter(entry => entry.options.name === name), inject: (_name, callback) => callback() },
   configForms: { developerTools: { enabled } },
@@ -59,6 +62,26 @@ navigation.ctx = ctx; navigation.selection = snapshot({ sessionId: oldChat.id })
 navigation.mainReference = { sessionId: oldChat.id, release() { oldChat.retainedBy.mainView = 0; calls.push('release-old-main') } }
 ctx.uiWorkspace = navigation
 presetModule.apply(ctx)
+// Execute the native display helper unchanged against the dictionaries that
+// the actual module just registered. This is not a second fake label mapping.
+const displayBegin = presetSource.indexOf('//#region ../../preset/agent-preset-registry/src/display.ts')
+const displayEnd = presetSource.indexOf('//#endregion', displayBegin)
+assert(displayBegin > 0 && displayEnd > displayBegin, 'native display region must be identified exactly')
+const displaySource = presetSource.slice(displayBegin, displayEnd)
+const nativeDisplay = vm.runInNewContext(displaySource + '\npresetDisplayText')
+const nativeZh = dictionaries.get('settings.agentPreset')?.zh
+assert(nativeZh && typeof nativeDisplay === 'function')
+const miniRoot = process.env.HARNESS_REMOTE_MINI_DIR || fileURLToPath(new URL('../../wechat-miniprogram', import.meta.url))
+const { presetName } = createRequire(import.meta.url)(path.join(miniRoot, 'utils/agent-preset-presentation.js'))
+const labelCases = ['standard', 'ptc', 'minimal', 'cordis'].flatMap(id => [
+  { id }, { id, name: `自定义 ${id}` }, { id, name: id },
+]).concat([{ id: 'harness-teacher', name: '教师助理' }, { id: 'private-mode' }])
+for (const row of labelCases) {
+  const before = JSON.stringify(row)
+  const nativeName = nativeDisplay(row, key => { assert.equal(typeof nativeZh[key], 'string'); return nativeZh[key] }).name
+  assert.equal(presetName(row), nativeName, `mini display must match the actual native label for ${before}`)
+  assert.equal(JSON.stringify(row), before, 'display mapping must never rewrite protocol IDs or authored names')
+}
 const picker = ctx.slots.entries('conversation.hero.agentPreset')[0]
 assert(picker && typeof picker.inject === 'function')
 const adapter = nativeAssistantNavigation(name => ctx[name])
@@ -79,7 +102,9 @@ assert.equal(oldChat.projectionValues.agentPreset, 'standard'); assert.equal(old
 await unbound.load(); assert.equal(unbound.hooks.agentPresetSeat.getSnapshot().current, 'standard', 'stage is consumed; host default remains unchanged')
 enabled.set(false); await assert.rejects(adapter.start('harness-customizer'), /快捷入口/)
 console.log(JSON.stringify({ archive, nativePickerSha256: createHash('sha256').update(presetSource).digest('hex'),
+  nativeDisplaySha256: createHash('sha256').update(displaySource).digest('hex'), nativeLabelCases: labelCases.length,
   nativeWorkspaceSha256: createHash('sha256').update(workspaceSource).digest('hex'), checks: [
     'native sessionless hero', 'preset staged without any session creation', 'old chat and draft preserved',
-    'native blank adopts staged mode only after later workspace choice', 'next default unchanged', 'disabled native picker refuses'],
+    'native blank adopts staged mode only after later workspace choice', 'next default unchanged', 'disabled native picker refuses',
+    'mini labels match actual native localization for four unnamed builtins and preserve authored names and IDs'],
   actualHost: false, scope: 'installed native code, isolated VM, no profile writes' }, null, 2))

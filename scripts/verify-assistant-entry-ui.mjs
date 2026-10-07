@@ -8,7 +8,7 @@ import { createRequire } from 'node:module'
 import { build } from 'esbuild'
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..')
-const out=path.join(root,'artifacts/assistant-entry-ui')
+const out=path.resolve(process.argv[2] || path.join(root,'artifacts/assistant-entry-ui'))
 const require=createRequire(import.meta.url)
 const {chromium}=require(require.resolve('playwright',{paths:[process.env.NODE_PATH || root]}))
 await fs.mkdir(out,{recursive:true})
@@ -39,6 +39,18 @@ try{
     assert(size.height<330,'compact panel, not a full page of explanation')
     assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth))
     await page.screenshot({path:path.join(out,`panel-${width}-${dark?'dark':'light'}.png`)})
+    const help=page.getByRole('button',{name:'教师助理使用说明',exact:true})
+    assert.equal(await help.getAttribute('title'),null,'no browser tooltip layered over the custom one')
+    await help.hover()
+    await page.waitForFunction(()=>[...document.querySelectorAll('[role="tooltip"]')].filter(e=>getComputedStyle(e).visibility==='visible').length===1)
+    const description=await help.getAttribute('aria-describedby')
+    assert.equal(await page.getByRole('tooltip').getAttribute('id'),description)
+    await page.screenshot({path:path.join(out,`help-${width}-${dark?'dark':'light'}.png`)})
+    await page.mouse.move(0,0)
+    await help.focus()
+    assert(await page.getByRole('tooltip').isVisible(),'keyboard focus uses the same tooltip')
+    await page.getByRole('button',{name:'刷新',exact:true}).focus()
+    assert.equal(await page.getByRole('tooltip').count(),0,'tooltip closes after hover and focus leave')
     await page.getByRole('button',{name:'开始使用',exact:true}).first().click()
     await page.waitForFunction(()=>window.opens.length===1)
     assert.equal(await page.getByRole('dialog').count(),0,'no intermediate plugin-owned workspace modal')
@@ -49,7 +61,7 @@ try{
     await page.evaluate(()=>window.disableTeacher())
     assert(await page.getByRole('button',{name:'开始使用',exact:true}).first().isDisabled())
     assert.deepEqual(errors,[])
-    metrics.push({width,dark,panelHeight:size.height,checks:'real panel/store; direct native entry callback, no workspace modal, customizer/disabled'})
+    metrics.push({width,dark,panelHeight:size.height,checks:'real panel/store; single accessible hover/focus tooltip; direct native entry callback, no workspace modal, customizer/disabled'})
     await page.close()
   }
 }finally{await browser.close()}

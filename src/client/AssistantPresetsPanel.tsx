@@ -1,4 +1,4 @@
-import { useEffect, useRef, useSyncExternalStore } from 'react'
+import { useEffect, useId, useRef, useSyncExternalStore } from 'react'
 import type { AssistantStore } from './assistant-store.js'
 import styles from './HarnessRemoteSettings.module.css'
 
@@ -11,8 +11,9 @@ const stateLabel = (item: any) => available(item) ? '已安装' : item.state ===
 const displayName = (item: any) => item.templateId === 'designer' || item.id === 'designer' ? '定制我的助手' : item.name
 
 function Help({ label, children }: { label: string; children: string }): JSX.Element {
+  const tooltipId = useId()
   return <span className={styles.assistantHelpAnchor}><button type="button" className={styles.assistantHelpButton}
-    aria-label={label} title={children}>?</button><span className={styles.assistantTooltip} role="tooltip">{children}</span></span>
+    aria-label={label} aria-describedby={tooltipId}>?</button><span id={tooltipId} className={styles.assistantTooltip} role="tooltip">{children}</span></span>
 }
 
 /** Native-mode shortcuts, not a second conversation or preset implementation. */

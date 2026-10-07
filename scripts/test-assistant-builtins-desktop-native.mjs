@@ -161,11 +161,13 @@ try {
   }
   const project = fileURLToPath(new URL('../', import.meta.url)), profileDir = path.join(work, 'metadata-profile')
   const fixtures = []
+  const fixtureIcon = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><rect x="2" y="2" width="12" height="12" rx="3" fill="#3575d4"/></svg>'
   for (const kind of ['core', 'installer']) {
     const manifest = JSON.parse(fs.readFileSync(path.join(project, kind === 'core' ? 'package.json' : 'installer/package.json'), 'utf8'))
     const owned = path.join(profileDir, 'embedded', kind), decoy = path.join(profileDir, 'node_modules', manifest.name)
     for (const directory of [owned, decoy]) {
-      fs.mkdirSync(directory, { recursive: true }); fs.writeFileSync(path.join(directory, 'package.json'), JSON.stringify(manifest))
+      fs.mkdirSync(directory, { recursive: true }); fs.writeFileSync(path.join(directory, 'package.json'), JSON.stringify({ ...manifest, icon: 'fixture-icon.svg' }))
+      fs.writeFileSync(path.join(directory, 'fixture-icon.svg'), fixtureIcon)
       const assetRoot = path.join(directory, kind === 'core' ? 'lib' : 'native/lib', 'assistant-presets')
       fs.mkdirSync(assetRoot, { recursive: true })
       fs.cpSync(path.join(project, 'lib/assistant-presets/locales'), path.join(assetRoot, 'locales'), { recursive: true })
@@ -187,13 +189,33 @@ try {
       const localePath = resolvePluginResource(specifier + '/locale/zh.json', parent)
       assert(localePath.startsWith(owned + path.sep), 'display metadata cannot be read from the decoy package')
     }
+    // A generic fixture verifies the native manifest contract without shipping
+    // or implying permission to use any third-party brand artwork.
+    for (const { manifest, owned } of fixtures) {
+      const manifestFile = path.join(owned, 'package.json'), parent = pathToFileURL(manifestFile).href
+      const meta = readPluginMeta(manifest.name, parent)
+      assert.equal(meta?.icon, 'data:image/svg+xml;base64,' + Buffer.from(fixtureIcon).toString('base64'))
+      assert.equal(meta?.title?.zh, '微信连接')
+      assert.equal(meta?.error, undefined)
+      for (const invalidIcon of ['https://example.invalid/logo.svg', '../outside-fixture.svg', 'too-large.svg']) {
+        fs.writeFileSync(path.join(path.dirname(owned), 'outside-fixture.svg'), fixtureIcon)
+        fs.writeFileSync(path.join(owned, 'too-large.svg'), Buffer.alloc(256 * 1024 + 1))
+        fs.writeFileSync(manifestFile, JSON.stringify({ ...manifest, icon: invalidIcon }))
+        const rejected = readPluginMeta(manifest.name, parent)
+        assert.equal(rejected?.icon, undefined, 'invalid artwork is not admitted')
+        assert.equal(rejected?.title?.zh, '微信连接', 'icon diagnostics retain localized display text')
+        assert.match(rejected?.error || '', /icon must be a relative file path|icon must remain inside|icon exceeds 256 KiB/)
+      }
+      fs.writeFileSync(manifestFile, JSON.stringify({ ...manifest, icon: 'fixture-icon.svg' }))
+    }
   } finally { await metadataContext.fiber.dispose() }
   const settingsChecks = await verifyNativePresetSettings({ load, work, invokeHostRemote })
   console.log(JSON.stringify({ passed: true, nativeVersion: JSON.parse(fs.readFileSync(anchor, 'utf8')).version,
     checks: ['native Loader component lifecycle', 'three actual registry modes', 'native acquireScope mount', 'default unchanged', 'owned dispose removes only builtins',
       'native request and result retain per-session mode', 'withdrawn selected default is reported without mutation',
       'actual native session creation with explicit mode and workspace while default is unavailable', 'no automatic message', 'ordinary default creation retained',
-      'native profile resolver self-reference beats same-name package for ESM and CJS', 'native Chinese component metadata resolves within owning core/installer package', ...settingsChecks], liveProfileTouched: false }))
+      'native profile resolver self-reference beats same-name package for ESM and CJS', 'native Chinese component metadata resolves within owning core/installer package',
+      'native manifest icon accepts contained SVG and rejects URL/traversal/oversize without losing display text', ...settingsChecks], liveProfileTouched: false }))
 } finally {
   await ctx?.fiber.dispose()
 }

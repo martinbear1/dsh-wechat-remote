@@ -148,6 +148,20 @@ test('assistant UI separates creation from ready-made modes and preserves exact 
   assert(!builtinHtml.includes('安装教师助理'));assert(!builtinHtml.includes('安装项目助理'));assert(!builtinHtml.includes('安装定制助手'))
 })
 
+test('help has one tooltip source with an accessible unique description, never a duplicate browser title',async()=>{
+  const AssistantPresetsPanel=await panelForSSR()
+  const templates=[{id:'teacher',name:'教师助理'},{id:'project',name:'项目助理'},{id:'designer',name:'定制助手'}]
+  const store=new AssistantStore(async()=>({...catalog,templates}));await store.load()
+  const html=renderToStaticMarkup(createElement(AssistantPresetsPanel,{store}))
+  const helpButtons=[...html.matchAll(/<button\b([^>]*aria-describedby="([^"]+)"[^>]*)>\?<\/button>/g)]
+  assert.equal(helpButtons.length,4)
+  assert.equal(new Set(helpButtons.map(match=>match[2])).size,4)
+  for(const [,attributes,id] of helpButtons){
+    assert.doesNotMatch(attributes,/\btitle=/,'custom tooltip must not also show a delayed browser tooltip')
+    assert(html.includes(`<span id="${id}" role="tooltip">`),'description resolves to the actual tooltip text')
+  }
+})
+
 test('start is a real native action after a fresh readiness check, never an install or prompt',async()=>{
   const calls=[],item={presetId:'harness-teacher',state:'installed',nativeState:'installed'}
   const store=new AssistantStore(async method=>{calls.push(method);return {...catalog,drafts:[item]}},async(id,signal)=>calls.push(['open',id,signal]))

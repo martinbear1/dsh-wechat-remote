@@ -14,15 +14,13 @@ const deferred = () => { let resolve; return {promise:new Promise(r=>resolve=r),
 const catalog = {schema:'human.assistants.catalog.v1',nodeId:'testnode',native:{supported:true},templates:[],drafts:[]}
 const preview = {id:'id',version:1,digest:'d'.repeat(64),previewId:'preview',expiresAt:Date.now()+60000}
 async function panelForSSR() {
-  // Portals belong to the native browser; these tests cover our rendered panel
-  // and store. The real native Modal is exercised by the browser visual test.
+  // The panel no longer owns a workspace modal; it opens the native composer.
   const require=createRequire(import.meta.url)
   const built=await build({entryPoints:[fileURLToPath(new URL('../src/client/AssistantPresetsPanel.tsx',import.meta.url))],
     bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',packages:'external',
     plugins:[{name:'panel-style-test',setup(plugin){plugin.onLoad({filter:/\.css$/},()=>({contents:'export default {}',loader:'js'}))}}]})
   const module={exports:{}}
   vm.runInNewContext(built.outputFiles[0].text,{module,exports:module.exports,require(id){
-    if(id==='@deepseek-ai/dsh-client-ui-primitives') return {Modal:()=>{throw Error('Native portals require browser verification')}}
     return require(id)
   }},{filename:'assistant-panel-ssr.cjs'})
   return module.exports.AssistantPresetsPanel
@@ -170,21 +168,17 @@ test('aborted or replaced owner prevents a late catalog from opening a session',
   }
 })
 
-test('start shortcut stops at workspace selection and cancel never creates a session',async()=>{
+test('start shortcut opens the native picker directly, with no private workspace state',async()=>{
   const opens=[],item={name:'教师助理',presetId:'harness-teacher',state:'installed',nativeState:'installed'}
-  const choices={items:[{id:'workspace_a',name:'语文班',path:'C:/class-a'},{id:'workspace_b',name:'英语班',path:'C:/class-b'}],preferredId:'workspace_a'}
-  const store=new AssistantStore(async()=>({...catalog,drafts:[item]}),async(...args)=>opens.push(args),{list:()=>choices,pick:async()=>undefined})
-  await store.prepareStart('harness-teacher');assert.equal(opens.length,0)
-  assert.equal(store.getSnapshot().launch.selectedId,'workspace_a')
-  await store.pickWorkspace();assert.equal(opens.length,0)
-  store.dismissStart();await store.confirmStart();assert.equal(opens.length,0)
-  await store.prepareStart('harness-teacher');store.selectWorkspace('workspace_b');await store.confirmStart()
-  assert.deepEqual(opens,[['harness-teacher',undefined,'workspace_b']]);assert.equal(store.getSnapshot().launch,null)
+  const store=new AssistantStore(async()=>({...catalog,drafts:[item]}),async(...args)=>opens.push(args))
+  await store.start('harness-teacher')
+  assert.deepEqual(opens,[['harness-teacher',undefined]])
+  assert(!('launch' in store.getSnapshot()));assert.equal(store.prepareStart,undefined)
 })
 
-test('workspace selector resets with connection, and selecting a folder does not open a session',async()=>{
-  const choices={items:[{id:'new',name:'New',path:'C:/new'}],preferredId:''};let opens=0
-  const store=new AssistantStore(async()=>({...catalog,drafts:[{name:'定制助手',presetId:'harness-customizer',state:'installed'}]}),async()=>{opens++},{list:()=>choices,pick:async()=> 'new'})
-  await store.prepareStart('harness-customizer');await store.pickWorkspace();assert.equal(opens,0)
-  assert.equal(store.getSnapshot().launch.selectedId,'new');store.reset();await store.confirmStart();assert.equal(opens,0)
+test('concurrent shortcut clicks only dispatch one native entry',async()=>{
+  const gate=deferred();let opens=0
+  const store=new AssistantStore(async()=>({...catalog,drafts:[{name:'定制助手',presetId:'harness-customizer',state:'installed'}]}),async()=>{opens++;await gate.promise})
+  const first=store.start('harness-customizer');await store.start('harness-customizer');gate.resolve();await first
+  assert.equal(opens,1)
 })

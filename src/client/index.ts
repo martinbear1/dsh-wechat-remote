@@ -79,16 +79,12 @@ export function apply(ctx: HarnessRemoteClientContext): void {
     return JSON.parse(result.valueJson)
   }
   let assistantNavigation: ReturnType<typeof nativeAssistantNavigation> | undefined
-  const assistants = new AssistantStore(assistantCall, async (presetId, signal, workspaceId) => {
+  const assistants = new AssistantStore(assistantCall, async (presetId, signal) => {
     if (!assistantNavigation) throw new Error('原生会话入口尚未就绪，请稍后再试。')
-    if (!workspaceId) throw new Error('请先选择工作区。')
-    await assistantNavigation.start(presetId, signal, true, workspaceId)
-  }, {
-    list: () => { if (!assistantNavigation) throw new Error('原生工作区入口尚未就绪'); return assistantNavigation.workspaces() },
-    pick: async signal => { if (!assistantNavigation) throw new Error('原生工作区入口尚未就绪'); return assistantNavigation.pickWorkspace(signal) },
+    await assistantNavigation.start(presetId, signal)
   })
-  ctx.inject(['remote.session', 'sessions', 'uiWorkspace', 'layout', 'workspaces', 'configForms'], scope => {
-    const navigation = nativeAssistantNavigation(name => scope.get(name), assistantCall)
+  ctx.inject(['uiWorkspace', 'slots', 'configForms'], scope => {
+    const navigation = nativeAssistantNavigation(name => scope.get(name))
     assistantNavigation = navigation
     scope.effect(() => () => { navigation.reset(); if (assistantNavigation === navigation) assistantNavigation = undefined }, 'wechat assistant navigation')
   })

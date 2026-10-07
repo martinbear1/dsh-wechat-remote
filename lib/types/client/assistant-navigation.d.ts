@@ -1,14 +1,8 @@
-/** Public native creation/navigation, with a durable current-node launch journal. */
-export declare function nativeAssistantNavigation(get: (name: string) => any, call?: (method: 'assistantSessionPrepare' | 'assistantSessionStatus', request: Record<string, unknown>) => Promise<any>): {
+/** Open the host's sessionless composer; workspace/preset selection stays native.
+ * The native hero slot stages a preset for the NEXT blank session. It is not a
+ * default-setting write, a session creation RPC, or a selection on an old chat.
+ */
+export declare function nativeAssistantNavigation(get: (name: string) => any): {
     reset(): void;
-    workspaces(): {
-        items: {
-            id: any;
-            name: any;
-            path: any;
-        }[];
-        preferredId: any;
-    };
-    pickWorkspace(lifetime?: AbortSignal): Promise<string | undefined>;
-    start(presetId: string, lifetime?: AbortSignal, newIntent?: boolean, workspaceId?: string): Promise<void>;
+    start(presetId: string, lifetime?: AbortSignal): Promise<void>;
 };

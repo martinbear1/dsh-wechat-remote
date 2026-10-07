@@ -782,7 +782,33 @@ function projectedSubagentCatalog(parent, projection, rows) {
     };
   }) };
 }
+function nativeSessionPresetSelection(ctx) {
+  try {
+    const descriptor = ctx.get?.("typert")?.local?.get("session/create");
+    const parameter = descriptor?.parameters?.find((item) => item.wire === "request");
+    const schema = (codec) => typeof codec?.create === "function" ? codec.create() : codec?.schema;
+    const sample = { sessionId: "session-00000000-0000-4000-8000-000000000001", agentPreset: "harness-contract-check" };
+    const input = schema(parameter?.codec)?.safeParse(sample);
+    const output = schema(descriptor?.result)?.safeParse(sample);
+    return input?.success === true && input.data?.agentPreset === sample.agentPreset && output?.success === true && output.data?.agentPreset === sample.agentPreset;
+  } catch {
+    return false;
+  }
+}
 async function invokeHostRemote(ctx, gateway, request) {
+  if (request.namespace === "agentPresets" && request.method === "list") {
+    const registry2 = ctx.get?.("agentPresets");
+    const configured = registry2?.defaultId;
+    request.signal?.throwIfAborted();
+    const value = await gateway.invoke(request);
+    request.signal?.throwIfAborted();
+    if (!registry2) return value;
+    if (registry2.defaultId !== configured) throw Object.assign(new Error("\u9ED8\u8BA4\u6A21\u5F0F\u5DF2\u53D8\u5316\uFF0C\u8BF7\u5237\u65B0\u6A21\u5F0F\u5217\u8868"), { code: "adapter/preset-catalog-changed" });
+    if (!Array.isArray(value?.presets)) throw new Error("DSH \u6A21\u5F0F\u5217\u8868\u6682\u4E0D\u53EF\u8BFB\u53D6");
+    const id = typeof configured === "string" ? configured : "";
+    const matching = value.presets.filter((item) => item.id === id);
+    return { ...value, sessionPresetSelection: nativeSessionPresetSelection(ctx), defaultPreset: { id, state: !id ? "unspecified" : matching.length === 1 && matching[0].broken === void 0 ? "available" : "unavailable" } };
+  }
   if (request.namespace === "settings" && request.method === "update" && request.args?.ns === "agent-presets" && request.args.patch && Object.hasOwn(request.args.patch, "default")) {
     request.signal?.throwIfAborted();
     const description = await gateway.invoke({ namespace: "settings", method: "describe", args: {}, signal: request.signal });

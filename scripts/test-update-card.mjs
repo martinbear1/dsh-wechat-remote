@@ -119,5 +119,20 @@ test('native settings puts both endpoints inside one update block, with read-onl
     assert.match(html, /同一主机/)
     assert.match(html, new RegExp(`确认更新 ${peer === 'web' ? 'Web' : 'Desktop'}`))
     assert(!html.includes('另一端插件</h4>'))
+    if (current === 'desktop') {
+      snapshot.status.plugin.installedVersion = '1.7.13'
+      snapshot.status.companionUpdate = { state: 'self-restart-required', message: '等待当前 Desktop 重启，Web 未更新。',
+        versions: { current, running: '1.7.12', installed: '1.7.13', peer, peerInstalled: '1.7.10' } }
+      store.nativeUpdates = passive({ check: { ...initial, canInstall: false }, status: { phase: 'restart-required', targetVersion: '1.7.13', message: 'Desktop 需要重启' } })
+      const pendingHtml = renderToStaticMarkup(createElement(module.exports.HarnessRemoteSettings, { store, describeHost: noAction, callManagement: noAction }))
+      assert.equal((pendingHtml.match(/应用 → 退出/g) || []).length, 1, 'one restart instruction in the unified update block')
+      assert(!pendingHtml.includes('新版插件尚未生效，请完整重启 Desktop'), 'removed duplicate hero notice')
+      assert(pendingHtml.includes('已安装，待重新打开 Desktop'))
+      assert(pendingHtml.indexOf('应用 → 退出') > pendingHtml.indexOf('aria-label="插件更新"'))
+      assert(pendingHtml.includes('Web 不受影响'))
+      store.nativeUpdates = passive({ check: { ...initial, canInstall: false }, status: { phase: 'failed', message: '安装失败，请核对' } })
+      const failedHtml = renderToStaticMarkup(createElement(module.exports.HarnessRemoteSettings, { store, describeHost: noAction, callManagement: noAction }))
+      assert(failedHtml.includes('更新未完成')); assert(failedHtml.includes('安装失败，请核对'))
+    }
   }
 })

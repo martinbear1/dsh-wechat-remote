@@ -84,14 +84,14 @@ let describeHost = null
 let callManagement = null
 let settingsComponent, sharedStore
 const nativeKeys = new Set()
-const assistantNavigationServices = ['remote.session', 'sessions', 'uiWorkspace', 'layout', 'workspaces', 'configForms']
+const assistantNavigationServices = ['uiWorkspace', 'slots', 'configForms']
 const optionalServices = []
 exports.apply({
   get() {},
   on(name, listener) { assert.equal(name, 'connection/reset'); assert.equal(typeof listener, 'function'); return () => {} },
   inject(names, effect) {
     const list = Array.from(names); optionalServices.push(list)
-    if (list[0] === 'remote.session') {
+    if (list[0] === 'uiWorkspace') {
       assert.deepEqual(list, assistantNavigationServices)
       effect({ get() { throw new Error('registering an assistant shortcut must not access or create a session') }, effect(fn) { return fn() } })
     } else { assert.deepEqual(list, ['pluginNavigation', 'remote.pluginManager']); effect() }
@@ -182,7 +182,7 @@ exports.apply({
   get() {}, effect(fn) { return fn() }, connection: { rpc: { call() {} } },
   inject(names) {
     const list = Array.from(names)
-    assert.deepEqual(list, list[0] === 'remote.session' ? assistantNavigationServices : ['pluginNavigation', 'remote.pluginManager'])
+    assert.deepEqual(list, list[0] === 'uiWorkspace' ? assistantNavigationServices : ['pluginNavigation', 'remote.pluginManager'])
     // Absent services: no navigation, session creation or changed fallback UI.
   },
   slots: {

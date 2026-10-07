@@ -16,4 +16,7 @@ export declare function nativeFileBytes(value: unknown): Buffer;
  * or inspecting native log files. Mutations still use native admission checks.
  * Remove this projection when the phone contract adopts parent projections. */
 export declare function projectedSubagentCatalog(parent: string, projection: Row | null, rows: Row[]): Row;
+/** Pure codec inspection, never a trial session creation. Both request and
+ * acknowledgement must retain the selected mode; old schemas may strip it. */
+export declare function nativeSessionPresetSelection(ctx: HostContext): boolean;
 export declare function invokeHostRemote(ctx: HostContext, gateway: Row, request: Row): Promise<unknown>;

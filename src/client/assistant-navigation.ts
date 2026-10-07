@@ -1,73 +1,47 @@
-/** Public native creation/navigation, with a durable current-node launch journal. */
-export function nativeAssistantNavigation(get: (name: string) => any,
-  call?: (method: 'assistantSessionPrepare' | 'assistantSessionStatus', request: Record<string, unknown>) => Promise<any>) {
+/** Open the host's sessionless composer; workspace/preset selection stays native.
+ * The native hero slot stages a preset for the NEXT blank session. It is not a
+ * default-setting write, a session creation RPC, or a selection on an old chat.
+ */
+export function nativeAssistantNavigation(get: (name: string) => any) {
   let epoch = 0, busy = false
-  const valid = (value: any, presetId: string, workspaceId?: string) => value?.schema === 'human.assistant.session-intent.v1'
-    && value.presetId === presetId && value.workspaceId === (workspaceId ?? null) && typeof value.nodeId === 'string'
-    && (value.state === 'none' || /^[a-f0-9]{32}$/.test(value.attemptId) && /^session-[a-f0-9-]{36}$/.test(value.sessionId))
   return {
     reset() { epoch++; busy = false },
-    workspaces() {
-      const list = get('workspaces')?.list?.getSnapshot(), sessions = get('sessions')?.list?.getSnapshot()
-      if (list?.phase !== 'ready' || sessions?.phase !== 'ready') throw new Error('工作区还在读取，请稍后再试。')
-      const currentSession = Object.values(sessions.byId || {}).find((item: any) => item.retainedBy?.mainView > 0) as any
-      const items = [...list.items].sort((a: any, b: any) => workspaceTime(b, sessions.byId) - workspaceTime(a, sessions.byId))
-      const preferred = items.find((item: any) => item.sessionIds.includes(currentSession?.id)) || items[0]
-      return { items: items.map((item: any) => ({ id: item.workspaceId, name: item.title || item.name || item.path, path: item.path })), preferredId: preferred?.workspaceId || '' }
-    },
-    async pickWorkspace(lifetime?: AbortSignal) {
-      const navigation = get('uiWorkspace'), workspaces = get('workspaces'), generation = epoch
-      if (typeof navigation?.pickDirectory !== 'function' || typeof workspaces?.create !== 'function') throw new Error('原生文件夹选择器暂不可用，请先在 DSH 添加工作区。')
-      const check = () => { if (generation !== epoch || lifetime?.aborted) throw new Error('连接或页面已变化，请重新选择工作区。') }
-      check(); const path = await navigation.pickDirectory(); check()
-      if (path === null) return undefined
-      if (typeof path !== 'string' || !path) throw new Error('文件夹选择结果无效')
-      const workspace = await workspaces.create({ path }); check()
-      return workspace.workspaceId as string
-    },
-    async start(presetId: string, lifetime?: AbortSignal, newIntent = false, workspaceId?: string) {
+    async start(presetId: string, lifetime?: AbortSignal) {
       if (!/^[a-z][a-z0-9_-]{0,63}$/.test(presetId)) throw new Error('助手身份无效')
-      const remote = get('remote.session'), sessions = get('sessions'), navigation = get('uiWorkspace'), layout = get('layout')
-      const enabled = get('configForms')?.developerTools?.enabled?.getSnapshot()
-      if (!call || enabled !== true || typeof remote?.create !== 'function' || typeof sessions?.refresh !== 'function'
-        || typeof navigation?.openSession !== 'function' || typeof layout?.beginNavigation !== 'function')
-        throw new Error('当前原生界面未提供助手会话入口，或原生工作模式选择尚未启用；请使用 DSH 的新会话入口选择此预设。')
       if (busy || lifetime?.aborted) return
-      const generation = epoch, navigationSignal = layout.beginNavigation() as AbortSignal
-      const current = () => generation === epoch && !navigationSignal.aborted && !lifetime?.aborted
-      const check = () => { if (!current()) throw new Error('导航或连接已变化，请核对原生会话列表；没有自动跳转。') }
-      if (!current()) return
+      const generation = epoch
+      const navigation = get('uiWorkspace'), slots = get('slots')
+      const enabled = get('configForms')?.developerTools?.enabled?.getSnapshot()
+      const entries = slots?.entries?.('conversation.hero.agentPreset')
+      // Fail closed if a future host replaces this single native picker contract.
+      const entry = Array.isArray(entries) && entries.length === 1 ? entries[0] : undefined
+      if (enabled !== true || typeof navigation?.clearMain !== 'function'
+        || entry?.options?.locale !== 'settings.agentPreset' || typeof entry?.inject !== 'function')
+        throw new Error('当前 DSH 尚未提供快捷入口，请在原生新会话中选择此助手模式。')
+      const seat = entry.inject(undefined)
+      if (typeof seat?.load !== 'function' || typeof seat?.select !== 'function'
+        || typeof seat?.hooks?.agentPresetSeat?.getSnapshot !== 'function')
+        throw new Error('当前 DSH 的模式选择入口不兼容，请使用原生新会话入口。')
+      const current = () => generation === epoch && !lifetime?.aborted
       busy = true
       try {
-        if (workspaceId !== undefined) {
-          const list = get('workspaces')?.list?.getSnapshot()
-          if (list?.phase !== 'ready' || !list.items.some((item: any) => item.workspaceId === workspaceId))
-            throw new Error('所选工作区已不可用，请重新选择。')
-        }
-        const selector = { presetId, ...(workspaceId ? { workspaceId } : {}) }
-        let intent = await call('assistantSessionStatus', selector); check()
-        if (!valid(intent, presetId, workspaceId)) throw new Error('会话创建意图格式无效')
-        if (intent.state === 'unknown' || intent.state === 'conflict') throw new Error('上次新建结果尚未确认，请核对原生会话列表；不会自动再次创建。')
-        const nodeId = intent.nodeId
-        if (intent.state === 'none' || newIntent) {
-          intent = await call('assistantSessionPrepare', { ...selector, ...(intent.state === 'created' ? { previousAttemptId: intent.attemptId } : {}) }); check()
-          if (!valid(intent, presetId, workspaceId) || intent.nodeId !== nodeId) throw new Error('节点或会话创建意图已变化')
-          if (intent.dispatch === true && intent.state === 'unknown') {
-            const result = await remote.create({ agentPreset: presetId, sessionId: intent.sessionId, ...(workspaceId ? { workspaceId } : {}) }); check()
-            if (!result?.ok || result.value?.sessionId !== intent.sessionId || result.value?.agentPreset !== presetId)
-              throw new Error('原生宿主未确认指定助手身份和会话，请核对会话列表；不会自动重试。')
-          }
-          intent = await call('assistantSessionStatus', { attemptId: intent.attemptId }); check()
-          if (!valid(intent, presetId, workspaceId) || intent.nodeId !== nodeId) throw new Error('节点或会话创建意图已变化')
-        }
-        if (intent.state !== 'created') throw new Error('上次新建结果尚未确认，请核对原生会话列表；不会自动再次创建。')
-        await sessions.refresh(); check(); navigation.openSession(intent.sessionId)
+        await seat.load()
+        if (!current()) return
+        const latestEntries = slots.entries('conversation.hero.agentPreset')
+        if (!Array.isArray(latestEntries) || latestEntries.length !== 1 || latestEntries[0] !== entry)
+          throw new Error('DSH 的模式入口已更新，请重新点击开始使用。')
+        const snapshot = seat.hooks.agentPresetSeat.getSnapshot()
+        if (snapshot.busy || snapshot.error || !snapshot.options?.some((item: any) => item.id === presetId))
+          throw new Error('此助手尚未就绪，请刷新状态后重试。')
+        if (get('configForms')?.developerTools?.enabled?.getSnapshot() !== true)
+          throw new Error('DSH 的工作模式选择已关闭，请在原生设置中开启后重试。')
+        // Detach the old main view BEFORE staging. This preserves existing input
+        // drafts and keeps native list-change observers from applying to them.
+        // clearMain opens the native hero without creating a session/workspace.
+        navigation.clearMain()
+        const refusal = await seat.select(presetId)
+        if (current() && refusal) throw new Error(refusal)
       } finally { if (generation === epoch) busy = false }
     },
   }
-}
-
-function workspaceTime(workspace: any, sessions: Record<string, any>): number {
-  const times = workspace.sessionIds.map((id: string) => sessions[id]?.updatedAt).filter(Number.isFinite)
-  return times.length ? Math.max(...times) : Date.parse(workspace.createdAt) || 0
 }

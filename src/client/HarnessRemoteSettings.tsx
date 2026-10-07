@@ -114,15 +114,6 @@ export function HarnessRemoteSettings({
         </span>
       </div>
 
-      {runtime?.profileScope === 'desktop' && status && (!status.plugin || status.plugin.runningVersion !== status.plugin.installedVersion) ?
-        <aside className={styles.companionCard} data-state="self-restart-required" role="status">
-          <strong>{status.plugin ? '新版插件尚未生效，请完整重启 Desktop' : '刚升级插件？请先完整重启 Desktop'}</strong>
-          {status.plugin ? <p>正在运行 {status.plugin.runningVersion}；已安装 {status.plugin.installedVersion}。</p> :
-            <p>当前连接服务尚不能核验运行版本，不能把安装完成当作新版已生效。</p>}
-          <p>等当前任务结束后，选择顶部「应用 → 退出」，再重新打开 Desktop。仅关闭窗口、刷新页面或开关插件不能保证新版生效。</p>
-          <small>不必重装或重新配对。此操作不会升级或重启 Web。</small>
-        </aside> : null}
-
       <div className={styles.capabilities}>
         <Capability
           title="局域网直连"

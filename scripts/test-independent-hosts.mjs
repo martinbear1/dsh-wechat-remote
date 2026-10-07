@@ -143,7 +143,6 @@ if (process.argv[2] === '--identity-worker') {
     process.env.HARNESS_REMOTE_UPDATE_JOB = path.join(home, 'must-not-read-web-job')
     try {
       const service = new PluginUpdateService(ctx, { web: 19387, gate: 40000, local: 40001 })
-      assert.equal(service.isMaintaining(), false)
     } finally {
       if (old === undefined) delete process.env.HARNESS_REMOTE_UPDATE_JOB
       else process.env.HARNESS_REMOTE_UPDATE_JOB = old

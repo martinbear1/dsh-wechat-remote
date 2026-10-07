@@ -4,8 +4,8 @@ const release = { version: '1.7.0', channel: 'stable', dsh: ['0.1.2-rc.1'], plat
   asset: { url: 'https://github.com/martinbear1/dsh-wechat-remote/releases/download/v1.7.0/plugin.tgz', bytes: 123, sha256: 'a'.repeat(64) } }
 const advice = { severity: 'info', targetVersion: '1.7.0', expiresAt: Date.now() + 60000 }
 const eligible = { eligible: true, reason: '' }, missing = { eligible: false, reason: 'Managed process' }
-assert.equal(updateAction(advice, release, eligible, false).mode, 'automatic')
-assert.equal(updateAction(advice, release, eligible, true).mode, 'busy')
+assert.equal(updateAction(advice, release, eligible, false).mode, 'manual')
+assert.equal(updateAction(advice, release, eligible, true).mode, 'manual')
 assert.equal(updateAction(advice, release, missing, false).mode, 'manual')
 assert.equal(updateAction({ ...advice, targetVersion: undefined, severity: 'none' }, undefined, missing, false).reason, '')
 assert.equal(updateAction({ ...advice, expiresAt: 0 }, release, eligible, false).canInstall, false)

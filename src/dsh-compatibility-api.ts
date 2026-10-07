@@ -41,17 +41,13 @@ export class DshCompatibilityApi implements DshCompatibilityTransport {
   /** Owned by the gate; credentials are removed before any native dispatch. */
   privateInput?: PrivateInputNative
   readonly realtime: DshRealtimeCompatibility
-  private inFlight = 0
-  hasInFlightRequests(): boolean { return this.inFlight > 0 }
-
-  constructor(private readonly ctx: Context, private readonly dshPort?: number, private readonly maintaining = () => false) {
+  constructor(private readonly ctx: Context, private readonly dshPort?: number) {
     this.realtime = new DshRealtimeCompatibility(ctx)
   }
 
   handlesPath(path: string): boolean {
     if (this.privateInput && path === '/api/wechatPrivateUpdates') return true
     if (this.taskNotificationRequest && path === '/api/wechatTaskNotifications') return true
-    if (this.maintaining()) return true
     if (resolveTypertGateway(this.ctx)) return true
     const invoker = this.ctx.get('typertGateway') as Partial<TypertGatewayLike> | undefined
     return typeof invoker?.invoke === 'function' && Boolean(this.dshPort)
@@ -81,15 +77,6 @@ export class DshCompatibilityApi implements DshCompatibilityTransport {
   }
 
   async request(request: CompatibilityHttpRequest): Promise<CompatibilityHttpResponse> {
-    if (this.maintaining()) return response(503, { error: { code: 'plugin-update-maintenance', message: '插件正在更新，请稍后重连' } })
-    this.inFlight++
-    try { return await this.dispatch(request) } finally { this.inFlight-- }
-  }
-
-  /** Only the local gate invokes this after authenticating the private worker. */
-  async verificationProbe(request: CompatibilityHttpRequest): Promise<CompatibilityHttpResponse> {
-    if (request.method !== 'POST' || !['/api/wechatHost/describe', '/api/session.list', '/api/session.history'].includes(request.path)
-        || !resolveTypertGateway(this.ctx)) return response(403, { error: 'Invalid verification probe' })
     return this.dispatch(request)
   }
 
@@ -169,7 +156,6 @@ export class DshCompatibilityApi implements DshCompatibilityTransport {
   }
 
   connectEvents(path: string, peer: LegacyRealtimePeer): () => void {
-    if (this.maintaining()) throw new Error('Plugin update in progress')
     if (path !== '/api/events.mux' && path !== '/api/events.host') {
       throw new Error('Unsupported DSH event stream')
     }

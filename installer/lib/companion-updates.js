@@ -3,7 +3,7 @@
 // src/companion-updates.ts
 import fs from "node:fs";
 import path5 from "node:path";
-import { spawn, execFile as execFile2 } from "node:child_process";
+import { execFile as execFile2 } from "node:child_process";
 import { promisify as promisify2 } from "node:util";
 import { createHash as createHash2, randomBytes as randomBytes2 } from "node:crypto";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
@@ -477,10 +477,17 @@ function auditNativeArchive(archive, version) {
   auditArchive(plugin, release);
 }
 
+// src/install-capabilities.ts
+var LEGACY_UPDATE_MANUAL_MESSAGE = "\u6B64\u5B89\u88C5\u7531 DSH Web \u547D\u4EE4\u884C\u7BA1\u7406\uFF0C\u4E0D\u652F\u6301\u4E00\u952E\u5728\u7EBF\u66F4\u65B0\u3002\u8BF7\u5148\u901A\u8FC7\u539F\u542F\u52A8\u65B9\u5F0F\u6B63\u5E38\u505C\u6B62 Web\uFF08\u540E\u53F0\u670D\u52A1\u9700\u6682\u505C\u81EA\u52A8\u91CD\u542F\uFF09\uFF0C\u518D\u6267\u884C\u539F\u5B89\u88C5\u547D\u4EE4\uFF1B\u539F\u751F\u5B89\u88C5\u5305\u8BF7\u4F7F\u7528 DSH \u63D2\u4EF6\u7BA1\u7406\u9875\u3002\u672A\u505C\u6B62\u6216\u4FEE\u6539\u5F53\u524D\u8282\u70B9\u3002";
+function legacyUpdateError() {
+  return Object.assign(new Error(LEGACY_UPDATE_MANUAL_MESSAGE), { code: "NATIVE_MANUAL_UPDATE_REQUIRED" });
+}
+
 // src/companion-updates.ts
 var core = "@harness-remote/dsh-wechat-remote";
 var native = "dsh-wechat-remote";
 var versionPattern2 = /^\d+\.\d+\.\d+(?:-[\w.-]+)?$/;
+var manualWeb = () => ({ state: "unavailable", message: LEGACY_UPDATE_MANUAL_MESSAGE });
 var pending = () => ({ state: "pending", message: "\u53E6\u4E00\u7AEF\u5C06\u5728\u5176\u539F\u751F\u66F4\u65B0\u5165\u53E3\u53EF\u7528\u65F6\u5904\u7406\uFF1B\u5F53\u524D\u8282\u70B9\u4E0D\u53D7\u5F71\u54CD\u3002" });
 function scopeOf(value) {
   return value === "desktop" ? "desktop" : value === "web" || value === "default" ? "web" : void 0;
@@ -543,7 +550,7 @@ function checkedSource(source, version) {
 }
 function offerCompanionUpdate(home, from, source, version) {
   const to = from === "web" ? "desktop" : "web", peer = companionTarget(home, to);
-  if (!peer || compareVersions(version, peer.version) <= 0) return;
+  if (!peer || peer.owner === "cli" || compareVersions(version, peer.version) <= 0) return;
   if (source) source = checkedSource(source, version);
   else if (from !== "web" || !versionPattern2.test(version)) throw new Error("\u53EA\u6709 Web \u53EF\u901A\u77E5\u539F\u751F Desktop \u83B7\u53D6\u540C\u7248\u672C npm \u5305");
   const directory = root(home), file = path5.join(directory, `${to}.json`);
@@ -581,17 +588,18 @@ function decision(home, offer) {
   }
 }
 function assertCompanionApproved(home, offer) {
-  validateCompanionOffer(home, offer.to, offer);
+  if (validateCompanionOffer(home, offer.to, offer).owner === "cli") throw legacyUpdateError();
   if (decision(home, offer) !== "approve") throw new Error("\u5C1A\u672A\u786E\u8BA4\u53E6\u4E00\u7AEF\u66F4\u65B0\uFF0C\u672A\u6267\u884C\u5B89\u88C5");
 }
 function decideCompanionOffer(home, offer, action) {
-  validateCompanionOffer(home, offer.to, offer);
+  if (validateCompanionOffer(home, offer.to, offer).owner === "cli") throw legacyUpdateError();
   if (!["approve", "later"].includes(action)) throw new Error("\u65E0\u6548\u7684\u66F4\u65B0\u9009\u62E9");
   if (decision(home, offer) === "approve") return;
   if (action === "approve") recordResult(home, offer.to, offer, pending());
   writePrivateJsonAtomic(path5.join(root(home), `decision-${offer.to}.json`), { id: offer.id, action });
 }
 function confirmation(home, offer) {
+  if (companionTarget(home, offer.to)?.owner === "cli") return manualWeb();
   const choice = decision(home, offer);
   if (choice === "approve") return;
   return {
@@ -669,70 +677,6 @@ async function applyNativeCompanion(home, scope, runningVersion, offer, services
   }
   if (companionTarget(home, scope)?.version !== offer.version) throw new Error("\u539F\u751F\u5B89\u88C5\u540E\u7684\u7248\u672C\u6821\u9A8C\u672A\u901A\u8FC7");
   return { state: "restart-required", message: "\u53E6\u4E00\u7AEF\u63D2\u4EF6\u5DF2\u5B89\u88C5\uFF0C\u91CD\u542F\u8BE5\u5E94\u7528\u540E\u751F\u6548\u3002" };
-}
-async function webInstallerRuntime(environment = process.env, electron = Boolean(process.versions.electron)) {
-  const env = { ...environment };
-  delete env.ELECTRON_RUN_AS_NODE;
-  delete env.DSH_DESKTOP_NODE_EXECUTABLE;
-  if (!electron) return { executable: process.execPath, env };
-  const search = Object.entries(env).find(([key]) => key.toLowerCase() === "path")?.[1] || "";
-  const candidates = [...new Set(search.split(path5.delimiter).filter((value) => path5.isAbsolute(value)).map((directory) => path5.join(directory, process.platform === "win32" ? "node.exe" : "node")))].slice(0, 32);
-  const signal = AbortSignal.timeout(1e4);
-  for (const candidate of candidates) {
-    if (!fs.existsSync(candidate)) continue;
-    try {
-      const { stdout } = await promisify2(execFile2)(
-        candidate,
-        ["-p", "JSON.stringify({executable:process.execPath,node:process.versions.node,electron:!!process.versions.electron})"],
-        { env, windowsHide: true, timeout: 2e3, signal, maxBuffer: 4096 }
-      );
-      const value = JSON.parse(stdout.trim()), [major, minor] = String(value.node).split(".").map(Number);
-      if (!value.electron && (major > 22 || major === 22 && minor >= 13) && fs.realpathSync(value.executable) === fs.realpathSync(candidate)) return { executable: fs.realpathSync(candidate), env };
-    } catch {
-    }
-    if (signal.aborted) break;
-  }
-  throw new Error("\u672A\u627E\u5230 Web \u4F7F\u7528\u7684\u72EC\u7ACB Node.js\uFF0C\u672A\u4F7F\u7528 Desktop \u8FD0\u884C\u65F6\u66FF\u4EE3\uFF0C\u8BF7\u5728\u7EC8\u7AEF\u6267\u884C\u539F\u5B89\u88C5\u547D\u4EE4");
-}
-async function runWebInstaller(home, offer, progress = () => {
-}, signal) {
-  signal?.throwIfAborted();
-  const notice = confirmation(home, offer);
-  if (notice) return notice;
-  progress({ state: "preparing", message: "\u68C0\u6D4B\u5230 Web \u65E7\u63D2\u4EF6\uFF0C\u6B63\u5728\u51C6\u5907\u540C\u6B65\u5347\u7EA7\uFF1B\u539F\u914D\u5BF9\u548C\u4F1A\u8BDD\u5C06\u4FDD\u7559\u3002" });
-  const target = validateCompanionOffer(home, "web", offer);
-  if (target.owner !== "cli") return Promise.resolve(pending());
-  const worker = path5.join(offer.source, "bin/companion-worker.mjs");
-  if (!fs.existsSync(worker)) throw new Error("\u6B64\u5B89\u88C5\u5305\u7F3A\u5C11\u8054\u52A8\u5B89\u88C5\u5165\u53E3");
-  const runtime = await webInstallerRuntime();
-  signal?.throwIfAborted();
-  validateCompanionOffer(home, "web", offer);
-  return new Promise((resolve, reject) => {
-    const child = spawn(runtime.executable, [worker, home, offer.version, offer.previous, offer.id], {
-      windowsHide: true,
-      env: runtime.env,
-      stdio: ["ignore", "ignore", "pipe", "ipc"]
-    });
-    child.on("message", (value) => {
-      if (value?.type === "companion-busy") progress({ state: "busy", message: "Web \u6B63\u5728\u6267\u884C\u4EFB\u52A1\uFF0C\u6682\u4E0D\u66F4\u65B0\uFF1B\u6B63\u5728\u7B49\u5F85\u5176\u7A7A\u95F2\u3002" });
-      if (value?.type === "companion-progress") {
-        const state = value.phase === "installing" ? "installing" : ["restarting", "verifying"].includes(value.phase) ? "verifying" : value.phase === "rolling-back" ? "recovering" : ["preparing", "checking"].includes(value.phase) ? "preparing" : void 0;
-        const messages = {
-          preparing: "\u6B63\u5728\u68C0\u67E5 Web \u5B89\u88C5\u6761\u4EF6\u5E76\u4FDD\u5B58\u72B6\u6001\uFF1B\u65E0\u9700\u624B\u52A8\u505C\u6B62\u4EFB\u52A1\u3002",
-          installing: "\u6B63\u5728\u5347\u7EA7 Web \u63D2\u4EF6\uFF0C\u8BF7\u6682\u52FF\u5173\u95ED Web\u3001\u9000\u51FA Desktop \u6216\u91CD\u590D\u5B89\u88C5\u3002",
-          verifying: "\u6B63\u5728\u6062\u590D Web \u8FDE\u63A5\u5E76\u6838\u9A8C\u7248\u672C\u3001\u539F\u914D\u5BF9\u548C\u4F1A\u8BDD\uFF0C\u8BF7\u7A0D\u5019\u3002",
-          recovering: "\u66F4\u65B0\u672A\u901A\u8FC7\u9A8C\u8BC1\uFF0C\u6B63\u5728\u6062\u590D Web \u539F\u63D2\u4EF6\uFF0C\u8BF7\u6682\u52FF\u5173\u95ED\u5E94\u7528\u3002"
-        };
-        if (state) progress({ state, message: messages[state] });
-      }
-    });
-    let tail = "";
-    child.stderr?.on("data", (bytes) => {
-      tail = (tail + bytes.toString()).slice(-2048);
-    });
-    child.once("error", reject);
-    child.once("exit", (code) => code === 0 ? resolve({ state: "restart-required", message: "Web \u63D2\u4EF6\u5DF2\u5B89\u88C5\uFF0C\u7B49\u5F85\u8BE5\u8282\u70B9\u542F\u52A8\u6216\u91CD\u65B0\u8FDE\u63A5\u786E\u8BA4\u3002" }) : code === 75 ? resolve({ state: "unavailable", message: "\u7B49\u5F85\u5DF2\u7ED3\u675F\uFF0CWeb \u4ECD\u6709\u4EFB\u52A1\uFF0C\u672C\u6B21\u672A\u66F4\u65B0\uFF1B\u4EFB\u52A1\u7ED3\u675F\u540E\u53EF\u4F7F\u7528\u539F\u5B89\u88C5\u547D\u4EE4\u5347\u7EA7\u3002" }) : reject(new Error(tail.trim() || "Web \u8054\u52A8\u66F4\u65B0\u672A\u5B8C\u6210\uFF1B\u539F\u6709\u8282\u70B9\u4FDD\u6301\u72EC\u7ACB\u3002")));
-  });
 }
 function mountCompanionUpdates(ctx, version, options = {}) {
   try {
@@ -813,7 +757,7 @@ function mount(ctx, version, options) {
           list: () => controller.list({}, AbortSignal.any([lifetime.signal, AbortSignal.timeout(15e3)])),
           install: (spec) => manager.installBundle(spec)
         }));
-      } else receipt(offer, await runWebInstaller(home, offer, (value) => receipt(offer, value), lifetime.signal));
+      } else receipt(offer, manualWeb());
     } catch (error) {
       if (stopped) return;
       status = { state: "unavailable", message: "\u8054\u52A8\u66F4\u65B0\u672A\u5B8C\u6210\uFF1B\u8BF7\u5728\u5BF9\u5E94\u5E94\u7528\u7684\u63D2\u4EF6\u7BA1\u7406\u9875\u6838\u5BF9\uFF0C\u5F53\u524D\u8282\u70B9\u4E0D\u53D7\u5F71\u54CD\u3002" };
@@ -831,47 +775,8 @@ function mount(ctx, version, options) {
   function existsInbox() {
     return fs.existsSync(inbox);
   }
-  let outboundBusy = false;
-  const checkOutbound = async () => {
-    if (stopped || ownChanged() || outboundBusy || options.isUpdating?.()) return;
-    let offer;
-    try {
-      offer = read(path5.join(directory, "web.json"));
-      if (scope !== "desktop" || offer.from !== scope || offer.version !== version) return;
-      const target = validateCompanionOffer(home, "web", offer);
-      if (target.owner !== "cli" || target.version === version) return;
-      const notice = confirmation(home, offer);
-      if (notice) {
-        recordResult(home, "web", offer, notice);
-        return;
-      }
-      if (compareVersions(offer.previous, "1.7.12-rc.6") >= 0) return;
-      try {
-        const last = read(path5.join(directory, "result-web.json"));
-        if (last.schema === 2 && last.id === offer.id && ["unavailable", "restart-required", "complete"].includes(last.state)) return;
-      } catch {
-      }
-    } catch {
-      return;
-    }
-    outboundBusy = true;
-    const report = (value) => {
-      try {
-        recordResult(home, "web", offer, value);
-      } catch {
-      }
-    };
-    try {
-      report(await runWebInstaller(home, offer, report, lifetime.signal));
-    } catch {
-      if (!stopped) report({ state: "unavailable", message: "Web \u8054\u52A8\u5B89\u88C5\u672A\u5B8C\u6210\uFF0C\u8BF7\u5728 Web \u539F\u751F\u5165\u53E3\u6838\u5BF9\uFF1BDesktop \u4E0D\u53D7\u5F71\u54CD\u3002" });
-    } finally {
-      outboundBusy = false;
-    }
-  };
   const watcher = fs.watch(directory, (_event, filename) => {
     if ([`${scope}.json`, `decision-${scope}.json`].includes(String(filename))) void check();
-    if (String(filename) === "decision-web.json") void checkOutbound();
   });
   watcher.on("error", () => {
     status = { state: "unavailable", message: "\u8054\u52A8\u66F4\u65B0\u901A\u77E5\u4E0D\u53EF\u7528\uFF0C\u4ECD\u53EF\u5206\u522B\u4F7F\u7528\u539F\u751F\u66F4\u65B0\u5165\u53E3\u3002" };
@@ -921,7 +826,6 @@ function mount(ctx, version, options) {
     } catch {
     }
     void check();
-    void checkOutbound();
   });
   const reportedStatus = () => {
     const to = scope === "web" ? "desktop" : "web";
@@ -965,6 +869,9 @@ function mount(ctx, version, options) {
       versions,
       message: `\u5F53\u524D ${scope === "desktop" ? "Desktop" : "Web"} \u5DF2\u5B89\u88C5 ${own.version}\uFF0C\u4ECD\u5728\u8FD0\u884C ${version}\u3002\u8BF7\u5728\u4EFB\u52A1\u7ED3\u675F\u540E\u91CD\u542F\u5F53\u524D\u5E94\u7528\uFF1B\u53E6\u4E00\u7AEF\u5C1A\u672A\u56E0\u6B64\u66F4\u65B0\u3002`
     };
+    if (peer?.owner === "cli" && compareVersions(version, peer.version) > 0) {
+      return { ...manualWeb(), versions, target: { scope: to, fromVersion: peer.version, version } };
+    }
     const result = reportedStatus();
     if (result.state === "complete" && (!own || !peer || own.version !== peer.version || own.version !== version)) {
       return { state: "unavailable", versions, message: "\u4E24\u7AEF\u7248\u672C\u6216\u542F\u7528\u72B6\u6001\u5DF2\u53D8\u5316\uFF0C\u65E7\u7684\u5B8C\u6210\u8BB0\u5F55\u4E0D\u518D\u4EE3\u8868\u5F53\u524D\u5DF2\u5BF9\u9F50\u3002\u8BF7\u5206\u522B\u6838\u5BF9\uFF0C\u4E0D\u4F1A\u81EA\u52A8\u8986\u76D6\u4EFB\u4F55\u4E00\u7AEF\u3002" };
@@ -985,7 +892,6 @@ function mount(ctx, version, options) {
     if (!offer) throw new Error("\u66F4\u65B0\u901A\u77E5\u5DF2\u8FC7\u671F\uFF0C\u8BF7\u5237\u65B0\u540E\u91CD\u8BD5");
     decideCompanionOffer(home, offer, action);
     void check();
-    void checkOutbound();
   }, dispose() {
     stopped = true;
     lifetime.abort();
@@ -1002,6 +908,5 @@ export {
   mountCompanionUpdates,
   offerCompanionUpdate,
   stageCompanionArchive,
-  validateCompanionOffer,
-  webInstallerRuntime
+  validateCompanionOffer
 };

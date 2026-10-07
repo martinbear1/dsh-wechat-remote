@@ -1,7 +1,7 @@
 /**
  * 制品一致性守卫（微信版插件）：客户端 bundle 必须用包自身的名字注册
  * （window.__ModuleLoader__.load({ id })），宿主网关必须是微信专用表面
- * （兼容 3092/3093、多 profile 端口、加密局域网、升级探针、独立状态文件）。
+ * （兼容 3092/3093、多 profile 端口、加密局域网、独立状态文件）。
  * DSH 的 client-modules 加载器会拒绝「注册 id 与启动条目 id 不一致」的
  * bundle，直接打崩 Web UI —— 本脚本把这类硬约束变成可执行的回归检查。
  *
@@ -84,7 +84,7 @@ for (const forbidden of ['createServer(', 'loadAgentDescriptor()', 'loadState()'
 }
 check(host.includes("from './gate-ports.js'"), 'lib/gate-runtime.js 未使用多 profile 端口推导')
 check(host.includes("from './dsh-runtime.js'"), 'lib/gate-runtime.js 未使用 DSH Web 运行时发现')
-check(host.includes("from './dsh-protocol-compat.js'"), 'lib/gate-runtime.js 未挂载 DSH 代际协议适配器')
+check(host.includes('new DshCompatibilityApi(ctx, UPSTREAM_PORT)'), 'lib/gate-runtime.js 未挂载 DSH 代际协议适配器')
 check(host.includes("from './dsh-compatibility-api.js'"), 'lib/gate-runtime.js 未挂载共用 DSH 适配入口')
 check(host.includes('setCors(req, res)'), '本地门没有为实际 GET 响应设置严格回环 CORS')
 check(host.includes('selectedGatePorts.publicPort'), 'lib/index.js 未使用推导出的局域网门')
@@ -106,9 +106,8 @@ for (const retiredConfigCode of ['loadWechatConfig', 'wechatAppId', 'wechatAppSe
   check(!host.includes(retiredConfigCode), `lib/gate-runtime.js 仍在读取旧微信身份配置：${retiredConfigCode}`)
 }
 check(host.includes("req.url === '/wechat-remote/secure-lan'"), 'lib/gate-runtime.js 缺少身份钉扎的加密局域网入口')
-check(host.includes('isVerificationProbe(req)'), 'lib/gate-runtime.js 缺少旧版安装器的严格回环验证探针')
+check(!host.includes('isVerificationProbe') && !host.includes('isMaintaining'), 'lib/gate-runtime.js 不应保留退役更新器的探针或全局维护分支')
 check(!host.includes('proxy.ws('), 'lib/gate-runtime.js 不应继续暴露普通 WebSocket 代理')
-check(host.includes('timingSafeEqual'), 'lib/index.js 缺少常数时间 token 比较')
 check(host.includes('rateBuckets'), 'lib/index.js 缺少每 IP 限速')
 check(secureFileArtifact.includes('icacls'), 'lib/secure-file.js 缺少 Windows ACL 收紧')
 check(host.includes('DSH 本体继续运行'), 'lib/index.js 缺少端口占用的崩溃隔离（server error 处理器）')

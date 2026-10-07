@@ -3,20 +3,13 @@ import type { Context } from '@deepseek-ai/cordis';
 import { type HostContext } from './dsh-host-context.js';
 import { type RuntimeVersion, type UpdateAdvice, type Release } from './update-policy.js';
 export declare function previewUpdatesEnabled(env?: NodeJS.ProcessEnv): boolean;
-interface UpdateJobReference {
-    jobId: string;
-    statusOrigin: string;
-    statusToken: string;
-}
-/** A nonterminal journal is historical evidence, not a worker heartbeat. */
-export declare function confirmUpdateProgress(job: UpdateJobReference, webPort: number, fetchImpl?: typeof fetch): Promise<unknown>;
 export declare function updateAction(advice: UpdateAdvice, release: Release | undefined, eligible: {
     eligible: boolean;
     reason: string;
     manualInstallAllowed?: boolean;
-}, occupied: boolean, ctx?: HostContext): {
+}, _occupied: boolean, ctx?: HostContext): {
     canInstall: boolean;
-    mode: 'none' | 'automatic' | 'manual' | 'busy';
+    mode: 'none' | 'manual';
     reason: string;
     manualCommand: string;
 };
@@ -29,28 +22,12 @@ export declare class PluginUpdateService {
     private catalog;
     private checkedAt;
     private checking?;
-    private ticket?;
-    private busy;
-    private maintenance;
-    private activeJob?;
-    private restoreFence?;
-    private startupJob?;
-    private startupTimer?;
-    private restoreStartup?;
-    private nativeRequests;
-    private readToken;
-    private otherInFlight;
-    private requestObserver;
     constructor(ctx: Context, ports: {
         web: number;
         gate: number;
         local: number;
     });
-    private fenceStartup;
-    isVerificationProbe(req: IncomingMessage): boolean;
-    trackPublicRequests(check: () => boolean): void;
     current(): RuntimeVersion;
-    isMaintaining(): boolean;
     private progressIndex;
     private recovery;
     check(force?: boolean): Promise<UpdateAdvice>;
@@ -60,8 +37,6 @@ export declare class PluginUpdateService {
         channel: "preview" | "stable";
     }>;
     private eligibility;
-    private begin;
     handle(req: IncomingMessage, res: ServerResponse): Promise<void>;
     dispose(): void;
 }
-export {};

@@ -1,5 +1,5 @@
-/** Read-only discovery. A candidate is NOT the installation target until the
- * native, token-bound host handshake confirms its home/profile/CLI/PID.
+/** Read-only discovery for explicitly stopped-host CLI installation.
+ * Canonical CLI validation never grants authority to stop a running host.
  * Never run an unvalidated shell shim, fetch a different DSH, or scan a disk. */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -98,8 +98,8 @@ export async function discoverDsh({ env = process.env, cwd = process.cwd(), cach
 export async function chooseDsh(options = {}) {
   if (options.cli) return validateDshCli(options.cli).cli
   const candidates = await discoverDsh(options)
-  if (!candidates.length) throw new Error('未找到 DSH。请先按原来的方式启动 DSH WebUI，再运行本命令。')
-  // A stopped host has no handshake yet. Follow the terminal's ordinary DSH
+  if (!candidates.length) throw new Error('未找到 DSH 命令行安装。请用 --dsh-cli 指定原 DSH 的 lib/bin.js；桌面应用请使用原生插件管理页。')
+  // For a stopped host, follow the terminal's ordinary DSH
   // resolution before consulting old NPX cache entries; no version sorting or
   // downloading. This fallback never overrides an already running host.
   const normal = candidates.find(item => item.source === 'PATH')
@@ -108,12 +108,12 @@ export async function chooseDsh(options = {}) {
   if (normal) return normal.cli
   if (candidates.length === 1) return candidates[0].cli
   // Multiple cache-only versions are not evidence of the user's choice.
-  // A live host normally bypasses this fallback via its native handshake.
+  // A running host is refused by the caller; never launch it for discovery.
   const prompt = options.prompt || (process.stdin.isTTY && process.stdout.isTTY ? async message => {
     const rl = createInterface({ input: process.stdin, output: process.stdout })
     try { return await rl.question(message) } finally { rl.close() }
   } : undefined)
-  if (!prompt) throw new Error('找到多份 DSH。请先启动要使用的 DSH，或用 --dsh-cli 指定其 lib/bin.js；未修改插件。')
+  if (!prompt) throw new Error('找到多份 DSH。请用 --dsh-cli 指定要使用的 lib/bin.js；未修改插件。')
   const list = candidates.map((item, index) => `${index + 1}. DSH ${clean(item.version)} — ${clean(item.cli)}`).join('\n')
   const answer = String(await prompt(`找到多份 DSH，请选择要使用的一份（直接回车取消）：\n${list}\n编号：`)).trim()
   const index = Number(answer) - 1
@@ -122,12 +122,12 @@ export async function chooseDsh(options = {}) {
 }
 
 // POSIX npm/npx normally starts through a bin symlink, not lib/bin.js.
-// This is a conservative stop signal only; target authority is the handshake.
+// This is a conservative refusal signal only; it never grants lifecycle authority.
 export function looksLikeDshProcess(command) {
   return /(?:[/\\](?:dsh|apps[/\\]cli)[/\\]lib[/\\]bin\.js|[/\\](?:\.bin|bin)[/\\]dsh)(?:["'\s]|$)/i.test(command || '')
 }
 
-/** Conservatively prevent a second host while a live profile reloads on a
+/** Conservatively refuse stopped-host installation while Web is running on a
  * non-default port. We use process listings only as a stop signal, never as
  * authority to install, stop a PID, or select another user's data directory. */
 export async function mayHaveRunningDsh() {
@@ -152,24 +152,4 @@ export async function mayHaveRunningDsh() {
     const { stdout } = await execute('/bin/ps', ['-axo', 'command='], { timeout: 10000, maxBuffer: 2 * 1024 * 1024 })
     return looksLikeDshProcess(stdout)
   } catch { return true } // Unknown process ownership must never authorize an extra host.
-}
-
-export function assertInstallTarget(host, { home, profile, cli, pid }) {
-  if (host.home !== home || host.profile !== profile || !Number.isInteger(host.pid) || host.pid < 1
-      || host.pid !== pid || (cli && host.cli !== validateDshCli(cli).cli)
-      || host.cli !== validateDshCli(host.cli).cli) {
-    throw new Error('当前 DSH 身份与安装目标不一致，未修改安装。')
-  }
-}
-
-/** Preserve arguments but use the validated real entry point for restart.
- * On macOS/Linux argv[0] can be npm's .bin/dsh symlink while host.cli is its
- * canonical target. The worker requires a canonical CLI, as the WebUI updater
- * already does. Never accept a different executable hidden in argv. */
-export function installHostArgv(host) {
-  if (!Array.isArray(host.argv) || !host.argv.length || !host.argv.every(arg => typeof arg === 'string')
-      || validateDshCli(host.argv[0]).cli !== host.cli) {
-    throw new Error('DSH 启动参数与安装目标不一致，未修改安装。')
-  }
-  return [host.cli, ...host.argv.slice(1)]
 }

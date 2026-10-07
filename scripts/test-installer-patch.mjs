@@ -12,16 +12,15 @@ try {
     fs.mkdirSync(directory, {recursive:true})
     const file = path.join(profile, 'cordis.patch.yml'), original = '# preserved comment\n- insert: []\n'
     fs.writeFileSync(file, original)
-    const remove = attachControl(profile, path.join(directory, 'install-control.js'), { directory, token: 'synthetic' })
-    assert(fs.readFileSync(file, 'utf8').includes('file:///'))
+    assert.throws(() => attachControl(profile, path.join(directory, 'install-control.js'), { directory, token: 'synthetic' }), { code: 'NATIVE_MANUAL_UPDATE_REQUIRED' })
+    assert.equal(fs.readFileSync(file, 'utf8'), original)
     if (concurrent) fs.appendFileSync(file, '\n- insert:\n  - id: user-added\n    name: example\n')
-    remove()
     const restored = fs.readFileSync(file, 'utf8')
     if (concurrent) { assert(restored.includes('user-added')); assert(!restored.includes('wechat-installer-')) }
     else assert.equal(restored, original)
     assert(!fs.readdirSync(profile).some(name => name.includes('.wechat-')))
   }
-  console.log('PASS atomic native patch, exact restoration and concurrent user edits')
+  console.log('PASS retired control cannot patch native profile or undo concurrent user edits')
 } finally {
   assert(path.dirname(root) === os.tmpdir() && path.basename(root).startsWith('installer-patch-proof-'))
   fs.rmSync(root, { recursive: true })

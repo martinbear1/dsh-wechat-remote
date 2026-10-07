@@ -98,13 +98,13 @@ test('installer native read works independently of a broken gateway and never as
   await assert.rejects(nativeInstallSessions({ get: () => undefined }, new AbortController().signal), /不可用/)
   await assert.rejects(nativeInstallSessions(ctx, AbortSignal.abort()))
 })
-test('repair keeps mandatory idle checks on both sides of durable flush', async () => {
-  let disposed = 0, flushed = 0, checks = 0
-  const ctx = { get: () => ({ list: () => [{}], flush: async () => { flushed++; return true } }), fiber: { dispose: async () => { disposed++ } } }
-  await assert.rejects(quiesceNativeHost(ctx, async () => ({ items: [{ running: true }] }), () => {}), /等待/)
-  assert.equal(flushed, 0); assert.equal(disposed, 0)
-  await assert.rejects(quiesceNativeHost(ctx, async () => ({ items: [{ running: ++checks > 1 }] }), () => {}), /新会话/)
-  assert.equal(flushed, 1); assert.equal(disposed, 0)
-  await quiesceNativeHost(ctx, async () => ({ items: [{ running: false }] }), () => {})
-  assert.equal(disposed, 1)
+test('retired repair path never flushes or disposes an idle or busy native host', async () => {
+  const touched = []
+  const ctx = { get: () => { touched.push('get'); throw Error('host must not be inspected') },
+    fiber: { dispose: async () => { touched.push('dispose') } } }
+  for (const running of [true, false]) {
+    await assert.rejects(quiesceNativeHost(ctx, async () => { touched.push('read'); return { items: [{ running }] } },
+      () => touched.push('disposing')), { code: 'NATIVE_MANUAL_UPDATE_REQUIRED' })
+  }
+  assert.deepEqual(touched, [])
 })

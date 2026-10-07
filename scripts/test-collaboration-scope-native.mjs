@@ -2,8 +2,9 @@
  * sessions. No live profile, cloud, WeChat, shell execution or model calls.
  *
  * The shipped native YAML is inspected verbatim. Runtime presets deliberately
- * use its persona/fs/skill rows, not the whole Desktop app: this tests the real
- * registry, scope chain, tools and skills without starting unrelated services.
+ * use its persona/fs/skill and PTC presentation rows, not the whole Desktop app:
+ * this tests the real registry, scope chain, tools, skills and native/PTC wire
+ * projections without starting unrelated services or executing PTC code.
  * Product modules are copied beside the installed native modules so none of
  * their imports accidentally use this repository's older development SDK.
  */
@@ -96,6 +97,7 @@ async function verify() {
   const { default: AgentRegistry } = await load('@deepseek-ai/dsh-agent')
   const { AgentLoop } = await load('@deepseek-ai/dsh-agent-loop')
   const { ToolRuntime } = await load('@deepseek-ai/dsh-tools')
+  const { default: NodePtcRuntime } = await load('@deepseek-ai/dsh-ptc-runtime-node')
   const { SessionController } = await load('@deepseek-ai/dsh-api-session-controller')
   const { applyChildComposition, childSessionMeta, appendDelegatedPolicyOverrides, captureDelegatedPolicyOverrides } = await load('@deepseek-ai/dsh-subagent')
   const { default: Typert } = await load('@deepseek-ai/dsh-typert-registry')
@@ -132,7 +134,7 @@ async function verify() {
     ctx.baseUrl = pathToFileURL(path.join(work, 'dsh/')).href
     ctx.provide('profileContext', { name: 'collaboration-scope-fixture', dir: work, home: work, installAnchor: anchor })
     await ctx.plugin(Loader); await ctx.plugin(Projection); await ctx.plugin(SystemPrompt, {})
-    new SessionStore(ctx); new AgentRegistry(ctx); new ToolRuntime(ctx, { mode: 'native' }); new Typert(ctx)
+    new SessionStore(ctx); new AgentRegistry(ctx); await ctx.plugin(ToolRuntime, { mode: 'native' }); new Typert(ctx)
     skillsFiber = await ctx.plugin(SkillRegistry)
     ctx.provide('agentDefaultModel', { currentSelection: () => ({ provider: 'fixture', model: 'no-model' }) })
     ctx.provide('llm', { listProviders: () => [{ id: 'fixture' }], resolveCallConfig: async value => value,
@@ -143,6 +145,15 @@ async function verify() {
     ctx.provide('workspaceRegistry', { archivedSessionIds: [], list: () => [{ id: 'scope-workspace', path: work }],
       get: id => id === 'scope-workspace' ? { id, path: work, attachSession: async id => controllerServices.push(id) } : undefined })
     ctx.provide('fs', { resolve: forbidden('native filesystem must not execute in scope inspection') })
+    // The real PTC provider is lazy: construction and schema projection never
+    // execute code. Its effectful seams deliberately fail if inspection ever
+    // regresses into starting a child process, sandbox, or filesystem action.
+    ctx.provide('subprocess', { spawn: forbidden('no PTC subprocess in scope inspection') })
+    ctx.provide('sandbox', { spawn: forbidden('no PTC sandbox in scope inspection') })
+    ctx.provide('sandboxPolicy', { defaultMode: 'read-only', overrideOf: () => undefined,
+      resolve: forbidden('no PTC execution policy in scope inspection') })
+    await ctx.plugin(NodePtcRuntime, {})
+    assert(ctx.get('ptcRuntime'), 'real PTC runtime must initialize before mounting the PTC preset')
     ctx.provide('sessionQuery', { listSessions: async () => [] })
     ctx.on('session/flush', async () => {})
     await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 10 })
@@ -150,22 +161,34 @@ async function verify() {
     await ctx.plugin(AgentPresets, { default: 'standard' })
     const codec = await nativeAssistantCodec(anchor)
     const nativeRows = {}
-    for (const id of ['standard', 'minimal', 'cordis']) {
+    for (const id of ['standard', 'ptc', 'minimal', 'cordis']) {
       const source = fs.readFileSync(path.join(work, `dsh/node_modules/@deepseek-ai/dsh-web-app/presets/${id}.patch.yml`), 'utf8')
       assert(!source.includes('dsh-wechat-remote') && !source.includes('human-workflow'), 'shipped native modes must not contain product collaboration')
       const definition = codec.load(source)[0].insert[0].config
-      nativeRows[id] = definition.plugins.filter(row => ['persona', 'tool-fs', 'tool-skill'].includes(row.id))
+      nativeRows[id] = definition.plugins.filter(row => ['persona', 'tool-fs', 'tool-skill', 'tool-presentation'].includes(row.id))
       assert(nativeRows[id].some(row => row.id === 'persona'))
+      if (id === 'ptc') assert(nativeRows[id].some(row => row.name === '@deepseek-ai/dsh-agent-tool-presentation' && row.config.mode === 'ptc'))
       await ctx.agentPresets.register({ id, name: id, plugins: nativeRows[id] })
       assert.equal((await ctx.agentPresets.resolve(id)).broken, undefined)
     }
-    checks.push('read shipped native mode declarations; mount real native persona/fs/skill rows under installed preset scopes')
+    checks.push('read all four shipped native mode declarations; mount their persona/fs/skill rows and the real PTC presentation with native NodePtcRuntime')
     const probe = { name: 'native_scope_probe', description: 'In-memory native dispatch probe', parameters: { type: 'object', properties: {} },
       output: { schema: { type: 'object' }, render: () => [] }, execute() { probeCalls++; return { ok: true } } }
     ctx.tools.register(probe)
-    backend = await ctx.plugin(HumanToolsService, config)
-    assert.equal(typeof ctx.get('humanTools').mountCapabilities, 'function')
-    await assert.rejects(ctx.get('humanTools').mountCapabilities(ctx), /不能全局装载/)
+    // Neither ordinary custom mode invokes our authoring transform. The third
+    // party has its own native scoped component; the user mode is an ordinary
+    // independent copy of a native declaration. Both must remain untouched.
+    const thirdPartyTool = { ...probe, name: 'third_party_scope_probe' }
+    ctx.loader.builtins.thirdPartyScopeFixture = { inject: ['tools', 'skills', 'systemPrompt'], apply(owner) {
+      owner.tools.register(thirdPartyTool)
+      owner.skills.register({ name: 'third-party-method', description: 'Independent third-party method',
+        source: 'bundled', provider: 'third-party-fixture', invocation: { modelInvocable: true, userInvocable: true }, content: 'Independent method.' })
+      owner.systemPrompt.context({ name: 'third-party-fixture.instructions', order: 90, text: 'Independent third-party instructions.' })
+    } }
+    await ctx.agentPresets.register({ id: 'fixture-third-party', plugins: [
+      ...structuredClone(nativeRows.standard), { id: 'third-party-only', name: 'cordis:thirdPartyScopeFixture' },
+    ] })
+    await ctx.agentPresets.register({ id: 'fixture-user-independent', plugins: structuredClone(nativeRows.standard) })
     const create = async id => {
       const result = await controller.create({ workspaceId: 'scope-workspace', agentPreset: id })
       const agent = ctx.agents.get(result.sessionId)
@@ -175,10 +198,23 @@ async function verify() {
       return agent
     }
     const ordinary = {}
-    for (const id of ['standard', 'minimal', 'cordis']) ordinary[id] = await create(id)
+    for (const id of ['standard', 'ptc', 'minimal', 'cordis', 'fixture-third-party', 'fixture-user-independent']) ordinary[id] = await create(id)
+    await ctx.loader.await()
     const schemaSnapshot = scope => ctx.tools.schemas(scope).toSorted((a, b) => a.name.localeCompare(b.name))
+    const presentationSnapshot = scope => ({ mode: ctx.tools.modeFor(scope), wire: ctx.tools.wireSchemas(scope), sdk: ctx.tools.sdkSchemas(scope) })
+    const reorderedPresentation = value => ({ ...value, wire: { ...value.wire,
+      schemas: value.wire.schemas.toSorted((a, b) => a.name.localeCompare(b.name)), knownNames: value.wire.knownNames.toSorted() },
+      sdk: value.sdk.toSorted((a, b) => a.name.localeCompare(b.name)) })
     const baseline = Object.fromEntries(Object.entries(ordinary).map(([id, agent]) => [id, schemaSnapshot(agent)]))
+    const presentations = Object.fromEntries(Object.entries(ordinary).map(([id, agent]) => [id, presentationSnapshot(agent)]))
+    assert.equal(presentations.ptc.mode, 'ptc')
+    assert.equal(presentations.standard.mode, 'native')
+    assert.equal(ctx.tools.get('third_party_scope_probe', ordinary['fixture-third-party']), thirdPartyTool)
+    assert.equal(ctx.tools.get('third_party_scope_probe', ordinary.standard), undefined)
     const globalBaseline = schemaSnapshot()
+    const globalPresentation = presentationSnapshot()
+    const originalDefaultConfig = JSON.stringify(ctx.agentPresets.config)
+    const originalModelSelection = structuredClone(ctx.agentDefaultModel.currentSelection())
     const ordinaryDefinitions = Object.fromEntries(Object.entries(ordinary).map(([id, agent]) => [id,
       new Map(baseline[id].map(schema => [schema.name, ctx.tools.get(schema.name, agent)]))]))
     // Native per-preset plugins construct separate function instances. Compare
@@ -191,15 +227,25 @@ async function verify() {
       const names = ctx.tools.schemas(agent).map(tool => tool.name)
       const skills = await ctx.skills.list({ scope: agent, cwd: work, signal })
       const context = renderContextSections(await ctx.systemPrompt.assemble({ agent, scope: agent }))
-      return { names, skills: skills.map(skill => skill.name), context: context.filter(part => part.name.startsWith('harness-remote.')) }
+      return { names, skills: skills.map(skill => skill.name), context: context.filter(part => part.name.startsWith('harness-remote.')), fullContext: context }
     }
+    const originalViews = Object.fromEntries(await Promise.all(Object.entries(ordinary).map(async ([id, agent]) => [id, await view(agent)])))
     async function cleanOrdinary(stage) {
       for (const [id, agent] of Object.entries(ordinary)) {
         const state = await view(agent)
         assert(!state.names.some(name => name.startsWith('human_')), `${stage}: ${id} leaked group tools`)
         assert(!state.skills.includes('human-workflow'), `${stage}: ${id} leaked group skill`)
         assert.deepEqual(state.context, [], `${stage}: ${id} leaked group runtime guidance`)
+        assert.deepEqual(state.skills, originalViews[id].skills, `${stage}: ${id} native skill catalog changed`)
+        // Deliberately reloading DSH's own SkillRegistry later legitimately
+        // reorders its re-registered skill tool. Until then compare exact wire
+        // order and SDK text; after that compare complete per-tool SDK contracts
+        // and every other prompt section, without blaming the plugin for it.
+        const comparableContext = value => nativeSkillsWereReloaded ? value.filter(part => part.name !== 'tools:sdk') : value
+        assert.deepEqual(comparableContext(state.fullContext), comparableContext(originalViews[id].fullContext), `${stage}: ${id} native prompt/SDK changed`)
         assert.deepEqual(schemaSnapshot(agent), baseline[id], `${stage}: ${id} native tool contract changed`)
+        const comparablePresentation = value => nativeSkillsWereReloaded ? reorderedPresentation(value) : value
+        assert.deepEqual(comparablePresentation(presentationSnapshot(agent)), comparablePresentation(presentations[id]), `${stage}: ${id} native/PTC presentation changed`)
         for (const [name, definition] of ordinaryDefinitions[id]) {
           // The final case deliberately reloads DSH's native SkillRegistry,
           // so its dependent skill tool legitimately gets a new instance.
@@ -211,8 +257,15 @@ async function verify() {
       }
       assert(!ctx.tools.schemas().some(tool => tool.name.startsWith('human_')), `${stage}: group tools leaked globally`)
       assert.deepEqual(schemaSnapshot(), globalBaseline, `${stage}: global native tool contract changed`)
+      assert.deepEqual(presentationSnapshot(), globalPresentation, `${stage}: global presentation changed`)
       assert(!(await ctx.skills.list({ signal })).some(skill => skill.name === 'human-workflow'), `${stage}: group skill leaked globally`)
+      assert.equal(JSON.stringify(ctx.agentPresets.config), originalDefaultConfig, `${stage}: native preset/default config changed`)
+      assert.deepEqual(ctx.agentDefaultModel.currentSelection(), originalModelSelection, `${stage}: native default model changed`)
     }
+    await cleanOrdinary('before-backend')
+    backend = await ctx.plugin(HumanToolsService, config)
+    assert.equal(typeof ctx.get('humanTools').mountCapabilities, 'function')
+    await assert.rejects(ctx.get('humanTools').mountCapabilities(ctx), /不能全局装载/)
     await cleanOrdinary('backend-only')
     const rows = BUILTIN_ASSISTANTS.map(identity => {
       ctx.loader.builtins[identity.service] = builtinComponent(identity.templateId)
@@ -249,9 +302,21 @@ async function verify() {
       return state
     }
     await Promise.all(Object.entries(sessions).map(([id, agent]) => present(agent, id)))
+    for (const [id, agent] of Object.entries(sessions)) {
+      for (const [name, args] of [['human_capabilities', { view: 'catalog' }], ['skill', { name: 'human-workflow' }]]) {
+        const result = await ctx.tools.execute({ name, arguments: args, agent, callId: `scope-usable-${id}-${name}`, signal })
+        assert.equal(result.isError, false, `${id}: scoped native dispatch failed: ${JSON.stringify(result)}`)
+      }
+    }
+    for (const [id, agent] of Object.entries(ordinary)) {
+      const result = await ctx.tools.execute({ name: 'human_capabilities', arguments: { view: 'catalog' }, agent,
+        callId: `scope-denied-${id}`, signal })
+      assert.equal(result.isError, true, `${id}: uncomposed collaboration capability must not execute`)
+    }
     await cleanOrdinary('four-compositions-concurrent')
-    checks.push('standard/minimal/cordis retain native schema baseline and have no collaboration tools, skill or context')
+    checks.push('standard/PTC/minimal/cordis and independent third-party/user modes retain pre-backend native schema, SDK, prompt, skill and default configuration baselines')
     checks.push('teacher/project/customizer and an independently named custom mode each compose all 40 capabilities plus native tools')
+    checks.push('all four collaboration compositions execute human_capabilities and native skill read; all six unrelated modes reject a direct collaboration call')
 
     // The native in-process spawn/fork driver calls applyChildComposition:
     // this inherits a precise parent revision, NOT an independent "standard"
@@ -283,10 +348,18 @@ async function verify() {
         assert.deepEqual(schemaSnapshot(handle.agent), baseline.standard)
         assert(!state.skills.includes('human-workflow')); assert.deepEqual(state.context, [])
       }
+      for (const [id, parent] of Object.entries(ordinary).filter(([id]) => id !== 'standard')) {
+        const inherited = await child(parent); delegated.push(inherited)
+        const state = await view(inherited.agent)
+        assert.deepEqual(schemaSnapshot(inherited.agent), baseline[id], `${id}: native child tools differ from parent`)
+        assert.deepEqual(presentationSnapshot(inherited.agent), presentations[id], `${id}: native child presentation differs from parent`)
+        assert.deepEqual(state.skills, originalViews[id].skills, `${id}: native child skills differ from parent`)
+        assert(!state.skills.includes('human-workflow')); assert.deepEqual(state.context, [])
+      }
       const explicitTeacher = await child(ordinary.standard, 'harness-teacher'); delegated.push(explicitTeacher)
       await present(explicitTeacher.agent, 'trusted-native-factory-explicit-teacher-child')
       await cleanOrdinary('child-composition-boundaries')
-      checks.push('native delegated children inherit parent preset; trusted explicit child presets isolate in both directions without affecting independent standard')
+      checks.push('children of all four native modes plus third-party/user modes retain their own composition; collaboration children inherit only their parent preset; trusted explicit child presets isolate in both directions')
     } finally { for (const handle of delegated.reverse()) await handle.dispose() }
 
     // Even unavailable history of an unrelated standard session must not make
@@ -417,7 +490,7 @@ async function verify() {
     assert.equal(modelCalls, 0); assert.equal(probeCalls, 1)
     console.log(JSON.stringify({ passed: true, nativeVersion: JSON.parse(fs.readFileSync(anchor, 'utf8')).version,
       checks, counts, offlineDiscoveryAttempts: externalCalls, modelCalls, liveProfileTouched: false,
-      limitation: 'native scope/registry integration with shipped persona/fs/skill rows; not a full Desktop or WeChat end-to-end run' }))
+      limitation: 'native scope/registry integration with shipped persona/fs/skill/PTC presentation rows and native PTC provider; other full preset components and PTC execution are not exercised; not a full Desktop or WeChat end-to-end run' }))
   } catch (error) { failure = error; throw error }
   finally {
     trace('disposing fixture')

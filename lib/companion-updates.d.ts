@@ -61,18 +61,9 @@ export declare function applyNativeCompanion(home: string, scope: Scope, running
     signal?: AbortSignal;
     progress?(value: CompanionResult): void;
 }): Promise<CompanionResult>;
-/** The existing Web transaction supplies idle fencing, exact launcher reuse,
- * verification and rollback. It is never passed the Desktop profile. */
-/** Desktop's Electron executable is not a Web launch runtime. Discover only
- * a real Node already available to this OS user; never install a runtime or
- * reinterpret a desktop executable as the user's existing CLI. */
-export declare function webInstallerRuntime(environment?: NodeJS.ProcessEnv, electron?: boolean): Promise<{
-    executable: string;
-    env: NodeJS.ProcessEnv;
-}>;
 /** No service daemon and no polling scanner: one fiber-owned file watcher plus
  * native agent-idle events. Old peers without this receiver keep their native
- * manual entry; an enabled legacy Web can use its existing one-line installer. */
+ * manual entry; CLI Web never receives an executable update offer. */
 export declare function mountCompanionUpdates(ctx: any, version: string, options?: {
     isUpdating?(): boolean;
 }): Coordinator;

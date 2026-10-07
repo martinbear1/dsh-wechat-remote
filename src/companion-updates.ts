@@ -3,7 +3,7 @@
  * phone authorization, profile copying, implicit installation or forced exit. */
 import fs from 'node:fs'
 import path from 'node:path'
-import { spawn, execFile } from 'node:child_process'
+import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { createHash, randomBytes } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
@@ -11,6 +11,7 @@ import { compareVersions } from './update-policy.js'
 import { writePrivateJsonAtomic } from './secure-file.js'
 import { agentDshHome, agentProfileScope } from './agent-metadata.js'
 import { auditNativeArchive } from './update-download.js'
+import { LEGACY_UPDATE_MANUAL_MESSAGE, legacyUpdateError } from './install-capabilities.js'
 
 type Scope = 'web' | 'desktop'
 const core = '@harness-remote/dsh-wechat-remote', native = 'dsh-wechat-remote'
@@ -21,6 +22,7 @@ export type CompanionResult = { state: 'idle' | 'confirmation-required' | 'defer
   target?: { scope: Scope; fromVersion: string; version: string };
   versions?: { current: Scope; running: string; installed: string | null; peer: Scope; peerInstalled: string | null } }
 interface Coordinator { status(): CompanionResult; decide(id: string, action: 'approve' | 'later'): void; dispose(): void }
+const manualWeb = (): CompanionResult => ({ state: 'unavailable', message: LEGACY_UPDATE_MANUAL_MESSAGE })
 const pending = (): CompanionResult => ({ state: 'pending', message: '另一端将在其原生更新入口可用时处理；当前节点不受影响。' })
 function scopeOf(value: string): Scope | undefined {
   return value === 'desktop' ? 'desktop' : value === 'web' || value === 'default' ? 'web' : undefined
@@ -80,7 +82,9 @@ function checkedSource(source: string, version: string): string {
  * offer instead of becoming an unwanted automatic re-upgrade. */
 export function offerCompanionUpdate(home: string, from: Scope, source: string, version: string): Offer | undefined {
   const to = from === 'web' ? 'desktop' : 'web', peer = companionTarget(home, to)
-  if (!peer || compareVersions(version, peer.version) <= 0) return
+  // Old receivers can execute schema-2 offers. Do not publish a CLI Web offer
+  // at all; the current UI derives a manual notice from read-only peer versions.
+  if (!peer || peer.owner === 'cli' || compareVersions(version, peer.version) <= 0) return
   if (source) source = checkedSource(source, version)
   else if (from !== 'web' || !versionPattern.test(version)) throw new Error('只有 Web 可通知原生 Desktop 获取同版本 npm 包')
   const directory = root(home), file = path.join(directory, `${to}.json`)
@@ -120,11 +124,11 @@ function decision(home: string, offer: Offer): string | undefined {
   try { const value = read(path.join(root(home), `decision-${offer.to}.json`)); return value.id === offer.id ? value.action : undefined } catch { return }
 }
 export function assertCompanionApproved(home: string, offer: Offer): void {
-  validateCompanionOffer(home, offer.to, offer)
+  if (validateCompanionOffer(home, offer.to, offer).owner === 'cli') throw legacyUpdateError()
   if (decision(home, offer) !== 'approve') throw new Error('尚未确认另一端更新，未执行安装')
 }
 export function decideCompanionOffer(home: string, offer: Offer, action: 'approve' | 'later'): void {
-  validateCompanionOffer(home, offer.to, offer)
+  if (validateCompanionOffer(home, offer.to, offer).owner === 'cli') throw legacyUpdateError()
   if (!['approve', 'later'].includes(action)) throw new Error('无效的更新选择')
   // Approval is tied to the exact immutable offer; a new version/source never
   // inherits it. Once admitted, "later" cannot cancel a transaction mid-write.
@@ -133,6 +137,7 @@ export function decideCompanionOffer(home: string, offer: Offer, action: 'approv
   writePrivateJsonAtomic(path.join(root(home), `decision-${offer.to}.json`), { id: offer.id, action })
 }
 function confirmation(home: string, offer: Offer): CompanionResult | undefined {
+  if (companionTarget(home, offer.to)?.owner === 'cli') return manualWeb()
   const choice = decision(home, offer)
   if (choice === 'approve') return
   return { state: choice === 'later' ? 'deferred' : 'confirmation-required', offerId: offer.id, target: offerTarget(offer),
@@ -217,77 +222,9 @@ export async function applyNativeCompanion(home: string, scope: Scope, runningVe
   if (companionTarget(home, scope)?.version !== offer.version) throw new Error('原生安装后的版本校验未通过')
   return { state: 'restart-required', message: '另一端插件已安装，重启该应用后生效。' }
 }
-/** The existing Web transaction supplies idle fencing, exact launcher reuse,
- * verification and rollback. It is never passed the Desktop profile. */
-/** Desktop's Electron executable is not a Web launch runtime. Discover only
- * a real Node already available to this OS user; never install a runtime or
- * reinterpret a desktop executable as the user's existing CLI. */
-export async function webInstallerRuntime(environment: NodeJS.ProcessEnv = process.env,
-  electron = Boolean(process.versions.electron)): Promise<{ executable: string; env: NodeJS.ProcessEnv }> {
-  const env = { ...environment }
-  delete env.ELECTRON_RUN_AS_NODE
-  delete env.DSH_DESKTOP_NODE_EXECUTABLE
-  if (!electron) return { executable: process.execPath, env }
-  const search = Object.entries(env).find(([key]) => key.toLowerCase() === 'path')?.[1] || ''
-  const candidates = [...new Set(search.split(path.delimiter).filter(value => path.isAbsolute(value))
-    .map(directory => path.join(directory, process.platform === 'win32' ? 'node.exe' : 'node')))].slice(0, 32)
-  const signal = AbortSignal.timeout(10_000)
-  for (const candidate of candidates) {
-    if (!fs.existsSync(candidate)) continue
-    try {
-      const { stdout } = await promisify(execFile)(candidate,
-        ['-p', 'JSON.stringify({executable:process.execPath,node:process.versions.node,electron:!!process.versions.electron})'],
-        { env, windowsHide: true, timeout: 2000, signal, maxBuffer: 4096 })
-      const value = JSON.parse(stdout.trim()), [major, minor] = String(value.node).split('.').map(Number)
-      if (!value.electron && (major > 22 || major === 22 && minor >= 13)
-          && fs.realpathSync(value.executable) === fs.realpathSync(candidate)) return { executable: fs.realpathSync(candidate), env }
-    } catch { /* Next already-installed Node; no shell wrappers or download. */ }
-    if (signal.aborted) break
-  }
-  throw new Error('未找到 Web 使用的独立 Node.js，未使用 Desktop 运行时替代，请在终端执行原安装命令')
-}
-async function runWebInstaller(home: string, offer: Offer, progress: (value: CompanionResult) => void = () => {}, signal?: AbortSignal): Promise<CompanionResult> {
-  signal?.throwIfAborted()
-  const notice = confirmation(home, offer)
-  if (notice) return notice
-  progress({ state: 'preparing', message: '检测到 Web 旧插件，正在准备同步升级；原配对和会话将保留。' })
-  const target = validateCompanionOffer(home, 'web', offer)
-  if (target.owner !== 'cli') return Promise.resolve(pending())
-  const worker = path.join(offer.source, 'bin/companion-worker.mjs')
-  if (!fs.existsSync(worker)) throw new Error('此安装包缺少联动安装入口')
-  const runtime = await webInstallerRuntime()
-  signal?.throwIfAborted()
-  validateCompanionOffer(home, 'web', offer)
-  return new Promise((resolve, reject) => {
-    // Once admitted, this standalone transaction owns its cleanup/rollback.
-    // Disposing the plugin must NOT kill a worker halfway through replacement.
-    const child = spawn(runtime.executable, [worker, home, offer.version, offer.previous, offer.id], { windowsHide: true,
-      env: runtime.env, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] })
-    child.on('message', (value: any) => {
-      if (value?.type === 'companion-busy') progress({ state: 'busy', message: 'Web 正在执行任务，暂不更新；正在等待其空闲。' })
-      if (value?.type === 'companion-progress') {
-        const state = value.phase === 'installing' ? 'installing'
-          : ['restarting', 'verifying'].includes(value.phase) ? 'verifying'
-          : value.phase === 'rolling-back' ? 'recovering'
-          : ['preparing', 'checking'].includes(value.phase) ? 'preparing' : undefined
-        const messages = { preparing: '正在检查 Web 安装条件并保存状态；无需手动停止任务。',
-          installing: '正在升级 Web 插件，请暂勿关闭 Web、退出 Desktop 或重复安装。',
-          verifying: '正在恢复 Web 连接并核验版本、原配对和会话，请稍候。',
-          recovering: '更新未通过验证，正在恢复 Web 原插件，请暂勿关闭应用。' }
-        if (state) progress({ state, message: messages[state] })
-      }
-    })
-    let tail = ''
-    child.stderr?.on('data', bytes => { tail = (tail + bytes.toString()).slice(-2048) })
-    child.once('error', reject)
-    child.once('exit', code => code === 0 ? resolve({ state: 'restart-required', message: 'Web 插件已安装，等待该节点启动或重新连接确认。' })
-      : code === 75 ? resolve({ state: 'unavailable', message: '等待已结束，Web 仍有任务，本次未更新；任务结束后可使用原安装命令升级。' })
-      : reject(new Error(tail.trim() || 'Web 联动更新未完成；原有节点保持独立。')))
-  })
-}
 /** No service daemon and no polling scanner: one fiber-owned file watcher plus
  * native agent-idle events. Old peers without this receiver keep their native
- * manual entry; an enabled legacy Web can use its existing one-line installer. */
+ * manual entry; CLI Web never receives an executable update offer. */
 export function mountCompanionUpdates(ctx: any, version: string, options: { isUpdating?(): boolean } = {}): Coordinator {
   try { return mount(ctx, version, options) } catch {
     // Coordination is optional. Its filesystem failure must not prevent
@@ -340,7 +277,7 @@ function mount(ctx: any, version: string, options: { isUpdating?(): boolean }): 
           list: () => controller.list({}, AbortSignal.any([lifetime.signal, AbortSignal.timeout(15_000)])),
           install: spec => manager.installBundle(spec),
         }))
-      } else receipt(offer!, await runWebInstaller(home, offer!, value => receipt(offer!, value), lifetime.signal))
+      } else receipt(offer!, manualWeb())
     } catch (error) {
       if (stopped) return
       status = { state: 'unavailable', message: '联动更新未完成；请在对应应用的插件管理页核对，当前节点不受影响。' }
@@ -351,31 +288,8 @@ function mount(ctx: any, version: string, options: { isUpdating?(): boolean }): 
     }
   }
   function existsInbox() { return fs.existsSync(inbox) }
-  let outboundBusy = false
-  const checkOutbound = async () => {
-    if (stopped || ownChanged() || outboundBusy || options.isUpdating?.()) return
-    let offer: Offer
-    try {
-      offer = read(path.join(directory, 'web.json'))
-      if (scope !== 'desktop' || offer.from !== scope || offer.version !== version) return
-      const target = validateCompanionOffer(home, 'web', offer)
-      if (target.owner !== 'cli' || target.version === version) return
-      const notice = confirmation(home, offer)
-      if (notice) { recordResult(home, 'web', offer, notice); return }
-      // Updated receivers own their own transaction. Only legacy Web needs
-      // the source host to invoke the existing guarded Web installer.
-      if (compareVersions(offer.previous, '1.7.12-rc.6') >= 0) return
-      try { const last = read(path.join(directory, 'result-web.json')); if (last.schema === 2 && last.id === offer.id && ['unavailable', 'restart-required', 'complete'].includes(last.state)) return } catch {}
-    } catch { return }
-    outboundBusy = true
-    const report = (value: CompanionResult) => { try { recordResult(home, 'web', offer, value) } catch {} }
-    try { report(await runWebInstaller(home, offer, report, lifetime.signal)) }
-    catch { if (!stopped) report({ state: 'unavailable', message: 'Web 联动安装未完成，请在 Web 原生入口核对；Desktop 不受影响。' }) }
-    finally { outboundBusy = false }
-  }
   const watcher = fs.watch(directory, (_event, filename) => {
     if ([`${scope}.json`, `decision-${scope}.json`].includes(String(filename))) void check()
-    if (String(filename) === 'decision-web.json') void checkOutbound()
   })
   watcher.on('error', () => { status = { state: 'unavailable', message: '联动更新通知不可用，仍可分别使用原生更新入口。' } })
   const cleanups: (() => void)[] = []
@@ -408,7 +322,6 @@ function mount(ctx: any, version: string, options: { isUpdating?(): boolean }): 
       }
     } catch { /* core-only install has no wrapper; explicit installer publishes */ }
     void check()
-    void checkOutbound()
   })
   const reportedStatus = (): CompanionResult => {
     // Report a peer outcome to the initiating host, without mistaking this
@@ -446,6 +359,9 @@ function mount(ctx: any, version: string, options: { isUpdating?(): boolean }): 
     const versions = { current: scope, running: version, installed: own?.version ?? null, peer: to, peerInstalled: peer?.version ?? null } as const
     if (own && own.version !== version) return { state: 'self-restart-required', versions,
       message: `当前 ${scope === 'desktop' ? 'Desktop' : 'Web'} 已安装 ${own.version}，仍在运行 ${version}。请在任务结束后重启当前应用；另一端尚未因此更新。` }
+    if (peer?.owner === 'cli' && compareVersions(version, peer.version) > 0) {
+      return { ...manualWeb(), versions, target: { scope: to, fromVersion: peer.version, version } }
+    }
     const result = reportedStatus()
     if (result.state === 'complete' && (!own || !peer || own.version !== peer.version || own.version !== version)) {
       return { state: 'unavailable', versions, message: '两端版本或启用状态已变化，旧的完成记录不再代表当前已对齐。请分别核对，不会自动覆盖任何一端。' }
@@ -459,6 +375,6 @@ function mount(ctx: any, version: string, options: { isUpdating?(): boolean }): 
     const offer = offers.find(item => item.id === id)
     if (!offer) throw new Error('更新通知已过期，请刷新后重试')
     decideCompanionOffer(home, offer, action)
-    void check(); void checkOutbound()
+    void check()
   }, dispose() { stopped = true; lifetime.abort(); clearImmediate(kickoff); watcher.close(); cleanups.forEach(fn => fn()) } }
 }

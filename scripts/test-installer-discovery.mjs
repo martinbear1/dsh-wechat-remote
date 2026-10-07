@@ -3,7 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import assert from 'node:assert/strict'
 import { test, after } from 'node:test'
-import { discoverDsh, chooseDsh, validateDshCli, assertInstallTarget, resolveHome, installHostArgv, looksLikeDshProcess } from '../installer/bin/dsh-discovery.mjs'
+import { discoverDsh, chooseDsh, validateDshCli, resolveHome, looksLikeDshProcess } from '../installer/bin/dsh-discovery.mjs'
 import { parseArguments } from '../installer/bin/setup.mjs'
 
 const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-discovery-test-')))
@@ -91,16 +91,6 @@ test('explicit CLI is validated; no arbitrary executable or invalid metadata', a
   fs.writeFileSync(path.resolve(cli, '../../package.json'), '{"name":"not-dsh","bin":{"dsh":"lib/bin.js"}}')
   assert.throws(() => validateDshCli(cli), /不是有效/)
 })
-test('live npx handshake remains authoritative when another global CLI exists', () => {
-  const home = fixture('target/home'), profile = fixture('target/home/profiles/web')
-  const live = makeDsh(path.join(root, 'target/npx/dsh')), other = makeDsh(path.join(root, 'target/global/dsh'))
-  const host = { home, profile, cli: live, pid: 123 }
-  assert.doesNotThrow(() => assertInstallTarget(host, { home, profile, pid: 123 }))
-  assert.throws(() => assertInstallTarget(host, { home, profile, cli: other, pid: 123 }), /身份/)
-  for (const bad of [{ home: root }, { profile: root }, { pid: 321 }]) {
-    assert.throws(() => assertInstallTarget({ ...host, ...bad }, { home, profile, pid: 123 }), /身份/)
-  }
-})
 test('home resolution matches DSH defaults and tilde expansion', () => {
   assert.equal(resolveHome('', root), path.join(root, '.dsh'))
   assert.equal(resolveHome('~/custom', root), path.join(root, 'custom'))
@@ -115,21 +105,12 @@ test('CLI options preserve default behavior and reject ambiguity', () => {
   }
 })
 
-test('POSIX global and npx symlinks resolve and restart with the same canonical CLI', { skip: process.platform === 'win32' }, async () => {
+test('POSIX global and npx symlinks resolve to the same canonical CLI', { skip: process.platform === 'win32' }, async () => {
   const o = options('posix'), bin = fixture('posix/任意 prefix/bin')
   const cli = makeDsh(path.join(root, 'posix/cache/_npx/abcd/node_modules/@deepseek-ai/dsh'))
   const link = path.join(bin, 'dsh')
   fs.symlinkSync(path.relative(bin, cli), link)
   assert.equal(await chooseDsh({ ...o, env: { PATH: bin } }), cli)
-  assert.deepEqual(installHostArgv({ cli, argv: [link, 'web', '--port', '7280'] }), [cli, 'web', '--port', '7280'])
-})
-
-test('restart arguments cannot select a different DSH or arbitrary command', () => {
-  const o = options('argv'), cli = makeDsh(path.join(o.cwd, 'dsh'))
-  const other = makeDsh(path.join(o.cwd, 'other/dsh'))
-  assert.deepEqual(installHostArgv({ cli, argv: [cli, 'web'] }), [cli, 'web'])
-  assert.throws(() => installHostArgv({ cli, argv: [other, 'web'] }), /启动参数/)
-  assert.throws(() => installHostArgv({ cli, argv: [cli, {}] }), /启动参数/)
 })
 
 test('running-host guard recognizes POSIX symlink entry points as well as Windows CLI', () => {

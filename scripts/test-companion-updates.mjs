@@ -5,7 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
 import { Context } from '@deepseek-ai/cordis'
-import { companionTarget, offerCompanionUpdate as propose, decideCompanionOffer, applyNativeCompanion, mountCompanionUpdates, webInstallerRuntime } from '../lib/companion-updates.js'
+import { companionTarget, offerCompanionUpdate as propose, decideCompanionOffer, applyNativeCompanion, mountCompanionUpdates } from '../lib/companion-updates.js'
 
 // The existing transaction tests start after the operator confirmation. Tests
 // below exercise the new unapproved/deferred boundary independently.
@@ -95,7 +95,7 @@ for (const from of ['web', 'desktop']) {
       const manifest = path.join(peerProfile, 'package.json')
       const before = fs.existsSync(manifest) ? fs.readFileSync(manifest, 'utf8') : null
       const offer = propose(f.home, from, f.source, next)
-      assert.equal(Boolean(offer), scenario === 'old-enabled-plugin')
+      assert.equal(Boolean(offer), scenario === 'old-enabled-plugin' && owner === native)
       assert.equal(fs.existsSync(manifest) ? fs.readFileSync(manifest, 'utf8') : null, before)
       assert.equal(fs.existsSync(path.join(f.home, `harness-remote/installation-offers/decision-${to}.json`)), false, 'offering is not approving')
       if (offer) { assert.equal(offer.schema, 2); assert.equal(offer.previous, '1.7.10'); assert.equal(companionTarget(f.home, to).version, '1.7.10') }
@@ -184,14 +184,33 @@ test('coordination filesystem failure cannot throw into plugin/host startup', t 
   coordinator.dispose()
 })
 
-test('Desktop coordination finds a real Node without passing Electron ownership to Web', async () => {
-  const environment = { ...process.env, PATH: path.dirname(process.execPath), ELECTRON_RUN_AS_NODE: '1', DSH_DESKTOP_NODE_EXECUTABLE: '/desktop' }
-  const runtime = await webInstallerRuntime(environment, true)
-  assert.equal(fs.realpathSync(runtime.executable), fs.realpathSync(process.execPath))
-  assert.equal(runtime.env.ELECTRON_RUN_AS_NODE, undefined)
-  assert.equal(runtime.env.DSH_DESKTOP_NODE_EXECUTABLE, undefined)
-  assert.equal(environment.ELECTRON_RUN_AS_NODE, '1', 'do not mutate the current host')
-  await assert.rejects(webInstallerRuntime({ PATH: '' }, true), /独立 Node/)
+test('CLI Web gets a manual notice, never an actionable offer or cross-host worker', async t => {
+  const f = fixture(t); f.target('desktop', native, next); f.target('web', core)
+  assert.equal(propose(f.home, 'desktop', f.source, next), undefined)
+  assert.equal(fs.existsSync(path.join(f.home, 'harness-remote/installation-offers/web.json')), false)
+  const mounted = mountCompanionUpdates(context(f), next); t.after(() => mounted.dispose())
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(mounted.status().state, 'unavailable')
+  assert.match(mounted.status().message, /不支持一键在线更新/)
+  assert.equal(mounted.status().offerId, undefined)
+  assert.equal(companionTarget(f.home, 'web').version, '1.7.10')
+})
+
+test('historical approved CLI Web offer cannot be reapproved or resumed', async t => {
+  const f = fixture(t); f.target('desktop', native, next); f.target('web', core)
+  const offer = { schema: 2, id: 'a'.repeat(32), from: 'desktop', to: 'web', source: f.source,
+    version: next, previous: '1.7.10' }
+  const directory = path.join(f.home, 'harness-remote/installation-offers')
+  f.put(path.join(directory, 'web.json'), offer)
+  f.put(path.join(directory, 'decision-web.json'), { id: offer.id, action: 'approve' })
+  const before = fs.readFileSync(path.join(directory, 'decision-web.json'), 'utf8')
+  assert.throws(() => decideCompanionOffer(f.home, offer, 'approve'), { code: 'NATIVE_MANUAL_UPDATE_REQUIRED' })
+  const mounted = mountCompanionUpdates(context(f), next); t.after(() => mounted.dispose())
+  assert.throws(() => mounted.decide(offer.id, 'approve'), { code: 'NATIVE_MANUAL_UPDATE_REQUIRED' })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(mounted.status().state, 'unavailable')
+  assert.equal(fs.readFileSync(path.join(directory, 'decision-web.json'), 'utf8'), before)
+  assert.equal(companionTarget(f.home, 'web').version, '1.7.10')
 })
 
 function deferred() { let resolve; const promise = new Promise(r => { resolve = r }); return { promise, resolve } }

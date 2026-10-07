@@ -23,21 +23,16 @@ export interface DshCompatibilityTransport {
 export declare class DshCompatibilityApi implements DshCompatibilityTransport {
     private readonly ctx;
     private readonly dshPort?;
-    private readonly maintaining;
     /** Optional observer owned by the authenticated gate; no native host API replacement. */
     taskNotificationRequest?: (args: unknown) => Promise<unknown>;
     /** Owned by the gate; credentials are removed before any native dispatch. */
     privateInput?: PrivateInputNative;
     readonly realtime: DshRealtimeCompatibility;
-    private inFlight;
-    hasInFlightRequests(): boolean;
-    constructor(ctx: Context, dshPort?: number | undefined, maintaining?: () => boolean);
+    constructor(ctx: Context, dshPort?: number | undefined);
     handlesPath(path: string): boolean;
     private flushPermission;
     private nativeRequest;
     request(request: CompatibilityHttpRequest): Promise<CompatibilityHttpResponse>;
-    /** Only the local gate invokes this after authenticating the private worker. */
-    verificationProbe(request: CompatibilityHttpRequest): Promise<CompatibilityHttpResponse>;
     private dispatch;
     connectEvents(path: string, peer: LegacyRealtimePeer): () => void;
     dispose(): void;

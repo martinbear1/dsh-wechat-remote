@@ -1,12 +1,19 @@
 {
   "name": "@harness-remote/dsh-wechat-remote",
-  "version": "1.7.14-rc.19",
+  "version": "1.7.14-rc.20",
   "description": "Agent远程管理助手：支持 Windows、macOS 与 Linux 上的 DeepSeek Harness，提供微信配对、安全局域网直连及端到端加密公网连接",
   "private": true,
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
+    "./locale/*.json": "./lib/assistant-presets/locales/main/*.json",
+    "./assistant-teacher/locale/*.json": "./lib/assistant-presets/locales/teacher/*.json",
+    "./assistant-project/locale/*.json": "./lib/assistant-presets/locales/project/*.json",
+    "./assistant-customizer/locale/*.json": "./lib/assistant-presets/locales/customizer/*.json",
+    "./assistant-teacher": { "types": "./lib/assistant-presets/builtin-teacher.d.ts", "default": "./lib/assistant-presets/builtin-teacher.js" },
+    "./assistant-project": { "types": "./lib/assistant-presets/builtin-project.d.ts", "default": "./lib/assistant-presets/builtin-project.js" },
+    "./assistant-customizer": { "types": "./lib/assistant-presets/builtin-customizer.d.ts", "default": "./lib/assistant-presets/builtin-customizer.js" },
     ".": {
       "types": "./lib/index.d.ts",
       "default": "./lib/index.js"
@@ -107,7 +114,8 @@
     "test:private-updates": "node --test scripts/test-human-private-publication.mjs scripts/test-private-input-native.mjs",
     "test:private-updates:desktop": "node scripts/test-private-input-desktop-native.mjs",
     "test:native-update": "node --test scripts/test-native-update.mjs scripts/test-native-update-store.mjs",
-"test:human-tools": "node --test scripts/test-human-receipt-recovery.mjs scripts/test-human-workspace-directory.mjs scripts/test-human-capability-index.mjs scripts/test-human-recipient-tools.mjs scripts/test-human-card-cover-renderer.mjs scripts/test-human-card-cover.mjs scripts/test-human-card-assets.mjs scripts/test-human-tools.mjs scripts/test-human-workflow.mjs scripts/test-human-workflow-sync.mjs scripts/test-human-workflow-service.mjs scripts/test-human-workflow-archive.mjs scripts/test-human-lifecycle.mjs scripts/test-human-submission-files.mjs scripts/test-human-operation-semantics.mjs scripts/test-human-known-members.mjs scripts/test-human-reminder-audience.mjs scripts/test-human-skill-refresh.mjs scripts/test-human-automation.mjs scripts/test-human-automation-native.mjs scripts/test-assistant-registry.mjs scripts/test-assistant-native-adapter.mjs scripts/test-assistant-interaction.mjs scripts/test-assistant-business.mjs scripts/test-assistant-client-store.mjs scripts/test-assistant-client-navigation.mjs",
+"test:human-tools": "node --test scripts/test-human-receipt-recovery.mjs scripts/test-human-workspace-directory.mjs scripts/test-human-capability-index.mjs scripts/test-human-recipient-tools.mjs scripts/test-human-card-cover-renderer.mjs scripts/test-human-card-cover.mjs scripts/test-human-card-assets.mjs scripts/test-human-tools.mjs scripts/test-human-workflow.mjs scripts/test-human-workflow-sync.mjs scripts/test-human-workflow-service.mjs scripts/test-human-workflow-archive.mjs scripts/test-human-lifecycle.mjs scripts/test-human-submission-files.mjs scripts/test-human-operation-semantics.mjs scripts/test-human-known-members.mjs scripts/test-human-reminder-audience.mjs scripts/test-human-skill-refresh.mjs scripts/test-human-automation.mjs scripts/test-human-automation-native.mjs scripts/test-assistant-registry.mjs scripts/test-assistant-native-adapter.mjs scripts/test-assistant-interaction.mjs scripts/test-assistant-business.mjs scripts/test-assistant-client-store.mjs scripts/test-assistant-client-navigation.mjs scripts/test-assistant-builtins.mjs",
+    "test:assistants:desktop": "node scripts/test-assistant-builtins-desktop-native.mjs",
     "test:lifecycle": "node scripts/test-gate-state.mjs && node scripts/test-secure-lan.mjs && node scripts/test-lifecycle.mjs",
     "test:notifications": "node --test scripts/test-task-notifications.mjs",
     "test:client": "node scripts/test-client-bundle.mjs && node --test scripts/test-pairing-management.mjs scripts/test-pairing-http.mjs scripts/test-companion-card.mjs scripts/test-shared-page.mjs scripts/test-web-update-store.mjs",
@@ -218,6 +226,7 @@
     "typescript": "^5.8.3"
   },
   "files": [
+    "lib/assistant-presets/locales",
     "lib/assistant-presets/*.js",
     "lib/assistant-presets/*.d.ts",
     "lib/human-workflow/*.js",

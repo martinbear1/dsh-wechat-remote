@@ -1,6 +1,7 @@
 import { type WorkflowDataStore } from '../human-workflow/data.js';
 import { type AssistantDefinition } from './definition.js';
 import type { NativeAssistantAdapter, NativeAssistantPreview, NativeAssistantInstallation } from './types.js';
+import { type BuiltinAssistantStatus } from './builtins.js';
 export interface AssistantRef {
     id: string;
     version: number;
@@ -25,6 +26,7 @@ export declare class AssistantRegistry {
     private tail;
     private readonly settle;
     private stopped;
+    private builtinStates;
     private constructor();
     static open(store: WorkflowDataStore, options: {
         nodeId: string;
@@ -32,25 +34,60 @@ export declare class AssistantRegistry {
         assertIdentity(): void;
         now?: () => number;
     }): Promise<AssistantRegistry>;
+    private readBuiltins;
     private check;
     private find;
     catalog(signal: AbortSignal): Promise<{
         schema: string;
         nodeId: string;
         native: import("./types.js").NativeAssistantCapability;
-        templates: import("./catalog.js").AssistantTemplate[];
-        drafts: {
+        templates: {
+            builtin?: {
+                reason?: string | undefined;
+                id: string;
+                version: number;
+                presetId: string;
+                name: string;
+                state: "installed" | "unknown";
+                nativeState: "installed" | "unknown" | "disabled" | "stale";
+            } | undefined;
+            id: string;
+            name: string;
+            description: string;
+            definition: AssistantDefinition;
+        }[];
+        drafts: ({
+            reason?: string | undefined;
+            id: string;
+            version: number;
+            digest: string;
+            presetId: string;
+            name: string;
+            description: string;
+            templateId: "designer" | "teacher" | "project";
+            source: "builtin";
+            state: "installed" | "unknown";
+            nativeState: "installed" | "unknown" | "disabled" | "stale";
+        } | {
             presetId?: string | undefined;
+            replacement?: {
+                presetId: string;
+                name: string;
+                state: "installed" | "unknown";
+                bundleName: string;
+                canRemoveAfterReview: boolean;
+                warning: string;
+            } | undefined;
             templateId?: string | undefined;
-            nativeState?: "unknown" | "disabled" | "stale" | "installed" | "uninstalled" | undefined;
+            nativeState?: "installed" | "unknown" | "disabled" | "stale" | "uninstalled" | undefined;
             reason?: string | undefined;
             id: string;
             version: number;
             digest: string;
             name: string;
             description: string;
-            state: "unknown" | "draft" | "installed" | "installing";
-        }[];
+            state: "installed" | "unknown" | "draft" | "installing";
+        })[];
     }>;
     draft(request: {
         templateId?: string;
@@ -67,7 +104,18 @@ export declare class AssistantRegistry {
         version: number;
         digest: string;
         definition: AssistantDefinition;
-        state: "unknown" | "draft" | "installed" | "installing";
+        state: "installed" | "unknown" | "draft" | "installing";
+    } | {
+        source: string;
+        state: "installed" | "unknown";
+        id: string;
+        version: number;
+        digest: string;
+        templateId: import("./builtins.js").BuiltinTemplateId;
+        presetId: string;
+        name: string;
+        definition: AssistantDefinition;
+        sourceTemplateDigest: string;
     };
     preview(ref: {
         id: string;
@@ -101,7 +149,7 @@ export declare class AssistantRegistry {
     status(ref: {
         id: string;
         version: number;
-    }, signal: AbortSignal): Promise<{
+    }, signal: AbortSignal): Promise<BuiltinAssistantStatus | {
         presetId: string;
         state: "installed" | "pending-restart" | "unknown";
         nativeState?: "installed" | "uninstalled" | "disabled" | "stale" | "unknown";
@@ -128,7 +176,7 @@ export declare class AssistantRegistry {
         version: number;
         digest: string;
         definition: AssistantDefinition;
-        state: "unknown" | "draft" | "installed" | "installing";
+        state: "installed" | "unknown" | "draft" | "installing";
     } | undefined;
     close(): Promise<void>;
 }

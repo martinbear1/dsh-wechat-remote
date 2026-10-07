@@ -185,7 +185,7 @@ test('current tool guidance treats receipt lag as recoverable evidence, not capa
   }
   const tools = assistantTools({ nodeId: 'test_node', registry: {}, business: {}, assertIdentity: unreachable, composedPreset: unreachable })
   const save = tools.find(item => item.name === 'human_assistant_work_save')
-  for (const phrase of ['title, answers and memory must be nested INSIDE content', 'Structural example:',
+  for (const phrase of ['title, answers and memory must be nested INSIDE content', 'CAS-save a FULL replacement:',
     'do not repeat unchanged arguments', 'replace real memory with an experiment/test note']) assert(save.description.includes(phrase), phrase)
   assert(!assistantGuidance(definition()).includes(ASSISTANT_TOOL_RECOVERY_GUIDANCE),
     'updating the tool contract must not alter already approved V6 native bundle bytes')

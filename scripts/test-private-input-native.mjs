@@ -91,6 +91,30 @@ test('same text or historical user message without this authenticated invocation
   await h.enter(); assert.equal((await h.call()).isError, true)
   assert.equal(h.last, undefined)
 })
+
+test('missing current proof is not reported as a disabled switch or missing user intent', async t => {
+  const h = await setup(t)
+  const exec = { agent: h.agent, token: Symbol('fixture'), callId: 'fake', rootCallId: 'fake', signal }
+  const status = await h.bridge.ownerInputStatus(exec)
+  assert.equal(status.state, 'no-current-input')
+  assert.match(status.reason, /不代表.*开关关闭/)
+  await assert.rejects(h.bridge.ownerInput(exec, taskRef, draftRef), error => {
+    assert.equal(error.code, 'private-input-unavailable')
+    assert.match(error.message, /不能据此判断.*开关是否开启/)
+    assert(!error.message.includes('请开启'));assert(!error.message.includes('只有准备权限'))
+    return true
+  })
+})
+
+test('unsupported native runtime has a distinct recovery message rather than switching permission on', async t => {
+  const h = await setup(t, { version: '0.1.7' })
+  const exec = { agent: h.agent, token: Symbol('fixture'), callId: 'fake', rootCallId: 'fake', signal }
+  assert.equal((await h.bridge.ownerInputStatus(exec)).state, 'unavailable')
+  await assert.rejects(h.bridge.ownerInput(exec, taskRef, draftRef), error => {
+    assert.equal(error.code, 'private-input-unavailable');assert.match(error.message, /宿主尚不能/)
+    assert(!error.message.includes('请开启'));return true
+  })
+})
 test('invalid scope, generation, digest, node, expiration and unknown fields are draft-only, not lost chat', async t => {
   for (const change of [{ scope: 'other' }, { sessionGeneration: '101' }, { contentDigest: 'b'.repeat(64) },
     { binding: { ...binding, nodeId: 'other' } }, { expiresAt: 0 }, { approved: true }]) {

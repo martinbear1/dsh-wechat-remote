@@ -10,6 +10,7 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { assistantDefinition, assistantGuidance, legacyAssistantGuidanceV1, legacyAssistantGuidanceV2, legacyAssistantGuidanceV3, legacyAssistantGuidanceV4, legacyAssistantGuidanceV5, type AssistantDefinition } from './definition.js'
 import type { NativeAssistantAdapter, NativeAssistantCapability, NativeAssistantInstallation, NativeAssistantPreview } from './types.js'
+import { BUILTIN_ASSISTANTS, builtinAssistants, type BuiltinAssistantStatus } from './builtins.js'
 
 type Row = Record<string, unknown>
 interface Host { get(name: string): unknown }
@@ -60,6 +61,7 @@ function plainTree(value: unknown, depth = 0, budget = { count: 0 }, ancestors =
   return result
 }
 const canonical = (value: unknown) => JSON.stringify(plainTree(value))
+export const nativeAssistantCompositionDigest = (value: unknown) => digest(canonical(value))
 function rows(value: unknown): Row[] {
   const parsed = plainTree(value)
   if (!Array.isArray(parsed) || parsed.length > 128) throw error('assistant-base-unsupported', '基础预设必须是有界插件声明列表')
@@ -73,7 +75,7 @@ function rows(value: unknown): Row[] {
   }
   return parsed as Row[]
 }
-function parseBase(codec: NativePresetCodec, document: unknown, expected: string): Row[] {
+export function parseNativeAssistantBase(codec: NativePresetCodec, document: unknown, expected: string): Row[] {
   if (!isRow(document) || document.agentPreset !== expected || !boundedText(document.content, 256 * 1024)) throw error('assistant-base-unsupported', '原生基础预设读取结果无效')
   // readDocument uses dump(noRefs:true). Refuse alias/anchor tokens before
   // parsing anyway, instead of allowing an alias graph to amplify work.
@@ -105,7 +107,7 @@ function nativePersona(result: Row[]): Row {
 }
 const stockCodingIdentity = 'You are a coding agent powered by the {{model}} model.'
 const neutralAssistantIdentity = 'You are an AI assistant powered by the {{model}} model.'
-function transform(base: Row[], definition: AssistantDefinition): Row[] {
+export function transformNativeAssistantBase(base: Row[], definition: AssistantDefinition): Row[] {
   const result = rows(base), persona = nativePersona(result), config = persona.config as Row
   let prefix = config.prefix as string
   // Our exported professional presets are results, not reusable native bases.
@@ -159,7 +161,7 @@ export function validateNativeAssistantPreview(value: unknown): NativeAssistantP
     return structuredClone(value) as unknown as NativeAssistantPreview
   } catch { throw invalid() }
 }
-async function nativeCodec(anchor: string): Promise<NativePresetCodec> {
+export async function nativeAssistantCodec(anchor: string): Promise<NativePresetCodec> {
   const hostRequire = createRequire(anchor)
   const includePath = hostRequire.resolve('@deepseek-ai/cordis-plugin-include')
   const include = await import(pathToFileURL(includePath).href) as { entryListSchema?: unknown }
@@ -180,6 +182,23 @@ class Adapter implements NativeAssistantAdapter {
   private codec?: Promise<NativePresetCodec>
   private queue: Promise<unknown> = Promise.resolve()
   constructor(private readonly host: Host, private readonly options: NativeAssistantAdapterOptions) {}
+  async builtins(signal: AbortSignal, options: { waitForReady?: boolean } = {}): Promise<BuiltinAssistantStatus[]> {
+    const results: BuiltinAssistantStatus[] = []
+    for (const definition of builtinAssistants()) {
+      signal.throwIfAborted(); this.lifetime.signal.throwIfAborted()
+      const key = BUILTIN_ASSISTANTS.find(item => item.templateId === definition.templateId)!.service
+      const component = this.host.get(key) as { status?: (options: { waitForReady?: boolean }) => Promise<BuiltinAssistantStatus> } | undefined
+      try {
+        const current = await component?.status?.(options)
+        if (current && current.presetId === definition.presetId && current.digest === definition.digest && current.source === 'builtin'
+          && ['installed', 'unknown'].includes(current.state) && (current.state === 'installed') === (current.nativeState === 'installed')) {
+          results.push(current); continue
+        }
+      } catch { /* A failed/disabled component is not an available preset. */ }
+      results.push({ ...definition, source: 'builtin', state: 'unknown', nativeState: 'disabled', reason: '内置助手组件未启用或当前 DSH 尚不支持。' })
+    }
+    signal.throwIfAborted(); return results
+  }
   private async environment(signal: AbortSignal): Promise<Environment> {
     this.lifetime.signal.throwIfAborted(); signal.throwIfAborted()
     const presets = this.host.get('agentPresets') as Presets | undefined, manager = this.host.get('pluginManager') as Manager | undefined
@@ -190,7 +209,7 @@ class Adapter implements NativeAssistantAdapter {
       || typeof profile?.dir !== 'string' || !path.isAbsolute(profile.dir) || typeof profile.installAnchor !== 'string' || !path.isAbsolute(profile.installAnchor))
       throw error('assistant-native-unavailable', '此宿主缺少新版声明式 preset 或公开 bundle 管理能力，不能创建职业预设')
     const profileDir = await realpath(profile.dir), anchor = await realpath(profile.installAnchor)
-    this.codec ??= this.options.codec ? Promise.resolve(this.options.codec) : nativeCodec(anchor)
+    this.codec ??= this.options.codec ? Promise.resolve(this.options.codec) : nativeAssistantCodec(anchor)
     const codec = await this.codec
     signal.throwIfAborted(); this.lifetime.signal.throwIfAborted()
     return { presets, manager, profileDir, anchor, codec, fingerprint: digest(`${profileDir}\0${anchor}`) }
@@ -207,9 +226,9 @@ class Adapter implements NativeAssistantAdapter {
       for (const item of roster) {
         if (item.broken !== undefined) continue
         try {
-          const base = parseBase(env.codec, await env.presets.readDocument(String(item.id)), String(item.id))
+          const base = parseNativeAssistantBase(env.codec, await env.presets.readDocument(String(item.id)), String(item.id))
           // Probe the exact composition shape; no new registry rows or Agents.
-          transform(base, { schemaVersion: 1, name: 'Probe', description: 'Read-only capability probe', role: 'Probe', methods: ['Probe'], onboarding: [], skills: ['human-workflow'], basePreset: String(item.id) })
+          transformNativeAssistantBase(base, { schemaVersion: 1, name: 'Probe', description: 'Read-only capability probe', role: 'Probe', methods: ['Probe'], onboarding: [], skills: ['human-workflow'], basePreset: String(item.id) })
           basePresets.push({ id: String(item.id), name: typeof item.name === 'string' ? item.name : String(item.id) })
         } catch { /* Unsupported bases are omitted, never silently rewritten. */ }
       }
@@ -227,7 +246,7 @@ class Adapter implements NativeAssistantAdapter {
     const roster = await this.roster(env), baseRow = roster.find(item => item.id === definition.basePreset)
     if (!baseRow || baseRow.broken !== undefined) throw error('assistant-base-unavailable', '基础预设不存在或无法加载')
     if (roster.some(item => item.id === input.presetId)) throw error('assistant-preset-exists', '不能覆盖已存在的原生预设')
-    const base = parseBase(env.codec, await env.presets.readDocument(definition.basePreset), definition.basePreset)
+    const base = parseNativeAssistantBase(env.codec, await env.presets.readDocument(definition.basePreset), definition.basePreset)
     const skillRegistry = this.host.get('skills') as { get?: (name: string) => Promise<unknown> } | undefined
     for (const name of definition.skills) {
       const skill = await skillRegistry?.get?.(name)
@@ -236,7 +255,7 @@ class Adapter implements NativeAssistantAdapter {
     }
     const rowId = `harness-assistant-${input.presetId}`, bundleName = `@harness-remote-assistants/${input.presetId}`
     const patch = JSON.stringify([{ insert: [{ id: rowId, name: moduleName, config: {
-      id: input.presetId, name: definition.name, description: definition.description, plugins: transform(base, definition),
+      id: input.presetId, name: definition.name, description: definition.description, plugins: transformNativeAssistantBase(base, definition),
     } }] }], null, 2) + '\n'
     const bundles = await env.manager.listBundles()
     if (!Array.isArray(bundles) || bundles.some(bundle => isRow(bundle) && bundle.name === bundleName)) throw error('assistant-preset-exists', '原生 bundle 名称已存在或目录不可读')
@@ -365,7 +384,7 @@ class Adapter implements NativeAssistantAdapter {
       ? { presetId: preview.presetId, state: 'pending-restart', message: `原生 bundle 已保存；需要宿主重启后再次核验预设。${defaultNote}` }
       : unknown('bundle 已保存，但原生预设尚未确认生效。')
     if (installed.broken !== undefined) return unknown('此助手无法加载，请在原生插件管理中核对。', 'stale')
-    const document = await env.presets.readDocument(preview.presetId), actual = parseBase(env.codec, document, preview.presetId)
+    const document = await env.presets.readDocument(preview.presetId), actual = parseNativeAssistantBase(env.codec, document, preview.presetId)
     const patch = JSON.parse(preview.patch) as { insert: { config: { plugins: unknown } }[] }[]
     if (canonical(actual) !== canonical(patch[0]!.insert[0]!.config.plugins)) return unknown('此助手内容与确认安装的版本不一致，请核对。', 'stale')
     signal.throwIfAborted(); this.lifetime.signal.throwIfAborted()

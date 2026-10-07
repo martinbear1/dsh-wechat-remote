@@ -81,8 +81,64 @@ test('desktop hides unavailable history by default and keeps new-install consent
     {id:'stale',name:'内容变化旧版',version:1,state:'unknown',nativeState:'stale'}]
   const store=new AssistantStore(async()=>({...catalog,drafts}));await store.load()
   const html=renderToStaticMarkup(createElement(AssistantPresetsPanel,{store,start:async()=>{assert.fail('render must not launch')}}))
-  assert.match(html,/<details><summary>历史助手（4）/);assert(!html.includes('<details open'))
-  assert.equal((html.match(/开始或打开已创建会话/g)||[]).length,1)
-  assert.equal((html.match(/重新预览安装/g)||[]).length,1)
-  for(const label of ['未安装','待核对','已停用','需要核对'])assert(html.includes(label))
+  assert.match(html,/<summary>更多助手与安装记录<\/summary>/);assert(!html.includes('<details open'))
+  assert.match(html,/<summary>以前安装的助手（4）<\/summary>/)
+  assert.equal((html.match(/怎么开始使用/g)||[]).length,1)
+  assert.equal((html.match(/查看并重新安装/g)||[]).length,1)
+  assert(!html.includes('开始或打开已创建会话'));assert(!html.includes('另开独立工作会话'))
+  for(const label of ['未安装','待核对','已停用'])assert(html.includes(label))
+})
+
+test('dismissed preview has no installation side effect and cannot reuse hidden consent',async()=>{
+  let installs=0
+  const store=new AssistantStore(async method=>method==='assistantCatalog'?catalog:method==='assistantDraft'?{id:'id',version:1}:method==='assistantInstall'?(installs++,{state:'installed'}):preview)
+  await store.choose('teacher');store.dismissPreview();await store.install()
+  assert.equal(installs,0);assert.equal(store.getSnapshot().preview,null)
+})
+
+test('included modes never call draft/install even while unknown; a pending custom draft is reused',async()=>{
+  const calls=[],store=new AssistantStore(async(method,args)=>{calls.push([method,args]);return method==='assistantCatalog'?{
+    ...catalog,templates:[{id:'teacher',builtin:{state:'unknown'}}],drafts:[{id:'pending',version:2,templateId:'general',state:'draft'}],
+  }:preview})
+  await store.load();await store.choose('teacher')
+  assert.deepEqual(calls.map(item=>item[0]),['assistantCatalog','assistantCatalog'])
+  await store.choose('general')
+  assert.deepEqual(calls.at(-1),['assistantPreview',{id:'pending',version:2}])
+  assert(!calls.some(item=>item[0]==='assistantDraft'||item[0]==='assistantInstall'))
+})
+
+test('replaced old packages cannot be reinstalled through a stale explicit client action',async()=>{
+  const calls=[],store=new AssistantStore(async method=>{calls.push(method);return {...catalog,drafts:[{id:'old',version:1,nativeState:'uninstalled',replacement:{presetId:'harness-teacher'}}]}})
+  await store.load();await store.reinstall('old',1)
+  assert.deepEqual(calls,['assistantCatalog','assistantCatalog']);assert.equal(store.getSnapshot().preview,null)
+  assert.match(store.getSnapshot().message,/无需重新安装旧包/)
+})
+
+test('assistant UI separates creation from ready-made modes and preserves exact installed names',async()=>{
+  const require=createRequire(import.meta.url)
+  const built=await build({entryPoints:[fileURLToPath(new URL('../src/client/AssistantPresetsPanel.tsx',import.meta.url))],bundle:true,write:false,platform:'node',format:'esm',jsx:'automatic',plugins:[{name:'assistant-hierarchy-test',setup(plugin){
+    plugin.onResolve({filter:/^react(?:\/jsx-runtime)?$/},args=>({path:pathToFileURL(require.resolve(args.path)).href,external:true}))
+    plugin.onLoad({filter:/\.module\.css$/},()=>({contents:'export default {}',loader:'js'}))
+  }}]})
+  const {AssistantPresetsPanel}=await import('data:text/javascript;base64,'+Buffer.from(built.outputFiles[0].text).toString('base64'))
+  const templates=[{id:'teacher',name:'教师助理',description:'教学工作'},{id:'project',name:'项目助理',description:'项目工作'},
+    {id:'designer',name:'助手设计师',description:'设计可复用模式'},{id:'general',name:'通用工作助理',description:'通用'}]
+  const drafts=[{id:'approved-teacher',version:1,templateId:'teacher',name:'教师助理',state:'installed',nativeState:'installed'},
+    {id:'approved-designer',version:1,templateId:'designer',name:'助手设计师',state:'installed',nativeState:'installed'}]
+  const store=new AssistantStore(async()=>({...catalog,templates,drafts}));await store.load()
+  const html=renderToStaticMarkup(createElement(AssistantPresetsPanel,{store}))
+  assert(html.includes('安装项目助理'));assert(!html.includes('安装教师助理'));assert(!html.includes('安装定制助手'))
+  assert(html.indexOf('教师助理')<html.indexOf('需要其他职业的助手？'))
+  assert(html.indexOf('需要其他职业的助手？')<html.indexOf('定制我的助手'))
+  assert(html.indexOf('更多助手与安装记录')<html.indexOf('通用工作助理'))
+  assert(!html.includes('助手设计师'));assert(!html.includes('approved-teacher'))
+  assert.equal((html.match(/怎么开始使用/g)||[]).length,2)
+  assert.equal(store.getSnapshot().catalog.drafts[1].name,'助手设计师')
+  const included=templates.slice(0,3).map(item=>({...item,builtin:{id:'builtin_'+item.id,version:1,state:'installed',nativeState:'installed'}}))
+  const builtinStore=new AssistantStore(async()=>({...catalog,native:{supported:false,reason:'custom install unavailable'},templates:included,
+    drafts:included.map(item=>({id:'builtin_'+item.id,templateId:item.id,name:item.id==='designer'?'定制助手':item.name,source:'builtin',state:'installed',nativeState:'installed'}))}))
+  await builtinStore.load()
+  const builtinHtml=renderToStaticMarkup(createElement(AssistantPresetsPanel,{store:builtinStore}))
+  assert.equal((builtinHtml.match(/已内置/g)||[]).length,3,'native bundled modes do not depend on custom installer availability')
+  assert(!builtinHtml.includes('安装教师助理'));assert(!builtinHtml.includes('安装项目助理'));assert(!builtinHtml.includes('安装定制助手'))
 })

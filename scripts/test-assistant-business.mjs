@@ -281,7 +281,8 @@ test('live tool-recovery methods are inherited by new profession and designer in
     assert.match(section.text, /human_task_publish_private/)
     assert.match(section.text, /不要求固定口令或额外确认回合/)
     assert.match(section.text, /真实输入和许可由宿主及云端核验/)
-    assert.match(section.text, /未开启或宿主不支持时如实提示一次开启方式或原按钮/)
+    assert.match(section.text, /no-current-input\/private-input-unavailable 不能证明用户未开启开关/)
+    assert.match(section.text, /只有实际核实许可关闭\/到期才提示开启/)
     assert.match(section.text, /私人页面更新不等于已通知/)
   }
   assert.equal(f.recordStore.writes, 0, 'working methods do not rewrite any business instance')

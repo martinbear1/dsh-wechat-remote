@@ -7,6 +7,5 @@ export interface HarnessRemoteSettingsProps {
     callManagement: CallPairingManagement;
     store?: RemotePageStore;
     assistants?: AssistantStore;
-    startAssistant?: (presetId: string, lifetime?: AbortSignal, newIntent?: boolean) => Promise<void>;
 }
-export declare function HarnessRemoteSettings({ describeHost, callManagement, store, assistants, startAssistant, }: HarnessRemoteSettingsProps): JSX.Element;
+export declare function HarnessRemoteSettings({ describeHost, callManagement, store, assistants, }: HarnessRemoteSettingsProps): JSX.Element;

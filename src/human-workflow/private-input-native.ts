@@ -33,7 +33,8 @@ export function privateInputTextDigest(content: unknown): string | undefined {
   if (!text.some(value => value.trim()) || Buffer.byteLength(JSON.stringify(text)) > 256 * 1024) return
   return hash(text)
 }
-const unavailable = () => fail('private-input-unavailable', '本次对话没有可核对的私人更新权限，请开启本会话的私人更新后重新发送要求；也可以继续起草并使用确认按钮。')
+const unavailable = () => fail('private-input-unavailable', '本次消息缺少可核验的输入凭据，不能据此判断私人页面更新开关是否开启。可核对当前会话设置后重试发送，也可继续起草并使用原确认按钮；不需要固定确认词。')
+const runtimeUnavailable = () => fail('private-input-unavailable', '当前宿主尚不能核对真实用户输入；可继续起草并使用原确认按钮。此状态不能通过反复开关权限解决。')
 function proofOf(value: unknown, nodeId: string, scope: string, digest: string | undefined, now: number): OwnerInput | undefined {
   if (!row(value) || !exact(value, ['schema', 'inputProof', 'inputId', 'contentDigest', 'scope', 'sessionGeneration', 'binding', 'expiresAt'])
     || value.schema !== 'human.owner.input.v1' || !plain(value.inputProof, 4096) || !plain(value.inputId, 128)
@@ -165,6 +166,7 @@ export class PrivateInputNative {
     finally { admission.open = false }
   }
   async ownerInput(exec: ToolRunContext, taskRef: HumanTaskRef, draftRef: HumanWorkflowDraftRef): Promise<PrivatePublishInput> {
+    if (!this.supported()) throw runtimeUnavailable()
     const dispatch = this.dispatches.getStore()
     if (!dispatch || dispatch.token !== exec.token) throw unavailable()
     const lease = dispatch.lease
@@ -183,7 +185,7 @@ export class PrivateInputNative {
       return { schema: 'human.private.update.status.v1', state: 'ready', expiresAt: dispatch.lease.proof.expiresAt,
         reason: '当前原生输入凭据可用；是否实际执行仍取决于用户意图和云端即时权限校验。' }
     } catch {
-      return { schema: 'human.private.update.status.v1', state: 'no-current-input', reason: '当前没有可核对的用户输入权限；不能据此推断用户已关闭设置，可继续起草并使用确认按钮。' }
+      return { schema: 'human.private.update.status.v1', state: 'no-current-input', reason: '本次消息缺少可核验的输入凭据，不代表私人页面更新开关关闭。可核对设置后重试发送，或使用原确认按钮；不要求固定确认词。' }
     }
   }
   private assertAgent(agent: Native): void {
@@ -192,7 +194,7 @@ export class PrivateInputNative {
     headerOf(agent.session)
   }
   private assertLease(lease: Lease): void {
-    if (!this.supported()) throw unavailable()
+    if (!this.supported()) throw runtimeUnavailable()
     this.assertAgent(lease.agent)
     if (lease.proof.expiresAt <= this.now() || lease.session !== lease.agent.session || headerOf(lease.session) !== lease.header
       || this.epochs.get(lease.session) !== lease.epoch || this.leases.get(lease.messageId) !== lease) throw unavailable()

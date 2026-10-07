@@ -37,8 +37,14 @@ test('official patch composition retains both gate rows: mixed packages are not 
   const layers = ['../cordis.patch.yml', '../installer/cordis.patch.yml'].map(name => parse(fs.readFileSync(new URL(name, import.meta.url), 'utf8')))
   for (const order of [layers, layers.toReversed()]) {
     const rows = applyEntryPatches([], structuredClone(order.flat()), () => {})
-    assert.equal(rows.filter(row => row.id === 'gate').length, 2)
-    assert.equal(new Set(rows.map(row => row.name)).size, 2)
+    // Each package now owns a gateway plus three preset components. Official
+    // composition preserves both packages, so mixing install owners remains
+    // unsafe; preset rows must not silently replace each other either.
+    assert.equal(rows.length, 8)
+    for (const id of ['gate', 'harness-assistant-teacher', 'harness-assistant-project', 'harness-assistant-customizer']) {
+      assert.equal(rows.filter(row => row.id === id).length, 2)
+    }
+    assert.equal(new Set(rows.map(row => row.name)).size, 8)
   }
 })
 test('fresh and existing legacy Web remain eligible; Desktop installation is a separate owner', t => {

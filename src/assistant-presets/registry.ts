@@ -4,6 +4,7 @@ import { assistantDefinition, definitionDigest, type AssistantDefinition } from 
 import { assistantTemplates } from './catalog.js'
 import type { NativeAssistantAdapter, NativeAssistantPreview, NativeAssistantInstallation } from './types.js'
 import { validateNativeAssistantPreview } from './native-adapter.js'
+import { builtinAssistant, builtinAssistants, type BuiltinAssistantStatus } from './builtins.js'
 
 export interface AssistantRef { id: string; version: number; digest: string }
 type AssistantNativePlan = NativeAssistantPreview
@@ -19,13 +20,31 @@ export class AssistantRegistry {
   private tail: Promise<unknown> = Promise.resolve()
   private readonly settle = new AbortController().signal
   private stopped = false
+  private builtinStates: BuiltinAssistantStatus[] = []
   private constructor(private state: StateQueue<Ledger>, private nodeId: string, private native: AssistantNativeAdapter,
     private assertIdentity: () => void, private now: () => number) {}
   static async open(store: WorkflowDataStore, options: { nodeId: string; native: AssistantNativeAdapter; assertIdentity(): void; now?: () => number }): Promise<AssistantRegistry> {
     if (!identifier(options.nodeId)) throw fail('assistant-node-invalid', '节点身份无效')
     const raw = await store.load()
     const ledger: Ledger = raw === undefined ? { schema: 'human.assistants.v1', nodeId: options.nodeId, entries: [], previews: [] } : validateLedger(raw, options.nodeId)
-    return new AssistantRegistry(new StateQueue(store, ledger), options.nodeId, options.native, options.assertIdentity, options.now || Date.now)
+    const registry = new AssistantRegistry(new StateQueue(store, ledger), options.nodeId, options.native, options.assertIdentity, options.now || Date.now)
+    // Initialization must not await a component waiting for the host Loader.
+    // The first real query/work call rechecks fully settled native availability.
+    await registry.readBuiltins(new AbortController().signal, false)
+    return registry
+  }
+  private async readBuiltins(signal: AbortSignal, waitForReady = true): Promise<void> {
+    if (!this.native.builtins) return
+    let results: BuiltinAssistantStatus[] = []
+    try { results = await this.native.builtins(signal, { waitForReady }) } catch { this.check(signal) }
+    this.check(signal)
+    this.builtinStates = builtinAssistants().map(definition => {
+      const observed = results.find(item => item.id === definition.id && item.version === definition.version && item.digest === definition.digest
+        && item.presetId === definition.presetId && item.source === 'builtin' && ['installed', 'unknown'].includes(item.state)
+        && ['installed', 'disabled', 'stale', 'unknown'].includes(item.nativeState) && (item.state === 'installed') === (item.nativeState === 'installed'))
+      return { ...definition, source: 'builtin', state: observed?.state || 'unknown', nativeState: observed?.nativeState || 'unknown',
+        ...(observed?.reason ? { reason: observed.reason } : observed ? {} : { reason: '内置助手状态尚未核实。' }) }
+    })
   }
   private check(signal?: AbortSignal) { if (this.stopped) throw fail('assistant-disabled', '助手功能已关闭'); signal?.throwIfAborted(); this.assertIdentity() }
   private find(id: string, selectedVersion: number): Entry {
@@ -37,6 +56,7 @@ export class AssistantRegistry {
   catalog(signal: AbortSignal) {
     const operation = this.tail.then(async () => {
       this.check(signal)
+      await this.readBuiltins(signal)
       let native
       try { native = await this.native.probe() }
       catch { this.check(signal); native = { supported: false, basePresets: [], reason: '暂时无法读取原生助手，请稍后核对。' } }
@@ -49,15 +69,26 @@ export class AssistantRegistry {
       }
       this.check(signal)
       const templates = assistantTemplates(), templatesByDigest = new Map(templates.map(t => [definitionDigest(t.definition), t.id]))
-      return { schema: 'human.assistants.catalog.v1', nodeId: this.nodeId, native, templates,
-        drafts: this.state.current().entries.map(e => {
+      return { schema: 'human.assistants.catalog.v1', nodeId: this.nodeId, native,
+        templates: templates.map(template => {
+          const component = this.builtinStates.find(item => item.templateId === template.id)
+          return { ...template, ...(component ? { builtin: { id: component.id, version: component.version, presetId: component.presetId,
+            name: component.name, state: component.state, nativeState: component.nativeState, ...(component.reason ? { reason: component.reason } : {}) } } : {}) }
+        }),
+        drafts: [...this.builtinStates.map(item => ({ id: item.id, version: item.version, digest: item.digest, presetId: item.presetId,
+          name: item.name, description: item.definition.description, templateId: item.templateId, source: item.source,
+          state: item.state, nativeState: item.nativeState, ...(item.reason ? { reason: item.reason } : {}) })), ...this.state.current().entries.map(e => {
           const observed = checked.get(`${e.id}:${e.version}`)
+          const replacement = this.builtinStates.find(item => e.digest === item.sourceTemplateDigest)
           return { id: e.id, version: e.version, digest: e.digest, name: e.definition.name,
             description: e.definition.description, state: e.state,
             ...(observed ? { nativeState: observed.nativeState || (observed.state === 'installed' ? 'installed' : 'unknown'), reason: observed.message || '' } : {}),
             ...(templatesByDigest.has(e.digest) ? { templateId: templatesByDigest.get(e.digest) } : {}),
+            ...(replacement && e.plan ? { replacement: { presetId: replacement.presetId, name: replacement.name, state: replacement.state,
+              bundleName: e.plan.bundleName, canRemoveAfterReview: replacement.state === 'installed' && observed?.nativeState === 'installed',
+              warning: '卸载旧独立包会使依赖旧模式的会话无法继续使用该模式；聊天与资料不删除，新工作请在新会话选择内置助手。不会自动切换旧会话。' } } : {}),
             ...(e.result?.presetId ? { presetId: e.result.presetId } : {}) }
-        }) }
+        })] }
     })
     this.tail = operation.catch(() => {})
     return operation
@@ -67,6 +98,8 @@ export class AssistantRegistry {
     if (!row(request) || !exact(request, [], ['templateId', 'definition', 'id', 'expectedVersion'])
       || Number(request.templateId !== undefined) + Number(request.definition !== undefined) !== 1) throw fail('assistant-draft-invalid', '请选择助手或提供结构化草稿')
     const template = request.templateId === undefined ? undefined : assistantTemplates().find(item => item.id === request.templateId)
+    if (template && this.builtinStates.some(item => item.templateId === template.id))
+      throw fail('assistant-builtin-included', '这个助手已随微信连接插件提供，无需另装独立包；请查看内置助手的状态。')
     const definition = assistantDefinition(template?.definition || request.definition)
     return this.state.update(ledger => {
       this.check(signal)
@@ -82,7 +115,12 @@ export class AssistantRegistry {
       return entry
     }, signal)
   }
-  get(ref: { id: string; version: number }) { this.check(); return publicEntry(this.find(ref.id, ref.version)) }
+  get(ref: { id: string; version: number }) {
+    this.check()
+    const builtin = builtinAssistant(ref.id, ref.version)
+    if (builtin) return { ...builtin, source: 'builtin', state: this.builtinStates.find(item => item.id === builtin.id)?.state || 'unknown' }
+    return publicEntry(this.find(ref.id, ref.version))
+  }
   async preview(ref: { id: string; version: number }, signal: AbortSignal) {
     this.check(signal)
     const entry = copy(this.find(ref.id, ref.version))
@@ -133,8 +171,15 @@ export class AssistantRegistry {
     return operation
   }
   status(ref: { id: string; version: number }, signal: AbortSignal) {
-    const operation = this.tail.then(() => {
-      this.check(signal); return this.reconcile(copy(this.find(ref.id, ref.version)), signal)
+    const operation = this.tail.then(async () => {
+      this.check(signal)
+      const builtin = builtinAssistant(ref.id, ref.version)
+      if (builtin) {
+        await this.readBuiltins(signal)
+        return this.builtinStates.find(item => item.id === ref.id)
+          || { ...builtin, source: 'builtin' as const, state: 'unknown' as const, nativeState: 'unknown' as const, reason: '内置助手尚未就绪。' }
+      }
+      return this.reconcile(copy(this.find(ref.id, ref.version)), signal)
     })
     this.tail = operation.catch(() => {})
     return operation
@@ -143,6 +188,9 @@ export class AssistantRegistry {
    * cache. undefined means unmanaged; false must not fall back to defaults. */
   async verifyPreset(presetId: string, signal: AbortSignal): Promise<boolean | undefined> {
     this.check(signal)
+    if (this.builtinStates.some(item => item.presetId === presetId)) {
+      await this.readBuiltins(signal); return this.builtinStates.some(item => item.presetId === presetId && item.state === 'installed')
+    }
     const entry = this.state.current().entries.find(e => e.plan?.presetId === presetId)
     if (!entry) return undefined
     return (await this.status(entry, signal)).state === 'installed'
@@ -151,9 +199,12 @@ export class AssistantRegistry {
    * reuse historical consent, artifacts, ID or native installation receipt. */
   async redraft(ref: { id: string; version: number }, signal: AbortSignal) {
     const status = await this.status(ref, signal)
+    const entry = this.find(ref.id, ref.version)
+    if (this.builtinStates.some(item => item.sourceTemplateDigest === entry.digest))
+      throw fail('assistant-builtin-included', '此旧模式已有内置版本，请在新会话选择对应助手，无需重新安装旧包。')
     if (status.nativeState !== 'uninstalled') throw fail('assistant-reinstall-unavailable', '请先核对原生安装状态；仅已确认未安装的助手可以重新准备安装。')
     this.check(signal)
-    return this.draft({ definition: copy(this.find(ref.id, ref.version).definition) }, signal)
+    return this.draft({ definition: copy(entry.definition) }, signal)
   }
   private async reconcile(entry: Entry, signal: AbortSignal) {
     if (!entry.plan) throw fail('assistant-not-installed', '此助手尚未提交安装')
@@ -194,6 +245,8 @@ export class AssistantRegistry {
   }
   installedForPreset(presetId: string) {
     this.check()
+    const builtin = this.builtinStates.find(item => item.presetId === presetId && item.state === 'installed')
+    if (builtin) return copy(builtin)
     const entry = this.state.current().entries.find(e => e.state === 'installed' && e.result?.presetId === presetId)
     return entry ? publicEntry(entry) : undefined
   }

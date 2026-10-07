@@ -1,4 +1,5 @@
 import type { AssistantDefinition } from './definition.js';
+import type { BuiltinAssistantStatus } from './builtins.js';
 /** Owner-management adapter only. Never register install as an Agent tool:
  * the core must authenticate the owner and verify its exact approved preview. */
 export interface NativeAssistantCapability {
@@ -35,6 +36,10 @@ export interface NativeAssistantInstallation {
     message?: string;
 }
 export interface NativeAssistantAdapter {
+    /** Main-package components, freshly checked against the actual native roster. */
+    builtins?(signal: AbortSignal, options?: {
+        waitForReady?: boolean;
+    }): Promise<BuiltinAssistantStatus[]>;
     probe(): Promise<NativeAssistantCapability>;
     preview(input: {
         presetId: string;

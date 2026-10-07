@@ -20,7 +20,7 @@ export const ASSISTANT_DEFINITION_SCHEMA = object({ schemaVersion: { type: 'inte
   onboarding: { type: 'array', items: object({ key: string, label: string, prompt: string }, ['key', 'label', 'prompt']) },
   skills: { type: 'array', items: { type: 'string', enum: ['human-workflow'] } },
 }, ['schemaVersion', 'name', 'description', 'role', 'basePreset', 'methods', 'onboarding', 'skills'])
-export const ASSISTANT_BUSINESS_SCHEMA = object({ title: string, answers: { type: 'object', description: 'Only onboarding keys in this installed assistant; each answered value is a nonempty string up to 1000 characters. Never add identity tokens or inferred member facts.' },
+export const ASSISTANT_BUSINESS_SCHEMA = object({ title: { ...string, description: 'Required: preserve current.content.title from work_start/work_get unless the user changes it; always include inside content on a full replacement.' }, answers: { type: 'object', description: 'Required: merge and preserve current.content.answers. Only onboarding keys in this installed assistant; each answered value is a nonempty string up to 1000 characters. Never add identity tokens or inferred member facts.' },
   memory: { type: 'string', description: 'Local work memory, up to 8000 characters. May be empty. Distinguish user-provided information, verified tool facts with source/time, and uncertain analysis. Never persist unverified capability denial as fact: zero known recipients or redacted raw IDs do not prove that the platform cannot obtain or preserve group/member identity.' } }, ['title', 'answers', 'memory'])
 function scope(exec: ToolRunContext, nodeId: string): WorkflowScope {
   const agent = exec.agent, header = agent?.session?.header
@@ -55,14 +55,14 @@ export function assistantTools(options: AssistantToolsOptions): ToolDefinition[]
     return { origin, presetId }
   }
   return [
-    tool('human_assistant_catalog', 'Read reusable profession assistant templates and saved definitions for this node. Templates contain working methods, never class/client/project answers. This tool cannot install, approve, enable capabilities or start an Agent.', object({}), async (input, exec) => {
+    tool('human_assistant_catalog', 'Read reusable profession assistant templates, actual built-in component status and saved custom definitions for this node. A template with builtin is included in the main plugin: do not draft another package just to use it. Installed builtin modes are selected in a new native conversation; unknown/disabled is not installed. Templates contain working methods, never class/client/project answers. This tool cannot install, approve, enable capabilities or start an Agent.', object({}), async (input, exec) => {
       args(input, []); at(exec)
       const result = await options.registry.catalog(exec.signal); at(exec)
       return { schema: result.schema, nodeId: result.nodeId, native: { supported: result.native.supported,
         ...(result.native.reason === undefined ? {} : { reason: result.native.reason }), basePresets: copy(result.native.basePresets) },
         templates: copy(result.templates), drafts: copy(result.drafts) }
     }),
-    tool('human_assistant_draft', 'Save a reusable data-only profession assistant definition after discussing the owner role and working methods. Choose templateId OR definition, not both. A definition has schemaVersion=1, name<=60, description<=500, role<=1500, basePreset from the native catalog, methods 1..16 strings<=500, onboarding<=12 unique snake_case keys with label<=60/prompt<=500, and skills=[human-workflow]. Never embed real class/client/project answers, credentials, executable code, module paths or configuration. Updating requires id+expectedVersion. The owner must inspect and install the exact version in the assistant page; there is no Agent approval/install tool. ' + ASSISTANT_AUTHORING_GUIDANCE,
+    tool('human_assistant_draft', 'Save a reusable data-only profession assistant definition after discussing the owner role and working methods. Choose templateId OR definition, not both. Read catalog first: templates with builtin are already included, so templateId cannot install a duplicate; for an intentionally customized mode read its full definition and provide the changed definition. A definition has schemaVersion=1, name<=60, description<=500, role<=1500, basePreset from the native catalog, methods 1..16 strings<=500, onboarding<=12 unique snake_case keys with label<=60/prompt<=500, and skills=[human-workflow]. Never embed real class/client/project answers, credentials, executable code, module paths or configuration. Updating requires id+expectedVersion. The owner must inspect and install the exact version in the assistant page; there is no Agent approval/install tool. ' + ASSISTANT_AUTHORING_GUIDANCE,
       object({ templateId: string, definition: ASSISTANT_DEFINITION_SCHEMA, id: string, expectedVersion: number }), async (input, exec) => {
         const request = args(input, [], ['templateId', 'definition', 'id', 'expectedVersion']); at(exec)
         return projection(await options.registry.draft(request as { templateId?: string; definition?: unknown; id?: string; expectedVersion?: number }, exec.signal))
@@ -72,7 +72,7 @@ export function assistantTools(options: AssistantToolsOptions): ToolDefinition[]
         const request = args(input, ['id', 'version']); at(exec)
         return projection(options.registry.get(request as { id: string; version: number }))
       }),
-    tool('human_assistant_work_start', 'Create or recover the ONE independent business instance for this actual node/session/generation and its actually composed installed assistant. Idempotent; never accept a model-selected preset, session or instance id. This does not invoke a model, send a group message or create a member form. Ask onboarding questions gradually, then save answers separately from the reusable assistant.', object({}), async (input, exec) => {
+    tool('human_assistant_work_start', 'Create or recover the ONE independent business instance for this actual node/session/generation and its actually composed installed assistant. Returns the complete current record including revision and content: use that result directly; no immediate work_get is required just to repeat the same read. Idempotent; never accept a model-selected preset, session or instance id. This does not invoke a model, send a group message or create a member form. Ask onboarding questions gradually, then save answers separately from the reusable assistant.', object({}), async (input, exec) => {
       args(input, []); const { origin, presetId } = work(exec)
       return options.business.start(origin, presetId, exec.signal)
     }),
@@ -80,7 +80,7 @@ export function assistantTools(options: AssistantToolsOptions): ToolDefinition[]
       args(input, []); const { origin, presetId } = work(exec)
       return options.business.get(origin, presetId)
     }),
-    tool('human_assistant_work_save', 'CAS-save the FULL desired content of this session business instance. Read first, supply expectedRevision, preserve existing answers/memory when merging, and distinguish user information from inference. Only expectedRevision and content belong at the top level; title, answers and memory must be nested INSIDE content. Structural example: {expectedRevision: current.revision, content: {title: current.content.title, answers: mergedAnswers, memory: mergedMemory}}. The example names are placeholders, not business values. On validation failure, fix the reported path; do not repeat unchanged arguments or replace real memory with an experiment/test note. Capability claims need current tool evidence; do not turn totalKnown=0, redacted raw IDs, or one failed action into a lasting cannot-obtain/cannot-store rule. Correct contradicted hypotheses without overwriting unrelated user facts. title<=80, answers only current assistant onboarding keys with strings<=1000, memory<=8000; whole content<=24KiB. Does not modify the assistant template, participant facts, permissions, task delivery or another session.',
+    tool('human_assistant_work_save', 'CAS-save a FULL replacement: {expectedRevision: current.revision, content: {title: current.content.title, answers: mergedAnswers, memory: mergedMemory}}. All three content fields are required, including an unchanged title; the example names are placeholders, not business values. Use the current full record returned by work_start/work_get, preserve unrelated answers/memory while merging, and distinguish user information from inference. Only expectedRevision and content belong at the top level; title, answers and memory must be nested INSIDE content. On validation failure, fix the reported path; do not repeat unchanged arguments or replace real memory with an experiment/test note. On revision conflict reread and merge. Capability claims need current tool evidence; do not turn totalKnown=0, redacted raw IDs, or one failed action into a lasting cannot-obtain/cannot-store rule. Correct contradicted hypotheses without overwriting unrelated user facts. title<=80, answers only current assistant onboarding keys with strings<=1000, memory<=8000; whole content<=24KiB. Does not modify the assistant template, participant facts, permissions, task delivery or another session.',
       object({ expectedRevision: number, content: ASSISTANT_BUSINESS_SCHEMA }, ['expectedRevision', 'content']), async (input, exec) => {
         const request = args(input, ['expectedRevision', 'content'], [], { moveTo: {
           title: 'content.title', answers: 'content.answers', memory: 'content.memory',
@@ -90,6 +90,10 @@ export function assistantTools(options: AssistantToolsOptions): ToolDefinition[]
       }),
   ].map(definition => ({ ...definition, execute: async (input, exec) => {
     const before = at(exec), presetBefore = options.composedPreset(exec.agent)
+    if (definition.name.startsWith('human_assistant_work_') && presetBefore)
+      await options.registry.verifyPreset(presetBefore, exec.signal)
+    if (!sameScope(before, at(exec)) || options.composedPreset(exec.agent) !== presetBefore)
+      throw fail('assistant-scope-changed', '核对期间会话或助手身份变化，请重新读取当前状态')
     const result = await definition.execute(input, exec)
     const after = at(exec), presetAfter = options.composedPreset(exec.agent)
     if (!sameScope(before, after) || definition.name.startsWith('human_assistant_work_') && presetBefore !== presetAfter)

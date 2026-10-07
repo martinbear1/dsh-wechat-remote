@@ -1,11 +1,21 @@
 {
   "name": "dsh-wechat-remote",
-  "version": "1.7.14-rc.19",
+  "version": "1.7.14-rc.20",
   "private": false,
   "description": "Agent远程管理助手：DSH 微信连接插件的一键安装与升级",
   "type": "module",
   "license": "MIT",
   "bin": { "dsh-wechat-remote": "bin/setup.mjs" },
+  "exports": {
+    "./package.json": "./package.json",
+    "./locale/*.json": "./native/lib/assistant-presets/locales/main/*.json",
+    "./assistant-teacher": "./native/lib/assistant-presets/builtin-teacher.js",
+    "./assistant-project": "./native/lib/assistant-presets/builtin-project.js",
+    "./assistant-customizer": "./native/lib/assistant-presets/builtin-customizer.js",
+    "./assistant-teacher/locale/*.json": "./native/lib/assistant-presets/locales/teacher/*.json",
+    "./assistant-project/locale/*.json": "./native/lib/assistant-presets/locales/project/*.json",
+    "./assistant-customizer/locale/*.json": "./native/lib/assistant-presets/locales/customizer/*.json"
+  },
   "dsh": { "bundle": { "patch": "./cordis.patch.yml" } },
   "files": ["cordis.patch.yml", "native/package.json", "native/lib", "bin/*.mjs", "lib/*.js", "lib/package.json", "assets/plugin.tgz", "assets/release.json", "README.md", "LICENSE"],
   "engines": { "node": ">=22.13.0" },

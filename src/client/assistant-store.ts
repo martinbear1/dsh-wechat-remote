@@ -35,8 +35,16 @@ export class AssistantStore {
     } catch (error) { if (current()) this.set({ message: '' }); throw error }
   }
   load = () => this.run(current => this.read(current))
+  dismissPreview = () => { if (!this.state.busy) this.set({ preview: null, message: '' }) }
   choose = (templateId: string) => this.run(async current => {
     this.set({ preview: null, message: '' })
+    const included = this.state.catalog?.templates?.find((item: any) => item.id === templateId)?.builtin
+    if (included) { await this.read(current); if (current()) this.set({ message: '此助手已包含在插件里，请在新会话中选择；无需另装独立包。' }); return }
+    const pending = this.state.catalog?.drafts?.find((item: any) => item.templateId === templateId && item.state === 'draft')
+    if (pending) {
+      const preview = await this.call('assistantPreview', { id: pending.id, version: pending.version })
+      if (current()) this.set({ preview }); return
+    }
     const draft = await this.call('assistantDraft', { templateId })
     if (!current()) return
     await this.read(current)
@@ -51,6 +59,9 @@ export class AssistantStore {
   })
   reinstall = (sourceId: string, sourceVersion: number) => this.run(async current => {
     this.set({ preview: null, message: '' })
+    if (this.state.catalog?.drafts?.some((item: any) => item.id === sourceId && item.version === sourceVersion && item.replacement)) {
+      await this.read(current); if (current()) this.set({ message: '这个旧模式已有内置版本，请在新会话中选择对应助手，无需重新安装旧包。' }); return
+    }
     const draft = await this.call('assistantDraft', { sourceId, sourceVersion })
     if (!current()) return
     await this.read(current)

@@ -61,3 +61,14 @@ test('undeclared external runtime dependency is not supplied by development modu
   f.write('lib/index.js', "import 'accidental-dev-dependency'")
   assert.throws(() => inspectPackedPlugin(f.root), /undeclared dependency accidental-dev-dependency/)
 })
+
+test('wildcard resource exports require actual packed resources inside their own package', t => {
+  const f = fixture(t)
+  f.write('package.json', JSON.stringify({ main: 'lib/index.js', exports: { './locale/*.json': './lib/locales/*.json' } }))
+  f.write('lib/locales/README.txt', 'not a locale')
+  assert.throws(() => inspectPackedPlugin(f.root), /wildcard has no packed files/)
+  f.write('lib/locales/zh.json', '{"meta":{"title":"助手"}}')
+  assert.equal(inspectPackedPlugin(f.root).modules, 5)
+  f.write('package.json', JSON.stringify({ main: 'lib/index.js', exports: { './locale/*.json': '../outside/*.json' } }))
+  assert.throws(() => inspectPackedPlugin(f.root), /path escapes package/)
+})

@@ -17,7 +17,6 @@ export interface HarnessRemoteSettingsProps {
   callManagement: CallPairingManagement
   store?: RemotePageStore
   assistants?: AssistantStore
-  startAssistant?: (presetId: string, lifetime?: AbortSignal, newIntent?: boolean) => Promise<void>
 }
 
 function StatusDot({ ok, busy = false }: { ok: boolean; busy?: boolean }): JSX.Element {
@@ -57,7 +56,6 @@ export function HarnessRemoteSettings({
   callManagement,
   store = pageStore(describeHost, callManagement),
   assistants,
-  startAssistant,
 }: HarnessRemoteSettingsProps): JSX.Element {
   const { loadState, qrState, status, runtime, host, localOrigin, qr, error } = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
   const { refresh: loadStatus, generateQr } = store
@@ -212,7 +210,7 @@ export function HarnessRemoteSettings({
         <CompanionPanel describeHost={describeHost} callManagement={callManagement} store={store} />
       </div>
       <p className={styles.securityNote}>设置和插件详情共用当前节点的配对与更新状态；Web 与 Desktop 各自独立。</p>
-      {assistants ? <AssistantPresetsPanel store={assistants} start={startAssistant} /> : null}
+      {assistants ? <AssistantPresetsPanel store={assistants} /> : null}
     </section>
   )
 }

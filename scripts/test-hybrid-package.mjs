@@ -31,6 +31,18 @@ try {
   const outerMeta = read(path.join(outer, 'package.json')), nativeMeta = read(path.join(native, 'package.json'))
   assert.equal(outerMeta.dsh.bundle.patch, './cordis.patch.yml')
   assert.match(fs.readFileSync(path.join(outer, 'cordis.patch.yml'), 'utf8'), /name: '\.\/native\/lib\/index\.js'/)
+  for (const component of ['teacher', 'project', 'customizer']) {
+    assert(fs.readFileSync(path.join(outer, 'cordis.patch.yml'), 'utf8').includes(`dsh-wechat-remote/assistant-${component}`))
+    assert(fs.existsSync(path.join(native, `lib/assistant-presets/builtin-${component}.js`)))
+    assert.equal(nativeMeta.exports[`./assistant-${component}`].default, `./lib/assistant-presets/builtin-${component}.js`)
+    assert.equal(outerMeta.exports[`./assistant-${component}`], `./native/lib/assistant-presets/builtin-${component}.js`)
+    const self = createRequire(path.join(outer, 'package.json'))
+    assert.equal(self.resolve(`dsh-wechat-remote/assistant-${component}`), path.join(native, `lib/assistant-presets/builtin-${component}.js`))
+    for (const language of ['en', 'zh']) {
+      const resource = self.resolve(`dsh-wechat-remote/assistant-${component}/locale/${language}.json`)
+      assert(resource.startsWith(native + path.sep)); assert.equal(typeof read(resource).meta.title, 'string')
+    }
+  }
   assert.equal(nativeMeta.version, version)
   assert.equal(nativeMeta.name, '@harness-remote/dsh-wechat-remote')
   assert.equal(nativeMeta.dsh.client.platform, 'web')

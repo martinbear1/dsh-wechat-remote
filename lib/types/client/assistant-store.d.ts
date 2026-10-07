@@ -23,6 +23,7 @@ export declare class AssistantStore {
     private run;
     private read;
     load: () => Promise<void>;
+    dismissPreview: () => void;
     choose: (templateId: string) => Promise<void>;
     preview: (id: string, version: number) => Promise<void>;
     reinstall: (sourceId: string, sourceVersion: number) => Promise<void>;

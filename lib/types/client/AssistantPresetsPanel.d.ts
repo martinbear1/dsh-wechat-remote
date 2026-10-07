@@ -1,6 +1,6 @@
 import type { AssistantStore } from './assistant-store.js';
-/** Registered inside the plugin's official Settings slot, never a shell patch. */
-export declare function AssistantPresetsPanel({ store, start }: {
+/** Registered inside the official Settings slot. The verified native new-session
+ * picker remains the entry to work; this panel only manages assistant modes. */
+export declare function AssistantPresetsPanel({ store }: {
     store: AssistantStore;
-    start?: (presetId: string, lifetime?: AbortSignal, newIntent?: boolean) => Promise<void>;
 }): JSX.Element;

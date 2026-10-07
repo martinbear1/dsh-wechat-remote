@@ -58,6 +58,18 @@ export function inspectPackedPlugin(directory) {
   const hostEntries = new Set(), peers = new Set(), bundle = new Set(manifest.bundleDependencies || [])
   const inspectExport = (value, key) => {
     if (typeof value === 'string') {
+      if (value.includes('*')) {
+        assert(key.includes('*') && value.split('*').length === 2, `export ${key}: unsupported wildcard target`)
+        const parent = value.slice(0, value.indexOf('*')).replace(/[^/]*$/, '')
+        const base = requireLocalFile(directory, parent, `export ${key}`, true)
+        const escaped = value.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace('*', '.+')
+        const pattern = new RegExp('^' + escaped + '$')
+        const matches = filesBelow(base).map(file => './' + path.relative(directory, file).split(path.sep).join('/'))
+          .filter(file => pattern.test(file))
+        assert(matches.length, `export ${key}: wildcard has no packed files`)
+        for (const match of matches) inspectExport(match, key)
+        return
+      }
       const target = requireLocalFile(directory, value, `export ${key}`)
       if (key !== './client' && value.endsWith('.js')) hostEntries.add(target)
     } else if (value && typeof value === 'object') for (const child of Object.values(value)) inspectExport(child, key)

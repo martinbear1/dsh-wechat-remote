@@ -24,7 +24,6 @@ import {
   type HarnessRemoteHostDescription,
 } from './HarnessRemoteSettings.tsx'
 import { AssistantStore } from './assistant-store.js'
-import { nativeAssistantNavigation } from './assistant-navigation.js'
 
 /** Required services for the slot registration. */
 export const inject = ['slots', 'connection']
@@ -79,14 +78,13 @@ export function apply(ctx: HarnessRemoteClientContext): void {
     return JSON.parse(result.valueJson)
   }
   const assistants = new AssistantStore(assistantCall)
-  const assistantNavigation = nativeAssistantNavigation(name => ctx.get(name), assistantCall)
   ctx.effect(() => {
-    const remove = ctx.on('connection/reset', () => { connectionGeneration++; assistants.reset(); assistantNavigation.reset() })
-    return () => { connectionGeneration++; remove(); assistants.dispose(); assistantNavigation.reset() }
+    const remove = ctx.on('connection/reset', () => { connectionGeneration++; assistants.reset() })
+    return () => { connectionGeneration++; remove(); assistants.dispose() }
   }, 'wechat assistant lifecycle')
   ctx.effect(() => () => store.dispose(), 'wechat shared page')
   const openPlugin = () => openPluginPage(name => ctx.get(name))
-  const injected = () => ({ describeHost, callManagement, store, assistants, startAssistant: assistantNavigation.start })
+  const injected = () => ({ describeHost, callManagement, store, assistants })
   ctx.slots.inject('settings.section', () =>
     ctx.slots.register(
       {

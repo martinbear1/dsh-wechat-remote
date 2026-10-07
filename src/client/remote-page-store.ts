@@ -7,7 +7,9 @@ export interface PairCode { qrDataUrl: string; mode: 'secure-lan-route' | 'publi
 export interface GateStatus {
   gate?: GateRuntimeInfo
   plugin?: { runningVersion: string; installedVersion: string }
-  companionUpdate?: { state: string; message: string; offerId?: string }
+  companionUpdate?: { state: string; message: string; offerId?: string;
+    target?: { scope: 'desktop' | 'web'; fromVersion: string; version: string };
+    versions?: { current: 'desktop' | 'web'; running: string; installed: string | null; peer: 'desktop' | 'web'; peerInstalled: string | null } }
   lan: { ip: string; port: number }
   publicRelay: { enabled: boolean; state: 'disabled' | 'enrolling' | 'connecting' | 'online' | 'offline';
     remoteAccess?: { status: 'active' | 'expired' | 'suspended' | 'not_entitled'; validUntil?: number | null } | null }

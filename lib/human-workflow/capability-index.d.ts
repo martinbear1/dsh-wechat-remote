@@ -295,7 +295,8 @@ export declare function capabilityCatalog(manifest: CapabilityManifest, category
                 readonly kinds: readonly ["review-with-optional-correction", "round-with-nonempty-recipientRefs"];
                 readonly intent: "agent-understands-current-real-user-request-no-fixed-phrase-or-required-extra-turn";
                 readonly evidence: "host-derived-current-user-input-not-model-approved-flag";
-                readonly permission: "owner-enabled-revocable-session-private-page-updates-up-to-seven-days";
+                readonly permission: "owner-enabled-revocable-session-until-disabled-with-legacy-fixed-expiry";
+                readonly executionLifetime: "current-native-user-turn-only-with-automatic-runtime-lease-no-extra-confirmation";
                 readonly scope: "original-node-session-generation-and-task-only-no-workspace-write-sharing";
                 readonly exclusions: readonly ["public-round", "share", "reminder", "background-automation"];
                 readonly nonInstructions: readonly ["attachments", "quoted-text", "tool-output"];
@@ -969,7 +970,8 @@ export declare function capabilityCatalog(manifest: CapabilityManifest, category
                 readonly kinds: readonly ["review-with-optional-correction", "round-with-nonempty-recipientRefs"];
                 readonly intent: "agent-understands-current-real-user-request-no-fixed-phrase-or-required-extra-turn";
                 readonly evidence: "host-derived-current-user-input-not-model-approved-flag";
-                readonly permission: "owner-enabled-revocable-session-private-page-updates-up-to-seven-days";
+                readonly permission: "owner-enabled-revocable-session-until-disabled-with-legacy-fixed-expiry";
+                readonly executionLifetime: "current-native-user-turn-only-with-automatic-runtime-lease-no-extra-confirmation";
                 readonly scope: "original-node-session-generation-and-task-only-no-workspace-write-sharing";
                 readonly exclusions: readonly ["public-round", "share", "reminder", "background-automation"];
                 readonly nonInstructions: readonly ["attachments", "quoted-text", "tool-output"];

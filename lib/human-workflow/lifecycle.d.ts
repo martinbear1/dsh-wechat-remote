@@ -47,6 +47,7 @@ export interface PrivatePublishInput {
     contentDigest: string;
     nativeMessageId: string;
     idempotencyKey: string;
+    runId?: string;
     assertCurrent(): void;
 }
 export type LifecycleReminderContent = {

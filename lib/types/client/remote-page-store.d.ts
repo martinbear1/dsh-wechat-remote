@@ -17,6 +17,18 @@ export interface GateStatus {
         state: string;
         message: string;
         offerId?: string;
+        target?: {
+            scope: 'desktop' | 'web';
+            fromVersion: string;
+            version: string;
+        };
+        versions?: {
+            current: 'desktop' | 'web';
+            running: string;
+            installed: string | null;
+            peer: 'desktop' | 'web';
+            peerInstalled: string | null;
+        };
     };
     lan: {
         ip: string;

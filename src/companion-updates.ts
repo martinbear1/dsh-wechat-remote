@@ -18,6 +18,7 @@ const versionPattern = /^\d+\.\d+\.\d+(?:-[\w.-]+)?$/
 type Target = { owner: 'cli' | 'native'; version: string }
 interface Offer { schema: 2; id: string; from: Scope; to: Scope; version: string; previous: string; source: string }
 export type CompanionResult = { state: 'idle' | 'confirmation-required' | 'deferred' | 'pending' | 'busy' | 'preparing' | 'installing' | 'verifying' | 'recovering' | 'restart-required' | 'self-restart-required' | 'complete' | 'unavailable'; message: string; offerId?: string;
+  target?: { scope: Scope; fromVersion: string; version: string };
   versions?: { current: Scope; running: string; installed: string | null; peer: Scope; peerInstalled: string | null } }
 interface Coordinator { status(): CompanionResult; decide(id: string, action: 'approve' | 'later'): void; dispose(): void }
 const pending = (): CompanionResult => ({ state: 'pending', message: '另一端将在其原生更新入口可用时处理；当前节点不受影响。' })
@@ -26,6 +27,12 @@ function scopeOf(value: string): Scope | undefined {
 }
 function read(file: string): any { return JSON.parse(fs.readFileSync(file, 'utf8')) }
 function root(home: string): string { return path.join(home, 'harness-remote', 'installation-offers') }
+// Presentation metadata only: decisions still authorize the exact immutable
+// offer ID. Both endpoints can display an offer, so never infer its destination
+// from the endpoint currently rendering the settings page.
+function offerTarget(offer: Offer): NonNullable<CompanionResult['target']> {
+  return { scope: offer.to, fromVersion: offer.previous, version: offer.version }
+}
 function recordResult(home: string, scope: Scope, offer: Offer, value: CompanionResult): boolean {
   const directory = root(home), file = path.join(directory, `result-${scope}.json`)
   try { if (read(path.join(directory, `${scope}.json`)).id !== offer.id) return false }
@@ -35,7 +42,7 @@ function recordResult(home: string, scope: Scope, offer: Offer, value: Companion
     if (last.id === offer.id && last.state === 'complete'
         && !['complete', 'recovering', 'unavailable'].includes(value.state)) return false
   } catch { /* first receipt */ }
-  writePrivateJsonAtomic(file, { schema: 2, id: offer.id, version: offer.version, ...value })
+  writePrivateJsonAtomic(file, { schema: 2, id: offer.id, version: offer.version, ...value, target: offerTarget(offer) })
   return true
 }
 /** Only already enabled installations participate. Do not re-enable a plugin,
@@ -128,7 +135,7 @@ export function decideCompanionOffer(home: string, offer: Offer, action: 'approv
 function confirmation(home: string, offer: Offer): CompanionResult | undefined {
   const choice = decision(home, offer)
   if (choice === 'approve') return
-  return { state: choice === 'later' ? 'deferred' : 'confirmation-required', offerId: offer.id,
+  return { state: choice === 'later' ? 'deferred' : 'confirmation-required', offerId: offer.id, target: offerTarget(offer),
     message: `${offer.to === 'web' ? 'Web' : 'Desktop'} 插件可从 ${offer.previous} 更新至 ${offer.version}。确认后会等待任务空闲，更新时连接将短暂断开；保留原配对和会话。当前尚未更新。` }
 }
 /** Never hand a peer's live directory to pnpm: local folder installs can link
@@ -300,7 +307,7 @@ function mount(ctx: any, version: string, options: { isUpdating?(): boolean }): 
     if (stopped) return
     // An older asynchronous attempt must not overwrite the latest receipt,
     // nor undo a new runtime's proof of successful activation.
-    try { if (recordResult(home, scope, offer, value)) status = value }
+    try { if (recordResult(home, scope, offer, value)) status = { ...value, target: offerTarget(offer) } }
     catch { status = { state: 'unavailable', message: '联动更新结果无法保存，请在该节点的原生插件管理页核对。' } }
   }
   const check = async () => {
@@ -420,7 +427,7 @@ function mount(ctx: any, version: string, options: { isUpdating?(): boolean }): 
           if (['complete', 'restart-required'].includes(last.state) && peer.version !== version) {
             return { state: 'unavailable', message: '另一端的安装已变化，请在该应用内核对；当前节点不受影响。' }
           }
-          return { state: last.state, message: `${to === 'web' ? 'Web' : 'Desktop'}：${String(last.message).slice(0, 240)}` }
+          return { state: last.state, target: offerTarget(offer), message: `${to === 'web' ? 'Web' : 'Desktop'}：${String(last.message).slice(0, 240)}` }
         }
       }
     } catch { /* no peer receipt */ }
@@ -429,7 +436,7 @@ function mount(ctx: any, version: string, options: { isUpdating?(): boolean }): 
       if (offer.from === scope && offer.version === version) {
         try { validateCompanionOffer(home, to, offer) }
         catch { return { state: 'unavailable', message: '另一端的安装或启用状态已变化，未继续更新；当前节点不受影响。' } }
-        return pending()
+        return { ...pending(), target: offerTarget(offer) }
       }
     } catch {}
     return status

@@ -31,6 +31,7 @@ export interface LifecycleDraft {
 /** Host-derived input authority; never a model tool parameter or tool output. */
 export interface PrivatePublishInput {
   inputProof: string; inputId: string; contentDigest: string; nativeMessageId: string; idempotencyKey: string
+  runId?: string
   assertCurrent(): void
 }
 export type LifecycleReminderContent = { roundId: string | null; title: string } & (
@@ -86,6 +87,7 @@ const PRIVATE_PUBLICATION_LIMIT = 256
 const PRIVATE_PUBLICATION_REJECTIONS: Record<string, number> = {
   private_updates_disabled: 403, invalid_private_input_proof: 403, private_publication_only: 403, source_scope_mismatch: 403,
   private_input_expired: 410, draft_expired: 410, private_input_replayed: 409, draft_changed: 409,
+  invalid_private_run: 409, private_run_conflict: 409, private_run_expired: 410,
   lifecycle_conflict: 409, idempotency_conflict: 409, private_update_capacity: 429, lifecycle_capacity: 429,
 }
 const receiptRetryableCodes = new Set(['download_ticket_expired', 'attachment_download_quota', 'usage_ledger_capacity', 'metering_unavailable', 'receiver-capacity', 'receiver_format_unsupported'])
@@ -356,6 +358,7 @@ export class WorkflowLifecycle {
       throw fail('private-publication-invalid', '只能更新准确任务的私人反馈或指定对象要求，不能发送群卡或提醒')
     if (!input || !plain(input.inputProof, 512) || !plain(input.inputId, 128) || !plain(input.nativeMessageId, 256)
       || !/^[a-f0-9]{64}$/.test(input.contentDigest) || !/^[A-Za-z0-9:_-]{16,128}$/.test(input.idempotencyKey)
+      || input.runId !== undefined && !/^[a-f0-9]{32}$/.test(input.runId)
       || typeof input.assertCurrent !== 'function') throw fail('private-input-required', '缺少当前真实对话输入的授权依据；未更新私人页面')
     input.assertCurrent()
     // Do not apply the workspace read-sharing grant to private writes.
@@ -407,7 +410,8 @@ export class WorkflowLifecycle {
     try {
       result = await this.options.transport.request('lifecycle', { operation: 'private-publish', scope: scope.sessionId,
         sessionGeneration: scope.sessionGeneration, taskRef, draftRef: ref, idempotencyKey: input.idempotencyKey,
-        inputProof: input.inputProof, inputId: input.inputId, contentDigest: input.contentDigest, nativeMessageId: input.nativeMessageId }, active)
+        inputProof: input.inputProof, inputId: input.inputId, contentDigest: input.contentDigest, nativeMessageId: input.nativeMessageId,
+        ...(input.runId ? { runId: input.runId } : {}) }, active)
     } catch (error) {
       if (row(error) && typeof error.code === 'string' && Object.hasOwn(PRIVATE_PUBLICATION_REJECTIONS, error.code)
         && error.status === PRIVATE_PUBLICATION_REJECTIONS[error.code]) {

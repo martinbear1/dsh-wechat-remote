@@ -203,13 +203,12 @@ export function HarnessRemoteSettings({
           </p>
         </div>
       )}
-      {localOrigin && store.updates ? <PluginUpdateCard store={store.updates} /> : null}
-      {runtime?.profileScope === 'desktop' && store.nativeUpdates ? <NativeUpdateCard store={store.nativeUpdates} /> : null}
-      <div className={styles.linkedSection}>
-        <h4>另一端插件</h4>
-        <CompanionPanel describeHost={describeHost} callManagement={callManagement} store={store} />
-      </div>
-      <p className={styles.securityNote}>设置和插件详情共用当前节点的配对与更新状态；Web 与 Desktop 各自独立。</p>
+      <section className={styles.updateCard} aria-label="插件更新">
+        <h3 className={styles.updateHeading}>插件更新</h3>
+        {localOrigin && store.updates ? <PluginUpdateCard store={store.updates} embedded /> : null}
+        {runtime?.profileScope === 'desktop' && store.nativeUpdates ? <NativeUpdateCard store={store.nativeUpdates} embedded /> : null}
+        <CompanionPanel describeHost={describeHost} callManagement={callManagement} store={store} compact />
+      </section>
       {assistants ? <AssistantPresetsPanel store={assistants} /> : null}
     </section>
   )

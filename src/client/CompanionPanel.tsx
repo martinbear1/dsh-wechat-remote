@@ -6,15 +6,15 @@ import { pageStore, type RemotePageStore } from './remote-page-store.js'
 import styles from './HarnessRemoteSettings.module.css'
 
 /** Native plugin activation/detail contribution; no host DOM manipulation. */
-export function CompanionPanel({ describeHost, callManagement, onDismiss, onOpenDetails, store = pageStore(describeHost, callManagement) }: {
+export function CompanionPanel({ describeHost, callManagement, onDismiss, onOpenDetails, compact = false, store = pageStore(describeHost, callManagement) }: {
   describeHost: () => Promise<HarnessRemoteHostDescription>; callManagement: CallPairingManagement; onDismiss?: () => void
-  onOpenDetails?: () => void; store?: RemotePageStore
+  onOpenDetails?: () => void; store?: RemotePageStore; compact?: boolean
 }): JSX.Element {
   const { status, deciding, decisionError, error: loadError, loadState } = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
   const value = status?.companionUpdate, error = decisionError || loadError
-  const content = <div><CompanionUpdateCard value={value} deciding={deciding || loadState !== 'ready'} onDecide={action => void store.decide(action)} />
-    {!value && !error ? <p className={styles.helpText}>正在检查联动更新状态；尚未确认的更新不会自动启动。</p>
-      : value?.state === 'idle' ? <p className={styles.helpText}>未发现需要联动更新的另一端。当前节点可独立使用，不会自动安装另一端或启用已停用的插件。</p> : null}
+  const content = <div><CompanionUpdateCard value={value} compact={compact} deciding={deciding || loadState !== 'ready'} onDecide={action => void store.decide(action)} />
+    {!value && !error ? <p className={styles.helpText}>{loadState === 'loading' ? '正在检查同一主机的另一端…' : '另一端状态未确认；不会自动更新。'}</p>
+      : !compact && value?.state === 'idle' ? <p className={styles.helpText}>未发现需要联动更新的另一端。当前节点可独立使用，不会自动安装另一端或启用已停用的插件。</p> : null}
     {error ? <p role="alert">{error}</p> : null}
     {onDismiss ? <div className={styles.actions}>
       {onOpenDetails ? <button type="button" className={styles.primaryButton} onClick={onOpenDetails}>前往微信连接</button> : null}

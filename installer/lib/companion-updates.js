@@ -491,6 +491,9 @@ function read(file) {
 function root(home) {
   return path5.join(home, "harness-remote", "installation-offers");
 }
+function offerTarget(offer) {
+  return { scope: offer.to, fromVersion: offer.previous, version: offer.version };
+}
 function recordResult(home, scope, offer, value) {
   const directory = root(home), file = path5.join(directory, `result-${scope}.json`);
   try {
@@ -503,7 +506,7 @@ function recordResult(home, scope, offer, value) {
     if (last.id === offer.id && last.state === "complete" && !["complete", "recovering", "unavailable"].includes(value.state)) return false;
   } catch {
   }
-  writePrivateJsonAtomic(file, { schema: 2, id: offer.id, version: offer.version, ...value });
+  writePrivateJsonAtomic(file, { schema: 2, id: offer.id, version: offer.version, ...value, target: offerTarget(offer) });
   return true;
 }
 function companionTarget(home, scope) {
@@ -594,6 +597,7 @@ function confirmation(home, offer) {
   return {
     state: choice === "later" ? "deferred" : "confirmation-required",
     offerId: offer.id,
+    target: offerTarget(offer),
     message: `${offer.to === "web" ? "Web" : "Desktop"} \u63D2\u4EF6\u53EF\u4ECE ${offer.previous} \u66F4\u65B0\u81F3 ${offer.version}\u3002\u786E\u8BA4\u540E\u4F1A\u7B49\u5F85\u4EFB\u52A1\u7A7A\u95F2\uFF0C\u66F4\u65B0\u65F6\u8FDE\u63A5\u5C06\u77ED\u6682\u65AD\u5F00\uFF1B\u4FDD\u7559\u539F\u914D\u5BF9\u548C\u4F1A\u8BDD\u3002\u5F53\u524D\u5C1A\u672A\u66F4\u65B0\u3002`
   };
 }
@@ -757,7 +761,7 @@ function mount(ctx, version, options) {
   const receipt = (offer, value) => {
     if (stopped) return;
     try {
-      if (recordResult(home, scope, offer, value)) status = value;
+      if (recordResult(home, scope, offer, value)) status = { ...value, target: offerTarget(offer) };
     } catch {
       status = { state: "unavailable", message: "\u8054\u52A8\u66F4\u65B0\u7ED3\u679C\u65E0\u6CD5\u4FDD\u5B58\uFF0C\u8BF7\u5728\u8BE5\u8282\u70B9\u7684\u539F\u751F\u63D2\u4EF6\u7BA1\u7406\u9875\u6838\u5BF9\u3002" };
     }
@@ -934,7 +938,7 @@ function mount(ctx, version, options) {
           if (["complete", "restart-required"].includes(last.state) && peer.version !== version) {
             return { state: "unavailable", message: "\u53E6\u4E00\u7AEF\u7684\u5B89\u88C5\u5DF2\u53D8\u5316\uFF0C\u8BF7\u5728\u8BE5\u5E94\u7528\u5185\u6838\u5BF9\uFF1B\u5F53\u524D\u8282\u70B9\u4E0D\u53D7\u5F71\u54CD\u3002" };
           }
-          return { state: last.state, message: `${to === "web" ? "Web" : "Desktop"}\uFF1A${String(last.message).slice(0, 240)}` };
+          return { state: last.state, target: offerTarget(offer), message: `${to === "web" ? "Web" : "Desktop"}\uFF1A${String(last.message).slice(0, 240)}` };
         }
       }
     } catch {
@@ -947,7 +951,7 @@ function mount(ctx, version, options) {
         } catch {
           return { state: "unavailable", message: "\u53E6\u4E00\u7AEF\u7684\u5B89\u88C5\u6216\u542F\u7528\u72B6\u6001\u5DF2\u53D8\u5316\uFF0C\u672A\u7EE7\u7EED\u66F4\u65B0\uFF1B\u5F53\u524D\u8282\u70B9\u4E0D\u53D7\u5F71\u54CD\u3002" };
         }
-        return pending();
+        return { ...pending(), target: offerTarget(offer) };
       }
     } catch {
     }

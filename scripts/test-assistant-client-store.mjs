@@ -3,7 +3,8 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { build, transform } from 'esbuild'
 import { createRequire } from 'node:module'
-import { fileURLToPath, pathToFileURL } from 'node:url'
+import { fileURLToPath } from 'node:url'
+import vm from 'node:vm'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 const source = await readFile(new URL('../src/client/assistant-store.ts', import.meta.url),'utf8')
@@ -12,6 +13,20 @@ const {AssistantStore} = await import('data:text/javascript;base64,'+Buffer.from
 const deferred = () => { let resolve; return {promise:new Promise(r=>resolve=r),resolve} }
 const catalog = {schema:'human.assistants.catalog.v1',nodeId:'testnode',native:{supported:true},templates:[],drafts:[]}
 const preview = {id:'id',version:1,digest:'d'.repeat(64),previewId:'preview',expiresAt:Date.now()+60000}
+async function panelForSSR() {
+  // Portals belong to the native browser; these tests cover our rendered panel
+  // and store. The real native Modal is exercised by the browser visual test.
+  const require=createRequire(import.meta.url)
+  const built=await build({entryPoints:[fileURLToPath(new URL('../src/client/AssistantPresetsPanel.tsx',import.meta.url))],
+    bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',packages:'external',
+    plugins:[{name:'panel-style-test',setup(plugin){plugin.onLoad({filter:/\.css$/},()=>({contents:'export default {}',loader:'js'}))}}]})
+  const module={exports:{}}
+  vm.runInNewContext(built.outputFiles[0].text,{module,exports:module.exports,require(id){
+    if(id==='@deepseek-ai/dsh-client-ui-primitives') return {Modal:()=>{throw Error('Native portals require browser verification')}}
+    return require(id)
+  }},{filename:'assistant-panel-ssr.cjs'})
+  return module.exports.AssistantPresetsPanel
+}
 test('assistant UI has no installation side effect until exact explicit consent',async()=>{
   const calls=[], store=new AssistantStore(async(method,request)=>{calls.push([method,request]);return method==='assistantCatalog'?catalog:method==='assistantDraft'?{id:'id',version:1}:method==='assistantPreview'?preview:{state:'installed',message:'installed'}})
   await store.load(); await store.choose('teacher')
@@ -68,12 +83,7 @@ test('reinstall is a new exact-source draft and preview, never an automatic inst
 })
 
 test('desktop hides unavailable history by default and keeps new-install consent separate from status',async()=>{
-  const require=createRequire(import.meta.url)
-  const built=await build({entryPoints:[fileURLToPath(new URL('../src/client/AssistantPresetsPanel.tsx',import.meta.url))],bundle:true,write:false,platform:'node',format:'esm',jsx:'automatic',plugins:[{name:'memory-panel-test',setup(plugin){
-    plugin.onResolve({filter:/^react(?:\/jsx-runtime)?$/},args=>({path:pathToFileURL(require.resolve(args.path)).href,external:true}))
-    plugin.onLoad({filter:/\.module\.css$/},()=>({contents:'export default {}',loader:'js'}))
-  }}]})
-  const {AssistantPresetsPanel}=await import('data:text/javascript;base64,'+Buffer.from(built.outputFiles[0].text).toString('base64'))
+  const AssistantPresetsPanel=await panelForSSR()
   const drafts=[{id:'new',name:'新版',version:1,presetId:'new_preset',state:'installed',nativeState:'installed'},
     {id:'old',name:'已卸载旧版',version:1,state:'unknown',nativeState:'uninstalled'},
     {id:'unknown',name:'失联旧版',version:1,state:'unknown',nativeState:'unknown'},
@@ -83,7 +93,7 @@ test('desktop hides unavailable history by default and keeps new-install consent
   const html=renderToStaticMarkup(createElement(AssistantPresetsPanel,{store,start:async()=>{assert.fail('render must not launch')}}))
   assert.match(html,/<summary>更多助手与安装记录<\/summary>/);assert(!html.includes('<details open'))
   assert.match(html,/<summary>以前安装的助手（4）<\/summary>/)
-  assert.equal((html.match(/怎么开始使用/g)||[]).length,1)
+  assert.equal((html.match(/>开始使用<\/button>/g)||[]).length,1)
   assert.equal((html.match(/查看并重新安装/g)||[]).length,1)
   assert(!html.includes('开始或打开已创建会话'));assert(!html.includes('另开独立工作会话'))
   for(const label of ['未安装','待核对','已停用'])assert(html.includes(label))
@@ -115,30 +125,66 @@ test('replaced old packages cannot be reinstalled through a stale explicit clien
 })
 
 test('assistant UI separates creation from ready-made modes and preserves exact installed names',async()=>{
-  const require=createRequire(import.meta.url)
-  const built=await build({entryPoints:[fileURLToPath(new URL('../src/client/AssistantPresetsPanel.tsx',import.meta.url))],bundle:true,write:false,platform:'node',format:'esm',jsx:'automatic',plugins:[{name:'assistant-hierarchy-test',setup(plugin){
-    plugin.onResolve({filter:/^react(?:\/jsx-runtime)?$/},args=>({path:pathToFileURL(require.resolve(args.path)).href,external:true}))
-    plugin.onLoad({filter:/\.module\.css$/},()=>({contents:'export default {}',loader:'js'}))
-  }}]})
-  const {AssistantPresetsPanel}=await import('data:text/javascript;base64,'+Buffer.from(built.outputFiles[0].text).toString('base64'))
+  const AssistantPresetsPanel=await panelForSSR()
   const templates=[{id:'teacher',name:'教师助理',description:'教学工作'},{id:'project',name:'项目助理',description:'项目工作'},
     {id:'designer',name:'助手设计师',description:'设计可复用模式'},{id:'general',name:'通用工作助理',description:'通用'}]
   const drafts=[{id:'approved-teacher',version:1,templateId:'teacher',name:'教师助理',state:'installed',nativeState:'installed'},
     {id:'approved-designer',version:1,templateId:'designer',name:'助手设计师',state:'installed',nativeState:'installed'}]
   const store=new AssistantStore(async()=>({...catalog,templates,drafts}));await store.load()
   const html=renderToStaticMarkup(createElement(AssistantPresetsPanel,{store}))
-  assert(html.includes('安装项目助理'));assert(!html.includes('安装教师助理'));assert(!html.includes('安装定制助手'))
-  assert(html.indexOf('教师助理')<html.indexOf('需要其他职业的助手？'))
-  assert(html.indexOf('需要其他职业的助手？')<html.indexOf('定制我的助手'))
+  assert.equal((html.match(/>安装<\/button>/g)||[]).length,2)
+  assert(html.indexOf('教师助理')<html.indexOf('定制我的助手'))
+  assert(html.includes('确认安装后，再用新模式开启工作会话'))
   assert(html.indexOf('更多助手与安装记录')<html.indexOf('通用工作助理'))
   assert(!html.includes('助手设计师'));assert(!html.includes('approved-teacher'))
-  assert.equal((html.match(/怎么开始使用/g)||[]).length,2)
+  assert.equal((html.match(/>开始使用<\/button>/g)||[]).length,1)
+  assert.equal((html.match(/>开始定制<\/button>/g)||[]).length,1)
   assert.equal(store.getSnapshot().catalog.drafts[1].name,'助手设计师')
   const included=templates.slice(0,3).map(item=>({...item,builtin:{id:'builtin_'+item.id,version:1,state:'installed',nativeState:'installed'}}))
   const builtinStore=new AssistantStore(async()=>({...catalog,native:{supported:false,reason:'custom install unavailable'},templates:included,
     drafts:included.map(item=>({id:'builtin_'+item.id,templateId:item.id,name:item.id==='designer'?'定制助手':item.name,source:'builtin',state:'installed',nativeState:'installed'}))}))
   await builtinStore.load()
   const builtinHtml=renderToStaticMarkup(createElement(AssistantPresetsPanel,{store:builtinStore}))
-  assert.equal((builtinHtml.match(/已内置/g)||[]).length,3,'native bundled modes do not depend on custom installer availability')
+  assert.equal((builtinHtml.match(/>开始使用<\/button>/g)||[]).length,2,'native bundled modes do not depend on custom installer availability')
+  assert.equal((builtinHtml.match(/>开始定制<\/button>/g)||[]).length,1)
   assert(!builtinHtml.includes('安装教师助理'));assert(!builtinHtml.includes('安装项目助理'));assert(!builtinHtml.includes('安装定制助手'))
+})
+
+test('start is a real native action after a fresh readiness check, never an install or prompt',async()=>{
+  const calls=[],item={presetId:'harness-teacher',state:'installed',nativeState:'installed'}
+  const store=new AssistantStore(async method=>{calls.push(method);return {...catalog,drafts:[item]}},async(id,signal)=>calls.push(['open',id,signal]))
+  const lifetime=new AbortController();await store.start('harness-teacher',lifetime.signal)
+  assert.deepEqual(calls,['assistantCatalog',['open','harness-teacher',lifetime.signal]])
+  item.nativeState='disabled';await store.start('harness-teacher')
+  assert.equal(calls.filter(c=>Array.isArray(c)).length,1);assert.match(store.getSnapshot().error,/已停用/)
+})
+
+test('aborted or replaced owner prevents a late catalog from opening a session',async()=>{
+  for(const action of ['abort','reset','dispose']){
+    const gate=deferred(),lifetime=new AbortController();let opens=0
+    const store=new AssistantStore(()=>gate.promise,async()=>{opens++})
+    const pending=store.start('harness-teacher',lifetime.signal)
+    if(action==='abort')lifetime.abort();else store[action]()
+    gate.resolve({...catalog,drafts:[{presetId:'harness-teacher',state:'installed'}]});await pending
+    assert.equal(opens,0)
+  }
+})
+
+test('start shortcut stops at workspace selection and cancel never creates a session',async()=>{
+  const opens=[],item={name:'教师助理',presetId:'harness-teacher',state:'installed',nativeState:'installed'}
+  const choices={items:[{id:'workspace_a',name:'语文班',path:'C:/class-a'},{id:'workspace_b',name:'英语班',path:'C:/class-b'}],preferredId:'workspace_a'}
+  const store=new AssistantStore(async()=>({...catalog,drafts:[item]}),async(...args)=>opens.push(args),{list:()=>choices,pick:async()=>undefined})
+  await store.prepareStart('harness-teacher');assert.equal(opens.length,0)
+  assert.equal(store.getSnapshot().launch.selectedId,'workspace_a')
+  await store.pickWorkspace();assert.equal(opens.length,0)
+  store.dismissStart();await store.confirmStart();assert.equal(opens.length,0)
+  await store.prepareStart('harness-teacher');store.selectWorkspace('workspace_b');await store.confirmStart()
+  assert.deepEqual(opens,[['harness-teacher',undefined,'workspace_b']]);assert.equal(store.getSnapshot().launch,null)
+})
+
+test('workspace selector resets with connection, and selecting a folder does not open a session',async()=>{
+  const choices={items:[{id:'new',name:'New',path:'C:/new'}],preferredId:''};let opens=0
+  const store=new AssistantStore(async()=>({...catalog,drafts:[{name:'定制助手',presetId:'harness-customizer',state:'installed'}]}),async()=>{opens++},{list:()=>choices,pick:async()=> 'new'})
+  await store.prepareStart('harness-customizer');await store.pickWorkspace();assert.equal(opens,0)
+  assert.equal(store.getSnapshot().launch.selectedId,'new');store.reset();await store.confirmStart();assert.equal(opens,0)
 })

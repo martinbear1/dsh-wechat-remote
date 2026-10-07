@@ -1,0 +1,69 @@
+/** Isolated browser QA of our actual panel/store and the published native Modal.
+ * No DSH profile, real workspace, model call, package install or network write. */
+import assert from 'node:assert/strict'
+import fs from 'node:fs/promises'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { createRequire } from 'node:module'
+import { build } from 'esbuild'
+
+const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..')
+const out=path.join(root,'artifacts/assistant-entry-ui')
+const require=createRequire(import.meta.url)
+const {chromium}=require(require.resolve('playwright',{paths:[process.env.NODE_PATH || root]}))
+await fs.mkdir(out,{recursive:true})
+const result=await build({stdin:{contents:`
+import React from 'react'; import {createRoot} from 'react-dom/client';
+import {AssistantPresetsPanel} from './src/client/AssistantPresetsPanel.tsx';
+import {AssistantStore} from './src/client/assistant-store.ts';
+const templates=[['teacher','教师助理','备课、布置与整理作业'],['project','项目助理','规划项目、跟进协作'],['designer','定制助手','设计工作方式']].map(([id,name,description])=>({id,name,description,builtin:{}}));
+const catalog={schema:'human.assistants.catalog.v1',nodeId:'visual',native:{supported:true},templates,drafts:templates.map(t=>({id:t.id,name:t.name,templateId:t.id,presetId:'harness-'+t.id,source:'builtin',state:'installed',nativeState:'installed'}))};
+const choices={items:[{id:'workspace_a',name:'语文班',path:'C:/Classes/Chinese'},{id:'workspace_b',name:'英语班',path:'C:/Classes/English'}],preferredId:'workspace_a'};
+window.opens=[]; window.picks=0;
+window.store=new AssistantStore(async method=>{if(method!=='assistantCatalog')throw Error('unexpected mutation '+method);return catalog},async(presetId,signal,workspaceId)=>window.opens.push({presetId,workspaceId}),{list:()=>choices,pick:async()=>{window.picks++;return undefined}});
+window.disableTeacher=()=>{catalog.drafts[0].nativeState='disabled';return window.store.load()};
+createRoot(document.querySelector('#root')).render(<AssistantPresetsPanel store={window.store}/>);
+`,resolveDir:root,loader:'tsx'},bundle:true,write:false,outfile:path.join(out,'preview.js'),format:'iife',platform:'browser',jsx:'automatic',
+  define:{'process.env.NODE_ENV':'"production"'},loader:{'.woff':'dataurl','.woff2':'dataurl','.ttf':'dataurl'},
+  plugins:[{name:'native-css-modules',setup(api){api.onLoad({filter:/\.module\.css$/},async({path:file})=>({contents:await fs.readFile(file,'utf8'),loader:'local-css'}))}}]})
+const js=result.outputFiles.find(f=>f.path.endsWith('.js')).text,css=result.outputFiles.find(f=>f.path.endsWith('.css')).text
+const browser=await chromium.launch({channel:'msedge',headless:true})
+const metrics=[]
+try{
+  for(const width of [360,820])for(const dark of [false,true]){
+    const page=await browser.newPage({viewport:{width,height:850},colorScheme:dark?'dark':'light'})
+    const errors=[];page.on('pageerror',e=>errors.push(e.message));await page.route('**/*',route=>route.abort())
+    const theme=`:root{color-scheme:${dark?'dark':'light'};--dsw-alias-label-primary:${dark?'#edf1f7':'#171a20'};--dsw-alias-label-secondary:${dark?'#b4becc':'#647084'};--dsw-alias-label-tertiary:${dark?'#9da8b8':'#8490a2'};--dsw-alias-bg-layer-1:${dark?'#242832':'#f5f6f8'};--dsw-alias-bg-layer-2:${dark?'#242832':'#fff'};--dsw-alias-bg-layer-3:${dark?'#20242c':'#fff'};--dsw-alias-border-l2:${dark?'#454b58':'#e2e6ee'};--dsw-alias-border-inverted:#9993;--dsw-alias-bg-mask-1:#0004;--dsw-mask-blur:blur(2px);--dsw-shadow-lv3:0 12px 48px #0003}*{box-sizing:border-box}body{margin:0;padding:20px;font:13px/1.5 'Microsoft YaHei',sans-serif;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1)}#root{max-width:760px;margin:auto}button{font-family:inherit}`
+    await page.setContent(`<style>${theme}\n${css}</style><div id="root"></div>`);await page.addScriptTag({content:js})
+    await page.getByRole('button',{name:'开始使用',exact:true}).first().waitFor()
+    const panel=page.getByRole('region',{name:'微信群协作助手'}),size=await panel.boundingBox()
+    assert(size.height<330,'compact panel, not a full page of explanation')
+    assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth))
+    await page.screenshot({path:path.join(out,`panel-${width}-${dark?'dark':'light'}.png`)})
+    await page.getByRole('button',{name:'开始使用',exact:true}).first().click()
+    const dialog=page.getByRole('dialog',{name:'选择工作区'})
+    await dialog.waitFor();assert.deepEqual(await page.evaluate(()=>window.opens),[])
+    assert.equal(await page.getByLabel('工作区',{exact:true}).inputValue(),'workspace_a')
+    await page.getByLabel('工作区',{exact:true}).selectOption('workspace_b')
+    await page.screenshot({path:path.join(out,`workspace-${width}-${dark?'dark':'light'}.png`)})
+    assert(await dialog.evaluate(el=>el.scrollWidth<=el.clientWidth),'native dialog has no horizontal overflow')
+    await dialog.getByRole('button',{name:'取消',exact:true}).click();assert.deepEqual(await page.evaluate(()=>window.opens),[])
+    await page.getByRole('button',{name:'开始使用',exact:true}).first().click()
+    await page.getByLabel('工作区',{exact:true}).selectOption('workspace_b')
+    await dialog.getByRole('button',{name:'开始会话',exact:true}).click()
+    await dialog.waitFor({state:'hidden'})
+    assert.deepEqual(await page.evaluate(()=>window.opens),[{presetId:'harness-teacher',workspaceId:'workspace_b'}])
+    await page.getByRole('button',{name:'开始定制',exact:true}).click();await dialog.waitFor()
+    assert((await dialog.innerText()).includes('定制助手'))
+    await dialog.getByRole('button',{name:'选择其他文件夹…',exact:true}).click()
+    assert.equal(await page.evaluate(()=>window.picks),1);assert.equal((await page.evaluate(()=>window.opens)).length,1)
+    await page.keyboard.press('Escape');await dialog.waitFor({state:'hidden'})
+    await page.evaluate(()=>window.disableTeacher())
+    assert(await page.getByRole('button',{name:'开始使用',exact:true}).first().isDisabled())
+    assert.deepEqual(errors,[])
+    metrics.push({width,dark,panelHeight:size.height,checks:'real panel/store/native Modal; selection/cancel/confirm/customizer/disabled'})
+    await page.close()
+  }
+}finally{await browser.close()}
+await fs.writeFile(path.join(out,'results.json'),JSON.stringify({scope:'isolated browser, not live DSH',metrics},null,2))
+console.log(JSON.stringify(metrics))

@@ -886,7 +886,7 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
             if (!publicRelayGateway) throw new Error('Node unavailable')
             return publicRelayGateway.agent.identity
           })
-        const privateInput = new PrivateInputNative(ctx, transport.nodeId, () => transport.assertIdentity())
+        const privateInput = new PrivateInputNative(ctx, transport.nodeId, () => transport.assertIdentity(), Date.now, { transport })
         compatibilityApi.privateInput = privateInput
         ctx.effect(() => () => { privateInput.close(); if (compatibilityApi.privateInput === privateInput) compatibilityApi.privateInput = undefined })
         mountChild('human-tools', HumanToolsService, { enabled: true, privateInput, workflow: {

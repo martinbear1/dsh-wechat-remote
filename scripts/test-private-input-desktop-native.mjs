@@ -70,17 +70,43 @@ try {
   const controller = new SessionController(ctx)
   const agent = await loop.create('private-modern-native', model, { cwd: work })
   const nodeId = 'modern_fixture', content = [{ type: 'text', text: '把这份私人评语更新给他，不用再问我。' }]
-  bridge = new PrivateInputNative(ctx, nodeId, () => {})
+  let now = Date.now(), activeV2 = false, timerId = 0
+  const timers = new Map(), runRequests = [], cloudRuns = new Map()
+  const transport = { nodeId, assertIdentity() {}, async request(route, body) {
+    assert.equal(route, 'lifecycle'); runRequests.push(structuredClone(body))
+    let run = cloudRuns.get(body.runId)
+    if (body.operation === 'private-input-end') run = { state: 'ended', leaseExpiresAt: null }
+    else {
+      assert.notEqual(run?.state, 'ended')
+      if (run) assert(run.leaseExpiresAt > now)
+      run = { state: 'active', leaseExpiresAt: now + 120000 }
+    }
+    cloudRuns.set(body.runId, run)
+    return { ok: true, schema: 'human.owner.input.run.v1', ...run, runId: body.runId, inputId: body.inputId,
+      nativeMessageId: body.nativeMessageId, scope: body.scope, sessionGeneration: body.sessionGeneration }
+  } }
+  bridge = new PrivateInputNative(ctx, nodeId, () => {}, () => now, { transport, schedule(callback, ms) {
+    const id = ++timerId; timers.set(id, { at: now + ms, callback }); return () => timers.delete(id)
+  } })
   assert.equal(bridge.supported(), true, JSON.stringify({ version: JSON.parse(fs.readFileSync(profile.installAnchor, 'utf8')).version,
     agents: typeof ctx.get('agents')?.get, sessions: typeof ctx.get('sessions')?.get, controller: typeof ctx.get('sessionController')?.inspect, tools: typeof ctx.get('tools')?.guard }))
   const described = await bridge.describe({ sessionId: agent.id }, new AbortController().signal)
   assert.equal(described.sessionGeneration, String(agent.session.header.createdAt))
+  assert.deepEqual(described.inputProofVersions, [1, 2])
   // Exercise the modern runtime-context append rather than deleting it from
   // the fixture to make the bridge pass.
   ctx.systemPrompt.context({ name: 'fixture-context', order: 1, text: () => '测试用运行时上下文；不是用户输入。' })
   ctx.tools.register({ name: 'fixture_private_prepare', description: 'same-turn draft preparation', parameters: { type: 'object', properties: {} },
     output: { schema: { type: 'object' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
-    async execute() { prepared++; return { draftRef: 'fixture-only-draft', notPublished: true } } })
+    async execute() {
+      prepared++
+      if (activeV2) for (let i = 0; i < 25; i++) {
+        now += 30000
+        for (const [id, timer] of timers) if (timer.at <= now) { timers.delete(id); timer.callback() }
+        await new Promise(resolve => setImmediate(resolve))
+      }
+      return { draftRef: 'fixture-only-draft', notPublished: true }
+    } })
   ctx.tools.register({ name: 'fixture_private_publish', description: 'native bridge fixture tool', parameters: { type: 'object', properties: {} },
     output: { schema: { type: 'object' }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
     async execute(_args, exec) {
@@ -114,7 +140,26 @@ try {
   await controller.prompt({ sessionId: agent.id, mode: 'queue', content, requestId: 'without-owner-proof' }, new AbortController().signal)
   await agent.whenIdle(); assert.equal(published, 1)
   assert.equal(prepared, 2, 'uncredentialed conversation can still prepare drafts')
-  console.log(JSON.stringify({ nativeVersion: JSON.parse(fs.readFileSync(profile.installAnchor, 'utf8')).version, checks: 'modern SessionController → AgentLoop → runtime-context → same-turn prepare and publish → ToolRuntime; uncredentialed next turn denied', passed: true }))
+  activeV2 = true
+  const proofV2 = { ...proof, schema: 'human.owner.input.v2', inputId: 'desktop-input-v2', admissionExpiresAt: now + 600000 }
+  delete proofV2.expiresAt
+  const v2Reply = await compat.request({ method: 'POST', path: '/api/session.prompt', body: Buffer.from(JSON.stringify({ type: 'client-request', rpcId: 'desktop-fixture-v2', method: 'session.prompt',
+    payload: { sessionId: agent.id, mode: 'queue', content, ownerInput: proofV2 } })), signal: new AbortController().signal })
+  assert.equal(v2Reply.statusCode, 200)
+  await agent.whenIdle()
+  assert.equal(published, 2, JSON.stringify(agent.session.snapshotEvents().filter(event => ['tool/result', 'turn/end'].includes(event.type))))
+  assert.equal(prepared, 3); assert.equal(calls, 9)
+  assert(now > proofV2.admissionExpiresAt, 'actual native turn lasts beyond initial admission window with a controlled test clock')
+  assert.match(authority.runId, /^[a-f0-9]{32}$/)
+  assert.equal(runRequests.filter(r => r.operation === 'private-input-claim').length, 1)
+  assert.equal(runRequests.filter(r => r.operation === 'private-input-renew').length, 25)
+  assert.equal(cloudRuns.get(authority.runId).state, 'ended')
+  assert.equal(timers.size, 0)
+  assert.throws(authority.assertCurrent)
+  assert(!JSON.stringify(agent.session.snapshotEvents()).includes(proofV2.inputProof))
+  assert(!JSON.stringify(agent.session.snapshotEvents()).includes(authority.runId))
+  console.log(JSON.stringify({ nativeVersion: JSON.parse(fs.readFileSync(profile.installAnchor, 'utf8')).version,
+    checks: 'modern SessionController → AgentLoop → runtime-context → same-turn prepare and publish → ToolRuntime; v1 compatible, uncredentialed turn denied; v2 current native turn renews >10min and ends without leakage (controlled cloud/clock, no live model)', passed: true }))
 } finally {
   compat?.dispose(); bridge?.close(); await ctx?.fiber.dispose(); fs.closeSync(fd)
   assert(path.resolve(work).startsWith(path.resolve(os.tmpdir()) + path.sep)); fs.rmSync(work, { recursive: true, force: true })

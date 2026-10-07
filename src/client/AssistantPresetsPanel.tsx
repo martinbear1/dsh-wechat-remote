@@ -1,4 +1,5 @@
-import { useEffect, useState, useSyncExternalStore } from 'react'
+import { useEffect, useRef, useSyncExternalStore } from 'react'
+import { Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { AssistantStore } from './assistant-store.js'
 import styles from './HarnessRemoteSettings.module.css'
 
@@ -10,30 +11,38 @@ const stateLabel = (item: any) => available(item) ? '已安装' : item.state ===
 /** Display aliases never rename an approved native preset or create a new ID. */
 const displayName = (item: any) => item.templateId === 'designer' || item.id === 'designer' ? '定制我的助手' : item.name
 
-/** Registered inside the official Settings slot. The verified native new-session
- * picker remains the entry to work; this panel only manages assistant modes. */
+function Help({ label, children }: { label: string; children: string }): JSX.Element {
+  return <span className={styles.assistantHelpAnchor}><button type="button" className={styles.assistantHelpButton}
+    aria-label={label} title={children}>?</button><span className={styles.assistantTooltip} role="tooltip">{children}</span></span>
+}
+
+/** Native-mode shortcuts, not a second conversation or preset implementation. */
 export function AssistantPresetsPanel({ store }: { store: AssistantStore }): JSX.Element {
-  const { catalog, preview, busy, message, error } = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
-  const [help, setHelp] = useState('')
-  useEffect(() => { void store.load() }, [store])
+  const { catalog, preview, busy, message, error, launch } = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
+  const lifetime = useRef<AbortController>()
+  useEffect(() => { const controller = new AbortController(); lifetime.current = controller; void store.load(); return () => controller.abort() }, [store])
   const drafts = catalog?.drafts || []
   const active = drafts.filter((item: any) => available(item) && !item.replacement)
   const pending = drafts.filter((item: any) => item.state === 'draft')
   const history = drafts.filter((item: any) => item.source !== 'builtin' && item.state !== 'draft' && (!available(item) || item.replacement))
   const templates = catalog?.templates || []
   const installedFor = (id: string) => active.find((item: any) => item.templateId === id)
-  const use = (item: any) => setHelp(`新建会话时，在模式中选择「${item.name}」，再告诉它你想做什么。已有会话不会自动切换。`)
+  const use = (item: any) => void store.prepareStart(item.presetId, lifetime.current?.signal)
+  const instructions = (item: any) => item.id === 'designer' || item.templateId === 'designer'
+    ? '先打开定制会话，说清职业和工作习惯；助手会设计可复用的模式。确认安装后，再用新模式开启工作会话。不会自动安装或发送消息。'
+    : `先选工作区，再用「${item.name}」开始空白会话。手机连接此电脑后可继续该会话；发卡与提醒需在小程序设置中开启「微信群协作助手」。`
   const template = (item: any) => {
     const installed = installedFor(item.id)
     const included = item.builtin
+    const current = drafts.find((entry: any) => entry.templateId === item.id && entry.source === 'builtin')
     return <article className={styles.assistantChoice} key={item.id} data-installed={Boolean(installed)}>
-      <div className={styles.assistantChoiceHead}><strong>{displayName(item)}</strong>
-        {installed ? <span className={styles.assistantStatus}>{included ? '已内置' : '已安装'}</span> : included ? <span>待就绪</span> : null}</div>
-      <p>{item.description}</p>
-      {included && !installed ? <p>{included.reason || '内置助手尚未就绪，请刷新状态。'}</p> : null}
-      <button type="button" className={installed ? styles.assistantSecondary : styles.assistantPrimary} disabled={busy}
+      <div className={styles.assistantChoiceCopy}><div className={styles.assistantChoiceHead}><strong>{displayName(item)}</strong>
+        <Help label={`${displayName(item)}使用说明`}>{instructions(item)}</Help></div>
+      <p>{item.id === 'designer' ? '用对话设计适合自己职业的助手模式' : item.description}</p></div>
+      {!installed && included ? <span className={styles.assistantUnavailable} title={current?.reason || included.reason}>{current?.nativeState === 'disabled' ? '已停用' : '待就绪'}</span> : null}
+      <button type="button" className={styles.secondaryButton} disabled={busy || Boolean(included && !installed)}
         onClick={() => installed ? use(installed) : included ? void store.load() : void store.choose(item.id)}>
-        {installed ? '怎么开始使用' : included ? '刷新状态' : item.id === 'designer' ? '安装定制助手' : `安装${item.name}`}
+        {installed ? item.id === 'designer' ? '开始定制' : '开始使用' : included ? '开始使用' : '安装'}
       </button>
     </article>
   }
@@ -42,25 +51,24 @@ export function AssistantPresetsPanel({ store }: { store: AssistantStore }): JSX
     {item.replacement ? <div><p>已提供内置「{item.replacement.name}」，无需再装同款独立包。</p>
       <p>{item.replacement.warning}</p>
       {item.replacement.canRemoveAfterReview ? <p>核对旧会话后，可在 DSH 插件列表卸载：<code>{item.replacement.bundleName}</code></p> : null}</div> : null}
-    {available(item) ? <button type="button" className={styles.assistantSecondary} disabled={busy} onClick={() => use(item)}>怎么开始使用</button>
+    {available(item) ? <button type="button" className={styles.assistantSecondary} disabled={busy} onClick={() => use(item)}>开始使用</button>
       : item.state === 'draft' ? <button type="button" className={styles.assistantPrimary} disabled={busy} onClick={() => void store.preview(item.id, item.version)}>查看并安装</button>
         : <><button type="button" className={styles.assistantSecondary} disabled={busy} onClick={() => void store.verify(item.id, item.version)}>刷新状态</button>
           {item.nativeState === 'uninstalled' && !item.replacement ? <button type="button" className={styles.assistantSecondary} disabled={busy} onClick={() => void store.reinstall(item.id, item.version)}>查看并重新安装</button> : null}</>}
     {!available(item) && item.reason ? <details className={styles.assistantDetails}><summary>状态说明</summary><p>{item.reason}</p></details> : null}
   </div>
-  return <section className={styles.assistantsCard} aria-label="工作助手" aria-busy={busy}>
-    <div className={styles.assistantsHeading}><div><h3>工作助手</h3><p>{templates.some((item: any) => item.builtin) ? '助手已包含在插件里，新建会话时选择即可。' : '选一个助手，安装后用对话开始工作。'}</p></div>
+  return <section className={styles.assistantsCard} aria-label="微信群协作助手" aria-busy={busy}>
+    <div className={styles.assistantsHeading}><div className={styles.assistantChoiceHead}><h3>微信群协作助手</h3>
+      <Help label="电脑助手与手机群协作">{'电脑助手可独立使用，组件开关由 DSH 管理。手机发任务和提醒，需在小程序「设置 → 实验性功能」开启「微信群协作助手」。各手机独立设置，不会关闭电脑助手或已发布任务。'}</Help></div>
       <button type="button" className={styles.assistantTextButton} disabled={busy} onClick={() => void store.load()}>{busy ? '读取中…' : '刷新'}</button></div>
     {!catalog && !error ? <p role="status">正在读取当前电脑的助手…</p> : null}
     {catalog && !catalog.native?.supported ? <p role="status">{catalog.native?.reason || '当前 DSH 暂不支持安装助手，请先检查版本。'}</p> : null}
     {catalog && (catalog.native?.supported || templates.some((item: any) => item.builtin)) ? <>
       <div className={styles.assistantChoices}>{templates.filter((item: any) => ['teacher', 'project'].includes(item.id)).map(template)}</div>
       {templates.some((item: any) => item.id === 'designer') ? <div className={styles.assistantCustomize}>
-        <h4>需要其他职业的助手？</h4><p>用对话定制工作方式，不需要编程。</p>
         {templates.filter((item: any) => item.id === 'designer').map(template)}
       </div> : null}
     </> : null}
-    {help ? <p className={styles.assistantHelp} role="status">{help}</p> : null}
     {preview ? <div className={styles.assistantPreview} aria-label="安装助手预览">
       <h4>安装「{preview.definition.name}」</h4><p>{preview.definition.description}</p>
       <p>新增一个可选的助手模式，不改默认模式、已有会话和资料。</p>
@@ -86,5 +94,21 @@ export function AssistantPresetsPanel({ store }: { store: AssistantStore }): JSX
     </details> : null}
     {message ? <p role="status">{message}</p> : null}
     {error ? <p role="alert">{error}</p> : null}
+    {launch ? <Modal open title="选择工作区" closeLabel="取消新会话" onClose={() => store.dismissStart()}>
+      <div className={styles.assistantLaunch} aria-busy={busy}>
+        <p>助手模式：<strong>{launch.name}</strong></p>
+        <label htmlFor="assistant-workspace">工作区</label>
+        <select id="assistant-workspace" value={launch.selectedId} disabled={busy} onChange={event => store.selectWorkspace(event.target.value)}>
+          {!launch.selectedId ? <option value="">请选择工作区</option> : null}
+          {launch.choices.items.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
+        </select>
+        {launch.choices.items.find(item => item.id === launch.selectedId)?.path ? <p className={styles.assistantWorkspacePath}>{launch.choices.items.find(item => item.id === launch.selectedId)?.path}</p> : null}
+        <button type="button" className={styles.assistantTextButton} disabled={busy} onClick={() => void store.pickWorkspace(lifetime.current?.signal)}>选择其他文件夹…</button>
+        <p>确认后才创建空白会话，不会自动发送消息。</p>
+        {error ? <p role="alert">{error}</p> : null}
+        <div className={styles.assistantButtons}><button type="button" className={styles.primaryButton} disabled={busy || !launch.selectedId} onClick={() => void store.confirmStart(lifetime.current?.signal)}>{busy ? '正在准备…' : '开始会话'}</button>
+          <button type="button" className={styles.secondaryButton} disabled={busy} onClick={() => store.dismissStart()}>取消</button></div>
+      </div>
+    </Modal> : null}
   </section>
 }

@@ -24,6 +24,7 @@ import {
   type HarnessRemoteHostDescription,
 } from './HarnessRemoteSettings.tsx'
 import { AssistantStore } from './assistant-store.js'
+import { nativeAssistantNavigation } from './assistant-navigation.js'
 
 /** Required services for the slot registration. */
 export const inject = ['slots', 'connection']
@@ -77,9 +78,22 @@ export function apply(ctx: HarnessRemoteClientContext): void {
       throw new Error(result?.error?.message || '此节点尚未提供助手能力')
     return JSON.parse(result.valueJson)
   }
-  const assistants = new AssistantStore(assistantCall)
+  let assistantNavigation: ReturnType<typeof nativeAssistantNavigation> | undefined
+  const assistants = new AssistantStore(assistantCall, async (presetId, signal, workspaceId) => {
+    if (!assistantNavigation) throw new Error('原生会话入口尚未就绪，请稍后再试。')
+    if (!workspaceId) throw new Error('请先选择工作区。')
+    await assistantNavigation.start(presetId, signal, true, workspaceId)
+  }, {
+    list: () => { if (!assistantNavigation) throw new Error('原生工作区入口尚未就绪'); return assistantNavigation.workspaces() },
+    pick: async signal => { if (!assistantNavigation) throw new Error('原生工作区入口尚未就绪'); return assistantNavigation.pickWorkspace(signal) },
+  })
+  ctx.inject(['remote.session', 'sessions', 'uiWorkspace', 'layout', 'workspaces', 'configForms'], scope => {
+    const navigation = nativeAssistantNavigation(name => scope.get(name), assistantCall)
+    assistantNavigation = navigation
+    scope.effect(() => () => { navigation.reset(); if (assistantNavigation === navigation) assistantNavigation = undefined }, 'wechat assistant navigation')
+  })
   ctx.effect(() => {
-    const remove = ctx.on('connection/reset', () => { connectionGeneration++; assistants.reset() })
+    const remove = ctx.on('connection/reset', () => { connectionGeneration++; assistantNavigation?.reset(); assistants.reset() })
     return () => { connectionGeneration++; remove(); assistants.dispose() }
   }, 'wechat assistant lifecycle')
   ctx.effect(() => () => store.dispose(), 'wechat shared page')

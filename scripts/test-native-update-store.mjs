@@ -24,11 +24,15 @@ test('pending native installation overrides stale update advice on both shared v
   } })
   for (const phase of ['installing', 'restart-required', 'unknown']) {
     const value = { check: { ...check(), advice: { label: '插件可更新', current: {}, targetVersion: '1.7.13', checkedAt: Date.now() } }, status: { phase, targetVersion: '1.7.13', message: phase } }
-    const tree = JSON.stringify(module.exports.NativeUpdateCard({ store: { getSnapshot: () => value } }))
+    const rendered = module.exports.NativeUpdateCard({ store: { getSnapshot: () => value } })
+    const tree = JSON.stringify(rendered)
     assert(!tree.includes('插件可更新'), 'pending state must not show stale advice')
     assert(!tree.includes('可更新至'), 'already installed is not an available-update state')
     assert(!tree.includes('"children":"更新 Desktop 插件"'), 'pending job must not offer another install')
-    if (phase === 'restart-required') assert(tree.includes('待重新打开 Desktop'))
+    if (phase === 'restart-required') {
+      assert(tree.includes('待重新打开 Desktop'))
+      assert(tree.includes('"data-severity":"info"'), 'restart-required is not a green success state')
+    }
   }
 })
 test('two visible pages share one read and submission, preserve progress across unmount/remount', async () => {

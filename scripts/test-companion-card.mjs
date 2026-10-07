@@ -60,3 +60,51 @@ test('the same confirmation names its destination without reversing direction on
     assert(rows.includes('Desktop 插件可更新'))
   }
 })
+
+const text = tree => flatten(tree).filter(n => typeof n === 'string').join(' ')
+test('compact peer row is named explicitly; an inbound offer still updates its real destination', () => {
+  for (const current of ['desktop', 'web']) {
+    const value = { state: 'confirmation-required', message: 'Desktop 插件从 1.7.10 更新至 1.7.12。', offerId: 'offer',
+      target: { scope: 'desktop', fromVersion: '1.7.10', version: '1.7.12' },
+      versions: { current, running: '1.7.12', installed: '1.7.12', peer: current === 'web' ? 'desktop' : 'web', peerInstalled: '1.7.10' } }
+    const rendered = card({ value, compact: true, onDecide() {} }), rows = flatten(rendered)
+    assert(text(rendered).includes(current === 'web' ? 'Desktop' : 'Web'))
+    assert(text(rendered).includes('同一主机'))
+    assert(rows.some(n => n?.type === 'button' && n.props.children === '确认更新 Desktop'))
+    assert.match(text(rendered), /Desktop\s+可更新至/)
+    assert(text(rendered).includes('连接会短暂中断'))
+    assert(!text(rendered).includes('DSH'), 'installed peer data does not prove its host or running version')
+  }
+})
+
+test('compact absent, idle, offline and stale peers never imply current runtime or an available update', () => {
+  const absent = card({ value: { state: 'idle', message: '', versions: { current: 'desktop', running: '1.7.12', installed: '1.7.12', peer: 'web', peerInstalled: null } }, compact: true })
+  assert.match(text(absent), /未检测到可同步更新的另一端/)
+  assert(!flatten(absent).some(n => n?.type === 'button'))
+  for (const state of ['idle', 'unavailable', 'unverified', 'restart-required', 'self-restart-required']) {
+    const rendered = card({ value: { state, message: '请核对该端状态。', versions: { current: 'desktop', running: '1.7.12', installed: '1.7.12', peer: 'web', peerInstalled: '1.7.10' } }, compact: true })
+    assert.match(text(rendered), /已安装 1.7.10/)
+    assert(!text(rendered).includes('已对齐'))
+    assert(!text(rendered).includes('最新'))
+    assert(!flatten(rendered).some(n => n?.type === 'button'))
+  }
+})
+
+test('compact progress and errors retain authoritative detail without offering another install', () => {
+  for (const state of ['pending', 'busy', 'preparing', 'installing', 'verifying', 'recovering', 'restart-required', 'unavailable', 'complete']) {
+    const rendered = card({ value: { state, message: 'Web: exact reason', target: { scope: 'web', fromVersion: '1.7.10', version: '1.7.12' },
+      versions: { current: 'desktop', running: '1.7.12', installed: '1.7.12', peer: 'web', peerInstalled: '1.7.10' } }, compact: true })
+    const rows = flatten(rendered)
+    assert(rows.some(n => n?.type === 'details'))
+    assert.match(text(rendered), /exact reason/)
+    assert(!rows.some(n => n?.type === 'button'))
+    assert.equal(rows.some(n => n?.type === 'progress'), ['preparing', 'installing', 'verifying', 'recovering'].includes(state))
+  }
+})
+
+test('older server without display metadata retains exact message and a neutral confirmation', () => {
+  const rendered = card({ value: { state: 'confirmation-required', message: 'Desktop 1.7.10 → 1.7.12', offerId: 'old' }, compact: true, onDecide() {} })
+  assert.match(text(rendered), /Desktop 1.7.10 → 1.7.12/)
+  assert(flatten(rendered).some(n => n?.type === 'button' && n.props.children === '确认更新指定端'))
+  assert(!text(rendered).includes('确认更新 Web'))
+})

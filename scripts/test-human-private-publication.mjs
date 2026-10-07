@@ -63,6 +63,22 @@ test('private review and targeted round publish exact effects without leaking ru
   }
 })
 
+test('v2 forwards only native-derived run binding without persisting or exposing it; v1 remains unchanged', async t => {
+  for (const runId of [undefined, 'a'.repeat(32)]) {
+    const f = await fixture(t), authority = { ...input(), ...(runId ? { runId } : {}) }
+    const result = await f.lifecycle.publishPrivate(scope, taskRef, f.draft.draftRef, authority, signal)
+    assert.equal(f.writes[0].input.runId, runId)
+    assert.equal(Object.hasOwn(f.writes[0].input, 'runId'), runId !== undefined)
+    assert(!JSON.stringify(result).includes('runId'))
+    assert(!JSON.stringify(f.store.value).includes('runId'))
+  }
+  for (const runId of ['', 'wrong', 'a'.repeat(31), 'a'.repeat(33), { value: 'a'.repeat(32) }]) {
+    const f = await fixture(t)
+    await assert.rejects(f.lifecycle.publishPrivate(scope, taskRef, f.draft.draftRef, { ...input(), runId }, signal), { code: 'private-input-required' })
+    assert.equal(f.requests.length, 0)
+  }
+})
+
 test('missing proof and foreign session fail before any private write; shared workspace never grants write scope', async t => {
   let sharedReads = 0
   const f = await fixture(t, { workspaceAccess: async () => { sharedReads++; return { sourceScope: { ...scope, sessionId: 'foreign' }, workspaceRef: {} } } })
@@ -121,7 +137,8 @@ test('concurrent identical draft requests write at most once', async t => {
 })
 
 test('structured definitive refusal allows only a new real input after an exact fresh query, never automatic retry', async t => {
-  for (const [code, status] of [['private_updates_disabled', 403], ['private_input_expired', 410], ['lifecycle_conflict', 409], ['private_update_capacity', 429]]) {
+  for (const [code, status] of [['private_updates_disabled', 403], ['private_input_expired', 410], ['lifecycle_conflict', 409], ['private_update_capacity', 429],
+    ['invalid_private_run', 409], ['private_run_conflict', 409], ['private_run_expired', 410]]) {
     const f = await fixture(t, { mutate: async () => { throw Object.assign(new Error(code), { code, status }) } }), ref = f.draft.draftRef
     await assert.rejects(f.lifecycle.publishPrivate(scope, taskRef, ref, input(), signal), { code })
     assert.equal(f.store.value.publications[0].state, 'rejected')
@@ -149,7 +166,7 @@ test('publication tool closes model arguments and never accepts a model approval
   const tools = lifecycleTools({ nodeId: scope.nodeId, lifecycle: f.lifecycle, core: {}, assertAgent() {}, ownerInput: async () => { callbacks++; return input() } })
   const tool = tools.find(t => t.name === 'human_task_publish_private')
   assertSupportedJsonSchema(tool.parameters)
-  for (const key of ['approved', 'inputProof', 'inputId', 'nativeMessageId', 'scope', 'workspaceRef'])
+  for (const key of ['approved', 'inputProof', 'inputId', 'nativeMessageId', 'runId', 'scope', 'workspaceRef'])
     await assert.rejects(tool.execute({ taskRef, draftRef: f.draft.draftRef, [key]: true }, e), { code: 'lifecycle-arguments-invalid' })
   assert.equal(callbacks, 0)
   const absent = lifecycleTools({ nodeId: scope.nodeId, lifecycle: f.lifecycle, core: {}, assertAgent() {} }).find(t => t.name === tool.name)

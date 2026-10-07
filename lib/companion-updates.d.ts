@@ -16,6 +16,11 @@ export type CompanionResult = {
     state: 'idle' | 'confirmation-required' | 'deferred' | 'pending' | 'busy' | 'preparing' | 'installing' | 'verifying' | 'recovering' | 'restart-required' | 'self-restart-required' | 'complete' | 'unavailable';
     message: string;
     offerId?: string;
+    target?: {
+        scope: Scope;
+        fromVersion: string;
+        version: string;
+    };
     versions?: {
         current: Scope;
         running: string;

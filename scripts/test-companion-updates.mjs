@@ -56,10 +56,13 @@ test('CLI enriches an unapproved npm-only offer without inheriting stale decisio
   assert.equal(enriched.source, fs.realpathSync(f.source))
   assert.throws(() => decideCompanionOffer(f.home, old, 'approve'), /已变化/)
   const services = { list: async () => assert.fail(), install: async () => assert.fail() }
-  assert.equal((await applyNativeCompanion(f.home, 'desktop', '1.7.10', enriched, services)).state, 'confirmation-required')
+  const notice = await applyNativeCompanion(f.home, 'desktop', '1.7.10', enriched, services)
+  assert.equal(notice.state, 'confirmation-required')
+  assert.deepEqual(notice.target, { scope: 'desktop', fromVersion: '1.7.10', version: next }, 'display destination follows the immutable offer, not the rendering endpoint')
   assert.equal(propose(f.home, 'web', '', next).id, enriched.id, 'late core offer cannot discard local source')
   assert.equal(propose(f.home, 'web', f.source, next).id, enriched.id)
   decideCompanionOffer(f.home, enriched, 'approve')
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(f.home, 'harness-remote/installation-offers/result-desktop.json'), 'utf8')).target, notice.target)
   const calls = [], archive = path.join(f.home, 'immutable.tgz')
   const result = await applyNativeCompanion(f.home, 'desktop', '1.7.10', enriched, {
     list: async () => ({ items: [] }), stage: async (_home, source) => { assert.equal(source, enriched.source); return archive },

@@ -1,20 +1,23 @@
 /** Owner UI state. No raw preset files, installation scripts or model calls. */
 export type AssistantMethod = 'assistantCatalog' | 'assistantDraft' | 'assistantPreview' | 'assistantInstall' | 'assistantStatus' | 'assistantSessionPrepare' | 'assistantSessionStatus'
 export type AssistantCall = (method: AssistantMethod, request: Record<string, unknown>) => Promise<any>
-export interface AssistantUiState { catalog: any; preview: any; busy: boolean; message: string; error: string }
+export interface WorkspaceChoices { items: Array<{ id: string; name: string; path: string }>; preferredId: string }
+interface AssistantLaunch { presetId: string; name: string; choices: WorkspaceChoices; selectedId: string }
+export interface AssistantUiState { catalog: any; preview: any; busy: boolean; message: string; error: string; launch: AssistantLaunch | null }
 export class AssistantStore {
-  private state: AssistantUiState = { catalog: null, preview: null, busy: false, message: '', error: '' }
+  private state: AssistantUiState = { catalog: null, preview: null, busy: false, message: '', error: '', launch: null }
   private listeners = new Set<() => void>()
   private epoch = 0
   private disposed = false
-  constructor(private call: AssistantCall) {}
+  constructor(private call: AssistantCall, private openSession?: (presetId: string, signal?: AbortSignal, workspaceId?: string) => Promise<void>,
+    private workspaceNavigation?: { list(): WorkspaceChoices; pick(signal?: AbortSignal): Promise<string | undefined> }) {}
   getSnapshot = () => this.state
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener) } }
   private set(patch: Partial<AssistantUiState>) {
     if (this.disposed) return
     this.state = { ...this.state, ...patch }; for (const listener of this.listeners) listener()
   }
-  reset = () => { this.epoch++; this.set({ catalog: null, preview: null, busy: false, message: '', error: '' }) }
+  reset = () => { this.epoch++; this.set({ catalog: null, preview: null, busy: false, message: '', error: '', launch: null }) }
   dispose = () => { this.reset(); this.disposed = true; this.listeners.clear() }
   private async run(action: (current: () => boolean) => Promise<void>) {
     if (this.disposed || this.state.busy) return
@@ -35,6 +38,51 @@ export class AssistantStore {
     } catch (error) { if (current()) this.set({ message: '' }); throw error }
   }
   load = () => this.run(current => this.read(current))
+  prepareStart = (presetId: string, signal?: AbortSignal) => this.run(async current => {
+    this.set({ launch: null, message: '' })
+    await this.read(current)
+    if (!current() || signal?.aborted) return
+    const item = this.readyAssistant(presetId)
+    if (!this.workspaceNavigation) throw new Error('原生工作区选择暂不可用，请使用 DSH 新会话入口。')
+    const choices = this.workspaceNavigation.list()
+    this.set({ launch: { presetId, name: item.name, choices, selectedId: choices.preferredId } })
+  })
+  dismissStart = () => { if (!this.state.busy) this.set({ launch: null, error: '' }) }
+  selectWorkspace = (id: string) => {
+    const launch = this.state.launch
+    if (!this.state.busy && launch?.choices.items.some(item => item.id === id)) this.set({ launch: { ...launch, selectedId: id } })
+  }
+  pickWorkspace = (signal?: AbortSignal) => this.run(async current => {
+    const launch = this.state.launch
+    if (!launch || !this.workspaceNavigation || signal?.aborted) return
+    const selectedId = await this.workspaceNavigation.pick(signal)
+    if (!current() || signal?.aborted || !selectedId) return
+    const choices = this.workspaceNavigation.list()
+    if (!choices.items.some(item => item.id === selectedId)) throw new Error('工作区列表尚未更新，请稍后重新打开。')
+    this.set({ launch: { ...launch, choices, selectedId } })
+  })
+  confirmStart = (signal?: AbortSignal) => {
+    const launch = this.state.launch
+    if (!launch?.selectedId) return Promise.resolve()
+    return this.start(launch.presetId, signal, launch.selectedId)
+  }
+  private readyAssistant(presetId: string) {
+    const item = this.state.catalog?.drafts?.find((entry: any) => entry.presetId === presetId)
+    if (!item || item.state !== 'installed' || item.nativeState && item.nativeState !== 'installed')
+      throw new Error('此助手已停用或尚未就绪，请核对下方组件开关。')
+    return item
+  }
+  start = (presetId: string, signal?: AbortSignal, workspaceId?: string) => this.run(async current => {
+    this.set({ message: '' })
+    // Refresh ownership/readiness, rather than trusting an old green label
+    // after the user disabled a native component in another settings panel.
+    await this.read(current)
+    if (!current() || signal?.aborted) return
+    this.readyAssistant(presetId)
+    if (!this.openSession) throw new Error('当前 DSH 未提供快捷入口，请在新会话中选择此助手模式。')
+    await this.openSession(presetId, signal, workspaceId)
+    if (current()) this.set({ launch: null })
+  })
   dismissPreview = () => { if (!this.state.busy) this.set({ preview: null, message: '' }) }
   choose = (templateId: string) => this.run(async current => {
     this.set({ preview: null, message: '' })

@@ -32,6 +32,28 @@ const surface = () => ({ schemaVersion: 1, kind: 'human.surface', id: 'a'.repeat
 const lifecycle = () => lifecycleTools({ nodeId: 'test_node', lifecycle: {}, core: {}, assertAgent: unreachable })
 const includesOnce = (text, part) => { assert(text.includes(part)); assert.equal(text.split(part).length - 1, 1) }
 
+test('every assistant shares revocable session permission and current-turn execution guidance without timed user rituals', () => {
+  for (const text of [ASSISTANT_TOOL_RECOVERY_GUIDANCE, HUMAN_WORKFLOW_SKILL.content]) {
+    assert.match(text, /手动关闭/)
+    assert.match(text, /旧.*限期.*不自动延长|旧版本的限期授权/)
+    assert.match(text, /长推理/)
+    assert.match(text, /停止.*新输入.*撤权/)
+    assert.match(text, /不要求.*定时回复|不需要.*定时回复/)
+    assert(!text.includes('最长7天'))
+    assert.match(text, /允许会话更新群协作页面/)
+  }
+  // Personal data and old approved presets are not rewritten by skill updates.
+  for (const template of assistantTemplates()) {
+    assert(template.definition.skills.includes('human-workflow'))
+  }
+  const tool = lifecycle().find(item => item.name === 'human_task_publish_private')
+  assert.match(tool.description, /允许会话更新群协作页面/)
+  assert.match(tool.description, /until manually disabled/)
+  assert.match(tool.description, /legacy fixed grants keep their original expiry/)
+  assert.match(tool.description, /host maintains the same active native user turn automatically/)
+  assert(!tool.description.includes('up to 7 days'))
+})
+
 test('interaction guidance asks only consequential missing facts and never turns business options into approval', () => {
   const text = ASSISTANT_INTERACTION_GUIDANCE
   assert.match(text, /先利用本会话已确认的资料和工作记忆/)

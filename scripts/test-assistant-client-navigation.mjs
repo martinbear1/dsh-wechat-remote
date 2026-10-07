@@ -23,7 +23,9 @@ async function fixture(t) {
     'remote.session': { create: async request => { calls.push(['create', request]); native.set(request.sessionId, { meta: { id: request.sessionId, agentPreset: request.agentPreset, createdAt: 100, cwd: workspace.path }, events: [] }); workspace.sessionIds.push(request.sessionId); return { ok: true, value: request } } },
     sessions: { refresh: async () => calls.push(['refresh']) }, uiWorkspace: { openSession: id => calls.push(['open', id]) },
     layout: { beginNavigation: () => navigation.signal }, configForms: { developerTools: { enabled: { getSnapshot: () => true } } },
+    workspaces: { list: { getSnapshot: () => ({phase:'ready',items:[{workspaceId:'workspace_a',createdAt:'2026-10-01',...workspace}]}) }, initializeDefault: async () => ({workspaceId:'workspace_a',...workspace}) },
   }
+  services.sessions.list = {getSnapshot:()=>({phase:'ready',byId:{}})}
   const call = (method, request) => method === 'assistantSessionPrepare' ? journal.prepare(request, signal) : journal.status(request, signal)
   let controller = nativeAssistantNavigation(name => services[name], call)
   t.after(async () => { await journal.close(); await rm(directory, { recursive: true, force: true }) })
@@ -112,4 +114,43 @@ test('different profile/node refuses another durable journal and close drains a 
   let closed = false; const closing = f.journal.close().then(() => { closed = true }); await Promise.resolve(); assert.equal(closed, false)
   gate.resolve(); await assert.rejects(operation); await closing
   assert.equal((await f.options.store.load()).intents.length, 2)
+})
+
+test('shortcut creates a new explicit-mode session in the native workspace without sending content',async t=>{
+  const f=await fixture(t)
+  await f.controller.start(presetId,signal,true,'workspace_a')
+  const request=f.calls.find(c=>c[0]==='create')[1]
+  assert.equal(request.workspaceId,'workspace_a');assert.equal(request.agentPreset,presetId)
+  assert.deepEqual(Object.keys(request).sort(),['agentPreset','sessionId','workspaceId'])
+  assert.deepEqual(f.calls.at(-1),['open',request.sessionId])
+  await f.controller.start(presetId,signal,true,'workspace_a')
+  assert.equal(f.calls.filter(c=>c[0]==='create').length,2)
+})
+
+test('workspace choices prefer current workspace but do not create or navigate until explicit selection',async t=>{
+  const f=await fixture(t)
+  f.services.workspaces.list.getSnapshot=()=>({phase:'ready',items:[{workspaceId:'other',sessionIds:['newer'],createdAt:'2026-10-07'},
+    {workspaceId:'workspace_a',sessionIds:['current'],createdAt:'2026-10-01'}]})
+  f.services.sessions.list.getSnapshot=()=>({phase:'ready',byId:{current:{id:'current',updatedAt:1,retainedBy:{mainView:1}},newer:{updatedAt:200}}})
+  const choices=f.controller.workspaces()
+  assert.equal(choices.preferredId,'workspace_a');assert.equal(choices.items.length,2)
+  assert.equal(f.calls.length,0)
+  f.services.workspaces.list.getSnapshot=()=>({phase:'loading',items:[]})
+  assert.throws(()=>f.controller.workspaces(),/工作区还在读取/)
+  f.services.workspaces.list.getSnapshot=()=>({phase:'ready',items:[]})
+  assert.deepEqual(f.controller.workspaces(),{items:[],preferredId:''})
+  await assert.rejects(f.controller.start(presetId,signal,true,'workspace_a'),/所选工作区已不可用/)
+  assert.equal(f.calls.filter(c=>c[0]==='create').length,0)
+})
+
+test('native directory picker cancellation or connection change creates neither workspace nor session',async t=>{
+  const f=await fixture(t),gate=deferred(),entered=deferred()
+  let creates=0;f.services.workspaces.create=async()=>{creates++;return {workspaceId:'workspace_a'}}
+  f.services.uiWorkspace.pickDirectory=async()=>null
+  assert.equal(await f.controller.pickWorkspace(signal),undefined)
+  f.services.uiWorkspace.pickDirectory=async()=>{entered.resolve();return gate.promise}
+  const pending=f.controller.pickWorkspace(signal);await entered.promise;f.controller.reset()
+  gate.resolve('C:/chosen');await assert.rejects(pending,/连接或页面/)
+  assert.equal(creates,0)
+  assert.equal(f.calls.filter(c=>c[0]==='create').length,0)
 })

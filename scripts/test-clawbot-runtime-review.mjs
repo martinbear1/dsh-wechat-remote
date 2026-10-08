@@ -17,6 +17,7 @@ async function sourceModule(name) {
 }
 const { ClawbotRuntime } = await sourceModule('runtime')
 const { FileClawbotStorage, emptyClawbotData } = await sourceModule('storage')
+const { ILinkClient } = await sourceModule('ilink')
 const auth = { token: 'synthetic-token', baseUrl: 'https://ilinkai.weixin.qq.com', accountId: 'test@im.bot', userId: 'test@im.wechat' }
 const sessions = [{ id: 'session-a', title: 'A', generation: 101 }, { id: 'session-b', title: 'B', generation: 102 }]
 const signal = () => new AbortController().signal
@@ -1126,6 +1127,105 @@ test('an immediate slash response does not wait for the next provider poll to be
     assert.equal(sent.length, 1)
     assert.equal(storage.data.receipts[0].state, 'done')
   } finally { await runtime.dispose() }
+})
+
+test('native HTTP adapter accepts omitted status codes through idle, dispatch, reply and duplicate receipt', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const gate = ownerGate(), storage = memory(seed({ cursor: 'initial', accessBinding: gate.owner }))
+  const cursors = [], sent = [], runs = []
+  const message = { message_id: '18446744073709551615', from_user_id: auth.userId, message_type: 1,
+    context_token: 'synthetic-context', item_list: [{ type: 1, text_item: { text: 'synthetic hello' } }] }
+  const http = new ILinkClient({ fetch: async (url, options) => {
+    const body = JSON.parse(options.body)
+    if (new URL(url).pathname.endsWith('/sendmessage')) {
+      sent.push(body.msg)
+      return Response.json({}) // Native acknowledgement need not contain ret.
+    }
+    assert.ok(new URL(url).pathname.endsWith('/getupdates'))
+    cursors.push(body.get_updates_buf)
+    if (cursors.length === 1) return Response.json({ msgs: [], sync_buf: 'deprecated', get_updates_buf: 'idle' })
+    if (cursors.length <= 3) return Response.json({ msgs: [message], get_updates_buf: cursors.length === 2 ? 'incoming' : 'repeat' })
+    return blockedPoll(null, null, options.signal)
+  } })
+  const runtime = new ClawbotRuntime(storage, host(async input => { runs.push(input); return { text: 'synthetic reply' } }), http, Date.now, gate)
+  try {
+    await enabled(runtime, true); await setImmediate()
+    assert.equal(runtime.snapshot().state, 'ready')
+    assert.equal(runtime.snapshot().message, '')
+    assert.equal(storage.data.cursor, 'idle')
+    assert.equal(runs.length, 0); assert.equal(sent.length, 0)
+    t.mock.timers.tick(500); await setImmediate()
+    assert.deepEqual(cursors, ['initial', 'idle', 'incoming', 'repeat'])
+    assert.equal(runs.length, 1); assert.equal(runs[0].sessionId, sessions[0].id)
+    assert.equal(runs[0].expectedGeneration, sessions[0].generation)
+    assert.equal(runs[0].text, 'synthetic hello')
+    assert.equal(sent.length, 1); assert.equal(sent[0].context_token, message.context_token)
+    assert.equal(sent[0].to_user_id, auth.userId)
+    assert.match(sent[0].item_list[0].text_item.text, /synthetic reply/)
+    assert.equal(storage.data.cursor, 'repeat'); assert.equal(storage.data.receipts.length, 1)
+    assert.equal(storage.data.receipts[0].state, 'done'); assert.equal(runtime.snapshot().uncertain, 0)
+    assert.equal(storage.data.receipts[0].contextToken, '')
+    assert.deepEqual(storage.data.credentials, auth); assert.deepEqual(storage.data.target, sessions[0])
+    assert.deepEqual(storage.data.accessBinding, gate.owner)
+    await enabled(runtime, false); await setImmediate()
+    assert.equal(runtime.snapshot().enabled, false)
+    assert.equal(runs.length, 1); assert.equal(sent.length, 1)
+  } finally { await runtime.dispose() }
+})
+
+test('native HTTP failures preserve cursor and binding, show safe distinct diagnostics and recover on next read', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  for (const [makeResponse, expected] of [
+    [() => Response.json({ msgs: 'bad', get_updates_buf: 'never-adopt' }), /数据暂不兼容/],
+    [() => { throw new Error(auth.token) }, /连接暂不可用/],
+    [() => Response.json({ errcode: 7, errmsg: auth.token, get_updates_buf: 'never-adopt' }), /服务暂未接受/],
+    [() => new Response(auth.token, { status: 503 }), /服务暂未接受/],
+    [() => new Response('', { headers: { 'content-length': '1048577' } }), /超过本地处理上限/],
+    [() => Response.redirect('https://example.invalid', 302), /地址校验未通过/],
+  ]) {
+    const storage = memory(seed({ cursor: 'keep', receipts: [receipt('kept', 'uncertain')] }))
+    let reads = 0
+    const http = new ILinkClient({ fetch: async (url) => {
+      assert.ok(new URL(url).pathname.endsWith('/getupdates'), 'no send or login is allowed')
+      if (++reads === 1) return makeResponse()
+      return Response.json({ msgs: [], get_updates_buf: 'recovered' })
+    } })
+    const runtime = new ClawbotRuntime(storage, host(() => assert.fail('must not dispatch')), http)
+    try {
+      await enabled(runtime, true); await setImmediate()
+      assert.equal(runtime.snapshot().state, 'error'); assert.match(runtime.snapshot().message, expected)
+      assert.ok(!runtime.snapshot().message.includes(auth.token))
+      assert.equal(storage.data.cursor, 'keep'); assert.equal(storage.data.receipts.length, 1)
+      assert.equal(storage.data.receipts[0].state, 'uncertain')
+      assert.deepEqual(storage.data.credentials, auth); assert.deepEqual(storage.data.target, sessions[0])
+      t.mock.timers.tick(1999); await setImmediate(); assert.equal(reads, 1)
+      t.mock.timers.tick(1); await setImmediate()
+      assert.equal(reads, 2); assert.equal(runtime.snapshot().state, 'ready')
+      assert.equal(runtime.snapshot().message, ''); assert.equal(storage.data.cursor, 'recovered')
+    } finally { await runtime.dispose() }
+  }
+})
+
+test('malformed send acknowledgement remains uncertain and is not replayed after pause or restart', async () => {
+  const storage = memory(seed({ receipts: [receipt('reply', 'ready', { input: '', output: 'synthetic reply' })] }))
+  let sends = 0
+  const http = new ILinkClient({ fetch: async (url, options) => {
+    if (new URL(url).pathname.endsWith('/getupdates')) return blockedPoll(null, null, options.signal)
+    assert.ok(new URL(url).pathname.endsWith('/sendmessage'))
+    sends++
+    return new Response('')
+  } })
+  const runtime = new ClawbotRuntime(storage, host(() => assert.fail('must not dispatch')), http)
+  try {
+    await enabled(runtime, true); await setImmediate()
+    assert.equal(sends, 1); assert.equal(storage.data.receipts[0].state, 'uncertain')
+    await enabled(runtime, false); await setImmediate()
+    await enabled(runtime, true); await setImmediate()
+    assert.equal(sends, 1)
+  } finally { await runtime.dispose() }
+  const restarted = new ClawbotRuntime(storage, host(() => assert.fail('must not dispatch')), http)
+  try { await setImmediate(); assert.equal(sends, 1); assert.equal(restarted.snapshot().uncertain, 1) }
+  finally { await restarted.dispose() }
 })
 
 test('safety: a second same-profile owner is rejected and cannot remove the first lock', () => {

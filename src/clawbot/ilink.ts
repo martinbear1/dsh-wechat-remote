@@ -83,7 +83,10 @@ function credentials(value: ILinkCredentials): string {
   return safeUrl(value.baseUrl, 'api')
 }
 
-function checkApiResult(body: JsonObject, requireSuccess: boolean): void {
+function checkApiResult(body: JsonObject): void {
+  // Native getUpdates/sendMessage responses may omit both status fields.
+  // Missing is not failure; explicit errors and malformed fields still fail.
+  // Endpoint-specific payload validation remains with each caller below.
   for (const key of ['ret', 'errcode']) {
     if (body[key] !== undefined && (typeof body[key] !== 'number' || !Number.isSafeInteger(body[key]))) invalid()
   }
@@ -94,7 +97,6 @@ function checkApiResult(body: JsonObject, requireSuccess: boolean): void {
   if (typeof failure === 'number') {
     throw new ILinkError('clawbot-api-error', '微信暂未接受此请求', failure)
   }
-  if (requireSuccess && body.ret !== 0) invalid('微信没有返回明确的成功结果')
 }
 
 /** Keep uint64 message IDs exact, following the upstream scanner before JSON.parse. */
@@ -213,7 +215,7 @@ export class ILinkClient {
   }
 
   private async request(baseUrl: string, endpoint: string, options: {
-    body?: JsonObject; token?: string; signal?: AbortSignal; timeoutMs?: number; requireSuccess?: boolean
+    body?: JsonObject; token?: string; signal?: AbortSignal; timeoutMs?: number
   }): Promise<JsonObject> {
     options.signal?.throwIfAborted()
     const url = new URL(endpoint, `${safeUrl(baseUrl, 'api')}/`).href
@@ -248,7 +250,7 @@ export class ILinkClient {
           ? 'clawbot-auth-expired' : 'clawbot-http-error', '微信接口请求失败', undefined, response.status)
       }
       const body = await readJson(response, controller.signal)
-      checkApiResult(body, options.requireSuccess ?? false)
+      checkApiResult(body)
       return body
     } catch (error) {
       options.signal?.throwIfAborted()
@@ -336,7 +338,7 @@ export class ILinkClient {
     try {
       body = await this.request(baseUrl, 'ilink/bot/getupdates', { body: {
         get_updates_buf: cursor, base_info: { ...BASE_INFO },
-      }, token: auth.token, signal, timeoutMs: this.nextPollTimeout, requireSuccess: true })
+      }, token: auth.token, signal, timeoutMs: this.nextPollTimeout })
     } catch (error) {
       if (error instanceof ILinkError && error.code === 'clawbot-timeout') return { cursor, messages: [] }
       throw error
@@ -361,7 +363,7 @@ export class ILinkClient {
       throw new ILinkError('clawbot-invalid-input', '微信消息缺少收件人、上下文或有效文本')
     }
     // A failed/ambiguous send is returned to the caller; transport never retries a write.
-    await this.request(baseUrl, 'ilink/bot/sendmessage', { token: auth.token, signal, requireSuccess: true,
+    await this.request(baseUrl, 'ilink/bot/sendmessage', { token: auth.token, signal,
       body: { msg: { from_user_id: '', to_user_id: text.userId, client_id: text.clientId,
         message_type: 2, message_state: 2, context_token: text.contextToken,
         item_list: [{ type: 1, text_item: { text: text.text } }] }, base_info: { ...BASE_INFO } },

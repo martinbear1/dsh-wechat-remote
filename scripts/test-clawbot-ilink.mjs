@@ -157,6 +157,38 @@ test('uint64 IDs remain exact, including item fallback, without rewriting user t
   assert.equal((await client.getUpdates(auth, first.cursor)).messages[0].id, '9007199254740993')
 })
 
+test('native getupdates may omit success codes, including idle replies with a cursor and deprecated sync_buf', async () => {
+  // Shape observed on device; all identifiers and cursor values here are synthetic.
+  const { client, calls } = fixture([
+    { msgs: [], sync_buf: 'deprecated', get_updates_buf: 'synthetic-cursor' },
+    { msgs: [inbound()], get_updates_buf: 'after-message' },
+    { errcode: 0, msgs: [], get_updates_buf: '' },
+    { sync_buf: 'never-adopt-this-cursor' }, {},
+  ])
+  assert.deepEqual(await client.getUpdates(auth, 'old'), { cursor: 'synthetic-cursor', messages: [] })
+  const batch = await client.getUpdates(auth, 'synthetic-cursor')
+  assert.equal(batch.cursor, 'after-message')
+  assert.equal(batch.messages[0].text, '你好')
+  assert.equal(JSON.parse(calls[1].options.body).get_updates_buf, 'synthetic-cursor')
+  for (let index = 0; index < 3; index++)
+    assert.deepEqual(await client.getUpdates(auth, 'after-message'), { cursor: 'after-message', messages: [] })
+})
+
+test('missing ret never hides an explicit error or malformed error field on reads or writes', async () => {
+  for (const [body, code] of [
+    [{ errcode: -14 }, 'clawbot-auth-expired'], [{ errcode: 7 }, 'clawbot-api-error'],
+    [{ ret: 0, errcode: 7 }, 'clawbot-api-error'], [{ ret: -2, errcode: 0 }, 'clawbot-api-error'],
+    ...[{ ret: null }, { errcode: null }, { errcode: '0' }, { ret: false }, { ret: 0.5 }]
+      .map(body => [body, 'clawbot-invalid-response']),
+  ]) {
+    for (const method of ['read', 'send']) {
+      const { client, calls } = fixture([{ msgs: [], get_updates_buf: 'must-not-adopt', ...body }])
+      await assert.rejects(method === 'read' ? client.getUpdates(auth, 'keep') : client.sendText(auth, outgoing), { code })
+      assert.equal(calls.length, 1)
+    }
+  }
+})
+
 test('media is flagged and group/bot events cannot become user commands', async () => {
   const { client } = fixture([success([inbound({ item_list: [{ type: 2, image_item: {} }] }),
     inbound({ group_id: 'group' }), inbound({ message_type: 2 })])])
@@ -175,7 +207,7 @@ test('malformed or over-limit batches fail as a whole and never return their cur
   }
   for (const body of [success(Array.from({ length: 101 }, () => inbound())),
     success([], { get_updates_buf: 12 }), success([], { longpolling_timeout_ms: -1 }),
-    { ret: 0, msgs: {} }, { ret: '0' }, {}]) {
+    { ret: 0, msgs: {} }, { ret: '0' }, { msgs: null }, { msgs: [inbound({ context_token: '' })] }]) {
     const { client } = fixture([body])
     await assert.rejects(client.getUpdates(auth, 'previous'), { code: 'clawbot-invalid-response' })
   }
@@ -224,15 +256,30 @@ test('response budget covers actual streamed bytes, advertised lengths and inval
   }
 })
 
-test('missing sending context, non-private recipients and ambiguous success cannot be accepted', async () => {
+test('missing sending context and non-private recipients cannot be accepted', async () => {
   for (const text of [{ ...outgoing, contextToken: '' }, { ...outgoing, userId: '' },
     { ...outgoing, userId: 'room@chatroom' }, { ...outgoing, clientId: '' }, { ...outgoing, text: '' }]) {
     const { client, calls } = fixture([])
     await assert.rejects(client.sendText(auth, text), { code: 'clawbot-invalid-input' })
     assert.equal(calls.length, 0)
   }
-  const { client } = fixture([{}])
-  await assert.rejects(client.sendText(auth, outgoing), { code: 'clawbot-invalid-response' })
+})
+
+test('native send acknowledgements may omit ret, but HTTP or malformed bodies never acknowledge delivery', async () => {
+  for (const body of [{}, { errcode: 0 }, { ret: 0 }, { ret: 0, errcode: 0 }]) {
+    const { client, calls } = fixture([body])
+    await client.sendText(auth, outgoing)
+    assert.equal(calls.length, 1, 'an accepted reply is not resent')
+  }
+  for (const response of [new Response(''), new Response(null, { status: 204 }),
+    new Response('null'), new Response('[]'), new Response('<html>error</html>'),
+    new Response('{}', { status: 503 })]) {
+    const { client, calls } = fixture([response])
+    await assert.rejects(client.sendText(auth, outgoing), error => {
+      assert.ok(['clawbot-invalid-response', 'clawbot-http-error'].includes(error.code)); return true
+    })
+    assert.equal(calls.length, 1, 'uncertain sends must not be retried')
+  }
 })
 
 test('external abort interrupts an in-flight body and is never converted to a successful poll', async () => {

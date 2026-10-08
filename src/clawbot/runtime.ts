@@ -21,6 +21,22 @@ type Login = { id: string; qrcode: string; url: string; qrDataUrl: string; statu
 type LoginWatch = { login: Login; timer?: NodeJS.Timeout; deadline?: NodeJS.Timeout; task?: Promise<void>; failures: number }
 export interface ClawbotAccess { authorize(): Promise<void>; current(): void; identity?(): AccessBinding }
 
+// Fixed local messages only: never expose provider bodies, credentials or URLs.
+function pollErrorMessage(code: string | undefined): string {
+  switch (code) {
+    case 'clawbot-auth-expired': return '微信连接已失效，请重新绑定。'
+    case 'clawbot-capacity': return '本机收件记录已满，接入已暂停；原记录未删除。'
+    case 'clawbot-invalid-response': return '微信返回的数据暂不兼容，正在重试；持续出现时请更新插件。'
+    case 'clawbot-response-too-large': return '微信消息超过本地处理上限，正在重试；本批消息尚未接入。'
+    case 'clawbot-untrusted-url': return '微信接口地址校验未通过，正在重试；请核对插件版本。'
+    case 'clawbot-api-error':
+    case 'clawbot-http-error': return '微信服务暂未接受请求，正在重试；不会重复提交已有任务。'
+    case 'clawbot-network-error':
+    case 'clawbot-timeout': return 'ClawBot 连接暂不可用，正在等待重连；不会重复提交已有任务。'
+    default: return 'ClawBot 接入处理异常，正在重试；请核对插件状态。'
+  }
+}
+
 /** Independently owned channel. No phone connection, relay account, model tool,
  * native preset mutation, or host process lifecycle is used here. */
 export class ClawbotRuntime {
@@ -403,9 +419,7 @@ export class ClawbotRuntime {
         failures++
         const code = (error as { code?: string }).code
         this.state = 'error'
-        this.message = code === 'clawbot-auth-expired' ? '微信连接已失效，请重新绑定。'
-          : code === 'clawbot-capacity' ? '本机收件记录已满，接入已暂停；原记录未删除。'
-          : 'ClawBot 连接暂不可用，正在等待重连；不会重复提交已有任务。'
+        this.message = pollErrorMessage(code)
         if (code === 'clawbot-auth-expired' || code === 'clawbot-capacity') {
           this.commit(d => { d.enabled = false; if (code === 'clawbot-auth-expired') d.authExpired = true; d.revision++ }); break
         }

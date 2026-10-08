@@ -326,6 +326,9 @@ export class ILinkClient {
     return { status, message: messages[status] }
   }
 
+  /** Forget an ended local attempt; never calls an account-unbind endpoint. */
+  forgetQr(qrcode: string): void { this.qrStates.delete(qrcode) }
+
   async getUpdates(auth: ILinkCredentials, cursor: string, signal?: AbortSignal): Promise<ILinkUpdates> {
     const baseUrl = credentials(auth)
     if (!boundedString(cursor, MAX_CURSOR_BYTES, true)) throw new ILinkError('clawbot-invalid-input', '微信消息游标无效')

@@ -11,11 +11,13 @@ export interface ClawbotStatus {
   enabled: boolean
   state: 'disabled' | 'unpaired' | 'ready' | 'connecting' | 'error'
   paired: boolean
+  /** Local credential health, not a claim about other nodes' bindings. */
+  bindingState?: 'unpaired' | 'paired' | 'expired'
   target: ClawbotSession | null
   message: string
   pending: number
   uncertain: number
-  pairing?: { id: string; url: string; qrDataUrl: string; status: string }
+  pairing?: { id: string; url: string; qrDataUrl: string; status: string; expiresAt?: number }
 }
 export interface ClawbotRequest {
   action: 'status' | 'sessions' | 'route' | 'enabled' | 'login.start' | 'login.poll' | 'login.cancel' | 'disconnect'

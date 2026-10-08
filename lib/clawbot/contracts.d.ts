@@ -24,6 +24,8 @@ export interface ClawbotStatus {
     enabled: boolean;
     state: 'disabled' | 'unpaired' | 'ready' | 'connecting' | 'error';
     paired: boolean;
+    /** Local credential health, not a claim about other nodes' bindings. */
+    bindingState?: 'unpaired' | 'paired' | 'expired';
     target: ClawbotSession | null;
     message: string;
     pending: number;
@@ -33,6 +35,7 @@ export interface ClawbotStatus {
         url: string;
         qrDataUrl: string;
         status: string;
+        expiresAt?: number;
     };
 }
 export interface ClawbotRequest {

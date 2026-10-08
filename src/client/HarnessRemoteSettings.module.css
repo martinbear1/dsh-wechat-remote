@@ -442,6 +442,9 @@
 .clawbotHead h3 { display: flex; align-items: center; gap: 8px; }
 .clawbotHead small { font-size: 11px; font-weight: normal; color: var(--muted-foreground, #7b8491); }
 .clawbotRow { margin: 10px 0; flex-wrap: wrap; }
+.clawbotNode { margin: 8px 0 0; font-size: 13px; overflow-wrap: anywhere; color: var(--muted-foreground, #7b8491); }
+.clawbotSection { margin-top: 14px; }
+.clawbotSection + .clawbotSection { border-top: 1px solid var(--border, #ddd); padding-top: 8px; }
 .clawbotRow select { flex: 1; min-width: 180px; max-width: 100%; border: 1px solid var(--border, #ddd); border-radius: 8px; padding: 8px; color: inherit; background: transparent; }
 .clawbotToggle { display: flex; gap: 6px; align-items: center; font-size: 13px; white-space: nowrap; }
 .clawbotNote { font-size: 12px; line-height: 1.6; color: var(--muted-foreground, #7b8491); margin: 8px 0; }
@@ -449,5 +452,6 @@
 .clawbotPairing { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; margin-top: 12px; }
 .clawbotPairing img { border-radius: 8px; }
 .clawbotPairing input { border: 1px solid var(--border, #ddd); border-radius: 6px; padding: 8px; width: 120px; color: inherit; background: transparent; }
+.clawbotPairing button + button, .clawbotPairing input + button { margin-left: 8px; }
 .clawbotMark { display: inline-flex; flex: 0 0 22px; width: 22px; height: 22px; border-radius: 50%; background: #e54443; align-items: center; justify-content: center; gap: 3px; }
 .clawbotMark::before, .clawbotMark::after { content: ''; display: block; width: 5px; height: 5px; border-radius: 50%; background: #fff; }

@@ -27,6 +27,8 @@ export declare class ClawbotRuntime {
     private commit;
     private checkRevision;
     snapshot(): ClawbotStatus;
+    private endLogin;
+    private expireLogin;
     control(request: ClawbotRequest, signal: AbortSignal): Promise<ClawbotStatus | {
         sessions: {
             id: string;

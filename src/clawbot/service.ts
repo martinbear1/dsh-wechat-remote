@@ -7,6 +7,7 @@ import { FileClawbotStorage } from './storage.js'
 import { ClawbotRuntime } from './runtime.js'
 import { DshClawbotHost } from './dsh-host.js'
 import { ClawbotError, type ClawbotRequest, type ClawbotStatus, type ClawbotSession } from './contracts.js'
+import { ILinkError } from './ilink-types.js'
 
 declare module '@deepseek-ai/cordis' { interface Context { wechatClawbot: WechatClawbotService } }
 export type ClawbotControlResult = { ok: true; value: ClawbotStatus | { sessions: ClawbotSession[] } }
@@ -36,8 +37,10 @@ export class WechatClawbotService extends TypertRemoteService {
     try { return { ok: true, value: await this.runtime.control(request, signal) } }
     catch (error) {
       signal.throwIfAborted()
-      return { ok: false, error: error instanceof ClawbotError ? { code: error.code, message: error.message }
-        : { code: 'clawbot-operation-failed', message: '操作未完成，请刷新核对；不要重复提交或重新扫码。' } }
+      // The adapter's typed errors contain fixed safe copy, never provider bodies,
+      // URLs or tokens. Preserve actionable pairing/network errors for both UIs.
+      return { ok: false, error: error instanceof ClawbotError || error instanceof ILinkError ? { code: error.code, message: error.message }
+        : { code: 'clawbot-operation-failed', message: '操作未完成，请刷新核对当前状态后再试。' } }
     }
   }
 }

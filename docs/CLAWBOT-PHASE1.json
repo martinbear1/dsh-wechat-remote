@@ -31,6 +31,19 @@
     "payload": "Tencent already returns qrcode_img_content. No encode-then-decode step is necessary; qrcode is separately used for confirmation polling.",
     "directOpen": "No documented mini API was found that accepts an arbitrary decoded QR payload and invokes ClawBot's native confirmation route. wx.scanCode returns result/rawData, not accepting them as inputs. No verified ClawBot appId/path/shortLink is published in the inspected sources.",
     "implementedCandidate": "wx.previewImage with showmenu:true, plugin-rendered QR written to private temporary mini storage; bounded cleanup on return, exit and timeout. Copied official pairing URL is also exposed. Neither action is treated as successful pairing.",
+    "deviceEvidence": {
+      "date": "2026-10-08",
+      "source": "User-performed device test with screenshots at 14:22 and explicit follow-up that Continue connecting was not pressed; exact WeChat client version was not supplied.",
+      "route": "Copy the current pairing URL into the user's own File Transfer Assistant chat and tap the link; no camera scan or image recognition.",
+      "observed": "The WeChat confirmation page opened and warned that continuing would disconnect an existing OpenClaw connection.",
+      "conclusion": "Direct HTTPS link activation from this user's WeChat chat can reach the official confirmation page without QR recognition. Binding completion, replacement effects, and direct launch from our mini-program remain unverified.",
+      "safety": "No confirmation, replacement or disconnect was performed by the assistant. The user explicitly stopped before Continue connecting. Pairing URLs, QR values and account identifiers are not stored in this record."
+    },
+    "miniLaunchResearch": {
+      "status": "No verified ClawBot-specific public mini-program launch contract found; successful chat-link routing is not evidence of mini-program launch permission.",
+      "businessView": "Official wx.openBusinessView documentation examined here applies to enterprise payments, requires product/API access and provider-issued businessType/queryString. It does not establish a generic LiteApp or ClawBot entry; do not guess or reuse payment parameters.",
+      "source": "https://pay.wechatpay.cn/doc/v3/partner/4014997783"
+    },
     "notClaimed": "No silent first-time authorization, account takeover, arbitrary private scheme or guaranteed same-phone recognition.",
     "sources": [
       "https://github.com/Tencent/openclaw-weixin/blob/24de5c9eb0dd5e595d7e2d090ed8a3f82870d42c/src/auth/login-qr.ts",
@@ -57,7 +70,7 @@
     "nativeBoundary": "Offline native component mount/dispose/remount does not change native tools, presets, defaults or the four shipped mode YAML files. No network/model calls in that test.",
     "limitations": [
       "Installed native prompt lacks an atomic generation precondition. The adapter rejects observed resets and refuses mismatched replies, but cannot seal a reset inside the host's own asynchronous admission path. Pause ClawBot before resetting its target during initial acceptance.",
-      "WeChat real account login, same-phone link/long-press routing, provider rebind behavior, real text exchange and physical mobile rendering remain unverified.",
+      "User-performed same-phone chat-link routing reached the official replacement-confirmation page on 2026-10-08, without pressing Continue connecting. Completed real-account login, mini-program direct launch, long-press routing, actual provider rebind effects, real text exchange and broader physical mobile rendering remain unverified.",
       "A native approval or question hands control back to desktop/mini. The first candidate does not resume watching that detached turn or approve it via ClawBot.",
       "No real installation, mini upload, cloud deployment, GitHub publication or host restart is part of this candidate build."
     ]

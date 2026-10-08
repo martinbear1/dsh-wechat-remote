@@ -24,6 +24,8 @@ export interface ClawbotData {
   revision: number
   enabled: boolean
   credentials: ILinkCredentials | null
+  /** Preserve the identity and pending ledger when Tencent rejects its token. */
+  authExpired?: boolean
   target: ClawbotSession | null
   cursor: string
   receipts: Receipt[]
@@ -35,6 +37,7 @@ export function validateClawbotData(data: ClawbotData): void {
     && target.id.length > 0 && target.id.length <= 256 && typeof target.title === 'string' && target.title.length <= 500
     && (target.generation === undefined || Number.isSafeInteger(target.generation))
   if (data.version !== 1 || !Number.isSafeInteger(data.revision) || data.revision < 0 || typeof data.enabled !== 'boolean'
+    || data.authExpired !== undefined && typeof data.authExpired !== 'boolean'
     || typeof data.cursor !== 'string' || data.cursor.length > 65536 || !validTarget(data.target)
     || !Array.isArray(data.receipts) || data.receipts.length > 1000 || new Set(data.receipts.map(r => r?.id)).size !== data.receipts.length
     || data.receipts.some(r => !r || typeof r.id !== 'string' || !/^[a-f0-9]{64}$/.test(r.id) || typeof r.userId !== 'string'

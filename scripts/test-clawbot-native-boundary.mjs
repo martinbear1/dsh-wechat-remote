@@ -126,8 +126,15 @@ async function verify() {
     const call = request => gateway.invoke({ namespace: 'wechatClawbot', method: 'control', args: { request }, signal })
     const status = await call({ action: 'status' })
     assert.deepEqual(status, { ok: true, value: { supported: true, revision: 0, enabled: false, state: 'disabled',
-      paired: false, target: null, pending: 0, uncertain: 0, message: status.value.message } })
+      paired: false, bindingState: 'unpaired', target: null, pending: 0, uncertain: 0, message: status.value.message } })
     assert(outputCodec.safeParse(status).success)
+    const pairingDto = { ok: true, value: { ...status.value, pairing: {
+      id: 'synthetic-login', url: 'https://liteapp.weixin.qq.com/q/test-only', qrDataUrl: 'data:image/png;base64,synthetic',
+      status: 'wait', expiresAt: 123456,
+    } } }
+    assert.equal(outputCodec.parse(pairingDto).value.pairing.expiresAt, 123456,
+      'generated wire codec retains the shared pairing deadline')
+    assert.equal(outputCodec.parse({ ok: true, value: { ...status.value, paired: true, bindingState: 'expired' } }).value.bindingState, 'expired')
     await assert.rejects(gateway.invoke({ namespace: 'wechatClawbot', method: 'control', args: { action: 'status' }, signal }),
       e => e.code === 'gateway/arguments-invalid')
     await assert.rejects(call({ action: 'approve' }), e => e.code === 'gateway/input-invalid')

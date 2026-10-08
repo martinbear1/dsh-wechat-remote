@@ -204,7 +204,7 @@ export function HarnessRemoteSettings({
         <CompanionPanel describeHost={describeHost} callManagement={callManagement} store={store} compact />
       </section>
       {assistants ? <AssistantPresetsPanel store={assistants} /> : null}
-      {clawbotCall ? <ClawbotPanel call={clawbotCall} /> : null}
+      {clawbotCall ? <ClawbotPanel call={clawbotCall} nodeName={agentName} hostName={hostName} /> : null}
     </section>
   )
 }

@@ -217,6 +217,7 @@ test('disconnect requires explicit abandonment, retains dedupe, and cannot reviv
     await runtime.control({ action: 'login.poll', loginId: login.pairing.id }, signal())
     runtime.ingest([incoming('1', 'work')], 'replayed-provider-cursor')
     assert.equal(storage.data.receipts.length, 1)
+    await runtime.control({ action: 'route', expectedRevision: runtime.snapshot().revision, sessionId: sessions[0].id }, signal())
     await enabled(runtime, true)
     run.resolve({ text: 'must stay in DSH' }); await setImmediate()
     assert.equal(sent.length, 0)
@@ -269,7 +270,7 @@ test('pairing cancellation aborts an outstanding native QR longpoll promptly', a
   } finally { poll.resolve({ status: 'wait' }); await runtime.dispose() }
 })
 
-test('a late old-account run cannot revive a sealed receipt or send through the new account', async () => {
+test('changing account cannot silently discard pending work; explicit disconnect seals late results', async () => {
   const run = deferred(), storage = memory(), sent = []
   const newAuth = { ...auth, accountId: 'new-bot@im.bot', token: 'new-account-token' }
   const runtime = new ClawbotRuntime(storage, host(() => run.promise), client({
@@ -284,17 +285,312 @@ test('a late old-account run cannot revive a sealed receipt or send through the 
     assert.equal(storage.data.receipts[0].state, 'running')
     await enabled(runtime, false)
     const started = await runtime.control({ action: 'login.start' }, signal())
-    await runtime.control({ action: 'login.poll', loginId: started.pairing.id }, signal())
+    await assert.rejects(runtime.control({ action: 'login.poll', loginId: started.pairing.id }, signal()), { code: 'clawbot-pending' })
+    assert.equal(storage.data.credentials.accountId, auth.accountId)
+    assert.equal(storage.data.receipts[0].state, 'running')
+    assert.equal(storage.data.cursor, 'old-cursor')
+    await runtime.control({ action: 'disconnect', expectedRevision: runtime.snapshot().revision, abandonPending: true }, signal())
+    const replacement = await runtime.control({ action: 'login.start' }, signal())
+    await runtime.control({ action: 'login.poll', loginId: replacement.pairing.id }, signal())
     assert.equal(storage.data.credentials.accountId, newAuth.accountId)
     assert.equal(storage.data.cursor, '')
     assert.equal(storage.data.receipts[0].state, 'uncertain')
     run.resolve({ text: 'old account output' })
     await setImmediate()
     assert.equal(storage.data.receipts[0].state, 'uncertain', 'late completion must not overwrite the sealed state')
+    await runtime.control({ action: 'route', expectedRevision: runtime.snapshot().revision, sessionId: sessions[1].id }, signal())
     await enabled(runtime, true)
     await setImmediate()
     assert.equal(sent.length, 0)
   } finally { run.resolve({ text: 'cleanup' }); await runtime.dispose() }
+})
+
+test('unpaired enable is rejected and legacy enabled-unpaired state can pair directly', async () => {
+  let qrCalls = 0
+  const storage = memory(emptyClawbotData())
+  const runtime = new ClawbotRuntime(storage, host(), client({
+    async getQr() { qrCalls++; return { qrcode: 'qr', url: 'https://liteapp.weixin.qq.com/q/test-only' } },
+    async pollQr() { return { status: 'confirmed', credentials: auth } },
+  }))
+  try {
+    await assert.rejects(enabled(runtime, true), { code: 'clawbot-unpaired' })
+    assert.equal(storage.data.enabled, false)
+    const start = await runtime.control({ action: 'login.start', expectedRevision: 0 }, signal())
+    const reused = await runtime.control({ action: 'login.start' }, signal())
+    assert.equal(start.pairing.id, reused.pairing.id)
+    assert.equal(start.revision, reused.revision)
+    assert.equal(qrCalls, 1)
+    const finish = await runtime.control({ action: 'login.poll', loginId: start.pairing.id }, signal())
+    assert.equal(finish.paired, true)
+    assert.equal(finish.bindingState, 'paired')
+    assert.equal(finish.enabled, false, 'confirmation is not permission to start receiving')
+    await assert.rejects(enabled(runtime, true), { code: 'clawbot-target-required' })
+    assert.equal(finish.revision > start.revision, true)
+  } finally { await runtime.dispose() }
+  const legacy = memory({ ...emptyClawbotData(), enabled: true })
+  const repaired = new ClawbotRuntime(legacy, host(), client({
+    async getQr() { return { qrcode: 'qr2', url: 'https://liteapp.weixin.qq.com/q/test-only' } },
+  }))
+  try {
+    const result = await repaired.control({ action: 'login.start' }, signal())
+    assert.equal(result.enabled, false)
+    assert.equal(result.pairing.status, 'wait')
+    assert.equal(legacy.data.enabled, false)
+  } finally { await repaired.dispose() }
+})
+
+test('shared pairing expiry, terminal regeneration and precise cancellation advance revision', async () => {
+  let now = 1000, qrCalls = 0, pollCalls = 0
+  const forgotten = []
+  const runtime = new ClawbotRuntime(memory(emptyClawbotData()), host(), client({
+    async getQr() { return { qrcode: `qr-${++qrCalls}`, url: 'https://liteapp.weixin.qq.com/q/test-only' } },
+    async pollQr() { pollCalls++; return { status: 'scaned', message: '请确认' } },
+    forgetQr(qr) { forgotten.push(qr) },
+  }), () => now)
+  try {
+    const [first, second] = await Promise.all([
+      runtime.control({ action: 'login.start' }, signal()), runtime.control({ action: 'login.start' }, signal()),
+    ])
+    assert.equal(first.pairing.id, second.pairing.id)
+    assert.equal(qrCalls, 1)
+    assert.equal(first.pairing.expiresAt, now + 300000)
+    const scanned = await runtime.control({ action: 'login.poll', loginId: first.pairing.id }, signal())
+    assert.ok(scanned.revision > first.revision)
+    now = first.pairing.expiresAt
+    const expired = runtime.snapshot()
+    assert.equal(expired.pairing.status, 'expired')
+    assert.equal(expired.pairing.url, '')
+    assert.equal(expired.pairing.qrDataUrl, '')
+    assert.ok(expired.revision > scanned.revision)
+    await runtime.control({ action: 'login.poll', loginId: first.pairing.id }, signal())
+    assert.equal(pollCalls, 1, 'an expired local attempt never calls the provider again')
+    const replacement = await runtime.control({ action: 'login.start' }, signal())
+    assert.notEqual(replacement.pairing.id, first.pairing.id)
+    assert.ok(replacement.revision > expired.revision)
+    await assert.rejects(runtime.control({ action: 'login.cancel', loginId: first.pairing.id }, signal()), { code: 'clawbot-login-stale' })
+    await assert.rejects(runtime.control({ action: 'login.cancel' }, signal()), { code: 'clawbot-login-stale' })
+    const cancel = await runtime.control({ action: 'login.cancel', loginId: replacement.pairing.id }, signal())
+    assert.equal(cancel.pairing, undefined)
+    assert.ok(cancel.revision > replacement.revision)
+    assert.ok(forgotten.includes('qr-1'))
+    assert.ok(forgotten.includes('qr-2'))
+  } finally { await runtime.dispose() }
+})
+
+test('pairing cannot replace a running identity and rejects stale mutation revisions', async () => {
+  let qrCalls = 0
+  const storage = memory(seed({ enabled: true }))
+  const runtime = new ClawbotRuntime(storage, host(), client({
+    async getQr() { qrCalls++; return { qrcode: 'qr', url: 'https://liteapp.weixin.qq.com/q/test-only' } },
+  }))
+  try {
+    await assert.rejects(runtime.control({ action: 'login.start' }, signal()), { code: 'clawbot-busy' })
+    await enabled(runtime, false)
+    await assert.rejects(runtime.control({ action: 'login.start', expectedRevision: 0 }, signal()), { code: 'clawbot-conflict' })
+    assert.equal(qrCalls, 0)
+    assert.deepEqual(storage.data.credentials, auth)
+  } finally { await runtime.dispose() }
+})
+
+test('expired credentials stay distinguishable across restarts and are not offered as a reusable binding', async () => {
+  const storage = memory(seed({ enabled: true }))
+  const runtime = new ClawbotRuntime(storage, host(), client({
+    async getUpdates() { throw Object.assign(new Error('expired'), { code: 'clawbot-auth-expired' }) },
+  }))
+  await setImmediate()
+  assert.equal(runtime.snapshot().bindingState, 'expired')
+  assert.equal(storage.data.enabled, false)
+  await runtime.dispose()
+  let providedTokens
+  const restarted = new ClawbotRuntime(storage, host(), client({
+    async getQr(_signal, tokens) { providedTokens = tokens; return { qrcode: 'qr', url: 'https://liteapp.weixin.qq.com/q/test-only' } },
+    async pollQr() { return { status: 'confirmed', credentials: { ...auth, token: 'refreshed-token' } } },
+  }))
+  try {
+    assert.equal(restarted.snapshot().bindingState, 'expired')
+    await assert.rejects(enabled(restarted, true), { code: 'clawbot-auth-expired' })
+    const start = await restarted.control({ action: 'login.start' }, signal())
+    assert.deepEqual(providedTokens, [])
+    const recovered = await restarted.control({ action: 'login.poll', loginId: start.pairing.id }, signal())
+    assert.equal(recovered.bindingState, 'paired')
+    assert.equal(storage.data.authExpired, false)
+    assert.equal(recovered.enabled, false)
+  } finally { await restarted.dispose() }
+})
+
+test('late confirmation past the shared deadline never installs credentials', async () => {
+  let now = 1000
+  const qrPoll = deferred(), storage = memory(emptyClawbotData())
+  const runtime = new ClawbotRuntime(storage, host(), client({
+    async getQr() { return { qrcode: 'qr', url: 'https://liteapp.weixin.qq.com/q/test-only' } },
+    async pollQr() { return qrPoll.promise },
+  }), () => now)
+  try {
+    const start = await runtime.control({ action: 'login.start' }, signal())
+    const waiting = runtime.control({ action: 'login.poll', loginId: start.pairing.id }, signal())
+    now = start.pairing.expiresAt
+    qrPoll.resolve({ status: 'confirmed', credentials: auth })
+    const finished = await waiting
+    assert.equal(finished.paired, false)
+    assert.equal(finished.pairing.status, 'expired')
+    assert.equal(finished.pairing.url, '')
+    assert.equal(storage.data.credentials, null)
+  } finally { qrPoll.resolve({ status: 'wait' }); await runtime.dispose() }
+})
+
+test('late cancelled confirmation cannot replace the next attempt or install an identity', async () => {
+  const oldPoll = deferred(), storage = memory(emptyClawbotData())
+  let qrCalls = 0
+  const runtime = new ClawbotRuntime(storage, host(), client({
+    async getQr() { return { qrcode: `qr-${++qrCalls}`, url: 'https://liteapp.weixin.qq.com/q/test-only' } },
+    async pollQr() { return oldPoll.promise },
+  }))
+  try {
+    const first = await runtime.control({ action: 'login.start' }, signal())
+    const waiting = runtime.control({ action: 'login.poll', loginId: first.pairing.id }, signal())
+    const rejected = assert.rejects(waiting)
+    await runtime.control({ action: 'login.cancel', loginId: first.pairing.id }, signal())
+    const next = await runtime.control({ action: 'login.start' }, signal())
+    oldPoll.resolve({ status: 'confirmed', credentials: auth })
+    await rejected
+    assert.equal(runtime.snapshot().pairing.id, next.pairing.id)
+    assert.equal(runtime.snapshot().paired, false)
+    assert.equal(storage.data.credentials, null)
+  } finally { oldPoll.resolve({ status: 'wait' }); await runtime.dispose() }
+})
+
+test('terminal QR regeneration failure preserves a monotonic expired snapshot', async () => {
+  let now = 1000, qrCalls = 0
+  const runtime = new ClawbotRuntime(memory(emptyClawbotData()), host(), client({
+    async getQr() {
+      if (++qrCalls > 1) throw new Error('synthetic network outage')
+      return { qrcode: 'qr', url: 'https://liteapp.weixin.qq.com/q/test-only' }
+    },
+  }), () => now)
+  try {
+    const first = await runtime.control({ action: 'login.start' }, signal())
+    now = first.pairing.expiresAt
+    const expired = runtime.snapshot()
+    await assert.rejects(runtime.control({ action: 'login.start' }, signal()), /synthetic network outage/)
+    assert.deepEqual(runtime.snapshot(), expired)
+  } finally { await runtime.dispose() }
+})
+
+test('send-side credential rejection pauses both receive and delivery without resending or dropping the queue', async () => {
+  let sent = 0
+  const storage = memory(seed({ receipts: [receipt('1', 'ready', { input: '', output: 'first' }), receipt('2', 'ready', { input: '', output: 'second' })] }))
+  const runtime = new ClawbotRuntime(storage, host(), client({
+    async sendText() { sent++; throw Object.assign(new Error('expired'), { code: 'clawbot-auth-expired' }) },
+  }))
+  try {
+    await enabled(runtime, true)
+    await setImmediate()
+    assert.equal(sent, 1)
+    assert.equal(runtime.snapshot().enabled, false)
+    assert.equal(runtime.snapshot().bindingState, 'expired')
+    assert.equal(storage.data.receipts[0].state, 'uncertain')
+    assert.equal(storage.data.receipts[1].state, 'ready')
+    assert.equal(storage.data.receipts[1].output, 'second')
+    assert.deepEqual(storage.data.credentials, auth)
+  } finally { await runtime.dispose() }
+})
+
+test('an old in-flight send cannot expire a newly confirmed same-account credential', async () => {
+  const oldSend = deferred(), storage = memory(seed({ receipts: [
+    receipt('1', 'ready', { input: '', output: 'old token output' }),
+    receipt('2', 'ready', { input: '', output: 'next output' }),
+  ] })), sentTokens = []
+  const refreshed = { ...auth, token: 'synthetic-refreshed-token' }
+  const runtime = new ClawbotRuntime(storage, host(), client({
+    async getQr() { return { qrcode: 'qr', url: 'https://liteapp.weixin.qq.com/q/test-only' } },
+    async pollQr() { return { status: 'confirmed', credentials: refreshed } },
+    async sendText(credentials) {
+      sentTokens.push(credentials.token)
+      if (credentials.token === auth.token) return oldSend.promise
+    },
+  }))
+  try {
+    await enabled(runtime, true); await setImmediate()
+    assert.equal(storage.data.receipts[0].state, 'sending')
+    await enabled(runtime, false)
+    const start = await runtime.control({ action: 'login.start' }, signal())
+    await runtime.control({ action: 'login.poll', loginId: start.pairing.id }, signal())
+    await enabled(runtime, true)
+    oldSend.reject(Object.assign(new Error('old token expired'), { code: 'clawbot-auth-expired' }))
+    await setImmediate()
+    assert.equal(runtime.snapshot().enabled, true)
+    assert.equal(runtime.snapshot().bindingState, 'paired')
+    assert.equal(storage.data.credentials.token, refreshed.token)
+    assert.equal(storage.data.receipts[0].state, 'uncertain')
+    assert.equal(storage.data.receipts[1].state, 'done')
+    assert.deepEqual(sentTokens, [auth.token, refreshed.token], 'old uncertain reply is not replayed')
+  } finally { oldSend.resolve(); await runtime.dispose() }
+})
+
+test('a superseded receive poll cannot expire the replacement credential or overwrite its cursor', async () => {
+  const oldPoll = deferred(), storage = memory(seed({ cursor: 'keep-cursor' })), pollTokens = []
+  const refreshed = { ...auth, token: 'synthetic-refreshed-token' }
+  const runtime = new ClawbotRuntime(storage, host(), client({
+    getUpdates(credentials, cursor, abort) {
+      pollTokens.push(credentials.token)
+      return credentials.token === auth.token ? oldPoll.promise : blockedPoll(credentials, cursor, abort)
+    },
+    async getQr() { return { qrcode: 'qr', url: 'https://liteapp.weixin.qq.com/q/test-only' } },
+    async pollQr() { return { status: 'confirmed', credentials: refreshed } },
+  }))
+  try {
+    await enabled(runtime, true)
+    await enabled(runtime, false)
+    const start = await runtime.control({ action: 'login.start' }, signal())
+    await runtime.control({ action: 'login.poll', loginId: start.pairing.id }, signal())
+    await enabled(runtime, true)
+    oldPoll.reject(Object.assign(new Error('old token expired'), { code: 'clawbot-auth-expired' }))
+    await setImmediate()
+    assert.equal(runtime.snapshot().enabled, true)
+    assert.equal(runtime.snapshot().bindingState, 'paired')
+    assert.equal(storage.data.credentials.token, refreshed.token)
+    assert.equal(storage.data.cursor, 'keep-cursor')
+    assert.deepEqual(pollTokens, [auth.token, refreshed.token])
+  } finally { oldPoll.resolve({ messages: [], cursor: 'stale' }); await runtime.dispose() }
+})
+
+test('terminal QR attempts do not block explicit disconnect while active attempts still require cancellation', async () => {
+  let now = 1000
+  const storage = memory(seed()), runtime = new ClawbotRuntime(storage, host(), client({
+    async getQr() { return { qrcode: 'qr', url: 'https://liteapp.weixin.qq.com/q/test-only' } },
+  }), () => now)
+  try {
+    const start = await runtime.control({ action: 'login.start' }, signal())
+    await assert.rejects(runtime.control({ action: 'disconnect', expectedRevision: start.revision }, signal()), { code: 'clawbot-login-active' })
+    assert.deepEqual(storage.data.credentials, auth)
+    now = start.pairing.expiresAt
+    const expired = runtime.snapshot()
+    const disconnected = await runtime.control({ action: 'disconnect', expectedRevision: expired.revision }, signal())
+    assert.equal(disconnected.paired, false)
+    assert.equal(disconnected.pairing, undefined)
+    assert.equal(disconnected.bindingState, 'unpaired')
+    assert.ok(disconnected.revision > expired.revision)
+  } finally { await runtime.dispose() }
+})
+
+test('component reload fences old pairing snapshots even when the carrier epoch stays unchanged', async () => {
+  const storage = memory(emptyClawbotData())
+  const runtime = new ClawbotRuntime(storage, host(), client({
+    async getQr() { return { qrcode: 'qr', url: 'https://liteapp.weixin.qq.com/q/test-only' } },
+  }))
+  const before = await runtime.control({ action: 'login.start' }, signal())
+  assert.ok(before.pairing)
+  await runtime.dispose()
+  const restarted = new ClawbotRuntime(storage, host(), client())
+  try {
+    const after = restarted.snapshot()
+    assert.equal(after.pairing, undefined)
+    assert.equal(after.enabled, false)
+    assert.equal(after.paired, false)
+    assert.ok(after.revision > before.revision)
+    assert.equal(storage.data.revision, after.revision)
+    await assert.rejects(restarted.control({ action: 'enabled', enabled: false, expectedRevision: before.revision }, signal()), { code: 'clawbot-conflict' })
+  } finally { await restarted.dispose() }
 })
 
 test('native already-bound confirmation retains the local account and pending ledger', async () => {

@@ -19,6 +19,7 @@ export declare class ClawbotRuntime {
     private broken;
     private login?;
     private loginPoll?;
+    private loginWatch?;
     private message;
     private state;
     private closed;
@@ -26,9 +27,16 @@ export declare class ClawbotRuntime {
     constructor(storage: ClawbotStorage, host: ClawbotHost, client?: ILinkClient, now?: () => number);
     private commit;
     private checkRevision;
+    private checkOperational;
     snapshot(): ClawbotStatus;
     private endLogin;
     private expireLogin;
+    /** The node owns a requested login, even while both control pages are closed.
+     * Only read its result, for this attempt's bounded lifetime; never restart a
+     * login, resend a verification code, or enable message receiving here. */
+    private watchLogin;
+    private failLoginStorage;
+    private scheduleLoginWatch;
     control(request: ClawbotRequest, signal: AbortSignal): Promise<ClawbotStatus | {
         sessions: {
             id: string;

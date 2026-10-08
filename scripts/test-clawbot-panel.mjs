@@ -48,7 +48,7 @@ function harness() {
   }
   const jsx = { Fragment: Symbol('Fragment'), jsx: (type, props) => ({ type, props }), jsxs: (type, props) => ({ type, props }) }
   const module = { exports: {} }
-  const context = vm.createContext({ module, exports: module.exports,
+  const context = vm.createContext({ module, exports: module.exports, Error,
     require(name) { if (name === 'react') return react; if (name === 'react/jsx-runtime') return jsx; assert.fail('unexpected dependency: ' + name) },
     setInterval(fn, ms) { assert.equal(ms, 4000); intervals.set(++intervalId, fn); return intervalId },
     clearInterval(id) { intervals.delete(id) }, window: { confirm: text => { confirms.push(text); return confirmResult } },
@@ -70,7 +70,7 @@ function harness() {
     return typeof value === 'object' ? text(value.props?.children ?? null) : String(value)
   }
   const find = predicate => { const found = nodes().filter(predicate); assert.equal(found.length, 1, 'expected exactly one fixture element'); return found[0] }
-  const button = label => find(node => node.type === 'button' && text(node) === label)
+  const button = label => find(node => node.type === 'button' && (node.props['aria-label'] || text(node)) === label)
   async function flush() {
     // RPC continuations and chained foreground requests settle deterministically.
     for (let i = 0; i < 12; i++) { await Promise.resolve(); if (dirty && !disposed) render() }
@@ -139,7 +139,7 @@ test('verification-code foreground request remains cancellable and its late resu
   await h.resolve(2, status({ revision: 2, message: 'cancelled code submission' }))
   await h.resolve(1, status({ revision: 3, paired: true, message: 'late verification success' }))
   assert(h.text().includes('cancelled code submission')); assert(!h.text().includes('late verification success'))
-  assert(h.text().includes('生成配对二维码')); assert(!h.text().includes('重新配对'))
+  assert(h.text().includes('显示配对码')); assert(!h.text().includes('重新配对'))
   h.unmount()
 })
 
@@ -203,19 +203,19 @@ test('pairing comes before target selection and identifies this node and its com
   assert(h.text().includes('当前节点：DeepSeek Harness · Desktop · fixture-computer'))
   assert(h.text().indexOf('微信配对') < h.text().indexOf('目标会话'))
   assert(h.find(n => n.type === 'input' && n.props.role === 'switch').props.disabled)
-  assert(!h.button('生成配对二维码').props.disabled)
+  assert(!h.button('显示配对码').props.disabled)
   assert(!h.nodes().some(n => n.type === 'img'))
-  await h.click('生成配对二维码')
-  assert.deepEqual(h.calls[1].request, { action: 'login.start' })
+  await h.click('显示配对码')
+  assert.deepEqual(h.calls[1].request, { action: 'login.start', expectedRevision: 1 })
   h.unmount()
 })
 
 test('legacy enabled but unpaired still has an available pairing entry and pause switch', async () => {
   const h = await mounted(status({ enabled: true, state: 'unpaired' }))
-  assert(!h.button('生成配对二维码').props.disabled)
+  assert(!h.button('显示配对码').props.disabled)
   assert(!h.find(n => n.type === 'input' && n.props.role === 'switch').props.disabled)
-  await h.click('生成配对二维码')
-  assert.deepEqual(h.calls[1].request, { action: 'login.start' })
+  await h.click('显示配对码')
+  assert.deepEqual(h.calls[1].request, { action: 'login.start', expectedRevision: 1 })
   assert(!h.calls.some(c => c.request.action === 'enabled'), 'the UI does not silently change existing settings')
   h.unmount()
 })
@@ -264,8 +264,8 @@ test('expired and terminal attempts hide QR and regenerate only after an explici
     assert(!h.nodes().some(n => n.type === 'img'))
     await h.tick()
     assert.deepEqual(h.calls[1].request, { action: 'status' })
-    await h.click('重新生成二维码')
-    assert.deepEqual(h.calls[2].request, { action: 'login.start' })
+    await h.click('重新显示配对码')
+    assert.deepEqual(h.calls[2].request, { action: 'login.start', expectedRevision: 1 })
     h.unmount()
   }
 })
@@ -285,7 +285,7 @@ test('scanned and verification attempts show confirmation steps without another 
   for (const state of ['scaned', 'scaned_but_redirect', 'need_verifycode']) {
     const h = await mounted(status({ pairing: pairing(state) }))
     assert(!h.nodes().some(n => n.type === 'img'))
-    assert(!h.text().includes('重新生成二维码'))
+    assert(!h.text().includes('重新显示配对码'))
     assert(h.text().includes('取消配对'))
     h.unmount()
   }
@@ -293,21 +293,32 @@ test('scanned and verification attempts show confirmation steps without another 
 
 test('credential expiry is not presented as a healthy pairing or allowed to enable messages', async () => {
   const h = await mounted(status({ paired: true, bindingState: 'expired', state: 'disabled', target: { id: 's1', title: 'A' } }))
-  assert(h.text().includes('需要重新配对'))
+  assert(h.text().includes('连接已失效'))
   assert(!h.text().includes('已配对此节点'))
   assert(h.find(n => n.type === 'input' && n.props.role === 'switch').props.disabled)
-  h.setConfirm(false); await h.click('生成配对二维码')
+  h.setConfirm(false); await h.click('重新配对')
   assert.equal(h.confirms.length, 1); assert.equal(h.calls.length, 1)
-  h.setConfirm(true); await h.click('生成配对二维码')
-  assert.deepEqual(h.calls[1].request, { action: 'login.start' })
+  h.setConfirm(true); await h.click('重新配对')
+  assert.deepEqual(h.calls[1].request, { action: 'login.start', expectedRevision: 1 })
   h.unmount()
 })
 
-test('running binding cannot be replaced or disconnected without first explicitly pausing', async () => {
+test('running binding requires confirmation then a fenced pause before starting a replacement', async () => {
   const h = await mounted(status({ paired: true, enabled: true, state: 'ready', target: { id: 's1', title: 'A' } }))
-  assert(h.text().includes('已配对此节点')); assert(h.text().includes('已连接'))
-  assert(h.button('重新配对').props.disabled); assert(h.button('移除配对').props.disabled)
+  assert(h.text().includes('已配对此节点')); assert(h.text().includes('接收中'))
+  assert(!h.button('重新配对').props.disabled); assert(!h.button('移除配对').props.disabled)
   assert(!h.find(n => n.type === 'input' && n.props.role === 'switch').props.disabled)
+  h.setConfirm(false); await h.click('重新配对')
+  assert.equal(h.calls.length, 1, 'cancelled confirmation makes no writes')
+  assert(h.confirms[0].includes('先暂停')); assert(h.confirms[0].includes('手动开启'))
+  h.setConfirm(true); await h.click('重新配对')
+  assert.deepEqual(h.calls[1].request, { action: 'enabled', enabled: false, expectedRevision: 1 })
+  assert(!h.calls.some(c => c.request.action === 'login.start'))
+  await h.resolve(1, status({ revision: 2, paired: true, state: 'disabled', target: { id: 's1', title: 'A' } }))
+  assert.deepEqual(h.calls[2].request, { action: 'login.start', expectedRevision: 2 })
+  await h.resolve(2, status({ revision: 3, paired: true, state: 'disabled', pairing: pairing(), target: { id: 's1', title: 'A' } }))
+  assert(h.nodes().some(n => n.type === 'img'))
+  assert(!h.calls.some(c => c.request.action === 'enabled' && c.request.enabled))
   h.unmount()
 })
 
@@ -319,7 +330,7 @@ test('an ended re-pairing attempt does not block resuming the existing valid bin
     toggle.props.onChange({ target: { checked: true } }); await h.flush()
     assert.deepEqual(h.calls[1].request, { action: 'enabled', enabled: true, expectedRevision: 1 })
     await h.resolve(1, status({ revision: 2, paired: true, enabled: true, state: 'ready', target: { id: 's1', title: 'A' } }))
-    assert(h.text().includes('已连接')); assert(!h.text().includes('取消配对'))
+    assert(h.text().includes('接收中')); assert(!h.text().includes('取消配对'))
     h.unmount()
   }
 })
@@ -330,7 +341,7 @@ test('paired without a target cannot start receiving, and no successful pairing 
   await h.resolve(1, status({ paired: true, revision: 2, state: 'disabled' }))
   assert(h.find(n => n.type === 'input' && n.props.role === 'switch').props.disabled)
   assert(!h.calls.some(c => c.request.action === 'enabled'))
-  assert(h.text().includes('选择会话后，即可开启微信消息'))
+  assert(h.text().includes('选择会话后可开启'))
   h.unmount()
 })
 
@@ -356,4 +367,134 @@ test('loading the latest session list does not disable and close the focused sel
   await h.resolve(1, { sessions: [{ id: 's1', title: 'New session' }] })
   assert(h.text().includes('New session'))
   h.unmount()
+})
+
+test('disconnect confirms the pending-work consequence and pauses before the revision-fenced removal', async () => {
+  const h = await mounted(status({ paired: true, enabled: true, state: 'ready', pending: 2, target: { id: 's1', title: 'A' } }))
+  h.setConfirm(false); await h.click('移除配对')
+  assert.equal(h.calls.length, 1)
+  assert(h.confirms[0].includes('先暂停')); assert(h.confirms[0].includes('未完成的微信消息'))
+  h.setConfirm(true); await h.click('移除配对')
+  assert.deepEqual(h.calls[1].request, { action: 'enabled', enabled: false, expectedRevision: 1 })
+  await h.resolve(1, status({ paired: true, state: 'disabled', revision: 2, pending: 2, target: { id: 's1', title: 'A' } }))
+  assert.deepEqual(h.calls[2].request, { action: 'disconnect', expectedRevision: 2, abandonPending: true })
+  await h.resolve(2, status({ state: 'disabled', revision: 3 }))
+  assert(!h.text().includes('配对管理'))
+  assert(h.text().includes('显示配对码'))
+  assert(!h.calls.some(c => c.request.action === 'enabled' && c.request.enabled))
+  h.unmount()
+})
+
+test('pause failure or an invalid stale pause receipt never proceeds to replacement or disconnect', async () => {
+  for (const label of ['重新配对', '移除配对']) {
+    for (const failure of ['rejected', 'stale', 'still-enabled', 'not-status']) {
+      const h = await mounted(status({ paired: true, enabled: true, state: 'ready' }))
+      await h.click(label)
+      if (failure === 'rejected') await h.reject(1, Error('pause failed'))
+      else if (failure === 'not-status') await h.resolve(1, { sessions: [] })
+      else await h.resolve(1, status({ paired: true, revision: failure === 'stale' ? 1 : 2, enabled: failure === 'still-enabled' }))
+      assert.equal(h.calls.length, 2, failure + ' must not continue to management mutation')
+      assert(h.nodes().some(n => n.props?.role === 'alert'))
+      assert(!h.button(label).props.disabled)
+      h.unmount()
+    }
+  }
+})
+
+test('node switch during the confirmed pause prevents the old-node follow-up mutation', async () => {
+  for (const label of ['重新配对', '移除配对']) {
+    const h = await mounted(status({ paired: true, enabled: true, state: 'ready' }))
+    await h.click(label)
+    await h.replaceCall()
+    assert.equal(h.calls.length, 3)
+    assert.deepEqual(h.calls[2].request, { action: 'status' }); assert.equal(h.calls[2].owner, 1)
+    await h.resolve(1, status({ paired: true, revision: 2, state: 'disabled' }))
+    assert.equal(h.calls.length, 3, 'old pause success may not act on either node')
+    assert(h.button('刷新').props.disabled, 'old finally must not release new-node foreground state')
+    await h.resolve(2, status({ state: 'disabled' }))
+    assert(!h.button('显示配对码').props.disabled)
+    h.unmount()
+  }
+})
+
+test('management failure after a successful pause remains paused without an automatic retry or resume', async () => {
+  const h = await mounted(status({ paired: true, enabled: true, state: 'ready' }))
+  await h.click('重新配对')
+  await h.resolve(1, status({ paired: true, revision: 2, state: 'disabled' }))
+  await h.reject(2, Error('QR provider temporarily unavailable'))
+  assert.equal(h.find(n => n.type === 'input' && n.props.role === 'switch').props.checked, false)
+  assert(h.text().includes('QR provider temporarily unavailable'))
+  await h.tick()
+  assert.deepEqual(h.calls[3].request, { action: 'status' })
+  assert.equal(h.calls.filter(c => c.request.action === 'login.start').length, 1)
+  assert(!h.calls.some(c => c.request.action === 'enabled' && c.request.enabled))
+  h.unmount()
+})
+
+test('valid pairing hides obsolete attempt notices and keeps replacement only in collapsed management', async () => {
+  for (const value of ['expired', 'verify_code_blocked', 'binded_redirect', 'confirmed']) {
+    const h = await mounted(status({ paired: true, state: 'disabled', pairing: pairing(value) }))
+    assert(!h.nodes().some(n => n.type === 'img'))
+    assert(!h.text().includes('二维码已过期'))
+    assert(!h.text().includes('验证码暂不可用'))
+    assert(!h.text().includes('请重新显示配对码'))
+    assert(!h.text().includes('取消配对'))
+    assert(!h.text().includes('重新显示配对码'))
+    assert(h.text().includes('已配对此节点'))
+    const menu = h.find(n => n.type === 'details')
+    assert(!menu.props.open)
+    assert.equal(h.nodes(menu).filter(n => n.type === 'button' && h.text(n) === '重新配对').length, 1)
+    h.unmount()
+  }
+})
+
+test('waiting QR has one cancel action, a homepage-scanner instruction and one accessible receive switch', async () => {
+  const h = await mounted(status({ pairing: pairing(), state: 'disabled' }))
+  assert(h.text().includes('微信首页「＋ → 扫一扫」'))
+  assert(h.text().includes('在微信中确认连接'))
+  assert(!h.nodes().some(n => n.type === 'button' && /显示配对码|重新配对/.test(h.text(n))))
+  assert.equal(h.nodes().filter(n => n.type === 'input' && n.props.role === 'switch').length, 1)
+  assert(h.find(n => n.type === 'input' && n.props.role === 'switch').props.disabled)
+  const label = h.find(n => n.type === 'label')
+  assert.equal(label.props.children[0].props['aria-label'], '接收微信消息')
+  assert.equal(label.props.children[1].props['aria-hidden'], true)
+  h.unmount()
+})
+
+test('disabled or expired states never hide replacement safety warnings or unknown provider messages', async () => {
+  for (const message of [
+    '此次确认的是另一个微信账号。未替换原绑定；如需换号，请先明确移除本地绑定。',
+    '原连接仍有未完成的消息，未替换本地绑定。请先处理原消息，或确认停止这些消息后移除绑定。',
+    '微信连接已失效，请重新配对。未确认送达的回复请在原会话查看。',
+    'A new warning not known to this version',
+  ]) {
+    const h = await mounted(status({ paired: true, state: 'disabled', bindingState: 'expired', message }))
+    assert(h.text().includes(message))
+    h.unmount()
+  }
+})
+
+test('routine successful pairing notices do not duplicate the current pairing and receive status', async () => {
+  for (const message of [
+    '微信已绑定。选择目标会话并开启接入后，即可在 ClawBot 私聊。',
+    '微信确认本节点已有绑定。选择会话并开启接入后即可使用。',
+  ]) {
+    const h = await mounted(status({ paired: true, state: 'disabled', target: { id: 's1', title: 'A' }, message }))
+    assert(!h.text().includes(message))
+    assert(h.text().includes('已配对此节点')); assert(h.text().includes('已暂停'))
+    h.unmount()
+  }
+})
+
+test('active replacement status takes precedence over both a valid or an expired previous binding', async () => {
+  for (const bindingState of ['paired', 'expired']) for (const [state, expected] of [
+    ['wait', '等待扫码'], ['scaned', '等待微信确认'], ['scaned_but_redirect', '等待微信确认'], ['need_verifycode', '等待确认码'],
+  ]) {
+    const h = await mounted(status({ paired: true, bindingState, state: 'disabled', pairing: pairing(state) }))
+    const badge = h.find(n => n.props?.['data-state'] === 'pending')
+    assert.equal(h.text(badge), expected)
+    assert(!h.text(badge).includes('已配对此节点')); assert(!h.text(badge).includes('连接已失效'))
+    assert(h.text().includes('配对完成后可开启')); assert(!h.text().includes('请重新配对'))
+    h.unmount()
+  }
 })

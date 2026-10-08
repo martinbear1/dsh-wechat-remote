@@ -612,6 +612,407 @@ test('native already-bound confirmation retains the local account and pending le
   } finally { await runtime.dispose() }
 })
 
+async function advanceLogin(t, milliseconds) {
+  t.mock.timers.tick(milliseconds)
+  // Drain the real runtime's control queue without advancing its next timer.
+  await setImmediate()
+}
+
+test('node-owned pairing finishes with both pages closed and caller disconnected, without enabling receiving', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const storage = memory(emptyClawbotData()), caller = new AbortController()
+  let polls = 0, updates = 0
+  const runtime = new ClawbotRuntime(storage, host(), client({
+    async getQr() { return { qrcode: 'qr-no-ui', url: 'https://example.invalid/qr' } },
+    async pollQr() { polls++; return { status: 'confirmed', credentials: auth } },
+    async getUpdates() { updates++; return { cursor: '', messages: [] } },
+  }))
+  try {
+    const started = await runtime.control({ action: 'login.start' }, caller.signal)
+    caller.abort()
+    assert.equal(polls, 0)
+    await advanceLogin(t, 1000)
+    const finished = runtime.snapshot()
+    assert.equal(polls, 1)
+    assert.equal(finished.paired, true)
+    assert.equal(finished.enabled, false)
+    assert.equal(finished.target, null)
+    assert.equal(finished.pairing, undefined)
+    assert.ok(finished.revision > started.revision)
+    assert.equal(storage.data.credentials.token, auth.token)
+    await advanceLogin(t, 300_000)
+    assert.equal(polls, 1)
+    assert.equal(updates, 0)
+  } finally { await runtime.dispose() }
+})
+
+test('watcher and UI share one provider poll; explicit code still preempts only the passive read', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let calls = 0, active = 0, maximum = 0, codes = []
+  const runtime = new ClawbotRuntime(memory(emptyClawbotData()), host(), client({
+    async getQr() { return { qrcode: 'qr-single-flight', url: 'https://example.invalid/qr' } },
+    async pollQr(_qr, abort, code) {
+      calls++; active++; maximum = Math.max(maximum, active)
+      if (code !== undefined) { codes.push(code); active--; return { status: 'confirmed', credentials: auth } }
+      return new Promise((_resolve, reject) => abort.addEventListener('abort', () => {
+        active--; reject(abort.reason)
+      }, { once: true }))
+    },
+  }))
+  try {
+    const started = await runtime.control({ action: 'login.start' }, signal())
+    await advanceLogin(t, 1000)
+    assert.equal(calls, 1)
+    const passive = await runtime.control({ action: 'login.poll', loginId: started.pairing.id }, signal())
+    assert.equal(passive.paired, false)
+    assert.equal(calls, 1)
+    const finished = await runtime.control({ action: 'login.poll', loginId: started.pairing.id, verifyCode: '123456' }, signal())
+    assert.equal(finished.paired, true)
+    assert.deepEqual(codes, ['123456'])
+    assert.equal(maximum, 1)
+    await advanceLogin(t, 20_000)
+    assert.equal(calls, 2)
+  } finally { await runtime.dispose() }
+})
+
+test('watcher pauses at verification and resumes passive reading only after the explicit code response', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let polls = 0, codes = []
+  const runtime = new ClawbotRuntime(memory(emptyClawbotData()), host(), client({
+    async getQr() { return { qrcode: 'qr-verify', url: 'https://example.invalid/qr' } },
+    async pollQr(_qr, _abort, code) {
+      polls++
+      if (code !== undefined) { codes.push(code); return { status: 'scaned' } }
+      return polls === 1 ? { status: 'need_verifycode' } : { status: 'confirmed', credentials: auth }
+    },
+  }))
+  try {
+    const started = await runtime.control({ action: 'login.start' }, signal())
+    await advanceLogin(t, 1000)
+    assert.equal(runtime.snapshot().pairing.status, 'need_verifycode')
+    await advanceLogin(t, 20_000)
+    assert.equal(polls, 1)
+    await runtime.control({ action: 'login.poll', loginId: started.pairing.id, verifyCode: '654321' }, signal())
+    assert.deepEqual(codes, ['654321'])
+    await advanceLogin(t, 1000)
+    assert.equal(runtime.snapshot().paired, true)
+    assert.equal(polls, 3)
+  } finally { await runtime.dispose() }
+})
+
+test('verification preemption is not a background failure while the explicit code is still in flight', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const verification = deferred()
+  let calls = 0
+  const runtime = new ClawbotRuntime(memory(emptyClawbotData()), host(), client({
+    async getQr() { return { qrcode: 'qr-verify-slow', url: 'https://example.invalid/qr' } },
+    async pollQr(_qr, abort, code) {
+      calls++
+      if (code !== undefined) return verification.promise
+      return new Promise((_resolve, reject) => abort.addEventListener('abort', () => reject(abort.reason), { once: true }))
+    },
+  }))
+  try {
+    const started = await runtime.control({ action: 'login.start' }, signal())
+    await advanceLogin(t, 1000)
+    const submitting = runtime.control({ action: 'login.poll', loginId: started.pairing.id, verifyCode: '123456' }, signal())
+    await setImmediate()
+    assert.equal(runtime.snapshot().pairing.status, 'wait')
+    await advanceLogin(t, 3000)
+    assert.equal(calls, 2, 'passive watcher cannot duplicate the explicit request')
+    verification.resolve({ status: 'need_verifycode' })
+    await submitting
+    await advanceLogin(t, 5000)
+    assert.equal(runtime.snapshot().pairing.status, 'need_verifycode')
+    assert.equal(calls, 2)
+  } finally { verification.resolve({ status: 'need_verifycode' }); await runtime.dispose() }
+})
+
+test('deadline aborts a background read with no UI, even if the computer clock stops or moves back', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let aborted = false, polls = 0
+  const runtime = new ClawbotRuntime(memory(emptyClawbotData()), host(), client({
+    async getQr() { return { qrcode: 'qr-deadline', url: 'https://example.invalid/qr' } },
+    async pollQr(_qr, abort) {
+      polls++
+      return new Promise((_resolve, reject) => abort.addEventListener('abort', () => {
+        aborted = true; reject(abort.reason)
+      }, { once: true }))
+    },
+  }), () => 1000)
+  try {
+    await runtime.control({ action: 'login.start' }, signal())
+    await advanceLogin(t, 1000)
+    await advanceLogin(t, 299_000)
+    assert.equal(aborted, true)
+    assert.equal(runtime.snapshot().pairing.status, 'expired')
+    assert.equal(runtime.snapshot().paired, false)
+    await advanceLogin(t, 300_000)
+    assert.equal(polls, 1)
+  } finally { await runtime.dispose() }
+})
+
+test('cancel and disposal clear node-owned timers and late confirmation never installs a binding', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const response = deferred(), storage = memory(emptyClawbotData())
+  let polls = 0, aborted = 0, qrCalls = 0
+  const runtime = new ClawbotRuntime(storage, host(), client({
+    async getQr() { return { qrcode: 'qr-cancel-' + ++qrCalls, url: 'https://example.invalid/qr' } },
+    async pollQr(_qr, abort) { polls++; abort.addEventListener('abort', () => aborted++); return response.promise },
+  }))
+  try {
+    const first = await runtime.control({ action: 'login.start' }, signal())
+    await advanceLogin(t, 1000)
+    await runtime.control({ action: 'login.cancel', loginId: first.pairing.id }, signal())
+    const second = await runtime.control({ action: 'login.start' }, signal())
+    response.resolve({ status: 'confirmed', credentials: auth })
+    await setImmediate()
+    assert.equal(runtime.snapshot().paired, false)
+    assert.equal(runtime.snapshot().pairing.id, second.pairing.id)
+    assert.equal(aborted, 1)
+    await runtime.dispose()
+    await advanceLogin(t, 300_000)
+    assert.equal(polls, 1)
+    assert.equal(storage.data.credentials, null)
+  } finally { response.resolve({ status: 'wait' }); await runtime.dispose() }
+})
+
+test('component disposal aborts and joins its in-flight watcher before closing local storage', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const storage = memory(emptyClawbotData())
+  let polls = 0, aborted = false, closed = false
+  storage.close = () => { assert.equal(aborted, true); closed = true }
+  const runtime = new ClawbotRuntime(storage, host(), client({
+    async getQr() { return { qrcode: 'qr-dispose', url: 'https://example.invalid/qr' } },
+    async pollQr(_qr, abort) {
+      polls++
+      return new Promise((_resolve, reject) => abort.addEventListener('abort', () => {
+        aborted = true; reject(abort.reason)
+      }, { once: true }))
+    },
+  }))
+  try {
+    await runtime.control({ action: 'login.start' }, signal())
+    await advanceLogin(t, 1000)
+    await runtime.dispose()
+    assert.equal(closed, true)
+    await advanceLogin(t, 300_000)
+    assert.equal(polls, 1)
+    assert.equal(storage.data.credentials, null)
+  } finally { await runtime.dispose() }
+})
+
+test('only transient background reads retry, bounded to the existing attempt without replaying login start', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let polls = 0, starts = 0
+  const runtime = new ClawbotRuntime(memory(emptyClawbotData()), host(), client({
+    async getQr() { starts++; return { qrcode: 'qr-retry', url: 'https://example.invalid/qr' } },
+    async pollQr() {
+      if (++polls === 1) throw Object.assign(new Error('must not leak provider detail'), { code: 'clawbot-network-error' })
+      return { status: 'confirmed', credentials: auth }
+    },
+  }))
+  try {
+    await runtime.control({ action: 'login.start' }, signal())
+    await advanceLogin(t, 1000)
+    assert.match(runtime.snapshot().message, /正在重试/)
+    assert.doesNotMatch(runtime.snapshot().message, /provider detail/)
+    await advanceLogin(t, 1999)
+    assert.equal(polls, 1)
+    await advanceLogin(t, 1)
+    assert.equal(polls, 2)
+    assert.equal(starts, 1)
+    assert.equal(runtime.snapshot().paired, true)
+  } finally { await runtime.dispose() }
+})
+
+test('only a real successful pairing read clears the retry notice and advances its revision', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const recoveredRead = deferred()
+  let polls = 0
+  const runtime = new ClawbotRuntime(memory(emptyClawbotData()), host(), client({
+    async getQr() { return { qrcode: 'qr-retry-message', url: 'https://example.invalid/qr' } },
+    async pollQr() {
+      polls++
+      if (polls === 1) return { status: 'wait' }
+      if (polls === 2) throw Object.assign(new Error('synthetic network outage'), { code: 'clawbot-network-error' })
+      return recoveredRead.promise
+    },
+  }))
+  try {
+    const started = await runtime.control({ action: 'login.start' }, signal())
+    await advanceLogin(t, 1000)
+    assert.equal(runtime.snapshot().message, started.message, 'a message-less result preserves unrelated guidance')
+    assert.equal(runtime.snapshot().revision, started.revision)
+    await advanceLogin(t, 1000)
+    const failed = runtime.snapshot()
+    assert.match(failed.message, /正在重试/)
+    assert.ok(failed.revision > started.revision)
+    await advanceLogin(t, 2000)
+    const coalesced = await runtime.control({ action: 'login.poll', loginId: started.pairing.id }, signal())
+    assert.equal(coalesced.message, failed.message, 'joining the existing read is not a recovery receipt')
+    assert.equal(coalesced.revision, failed.revision)
+    recoveredRead.resolve({ status: 'wait' }) // The adapter also returns this for a normal long-poll timeout.
+    await setImmediate()
+    const recovered = runtime.snapshot()
+    assert.equal(recovered.message, '')
+    assert.ok(recovered.revision > failed.revision)
+    assert.equal(recovered.pairing.status, 'wait')
+    assert.equal(recovered.paired, false)
+    assert.equal(polls, 3)
+  } finally { recoveredRead.resolve({ status: 'wait' }); await runtime.dispose() }
+})
+
+test('background pairing reports account mismatch and storage failure without changing the old binding', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const existing = memory(seed())
+  const mismatch = new ClawbotRuntime(existing, host(), client({
+    async getQr() { return { qrcode: 'qr-mismatch', url: 'https://example.invalid/qr' } },
+    async pollQr() { return { status: 'confirmed', credentials: { ...auth, userId: 'other@im.wechat' } } },
+  }))
+  try {
+    await mismatch.control({ action: 'login.start' }, signal())
+    await advanceLogin(t, 1000)
+    assert.match(mismatch.snapshot().message, /另一个微信账号/)
+    assert.equal(mismatch.snapshot().pairing, undefined)
+    assert.equal(existing.data.credentials.userId, auth.userId)
+  } finally { await mismatch.dispose() }
+  const storage = memory(emptyClawbotData())
+  const broken = new ClawbotRuntime(storage, host(), client({
+    async getQr() { return { qrcode: 'qr-storage', url: 'https://example.invalid/qr' } },
+    async pollQr() { storage.fail = true; return { status: 'confirmed', credentials: auth } },
+  }))
+  try {
+    await broken.control({ action: 'login.start' }, signal())
+    await advanceLogin(t, 1000)
+    assert.equal(broken.snapshot().paired, false)
+    assert.equal(broken.snapshot().pairing.status, 'error')
+    assert.match(broken.snapshot().message, /记录未能保存/)
+    assert.equal(storage.data.credentials, null)
+    await advanceLogin(t, 300_000)
+  } finally { await broken.dispose() }
+})
+
+test('restoring storage after a fatal pairing write cannot claim a successful binding or enabled channel before restart', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const storage = memory(seed())
+  let qrCalls = 0, pollCalls = 0, updates = 0, descriptions = 0
+  const runtime = new ClawbotRuntime(storage, {
+    ...host(), async describeSession(id) { descriptions++; return sessions.find(item => item.id === id) },
+  }, client({
+    async getQr() { qrCalls++; return { qrcode: 'qr-storage-recovery', url: 'https://example.invalid/qr' } },
+    async pollQr() { pollCalls++; storage.fail = true; return { status: 'confirmed', credentials: { ...auth, token: 'replacement-token' } } },
+    getUpdates(...args) { updates++; return blockedPoll(...args) },
+  }))
+  try {
+    const started = await runtime.control({ action: 'login.start' }, signal())
+    const durableBeforeFailure = structuredClone(storage.data)
+    await advanceLogin(t, 1000)
+    const failed = runtime.snapshot()
+    assert.match(failed.message, /记录未能保存.*重启/)
+    assert.equal(failed.enabled, false)
+    assert.equal(storage.data.credentials.token, auth.token)
+    storage.fail = false // Disk availability alone cannot repair the stopped in-memory runtime.
+    const revision = failed.revision
+    for (const request of [
+      { action: 'login.start' },
+      { action: 'login.poll', loginId: started.pairing.id },
+      { action: 'login.poll', loginId: started.pairing.id, verifyCode: '123456' },
+      { action: 'route', sessionId: sessions[1].id, expectedRevision: revision },
+      { action: 'enabled', enabled: true, expectedRevision: revision },
+      { action: 'disconnect', expectedRevision: revision },
+    ]) {
+      await assert.rejects(runtime.control(request, signal()), error => error.code === 'clawbot-restart-required' && /重启/.test(error.message))
+      assert.deepEqual(storage.data, durableBeforeFailure)
+      assert.deepEqual(runtime.snapshot(), failed)
+    }
+    const read = await runtime.control({ action: 'status' }, signal())
+    assert.equal(read.message, failed.message)
+    const paused = await runtime.control({ action: 'enabled', enabled: false, expectedRevision: revision }, signal())
+    assert.equal(paused.enabled, false)
+    assert.equal(paused.message, failed.message)
+    assert.deepEqual(storage.data, durableBeforeFailure, 'an already-paused broken runtime does not rewrite state')
+    const cancelled = await runtime.control({ action: 'login.cancel', loginId: started.pairing.id }, signal())
+    assert.equal(cancelled.pairing, undefined)
+    assert.equal(cancelled.message, failed.message, 'safe cancellation must retain the restart diagnostic')
+    assert.equal(storage.data.credentials.token, auth.token)
+    assert.deepEqual(storage.data.target, durableBeforeFailure.target)
+    assert.deepEqual(storage.data.receipts, durableBeforeFailure.receipts)
+    await advanceLogin(t, 300_000)
+    assert.equal(qrCalls, 1)
+    assert.equal(pollCalls, 1)
+    assert.equal(updates, 0)
+    assert.equal(descriptions, 0)
+  } finally { await runtime.dispose() }
+})
+
+test('a storage-locked runtime cannot finish an in-flight slash route or persist its success', async () => {
+  const nativeResult = deferred(), description = deferred(), sent = []
+  const commandText = '/切换 ' + createHash('sha256').update(sessions[1].id).digest('hex').slice(0, 8)
+  const storage = memory(seed({ receipts: [receipt('route-trigger'), receipt('late-command', 'pending', { input: commandText })] }))
+  let nativeSignal
+  const runtime = new ClawbotRuntime(storage, {
+    ...host(), async describeSession() { return description.promise },
+    async run(_input, signal) { nativeSignal = signal; return nativeResult.promise },
+  }, client({ async sendText(_auth, message) { sent.push(message) } }))
+  try {
+    await enabled(runtime, true)
+    await setImmediate()
+    storage.fail = true
+    nativeResult.resolve({ text: 'completed in the original DSH session' })
+    await setImmediate()
+    const failed = runtime.snapshot(), original = structuredClone(storage.data)
+    assert.match(failed.message, /保存失败.*重启/)
+    assert.equal(nativeSignal.aborted, false, 'a local storage fault must not cancel the native DSH task')
+    storage.fail = false
+    description.resolve(sessions[1])
+    await setImmediate()
+    assert.equal(runtime.snapshot().target.id, sessions[0].id)
+    assert.equal(runtime.snapshot().message, failed.message)
+    assert.deepEqual(storage.data, original, 'late route completion does not revive writes or success receipts')
+    assert.deepEqual(sent, [])
+    assert.ok(storage.data.receipts.every(row => row.state === 'running'))
+  } finally { nativeResult.resolve({ text: 'done' }); description.resolve(sessions[1]); await runtime.dispose() }
+  const restarted = new ClawbotRuntime(storage, host(), client())
+  try {
+    assert.ok(storage.data.receipts.every(row => row.state === 'uncertain'))
+    assert.equal(storage.data.target.id, sessions[0].id)
+  } finally { await restarted.dispose() }
+})
+
+test('a storage-locked runtime stops after the already-sent first fragment and never replays it on restart', async () => {
+  const nativeResult = deferred(), firstSend = deferred(), sent = []
+  const storage = memory(seed({ receipts: [receipt('send-trigger'), receipt('partial-reply', 'ready', { input: '', output: 'A'.repeat(1900) })] }))
+  let nativeSignal
+  const runtime = new ClawbotRuntime(storage, {
+    ...host(), async run(_input, signal) { nativeSignal = signal; return nativeResult.promise },
+  }, client({ async sendText(_auth, message) { sent.push(message); if (sent.length === 1) await firstSend.promise } }))
+  try {
+    await enabled(runtime, true)
+    await setImmediate()
+    assert.equal(sent.length, 1)
+    storage.fail = true
+    nativeResult.resolve({ text: 'completed in the original DSH session' })
+    await setImmediate()
+    const failed = runtime.snapshot(), original = structuredClone(storage.data)
+    assert.match(failed.message, /保存失败.*重启/)
+    assert.equal(nativeSignal.aborted, false)
+    storage.fail = false
+    firstSend.resolve()
+    await setImmediate()
+    assert.equal(sent.length, 1, 'storage recovery must not send the remaining fragment in a stopped runtime')
+    assert.equal(runtime.snapshot().message, failed.message)
+    assert.deepEqual(storage.data, original)
+    assert.deepEqual(storage.data.receipts.map(row => row.state), ['running', 'sending'])
+  } finally { nativeResult.resolve({ text: 'done' }); firstSend.resolve(); await runtime.dispose() }
+  const restarted = new ClawbotRuntime(storage, host(), client({ async sendText(_auth, message) { sent.push(message) } }))
+  try {
+    await setImmediate()
+    assert.ok(storage.data.receipts.every(row => row.state === 'uncertain'))
+    assert.equal(sent.length, 1, 'an uncertain first fragment is never automatically resent')
+  } finally { await restarted.dispose() }
+})
+
 test('an immediate slash response does not wait for the next provider poll to be delivered', async () => {
   const storage = memory(), sent = []
   const runtime = new ClawbotRuntime(storage, host(), client({ async sendText(_auth, message) { sent.push(message) } }))

@@ -34,7 +34,7 @@ const MAX_OBSERVATION_MS = 15 * 60 * 1000
  */
 export class DshClawbotHost implements ClawbotHost {
   private readonly running = new Set<string>()
-  constructor(private readonly ctx: DshClawbotContext) {}
+  constructor(private readonly ctx: DshClawbotContext, private readonly assertAccess?: () => void) {}
 
   private gateway(): Row {
     const gateway = this.ctx.get('typertGateway')
@@ -56,12 +56,20 @@ export class DshClawbotHost implements ClawbotHost {
     const archived = this.archived()
     if (!Array.isArray(result?.items)) throw fail('unavailable', '无法读取原生会话列表。')
     const seen = new Set<string>(), items: ClawbotSession[] = []
+    const registry = this.ctx.get('workspaceRegistry')
+    const workspaces: Row[] = typeof registry?.list === 'function' ? registry.list() : []
     for (const item of result.items) {
       if (!row(item) || !id(item.sessionId) || seen.has(item.sessionId)) throw fail('unavailable', '原生会话列表不完整，请刷新后重试。')
       seen.add(item.sessionId)
       if (item.origin === 'subagent' || archived.has(item.sessionId) || typeof item.cwd !== 'string' || !item.cwd) continue
       const title = item.projections?.values?.title
-      items.push({ id: item.sessionId, title: typeof title === 'string' && title.trim() ? title.slice(0, 200) : '未命名会话' })
+      const matches = Array.isArray(workspaces) ? workspaces.filter(workspace => row(workspace) && id(workspace.id)
+        && Array.isArray(workspace.sessionIds) && workspace.sessionIds.includes(item.sessionId)) : []
+      const workspace = matches.length === 1 ? matches[0] : undefined
+      const workspaceTitle = workspace && (typeof workspace.name === 'string' && workspace.name.trim() ? workspace.name
+        : typeof workspace.path === 'string' ? workspace.path.replace(/[\\/]+$/, '').split(/[\\/]/).at(-1) : undefined)
+      items.push({ id: item.sessionId, title: typeof title === 'string' && title.trim() ? title.slice(0, 200) : '未命名会话',
+        ...(workspace && workspaceTitle ? { workspaceId: workspace.id, workspaceTitle: workspaceTitle.slice(0, 200) } : {}) })
     }
     return items
   }
@@ -210,6 +218,7 @@ export class DshClawbotHost implements ClawbotHost {
         // The installed native prompt has no generation precondition. This
         // immediate check plus event identity checks fail closed for observed
         // resets; they cannot provide CAS inside the native async dispatcher.
+        this.assertAccess?.()
         dispatched = true
         void Promise.resolve(gateway.invoke({ namespace: 'session', method: 'prompt', args: { request: {
           sessionId: input.sessionId, requestId: input.requestId, mode: 'queue', content: [{ type: 'text', text: input.text }],

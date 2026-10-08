@@ -1,4 +1,5 @@
 import test from 'node:test'
+import { allowedFeatureFixture } from './feature-access-fixture.mjs'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { Context } from '@deepseek-ai/cordis'
@@ -39,6 +40,7 @@ const unwrap = response => { assert.equal(response.ok, true, JSON.stringify(resp
 
 async function setup(t, options = {}) {
   const ctx = new Context(); new SystemPrompt(ctx, {}); new SkillRegistry(ctx)
+  ctx.provide('wechatFeatures', allowedFeatureFixture())
   const tools = new ToolRuntime(ctx, { mode: options.mode || 'native' }), sessions = new SessionStore(ctx)
   const session = sessions.create(SessionId(sessionId), { meta: { createdAt: 100 } })
   const agent = { id: session.id, session, ctx, status: 'idle', send() { assert.fail('service must not wake Agent') } }
@@ -99,6 +101,19 @@ test('assistant RPC freshly rejects an uninstalled managed preset even when it i
   available=true
   const intent=unwrap(await host.service.assistantSessionPrepare({presetId:result.presetId},signal));assert.equal(intent.dispatch,true)
   assert.equal(installs,1)
+})
+
+test('group off gates already-mounted tool execution and owner mutation RPC, but safe status remains readable', async t => {
+  const h = await setup(t); await h.compose()
+  const denied = () => { throw Object.assign(Error('此账号暂未开通此功能。'),{code:'feature-access-denied'}) }
+  h.ctx.get('wechatFeatures').access.assert = denied
+  const tool = await h.run('human_mode_draft', {package:pkg()})
+  assert.equal(tool.isError,true); assert.match(tool.content[0].text,/未开通/)
+  assert.equal(h.modeStore.writes,0)
+  const rpc = await h.service.modePreview({scope:sessionId,id:'any',version:1},signal)
+  assert.equal(rpc.ok,false); assert.equal(rpc.error.code,'feature-access-denied')
+  assert.equal((await h.service.modeList({scope:sessionId},signal)).ok,true)
+  assert.equal(h.networkCalls,0)
 })
 
 // Cordis provides/withdraws real services; methods must NOT be invoked by

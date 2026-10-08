@@ -31,6 +31,7 @@ try {
   copyFileSync(path.join(root, 'package.json'), path.join(packageRoot, 'package.json'))
   const hostSources = [
     'index.ts',
+    'feature-access.ts',
     'clawbot-component.ts',
     'clawbot/service.ts',
     'clawbot/contracts.ts',

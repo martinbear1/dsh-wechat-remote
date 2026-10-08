@@ -16,6 +16,7 @@ import { createNativeAssistantAdapter, nativeAssistantCodec, parseNativeAssistan
 import { HUMAN_WORKFLOW_SKILL } from '../lib/human-workflow/dsh-skill.js'
 import { invokeHostRemote, nativeSessionPresetSelection } from '../lib/dsh-host-contract.js'
 import { verifyNativePresetSettings } from './native-preset-settings-fixture.mjs'
+import { FeatureAccess } from '../lib/feature-access.js'
 
 const archive = process.env.HARNESS_DSH_ASAR
 assert(archive, 'HARNESS_DSH_ASAR is required; no silent native-test skip')
@@ -48,7 +49,7 @@ try {
 }
 } else {
 assert(path.dirname(path.resolve(work)) === path.resolve(os.tmpdir()) && path.basename(work).startsWith('assistant-builtins-native-'))
-let ctx
+let ctx, featureAccess
 try {
   const anchor = path.join(work, 'dsh/node_modules/@deepseek-ai/dsh/package.json')
   const require = createRequire(anchor), load = name => import(pathToFileURL(require.resolve(name)).href)
@@ -109,6 +110,10 @@ try {
   assert.equal(nativeSessionPresetSelection({ get: name => name === 'typert' ? { local: { get: id => id === 'session/create' ? createDescriptor : undefined } } : undefined }), true,
     'actual installed native codecs preserve per-session mode selection and acknowledgement')
   ctx = new Context(); ctx.baseUrl = pathToFileURL(path.join(work, 'dsh/')).href
+  featureAccess = new FeatureAccess({nodeId:()=>'builtin-feature-fixture',read:async()=>({schemaVersion:1,nodeId:'builtin-feature-fixture',accountInstance:'synthetic-owner',
+    checkedAt:1000,expiresAt:61000,features:{group_assistant:{allowed:true,reason:'allowed',validUntil:61000},clawbot:{allowed:true,reason:'allowed',validUntil:61000}}})})
+  await featureAccess.setGroupEnabled(true)
+  ctx.provide('wechatFeatures', {access:featureAccess})
   ctx.provide('profileContext', { name: 'builtin-contract-fixture', dir: work, home: work, installAnchor: anchor })
   await ctx.plugin(Loader); await ctx.plugin(Projection); await ctx.plugin(SystemPrompt, {})
   new SessionStore(ctx); new AgentRegistry(ctx); new ToolRuntime(ctx, { mode: 'native' }); new Typert(ctx)
@@ -206,6 +211,18 @@ try {
     const doc = await ctx.agentPresets.readDocument(identity.presetId)
     assert.match(doc.content, /Native fixture policy/); assert.match(doc.content, /Native suffix/)
   }
+  const teacher = ctx.agents.get(created.sessionId), originalCancel = teacher.cancel
+  const teacherEvents = JSON.stringify(teacher.session.snapshotEvents()), ordinaryEvents = JSON.stringify(ordinaryAgent.session.snapshotEvents())
+  teacher.cancel = () => assert.fail('turning off group features must not cancel a native Agent')
+  try {
+    await featureAccess.setGroupEnabled(false)
+    for(let attempt=0;attempt<20 && (await ctx.agentPresets.list()).some(row=>row.id==='harness-teacher');attempt++) await new Promise(resolve=>setTimeout(resolve,10))
+    assert.deepEqual((await ctx.agentPresets.list()).map(item=>item.id),['standard'])
+    assert.equal(ctx.agents.get(created.sessionId),teacher); assert.equal(ctx.agents.get(ordinary.sessionId),ordinaryAgent)
+    assert.equal(JSON.stringify(teacher.session.snapshotEvents()),teacherEvents); assert.equal(JSON.stringify(ordinaryAgent.session.snapshotEvents()),ordinaryEvents)
+    assert.equal(JSON.stringify(ctx.agentPresets.config),originalDefaultConfig); assert.deepEqual(ctx.agentDefaultModel.currentSelection(),originalModelSelection)
+    assert.equal(ctx.tools.get('human_capabilities',ordinaryAgent),undefined)
+  } finally {teacher.cancel=originalCancel}
   await ctx.loader.root.update([]); await ctx.loader.await()
   assert.deepEqual((await ctx.agentPresets.list()).map(item => item.id), ['standard'])
   await standard()
@@ -309,6 +326,7 @@ try {
     nativePresetSources, nativeStandardRows: nativeStandard.map(row => ({ id: row.id, module: row.name })),
     checks: ['complete shipped standard declaration non-persona rows preserved field-for-field; original preset files byte-identical',
       'native Loader component lifecycle', 'three actual registry modes', 'native acquireScope mount', 'default unchanged', 'owned dispose removes only builtins',
+      'account-qualified group pause withdraws only owned presets, preserves both existing native Agents and events, and never cancels tasks',
       'actual exported collaboration component mounts only in native preset scopes', 'standard Agent and host have no collaboration tools or skill',
       'scoped readiness cannot be supplied by a global skill', 'core and Desktop authoring choose their actual owning package exports',
       'native request and result retain per-session mode', 'withdrawn selected default is reported without mutation',
@@ -317,5 +335,6 @@ try {
       'native manifest icon accepts contained SVG and rejects URL/traversal/oversize without losing display text', ...settingsChecks], liveProfileTouched: false }))
 } finally {
   await ctx?.fiber.dispose()
+  featureAccess?.close()
 }
 }

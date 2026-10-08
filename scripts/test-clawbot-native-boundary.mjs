@@ -70,6 +70,7 @@ async function verify() {
   const component = await load('@harness-remote/dsh-wechat-remote/clawbot')
   const { TYPERT } = await load('@harness-remote/dsh-wechat-remote/typert')
   const { invokeLegacyRpc } = await load('@harness-remote/dsh-wechat-remote/dsh-protocol-compat')
+  const { FeatureAccess } = await load('@harness-remote/dsh-wechat-remote/features')
   const product = path.join(work, 'dsh/node_modules/@harness-remote/dsh-wechat-remote')
   const { nodeStorageDirectory } = await import(pathToFileURL(path.join(product, 'lib/node-storage.js')).href)
   const descriptor = TYPERT.invocations.find(v => v.namespace === 'wechatClawbot' && v.method === 'control')
@@ -78,7 +79,7 @@ async function verify() {
   assert.deepEqual(descriptor.parameters.map(p => [p.name, p.wire, p.source, p.codec.mode]), [['request', 'request', 'json', 'strict']])
   assert.equal(descriptor.result.mode, 'strict')
   assert.deepEqual(descriptor.cancellation, { parameter: 'signal' })
-  assert.deepEqual(component.inject, ['typertGateway', 'profileContext'])
+  assert.deepEqual(component.inject, ['typertGateway', 'profileContext', 'wechatFeatures'])
   const inputCodec = descriptor.parameters[0].codec.create(), outputCodec = descriptor.result.create()
   assert(inputCodec.safeParse({ action: 'status' }).success)
   assert.equal(inputCodec.parse({ action: 'disconnect', expectedRevision: 1, abandonPending: true }).abandonPending, true,
@@ -89,12 +90,15 @@ async function verify() {
 
   const profile = { name: 'clawbot-boundary-fixture', home: path.join(work, 'profile-home'), dir: path.join(work, 'profile'), installAnchor: anchor }
   const root = new Context(), checks = [], signal = new AbortController().signal
+  const featureAccess = new FeatureAccess({nodeId:()=>'fixture-node',read:async()=>({schemaVersion:1,nodeId:'fixture-node',accountInstance:null,
+    checkedAt:1000,expiresAt:61000,features:{group_assistant:{allowed:false,reason:'node_unbound',validUntil:null},clawbot:{allowed:false,reason:'node_unbound',validUntil:null}}})})
   const originalFetch = globalThis.fetch
   let componentFiber, networkCalls = 0
   globalThis.fetch = async () => { networkCalls++; assert.fail('no network or pairing is allowed') }
   try {
     root.baseUrl = pathToFileURL(path.join(work, 'dsh/')).href
     root.provide('profileContext', profile)
+    root.provide('wechatFeatures', {access:featureAccess})
     await root.plugin(Loader); new Projections(root); new SystemPrompt(root, {})
     new ToolRuntime(root, { mode: 'native' }); new Typert(root)
     await root.plugin(TypertGatewayService, {})
@@ -126,7 +130,8 @@ async function verify() {
     const call = request => gateway.invoke({ namespace: 'wechatClawbot', method: 'control', args: { request }, signal })
     const status = await call({ action: 'status' })
     assert.deepEqual(status, { ok: true, value: { supported: true, revision: 0, enabled: false, state: 'disabled',
-      paired: false, bindingState: 'unpaired', target: null, pending: 0, uncertain: 0, message: status.value.message } })
+      paired: false, bindingState: 'unpaired', target: null, pending: 0, uncertain: 0, message: status.value.message, access:status.value.access } })
+    assert.equal(status.value.access.allowed,false); assert.equal(status.value.access.reason,'node_unbound')
     assert(outputCodec.safeParse(status).success)
     const pairingDto = { ok: true, value: { ...status.value, pairing: {
       id: 'synthetic-login', url: 'https://liteapp.weixin.qq.com/q/test-only', qrDataUrl: 'data:image/png;base64,synthetic',
@@ -194,6 +199,7 @@ async function verify() {
     checks.push('no gate/webServer/phone/cloud login, network, tools, preset/default or shipped mode config changes')
     console.log(JSON.stringify({ ok: true, installedDsh: JSON.parse(fs.readFileSync(anchor, 'utf8')).version, checks }, null, 2))
   } finally {
+    featureAccess.close()
     await componentFiber?.dispose()
     await root.fiber.dispose()
     globalThis.fetch = originalFetch

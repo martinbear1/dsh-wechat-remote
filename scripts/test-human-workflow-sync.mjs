@@ -277,6 +277,7 @@ test('transport sanitizes server errors and bounds response body', async () => {
 test('authenticated resource denials keep accurate scoped error codes without exposing response data or retrying', async () => {
   const pair = generateKeyPairSync('ed25519'), identity = { nodeId, privateKeyPem: pair.privateKey.export({ type: 'pkcs8', format: 'pem' }) }
   const cases = [
+    ['publisher_not_allowed', ['grant','workspace','receiver-key','lifecycle','cover-assets/prepare'], /协作助手资格和公网/],
     ['invalid_recipients', ['lifecycle'], /指定对象/],
     ['private_updates_disabled', ['lifecycle'], /私人更新尚未开启或已关闭/],
     ['invalid_private_input_proof', ['lifecycle'], /私人更新权限无法核对/],
@@ -316,6 +317,8 @@ test('the resource-denial allowlist cannot soften 401, unrelated routes, invalid
     ['receiver-key', 403, JSON.stringify({ error: { code: 'workspace_scope_mismatch' } })],
     ['grant', 403, JSON.stringify({ error: { code: 'source_scope_mismatch' } })],
     ['sync', 403, JSON.stringify({ error: { code: 'action_source_mismatch' } })],
+    ['sync', 403, JSON.stringify({ error: { code: 'publisher_not_allowed' } })],
+    ['grant', 401, JSON.stringify({ error: { code: 'publisher_not_allowed' } })],
     ...[null, '', 'Forbidden', '{', '{"ok":true}', JSON.stringify({ error: { code: 'invalid_recipients', message: 'x'.repeat(16 * 1024) } })]
       .map(body => ['lifecycle', 403, body]),
   ]

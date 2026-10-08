@@ -7,11 +7,12 @@ type Contribution = (ctx: Context) => Dispose;
  * The backend owns storage; each mount owns its model-visible registrations. */
 export declare class ScopedCapabilities {
     private readonly lifetime;
+    private readonly authorize?;
     private readonly definitions;
     private readonly contributions;
     private readonly mounts;
     private closed;
-    constructor(lifetime: AbortSignal);
+    constructor(lifetime: AbortSignal, authorize?: ((tool: string, signal: AbortSignal) => Promise<void>) | undefined);
     has(name: string): boolean;
     add(tool: ToolDefinition): Dispose;
     contribute(register: Contribution): Dispose;

@@ -472,12 +472,14 @@
 .clawbotPairingCopy form { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .clawbotPairing input { border: 1px solid var(--dsw-alias-border-l2, #ddd); border-radius: 6px; padding: 8px; width: 120px; max-width: 100%; color: inherit; background: transparent; }
 .clawbotActions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
-.clawbotTextButton { padding: 4px 0; border: 0; color: var(--dsw-alias-state-business-primary, #4e79ff); background: transparent; font: inherit; font-size: 12px; cursor: pointer; }
+.clawbotTextButton { padding: 4px 0; border: 0; color: var(--dsw-alias-state-business-primary, #4e79ff); background: transparent; font: inherit; font-size: 12px; cursor: pointer; white-space: nowrap; flex-shrink: 0; }
 .clawbotTextButton:disabled { opacity: .5; cursor: default; }
 .clawbotManage { margin-top: 16px; color: var(--dsw-alias-label-secondary, #647084); font-size: 12px; }
 .clawbotManage summary { width: fit-content; padding: 4px 0; cursor: pointer; }
 .clawbotManage .clawbotActions { margin-top: 6px; gap: 14px; }
-.clawbotMark { display: inline-flex; flex: 0 0 22px; width: 22px; height: 22px; border-radius: 50%; background: #e54443; align-items: center; justify-content: center; gap: 3px; }
+.assistantFeatureBody { border: 0; padding: 0; margin: 12px 0 0; min-width: 0; }
+.assistantFeatureBody:disabled { opacity: .55; }
+.clawbotMark { display: inline-flex; flex: 0 0 18px; width: 18px; height: 18px; border-radius: 5px; background: #e54443; align-items: center; justify-content: center; gap: 3px; }
 .clawbotMark::before, .clawbotMark::after { content: ''; display: block; width: 5px; height: 5px; border-radius: 50%; background: #fff; }
 @media (prefers-reduced-motion: reduce) {
   .clawbotSwitchTrack, .clawbotSwitchTrack::after { transition: none; }

@@ -3,6 +3,7 @@ import path from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { ScopedCapabilities } from './scoped-capabilities.js'
+import { hostFeatureAccess } from '../feature-access.js'
 import type { SessionId, SessionStore } from '@deepseek-ai/dsh-session'
 import { defaultGateStatePath } from '../agent-metadata.js'
 import { HumanToolsCore, type HumanStore } from './core.js'
@@ -74,7 +75,10 @@ export class HumanToolsService extends TypertRemoteService {
   private core?: HumanToolsCore
   private ready?: Promise<void>
   private readonly lifetime = new AbortController()
-  private readonly modelCapabilities = new ScopedCapabilities(this.lifetime.signal)
+  private readonly modelCapabilities = new ScopedCapabilities(this.lifetime.signal, async (tool, signal) => {
+    if (!SAFE_GROUP_READ_TOOLS.has(tool)) await hostFeatureAccess(this.host).assert('group_assistant')
+    signal.throwIfAborted()
+  })
   private unregister?: () => void
   private workflow?: { transport: WorkflowTransport; modes: ModeRegistry; records: WorkflowRecords; replica: WorkflowReplica }
   private assistants?: { registry: AssistantRegistry; business: AssistantBusinessRecords; native: NativeAssistantAdapter; sessionIntents?: AssistantSessionIntents }
@@ -113,9 +117,11 @@ export class HumanToolsService extends TypertRemoteService {
   /** Internal native composition API, deliberately not a Remote method.
    * Await backend readiness without creating a session or changing a preset. */
   async mountCapabilities(ctx: Context): Promise<() => void> {
+    await hostFeatureAccess(this.host).assert('group_assistant')
     if (!this.ready) throw disabled()
     await this.ready
     this.lifetime.signal.throwIfAborted()
+    hostFeatureAccess(this.host).assertCurrent('group_assistant')
     if (!this.core) throw disabled()
     return this.modelCapabilities.mount(ctx)
   }
@@ -231,7 +237,10 @@ export class HumanToolsService extends TypertRemoteService {
             this.lifecycle = { runtime, keys, receiver, unsubscribe: replica.onSynchronized((binding, tasks) => {
               void current.synced(binding, tasks, this.lifetime.signal).then(() => this.automation?.drive(this.lifetime.signal)).catch(() => {})
             }) }
-            const nativeAutomation = config.workflow.automationNative || createNativeAutomationAdapter(this.host)
+            const nativeAutomation = config.workflow.automationNative || createNativeAutomationAdapter(this.host, {
+              authorize: () => hostFeatureAccess(this.host).assert('group_assistant'),
+              current: () => hostFeatureAccess(this.host).assertCurrent('group_assistant'),
+            })
             let automation: WorkflowAutomation | undefined
             const unregisterAutomation: (() => void)[] = []
             try {
@@ -297,7 +306,9 @@ export class HumanToolsService extends TypertRemoteService {
             return remove
           }))
           if (config.assistants !== false) {
-            const assistantConfig = config.assistants || {}, native = assistantConfig.native || createNativeAssistantAdapter(this.host)
+            const assistantConfig = config.assistants || {}, native = assistantConfig.native || createNativeAssistantAdapter(this.host, {
+              access: { authorize: () => hostFeatureAccess(this.host).assert('group_assistant'), current: () => hostFeatureAccess(this.host).assertCurrent('group_assistant') },
+            })
             let registry: AssistantRegistry | undefined, business: AssistantBusinessRecords | undefined
             try {
               registry = await AssistantRegistry.open(assistantConfig.registryStore || file('assistants'), {
@@ -363,7 +374,7 @@ export class HumanToolsService extends TypertRemoteService {
   }
   @Remote('automationList')
   async automationList(request: { scope: string; offset?: number }, signal: AbortSignal): Promise<HumanResult> {
-    return this.result(async () => {
+    return this.readResult(async () => {
       const scope = await this.workflowScope(request.scope, signal), active = AbortSignal.any([signal, this.lifetime.signal])
       if (request.offset !== undefined && (!Number.isSafeInteger(request.offset) || request.offset < 0 || request.offset > 10000)) throw fail('automation-offset-invalid', '任务分页位置无效')
       const page = await this.workflow!.replica.query(scope, { limit: 20, offset: request.offset ?? 0 }, active)
@@ -386,7 +397,7 @@ export class HumanToolsService extends TypertRemoteService {
   }
   @Remote('workflowReceiptStatus')
   async workflowReceiptStatus(request: AutomationTaskRequest & { offset?: number }, signal: AbortSignal): Promise<HumanResult> {
-    return this.result(async () => {
+    return this.readResult(async () => {
       const scope = await this.workflowScope(request.scope, signal)
       if (!this.lifecycle) throw fail('receiver-unavailable', '此节点尚未提供持久收件')
       return this.lifecycle.runtime.receiptStatus(scope, request.taskRef, AbortSignal.any([signal, this.lifetime.signal]), request.offset)
@@ -394,14 +405,14 @@ export class HumanToolsService extends TypertRemoteService {
   }
   @Remote('automationProposals')
   async automationProposals(request: AutomationTaskRequest, signal: AbortSignal): Promise<HumanResult> {
-    return this.result(async () => {
+    return this.readResult(async () => {
       const { scope, runtime, active } = await this.automationScope(request, signal)
       return runtime.proposals(scope, request.taskRef, active)
     })
   }
   @Remote('workflowReceiptRetry')
   async workflowReceiptRetry(request: AutomationTaskRequest & { submissionId: string; submissionVersion: number; expectedRevision: number }, signal: AbortSignal): Promise<HumanResult> {
-    return this.result(async () => {
+    return this.readResult(async () => {
       const scope = await this.workflowScope(request.scope, signal)
       if (!this.lifecycle) throw fail('receiver-unavailable', '此节点尚未提供持久收件')
       return this.lifecycle.runtime.retryReceipt(scope, request.taskRef, request, AbortSignal.any([signal, this.lifetime.signal]))
@@ -421,17 +432,17 @@ export class HumanToolsService extends TypertRemoteService {
   }
   @Remote('automationPause')
   async automationPause(request: AutomationPauseRequest, signal: AbortSignal): Promise<HumanResult> {
-    return this.result(async () => { const { scope, runtime, active } = await this.automationScope(request, signal)
+    return this.readResult(async () => { const { scope, runtime, active } = await this.automationScope(request, signal)
       return automationPolicyView(await runtime.pause(scope, request.taskRef, request.expectedRevision, active)) })
   }
   @Remote('automationStatus')
   async automationStatus(request: AutomationStatusRequest, signal: AbortSignal): Promise<HumanResult> {
-    return this.result(async () => { const { scope, runtime, active } = await this.automationScope(request, signal)
+    return this.readResult(async () => { const { scope, runtime, active } = await this.automationScope(request, signal)
       return runtime.status(scope, request.taskRef, active, request.cursor) })
   }
   @Remote('workflowDraft')
   async workflowDraft(request: HumanActionRequest, signal: AbortSignal): Promise<HumanResult> {
-    return this.result(async () => {
+    return this.readResult(async () => {
       const active = AbortSignal.any([signal, this.lifetime.signal]), core = await this.use(active)
       if (!this.lifecycle) throw fail('lifecycle-unavailable', '此节点尚未提供任务生命周期')
       const source = core.grantSource(request), generation = await this.claimGeneration(request.scope, active)
@@ -446,7 +457,7 @@ export class HumanToolsService extends TypertRemoteService {
    * Resolve the asset from the durable Surface / exact cloud draft, not input. */
   @Remote('coverPreview')
   async coverPreview(request: CoverPreviewRequest, signal: AbortSignal): Promise<HumanResult> {
-    return this.result(async () => {
+    return this.readResult(async () => {
       const active = AbortSignal.any([signal, this.lifetime.signal]), core = await this.use(active)
       if (!row(request) || request.revision !== 1 || !this.covers || !this.workflow) throw fail('cover-preview-invalid', '封面预览不可用')
       const scope = await this.workflowScope(request.scope, active)
@@ -476,7 +487,7 @@ export class HumanToolsService extends TypertRemoteService {
   }
   @Remote('assistantCatalog')
   async assistantCatalog(request: {}, signal: AbortSignal): Promise<HumanResult> {
-    return this.result(async () => (await this.assistantRegistry(signal)).catalog(AbortSignal.any([signal, this.lifetime.signal])))
+    return this.readResult(async () => (await this.assistantRegistry(signal)).catalog(AbortSignal.any([signal, this.lifetime.signal])))
   }
   @Remote('assistantDraft')
   async assistantDraft(request: AssistantDraftRequest, signal: AbortSignal): Promise<HumanResult> {
@@ -501,7 +512,7 @@ export class HumanToolsService extends TypertRemoteService {
   }
   @Remote('assistantStatus')
   async assistantStatus(request: AssistantVersionRequest, signal: AbortSignal): Promise<HumanResult> {
-    return this.result(async () => (await this.assistantRegistry(signal)).status(request, AbortSignal.any([signal, this.lifetime.signal])))
+    return this.readResult(async () => (await this.assistantRegistry(signal)).status(request, AbortSignal.any([signal, this.lifetime.signal])))
   }
   @Remote('assistantSessionPrepare')
   async assistantSessionPrepare(request: { presetId: string; workspaceId?: string; previousAttemptId?: string }, signal: AbortSignal): Promise<HumanResult> {
@@ -513,7 +524,7 @@ export class HumanToolsService extends TypertRemoteService {
   }
   @Remote('assistantSessionStatus')
   async assistantSessionStatus(request: { attemptId: string } | { presetId: string; workspaceId?: string }, signal: AbortSignal): Promise<HumanResult> {
-    return this.result(async () => {
+    return this.readResult(async () => {
       await this.assistantRegistry(signal)
       if (!this.assistants?.sessionIntents) throw fail('assistant-session-unavailable', '此节点无法持久核对新建会话；请使用 DSH 原生会话列表')
       return this.assistants.sessionIntents.status(request, AbortSignal.any([signal, this.lifetime.signal]))
@@ -528,8 +539,10 @@ export class HumanToolsService extends TypertRemoteService {
     this.workflow?.transport.assertIdentity()
     return this.core
   }
-  private async result(operation: () => Promise<unknown>): Promise<HumanResult> {
+  private readResult(operation: () => Promise<unknown>): Promise<HumanResult> { return this.result(operation, false) }
+  private async result(operation: () => Promise<unknown>, mutation = true): Promise<HumanResult> {
     try {
+      if (mutation) await hostFeatureAccess(this.host).assert('group_assistant')
       const value = await operation()
       this.lifetime.signal.throwIfAborted(); this.workflow?.transport.assertIdentity()
       return { ok: true, valueJson: JSON.stringify(value) }
@@ -551,14 +564,16 @@ export class HumanToolsService extends TypertRemoteService {
   }
   @Remote('capabilities')
   async capabilities(request: { scope: string }, signal: AbortSignal): Promise<HumanResult> {
-    return this.result(async () => {
+    return this.readResult(async () => {
       await this.use(signal)
       const manifest = this.workflow?.modes.manifest()
+      let groupAllowed = false
+      try { const access = hostFeatureAccess(this.host); await access.refresh(); groupAllowed = access.grant('group_assistant').allowed } catch {}
       // Phone action discovery is a readiness projection, not the Agent's
       // capability documentation. Keep it independent of growing contracts,
       // tool descriptions and Skill text. Full details remain discoverable
       // through human_capabilities and the exact mode preview endpoints.
-      return { schema: 'human.tools.v1', enabled: true, shareTest: true, members: true, remind: true,
+      return { schema: 'human.tools.v1', enabled: groupAllowed, shareTest: groupAllowed, members: groupAllowed, remind: groupAllowed,
         ...(manifest ? { workflow: { schema: 'human.capabilities.status.v1', nodeId: manifest.nodeId, version: manifest.version,
           statusMeaning: 'node-implementation-not-device-verification-or-authorization',
           capabilities: manifest.capabilities.map(({ id, version, status, ownerApproval, reason }) =>
@@ -593,7 +608,7 @@ export class HumanToolsService extends TypertRemoteService {
   }
   @Remote('modeList')
   async modeList(request: { scope: string }, signal: AbortSignal): Promise<HumanResult> {
-    return this.result(async () => { const scope = await this.workflowScope(request.scope, signal); return this.workflow!.modes.list(scope) })
+    return this.readResult(async () => { const scope = await this.workflowScope(request.scope, signal); return this.workflow!.modes.list(scope) })
   }
   @Remote('modePreview')
   async modePreview(request: ModeVersionRequest, signal: AbortSignal): Promise<HumanResult> {
@@ -674,7 +689,7 @@ export class HumanToolsService extends TypertRemoteService {
   }
   @Remote('ack')
   async ack(request: HumanAckWireRequest, signal: AbortSignal): Promise<HumanResult> {
-    return this.result(async () => {
+    return this.readResult(async () => {
       const active = AbortSignal.any([signal, this.lifetime.signal]), receipt = await (await this.use(active)).ack(request, active)
       if (this.workflow && request.actionId === 'share' && ['success', 'unknown'].includes(receipt.outcome)) {
         // Also cover a late native result and pre-upgrade ledgers which never
@@ -687,7 +702,7 @@ export class HumanToolsService extends TypertRemoteService {
   }
   @Remote('status')
   async status(request: { scope: string; surfaceId: string }, signal: AbortSignal): Promise<HumanResult> {
-    return this.result(async () => {
+    return this.readResult(async () => {
       const active = AbortSignal.any([signal, this.lifetime.signal]), core = await this.use(active)
       // Resolve the saved source before inspecting the host; unrelated or
       // fabricated status reads cannot probe its session directory.
@@ -700,6 +715,14 @@ export class HumanToolsService extends TypertRemoteService {
 function disabled(): Error & { code: string } {
   return Object.assign(new Error('此节点尚未启用群任务功能'), { code: 'human-tools-disabled' })
 }
+
+// Existing task facts, local files and diagnostics remain readable. Everything
+// else, including any newly added tool, defaults to feature-gated execution.
+const SAFE_GROUP_READ_TOOLS = new Set(['human_capabilities', 'human_capability_catalog', 'human_capability_get',
+  'human_task_list', 'human_task_get', 'human_task_recipients', 'human_task_lifecycle', 'human_submission_analysis_list',
+  'human_submission_image', 'human_submission_file', 'human_private_update_status', 'human_automation_rules',
+  'human_assistant_catalog', 'human_assistant_get', 'human_assistant_work_get', 'human_mode_list', 'human_mode_get',
+  'human_workflow_get', 'human_workflow_list', 'human_workspace_directory'])
 
 function originUnavailable(): Error & { code: string } {
   return Object.assign(new Error('无法确认原会话身份，请在电脑端确认会话仍然存在后重试'), { code: 'human-origin-unavailable' })

@@ -8,6 +8,7 @@ import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client
 // Type-only: pulls the canonical Settings slot contract.
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import { CompanionPanel } from './CompanionPanel.tsx'
+import { featureView } from './feature-client.js'
 import type { CallPairingManagement } from './pairing-client.js'
 import { RemotePageStore } from './remote-page-store.js'
 import { WechatShortcut } from './WechatShortcut.tsx'
@@ -68,6 +69,15 @@ export function apply(ctx: HarnessRemoteClientContext): void {
 
   const store = new RemotePageStore(describeHost, callManagement)
   let connectionGeneration = 0
+  const featureCall: import('./feature-client.js').FeatureCall = async request => {
+    const generation = connectionGeneration
+    const response = await ctx.connection.rpc.call('/api', 'wechatFeatures/control', { args: { request } })
+    if (generation !== connectionGeneration) throw new Error('节点连接已变化，请重新核对资格。')
+    if (!response.ok) throw new Error('使用资格服务暂不可用，请更新插件并刷新。')
+    const result = response.value as { ok: boolean; value?: unknown; error?: { message?: string } }
+    if (!result?.ok) throw new Error(result?.error?.message || '使用资格核对失败。')
+    return featureView(result.value)
+  }
   const clawbotCall: import('./ClawbotPanel.tsx').ClawbotCall = async request => {
     const generation = connectionGeneration
     const response = await ctx.connection.rpc.call('/api', 'wechatClawbot/control', { args: { request } })
@@ -103,7 +113,7 @@ export function apply(ctx: HarnessRemoteClientContext): void {
   }, 'wechat assistant lifecycle')
   ctx.effect(() => () => store.dispose(), 'wechat shared page')
   const openPlugin = () => openPluginPage(name => ctx.get(name))
-  const injected = () => ({ describeHost, callManagement, store, assistants, clawbotCall })
+  const injected = () => ({ describeHost, callManagement, store, assistants, clawbotCall, featureCall })
   ctx.slots.inject('settings.section', () =>
     ctx.slots.register(
       {

@@ -11,9 +11,10 @@ export declare function workflowErrorMessage(code: string): string;
 export declare class WorkflowHttpTransport implements WorkflowTransport {
     private readonly identity;
     private readonly fetcher;
+    private readonly authorizeMutation?;
     readonly nodeId: string;
     private readonly origin;
-    constructor(origin: string, identity: () => AgentIdentity, fetcher?: typeof fetch);
+    constructor(origin: string, identity: () => AgentIdentity, fetcher?: typeof fetch, authorizeMutation?: (() => Promise<void>) | undefined);
     assertIdentity(): void;
     request(operation: WorkflowOperation, body: Record<string, unknown>, signal: AbortSignal): Promise<unknown>;
 }

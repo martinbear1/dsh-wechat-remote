@@ -50,6 +50,109 @@ function client(patch = {}) {
 function host(run = async () => ({ text: 'reply' })) {
   return { async listSessions() { return sessions }, async describeSession(id) { return sessions.find(item => item.id === id) }, run }
 }
+function featureGate() {
+  return { allowed: true, current() { if (!this.allowed) throw Error('公网流量已用完，请补充后再使用。') }, async authorize() { this.current() } }
+}
+
+function ownerGate() { return { ...featureGate(), owner: { nodeId: 'node-one', accountInstance: 'account-one' }, identity() { this.current(); return { ...this.owner } } } }
+
+test('legacy enabled ClawBot keeps its token and target but requires explicit owner-qualified enable after upgrade', async () => {
+  const gate = ownerGate(), storage = memory(seed({enabled:true})); let polls = 0
+  const runtime = new ClawbotRuntime(storage, host(), client({getUpdates(...args) { polls++; return blockedPoll(...args) }}), Date.now, gate)
+  try {
+    await setImmediate(); assert.equal(polls, 0); assert.equal(runtime.snapshot().enabled, false)
+    assert.match(runtime.snapshot().message, /升级后/); assert.equal(storage.data.credentials.token, auth.token)
+    assert.equal(storage.data.target.id, sessions[0].id); assert.equal(storage.data.accessBinding, undefined)
+    await enabled(runtime, true); await setImmediate()
+    assert.deepEqual(storage.data.accessBinding, gate.owner); assert.equal(polls, 1)
+  } finally { await runtime.dispose() }
+})
+
+test('same node new account incarnation cannot reuse a former account token, poll reply or route', async () => {
+  const gate = ownerGate(), read = deferred(), storage = memory(seed({accessBinding:gate.owner}))
+  const runtime = new ClawbotRuntime(storage, host(() => assert.fail('must not dispatch')), client({getUpdates:() => read.promise}), Date.now, gate)
+  try {
+    await enabled(runtime, true); await setImmediate()
+    gate.owner = { ...gate.owner, accountInstance:'account-recreated' }
+    read.resolve({cursor:'late',messages:[incoming('late-owner','hi')]}); await setImmediate()
+    assert.equal(runtime.snapshot().enabled, false); assert.equal(storage.data.cursor, ''); assert.equal(storage.data.receipts.length, 0)
+    assert.equal(storage.data.accessBinding.accountInstance, 'account-one'); assert.equal(storage.data.credentials.token, auth.token)
+    await assert.rejects(enabled(runtime,true), /账号绑定已变化/)
+    await assert.rejects(runtime.control({action:'route',sessionId:sessions[1].id,expectedRevision:runtime.snapshot().revision},signal()), /账号绑定已变化/)
+    await runtime.control({action:'disconnect',expectedRevision:runtime.snapshot().revision},signal())
+    assert.equal(storage.data.accessBinding, undefined); assert.equal(storage.data.credentials,null)
+  } finally { read.resolve({cursor:'',messages:[]}); await runtime.dispose() }
+})
+
+test('node or account change during QR generation or provider confirmation never adopts the delayed binding', async () => {
+  for (const stage of ['qr','confirmation']) {
+    const gate = ownerGate(), delayed = deferred(), storage = memory(emptyClawbotData()); let forgotten = 0
+    const runtime = new ClawbotRuntime(storage, host(), client({
+      async getQr() { return stage === 'qr' ? delayed.promise : {qrcode:'owner-qr',url:'https://example.invalid/qr'} },
+      async pollQr() { return delayed.promise }, forgetQr() {forgotten++},
+    }), Date.now, gate)
+    try {
+      const start = runtime.control({action:'login.start'},signal())
+      if (stage === 'qr') {
+        await setImmediate(); gate.owner = {...gate.owner,nodeId:'node-two'}
+        delayed.resolve({qrcode:'owner-qr',url:'https://example.invalid/qr'})
+        await assert.rejects(start, /节点或账号已变化/)
+      } else {
+        const state = await start, poll = runtime.control({action:'login.poll',loginId:state.pairing.id},signal())
+        await setImmediate(); gate.owner = {...gate.owner,accountInstance:'account-two'}
+        delayed.resolve({status:'confirmed',credentials:auth})
+        await assert.rejects(poll, /账号绑定已变化/)
+      }
+      assert.equal(runtime.snapshot().paired,false); assert.equal(storage.data.credentials,null); assert.equal(storage.data.accessBinding,undefined); assert.ok(forgotten > 0)
+    } finally { await runtime.dispose() }
+  }
+})
+
+test('feature denial blocks new controls and Tencent access on any carrier; safe pause and disconnect remain available', async () => {
+  const gate = featureGate(); gate.allowed = false
+  const storage = memory(), runtime = new ClawbotRuntime(storage, { ...host(), async describeSession() { assert.fail('must not route') } },
+    client({ async getQr() { assert.fail('must not request QR') }, async getUpdates() { assert.fail('must not poll') }, async sendText() { assert.fail('must not send') } }), Date.now, gate)
+  try {
+    for (const request of [{ action: 'enabled', enabled: true }, { action: 'route', sessionId: sessions[1].id }, { action: 'login.start' }])
+      await assert.rejects(runtime.control({ ...request, expectedRevision: runtime.snapshot().revision }, signal()), /公网流量/)
+    assert.equal(runtime.snapshot().enabled, false); assert.equal(storage.data.credentials.accountId, auth.accountId)
+    await enabled(runtime, false)
+    await runtime.control({ action: 'disconnect', expectedRevision: runtime.snapshot().revision }, signal())
+    assert.equal(runtime.snapshot().paired, false)
+  } finally { await runtime.dispose() }
+})
+
+test('feature revocation while Tencent poll is pending accepts no new input and does not advance cursor', async () => {
+  const gate = featureGate(), next = deferred(), storage = memory()
+  const runtime = new ClawbotRuntime(storage, host(() => assert.fail('must not dispatch')), client({ getUpdates: () => next.promise }), Date.now, gate)
+  try {
+    await enabled(runtime, true); await setImmediate(); gate.allowed = false
+    next.resolve({ cursor: 'new', messages: [incoming('denied', 'hi')] }); await setImmediate()
+    assert.equal(storage.data.cursor, ''); assert.equal(storage.data.receipts.length, 0); assert.equal(runtime.snapshot().enabled, false)
+  } finally { await runtime.dispose() }
+})
+
+test('feature revocation preserves in-flight native result without cancel or new send; route cannot finish after revocation', async () => {
+  const gate = featureGate(), run = deferred(), selected = deferred(), storage = memory(seed({ receipts: [receipt('native'), receipt('route', 'pending', { input: '/切换 ' + createHash('sha256').update(sessions[1].id).digest('hex').slice(0, 8) })] }))
+  let calls = 0
+  const runtime = new ClawbotRuntime(storage, { ...host(async () => { calls++; return run.promise }), describeSession: () => selected.promise }, client({ sendText: () => assert.fail('must not send') }), Date.now, gate)
+  try {
+    await enabled(runtime, true); await setImmediate(); gate.allowed = false; selected.resolve(sessions[1]); run.resolve({text:'saved result'}); await setImmediate()
+    assert.equal(calls, 1); assert.equal(storage.data.target.id, sessions[0].id); assert.equal(runtime.snapshot().enabled, false)
+    assert.equal(storage.data.receipts.find(r => r.id === receipt('native').id).state, 'ready')
+    assert.match(storage.data.receipts.find(r => r.id === receipt('native').id).output, /saved result/)
+  } finally { await runtime.dispose() }
+})
+
+test('feature revocation after first reply fragment never sends the next fragment or replays the acknowledged fragment', async () => {
+  const gate = featureGate(), sent = deferred(), storage = memory(seed({ receipts: [receipt('delivery', 'ready', { input:'', output:'A'.repeat(1900) })] }))
+  let count = 0
+  const runtime = new ClawbotRuntime(storage, host(), client({ sendText: async () => { count++; return sent.promise } }), Date.now, gate)
+  try {
+    await enabled(runtime, true); await setImmediate(); gate.allowed = false; sent.resolve(); await setImmediate()
+    assert.equal(count, 1); assert.equal(storage.data.receipts[0].sentParts, 1); assert.equal(storage.data.receipts[0].state, 'ready'); assert.equal(runtime.snapshot().enabled, false)
+  } finally { await runtime.dispose() }
+})
 async function enabled(runtime, value) {
   return runtime.control({ action: 'enabled', expectedRevision: runtime.snapshot().revision, enabled: value }, signal())
 }

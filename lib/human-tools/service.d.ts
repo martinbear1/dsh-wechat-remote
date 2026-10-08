@@ -153,6 +153,7 @@ export declare class HumanToolsService extends TypertRemoteService {
         workspaceId?: string;
     }, signal: AbortSignal): Promise<HumanResult>;
     private use;
+    private readResult;
     private result;
     /** Synchronous bounded lookup used identically by history and live projection. */
     present(scope: string, callId: string): HumanSurface | undefined;

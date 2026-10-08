@@ -10,5 +10,8 @@ interface Host {
  * native tools/turns; admission of NEW automation still requires inspect(). */
 export declare function installNativeAutomationGate(host: Host): () => void;
 export declare const AUTOMATION_TOOLS: readonly ["human_automation_submission", "human_automation_image", "human_automation_save"];
-export declare function createNativeAutomationAdapter(host: Host): NativeAutomationAdapter;
+export declare function createNativeAutomationAdapter(host: Host, access?: {
+    authorize(): Promise<void>;
+    current(): void;
+}): NativeAutomationAdapter;
 export {};

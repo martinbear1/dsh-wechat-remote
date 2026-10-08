@@ -33,7 +33,8 @@ createRoot(document.querySelector('#root')).render(<ClawbotPanel call={call} nod
 const js = bundle.outputFiles.find(f => f.path.endsWith('.js')).text
 const css = bundle.outputFiles.find(f => f.path.endsWith('.css')).text
 const base = { supported: true, revision: 1, enabled: false, state: 'disabled', paired: false,
-  target: null, message: '', pending: 0, uncertain: 0 }
+  target: null, message: '', pending: 0, uncertain: 0,
+  access: { allowed: true, reason: 'allowed', validUntil: Date.now() + 86400000, checkedAt: Date.now(), expiresAt: Date.now() + 60000, message: '' } }
 const target = { id: 'fixture-session', title: '整理本周资料与下一步安排' }
 const pairing = { id: 'fixture-login', url: 'https://example.invalid/visual-only', status: 'wait', expiresAt: Date.now() + 300_000,
   qrDataUrl: await QRCode.toDataURL('https://example.invalid/visual-only', { width: 240, margin: 2 }) }
@@ -42,6 +43,7 @@ const scenes = [
   ['verify', { pairing: { ...pairing, status: 'need_verifycode' } }],
   ['paused', { paired: true, target }], ['receiving', { paired: true, enabled: true, state: 'ready', target }],
   ['expired', { paired: true, bindingState: 'expired', target }],
+  ['locked', { access: { allowed: false, reason: 'feature_not_entitled', validUntil: null, message: '此账号暂未开通此功能。' } }],
 ]
 const browser = await chromium.launch({ channel: 'msedge', headless: true })
 const results = []
@@ -55,8 +57,8 @@ try {
     await page.evaluate(fixture => { window.fixture = fixture; window.requests = [] }, { ...base, ...value })
     await page.addScriptTag({ content: js })
     await page.waitForFunction(() => window.requests.length > 0 && !document.body.textContent.includes('读取中'))
-    const panel = page.getByRole('region', { name: '微信 ClawBot' })
-    assert.equal(await panel.getByRole('switch', { name: '接收微信消息' }).count(), 1)
+    const panel = page.getByRole('region', { name: '微信 ClawBot 私聊接线' })
+    assert.equal(await panel.getByRole('switch', { name: '启用私聊接入' }).count(), 1)
     const metrics = await panel.evaluate(element => {
       const input = element.querySelector('input[role="switch"]'), track = input.nextElementSibling
       const state = getComputedStyle(track), knob = getComputedStyle(track, '::after')
@@ -75,7 +77,7 @@ try {
     assert.equal(metrics.checked, scene === 'receiving')
     assert.equal(metrics.knobTransform, scene === 'receiving' ? 'matrix(1, 0, 0, 1, 18, 0)' : 'none')
     assert.equal(metrics.disabled, !['paused', 'receiving'].includes(scene))
-    const toggle = panel.getByRole('switch', { name: '接收微信消息' })
+    const toggle = panel.getByRole('switch', { name: '启用私聊接入' })
     if (metrics.disabled) {
       assert.equal(await toggle.evaluate(input => { input.focus(); return input === document.activeElement }), false)
     } else {
@@ -91,7 +93,7 @@ try {
       assert.equal(await panel.locator('details').evaluate(element => element.open), false)
       await summary.evaluate(element => element.blur())
     }
-    assert.equal(await page.getByRole('img', { name: '微信 ClawBot 配对二维码' }).count(), scene === 'waiting' ? 1 : 0)
+    assert.equal(await page.getByRole('img', { name: '微信 ClawBot 节点绑定码' }).count(), scene === 'waiting' ? 1 : 0)
     assert.deepEqual(errors, [])
     const screenshot = path.join(out, `${scene}-${width}-${dark ? 'dark' : 'light'}.png`)
     await page.screenshot({ path: screenshot })

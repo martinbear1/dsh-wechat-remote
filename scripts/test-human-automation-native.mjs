@@ -63,7 +63,7 @@ async function setup(t, options = {}) {
   ctx.provide('agents', services.agents); ctx.on('session/flush', async () => {})
   let seq = 0
   async function call(name, args, extra = {}) { return tools.execute({ name, arguments: args, agent, callId: `native_call_${++seq}`, signal, ...extra }) }
-  const adapter = createNativeAutomationAdapter(host), scope = { nodeId, sessionId: String(session.id), sessionGeneration: '100' }
+  const adapter = createNativeAutomationAdapter(host, options.access), scope = { nodeId, sessionId: String(session.id), sessionGeneration: '100' }
   t.after(async () => { await adapter.close(); await ownedScope.dispose(); await ctx.fiber.dispose() })
   const inspection = await adapter.inspect(scope, signal)
   const policy = { scope, taskRef, policyVersion: 1, processor: inspection.processor, config: { instructions: '只分析本提交', allowSessionResume: false }, bindingKey: 'a'.repeat(64) }
@@ -86,6 +86,27 @@ test('real scoped ToolRuntime denies other tools and PTC inner calls; ordinary n
   h.tools.register({ name: 'ordinary_tool', description: 'native ordinary tool', parameters: { type: 'object', properties: {} }, output, async execute() { normalCalls++; return {} } })
   const result = await h.adapter.run(h.request(), signal)
   assert.equal(result.state, 'succeeded', JSON.stringify(h.controls.failure)); assert.equal(normalCalls, 1); assert.equal(h.controls.modelCalls, 1)
+})
+
+test('feature admission denies new automation but expiration cannot cancel an admitted native task', async t => {
+  const gate = { allowed: false, async authorize() { this.current() }, current() { if (!this.allowed) throw Error('feature denied') } }
+  const h = await setup(t, { access: gate, model: async () => {
+    gate.allowed = false
+    assert.equal((await h.call('human_automation_save', {})).isError, false, 'already-started analysis can save its result')
+  } })
+  assert.equal((await h.adapter.run(h.request(), signal)).state, 'failed')
+  assert.equal(h.controls.followups, 0); assert.equal(h.controls.restores, 0)
+  gate.allowed = true
+  assert.equal((await h.adapter.run(h.request(), signal)).state, 'succeeded')
+  assert.equal(h.controls.cancels, 0); assert.equal(h.controls.modelCalls, 1)
+  assert.equal((await h.adapter.run(h.request(), signal)).state, 'failed')
+  assert.equal(h.controls.followups, 1)
+})
+
+test('feature lost during native inspection cannot enqueue a followup or cancel the host', async t => {
+  const h = await setup(t, { access: { async authorize() {}, current() { throw Error('expired before dispatch') } } })
+  assert.equal((await h.adapter.run(h.request(), signal)).state, 'failed')
+  assert.equal(h.controls.followups, 0); assert.equal(h.controls.cancels, 0); assert.equal(h.controls.modelCalls, 0)
 })
 test('service-time gate blocks restored pending plugin source without a live job lease', async t => {
   const h = await setup(t), message = pluginMessage(); h.agent.inbox.append('next-turn', message)

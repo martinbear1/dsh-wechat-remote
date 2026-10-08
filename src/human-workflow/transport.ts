@@ -13,6 +13,7 @@ export interface WorkflowTransport {
  * this allowlist tied to the actual node routes; a code on another endpoint,
  * any 401, or an unreadable/unrecognized 403 remains fail-closed. */
 const RESOURCE_DENIAL_OPERATIONS: Readonly<Record<string, readonly WorkflowOperation[]>> = {
+  publisher_not_allowed: ['grant', 'workspace', 'receiver-key', 'lifecycle', 'cover-assets/prepare'],
   invalid_recipients: ['lifecycle'],
   workspace_registration_required: ['grant', 'workspace', 'lifecycle', 'objects/claim', 'objects/ack', 'action-result'],
   workspace_scope_mismatch: ['grant', 'workspace', 'lifecycle', 'objects/claim', 'objects/ack', 'action-result'],
@@ -25,6 +26,7 @@ const RESOURCE_DENIAL_OPERATIONS: Readonly<Record<string, readonly WorkflowOpera
 const FORBIDDEN_ERROR_MAX_BYTES = 16 * 1024
 export function workflowErrorMessage(code: string): string {
   const messages: Record<string, string> = {
+    publisher_not_allowed: '请核对微信群协作助手资格和公网服务状态；原任务、成员提交和本机资料仍保留。',
     private_updates_disabled: '本会话的私人更新尚未开启或已关闭；可先保留草稿，或由用户开启后重新提出要求。',
     invalid_private_input_proof: '本次输入的私人更新权限无法核对，未执行；请由用户在当前会话重新发送要求。',
     private_input_expired: '本次输入的私人更新权限已过期；先查询原内容是否已生效，仍需更新时请用户重新提出要求。',
@@ -85,7 +87,8 @@ export function workflowErrorMessage(code: string): string {
 export class WorkflowHttpTransport implements WorkflowTransport {
   readonly nodeId: string
   private readonly origin: string
-  constructor(origin: string, private readonly identity: () => AgentIdentity, private readonly fetcher: typeof fetch = fetch) {
+  constructor(origin: string, private readonly identity: () => AgentIdentity, private readonly fetcher: typeof fetch = fetch,
+    private readonly authorizeMutation?: () => Promise<void>) {
     const url = new URL(origin)
     if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash || url.pathname !== '/')
       throw fail('workflow-origin-invalid', '群任务服务需要可信 HTTPS 源地址')
@@ -98,6 +101,10 @@ export class WorkflowHttpTransport implements WorkflowTransport {
   async request(operation: WorkflowOperation, body: Record<string, unknown>, signal: AbortSignal): Promise<unknown> {
     this.assertIdentity(); signal.throwIfAborted()
     if (!['grant', 'sync', 'action-result', 'workspace', 'receiver-key', 'lifecycle', 'objects/claim', 'objects/ack', 'cover-assets/prepare', 'cover-assets/finalize', 'cover-assets/download'].includes(operation)) throw fail('workflow-request-invalid', '群任务操作不受支持')
+    const mutation = operation === 'grant' || operation === 'cover-assets/prepare'
+      || operation === 'lifecycle' && !['get', 'recipients', 'private-input-end'].includes(String(body.operation))
+    if (mutation) await this.authorizeMutation?.()
+    this.assertIdentity(); signal.throwIfAborted()
     const pathname = `/api/human-tasks/v1/node/${operation}`
     const serialized = JSON.stringify({ ...body, audience: 'human.workflow.node.v1' })
     const requestLimit = ['grant', 'lifecycle', 'action-result'].includes(operation) ? HUMAN_CARD_REQUEST_MAX_BYTES : 16384

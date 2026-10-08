@@ -1,6 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { BUILTIN_ASSISTANTS, builtinAssistants, type BuiltinTemplateId, type BuiltinAssistantStatus } from './builtins.js'
 import { nativeAssistantCapabilitiesReady, nativeAssistantCodec, nativeAssistantCompositionDigest, parseNativeAssistantBase, transformNativeAssistantBase } from './native-adapter.js'
+import { hostFeatureAccess } from '../feature-access.js'
 
 type Host = { get(name: string): any; provide(name: any, service: any): unknown; effect(callback: () => () => Promise<void>, label: string): unknown }
 
@@ -13,21 +14,37 @@ export class BuiltinAssistantComponent {
   private unregister?: () => Promise<void>
   private expected?: string
   private settled = false
+  private changes: Promise<void> = Promise.resolve()
+  private unsubscribe?: () => void
   private issue = '内置助手正在准备，请稍后刷新。'
   private readonly definition
   constructor(private readonly host: Host, templateId: BuiltinTemplateId) {
     this.definition = builtinAssistants().find(item => item.templateId === templateId)!
     const identity = BUILTIN_ASSISTANTS.find(item => item.templateId === templateId)!
     host.provide(identity.service, this)
+    try { this.unsubscribe = hostFeatureAccess(host).subscribe(() => {
+      this.changes = this.changes.then(() => this.initialize()).catch(() => {})
+    }) } catch { /* missing account gate remains closed */ }
     this.ready = this.initialize().finally(() => { this.settled = true })
+    this.changes = this.ready
     host.effect(() => async () => {
-      this.lifetime.abort(); await this.ready
+      this.lifetime.abort(); this.unsubscribe?.(); await this.ready; await this.changes
       const dispose = this.unregister; this.unregister = undefined; this.expected = undefined
       await dispose?.()
     }, `${identity.presetId} component`)
   }
   private async initialize(): Promise<void> {
     try {
+      if (this.lifetime.signal.aborted) return
+      const access = hostFeatureAccess(this.host)
+      // A refresh never grants the local opt-in. Only the owner control can set
+      // it, scoped to this node and account incarnation.
+      if (!access.groupEnabled()) {
+        const dispose = this.unregister; this.unregister = undefined; this.expected = undefined
+        this.issue = access.grant('group_assistant').message || '微信群协作助手已关闭。'
+        await dispose?.(); return
+      }
+      if (this.unregister) return
       const registry = this.host.get('agentPresets'), loader = this.host.get('loader')
       const profile = this.host.get('profileContext')
       if (typeof registry?.register !== 'function' || typeof registry?.readDocument !== 'function'
@@ -46,13 +63,14 @@ export class BuiltinAssistantComponent {
       const base = parseNativeAssistantBase(codec, await registry.readDocument(this.definition.definition.basePreset), this.definition.definition.basePreset)
       const plugins = transformNativeAssistantBase(base, this.definition.definition)
       this.lifetime.signal.throwIfAborted()
+      access.assertCurrent('group_assistant')
       const dispose = await registry.register({ id: this.definition.presetId, name: this.definition.name,
         description: this.definition.definition.description, order: 100 + BUILTIN_ASSISTANTS.findIndex(item => item.presetId === this.definition.presetId), plugins })
       if (typeof dispose !== 'function') throw new Error('native registry did not return a disposer')
       this.unregister = dispose
       this.expected = nativeAssistantCompositionDigest(plugins)
       this.issue = ''
-      if (this.lifetime.signal.aborted) { await dispose(); this.unregister = undefined; this.expected = undefined }
+      if (this.lifetime.signal.aborted || !access.groupEnabled()) { await dispose(); this.unregister = undefined; this.expected = undefined }
     } catch {
       // Host paths/configs never enter a user-facing catalog.
       this.issue = '内置助手暂未就绪，请检查 DSH 版本或同名模式冲突；原有会话和资料未改动。'
@@ -92,7 +110,7 @@ export class BuiltinAssistantComponent {
 
 export function builtinComponent(templateId: BuiltinTemplateId) {
   return class {
-    static inject = ['agentPresets', 'loader', 'profileContext']
+    static inject = ['agentPresets', 'loader', 'profileContext', 'wechatFeatures']
     constructor(ctx: Context) { new BuiltinAssistantComponent(ctx as unknown as Host, templateId) }
   }
 }

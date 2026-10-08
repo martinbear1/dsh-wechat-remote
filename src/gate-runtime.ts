@@ -44,6 +44,7 @@ import WechatAttachmentService, {
 import { AgentResourcesService } from './agent-resources.js'
 import { AgentInputsService } from './agent-inputs.js'
 import { HumanToolsService } from './human-tools/service.js'
+import { WechatFeaturesService } from './feature-access.js'
 import { PrivateInputNative } from './human-workflow/private-input-native.js'
 import { WorkflowHttpTransport } from './human-workflow/transport.js'
 import PublicRelayGateway from './public-relay-gateway.js'
@@ -624,6 +625,13 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
   // Every door and optional relay fails independently; none may terminate DSH.
   // 独立的 Host-only Typert 服务。它不占用 DSH 的全局 directoryPicker，
   // 因而 WebUI 继续使用官方 auto/native 目录选择器。
+  mountChild('features', WechatFeaturesService, {
+    preferenceFile: path.join(path.dirname(defaultGateStatePath(ctx)), 'wechat-feature-preferences-v1.json'),
+    source: {
+      nodeId: () => { if (!publicRelayGateway) throw new Error('Node unavailable'); return publicRelayGateway.agent.identity.nodeId },
+      read: (signal: AbortSignal) => { if (!publicRelayGateway) throw new Error('Node unavailable'); return publicRelayGateway.agent.readFeatures(signal) },
+    },
+  })
   mountChild('directory', WechatDirectoryService, { maxEntries: 1000 })
   // 电脑名不在 DSH 原生 host.describe 契约里；以微信端隔离的只读 Remote
   // 提供，避免为了一个客户端字段污染 DSH/WebUI 的 Host API。
@@ -732,6 +740,7 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
           publicRelayStatus = status
         },
         onIdentityChange: () => {
+          ctx.get('wechatFeatures')?.access.invalidate()
           // Cloud revocation is a security boundary, not a display rename.
           // Retire local grants too; never carry a former owner's LAN token
           // into the newly enrollable public identity.
@@ -747,6 +756,10 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
         const transport = new WorkflowHttpTransport(relayConfig.relayOrigin, () => {
             if (!publicRelayGateway) throw new Error('Node unavailable')
             return publicRelayGateway.agent.identity
+          }, undefined, () => {
+            const access = ctx.get('wechatFeatures')?.access
+            if (!access) throw new Error('暂时无法核对使用资格，请联网后刷新。')
+            return access.assert('group_assistant')
           })
         const privateInput = new PrivateInputNative(ctx, transport.nodeId, () => transport.assertIdentity(), Date.now, { transport })
         compatibilityApi.privateInput = privateInput
@@ -767,7 +780,7 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
           console.warn('[wechat-gate] optional task notifications unavailable')
         }
       }
-      void publicRelayGateway.start()
+      void publicRelayGateway.start().then(() => ctx.get('wechatFeatures')?.access.refresh()).catch(() => {})
     }
   } catch (error: unknown) {
     publicRelayStatus = {

@@ -108,6 +108,7 @@ async function verify() {
   const { nativeAssistantCodec, parseNativeAssistantBase, transformNativeAssistantBase } = await product('assistant-presets/native-adapter.js')
 
   const ctx = new Context(), controllerServices = [], signal = new AbortController().signal
+  ctx.provide('wechatFeatures', (await import('./feature-access-fixture.mjs')).allowedFeatureFixture())
   const checks = [], counts = {}, nodeId = 'native_scope_fixture_' + 'a'.repeat(16)
   let backend, skillsFiber, failure, nativeSkillsWereReloaded = false, probeCalls = 0, externalCalls = 0, modelCalls = 0
   const memory = initial => {

@@ -84,6 +84,15 @@ test('directory includes ordinary cold/fork sessions, excludes archive/subagent 
   assert.equal(h.listenerCount(), 0)
 })
 
+test('session picker grouping uses registered workspace membership and never exposes the directory path', async () => {
+  const h = fixture(), registry = h.ctx.get('workspaceRegistry')
+  registry.list = () => [{id:'workspace-1',name:'Project',path:'C:/private/Project',sessionIds:['s1']}]
+  assert.deepEqual(await h.host.listSessions(signal()),[{id:'s1',title:'Target',workspaceId:'workspace-1',workspaceTitle:'Project'}])
+  registry.list = () => [{id:'workspace-1',path:'C:/private/Project',sessionIds:['s1']}]
+  assert.equal((await h.host.listSessions(signal()))[0].workspaceTitle,'Project')
+  assert.equal(h.calls().length,0)
+})
+
 test('accepted is not completion; correlate exact request and return only final durable text', async () => {
   const h = fixture(), promise = h.host.run(input(), signal())
   let done = false; promise.finally(() => { done = true })

@@ -1,7 +1,13 @@
 import { type ClawbotHost, type ClawbotRequest, type ClawbotStatus } from './contracts.js';
 import { ILinkClient } from './ilink.js';
 import type { ILinkMessage } from './ilink-types.js';
-import type { ClawbotStorage } from './storage.js';
+import type { ClawbotData, ClawbotStorage } from './storage.js';
+type AccessBinding = NonNullable<ClawbotData['accessBinding']>;
+export interface ClawbotAccess {
+    authorize(): Promise<void>;
+    current(): void;
+    identity?(): AccessBinding;
+}
 /** Independently owned channel. No phone connection, relay account, model tool,
  * native preset mutation, or host process lifecycle is used here. */
 export declare class ClawbotRuntime {
@@ -9,6 +15,7 @@ export declare class ClawbotRuntime {
     private readonly host;
     private readonly client;
     private readonly now;
+    private readonly access?;
     private data;
     private readonly lifetime;
     private polling?;
@@ -24,10 +31,15 @@ export declare class ClawbotRuntime {
     private state;
     private closed;
     private commandQueue;
-    constructor(storage: ClawbotStorage, host: ClawbotHost, client?: ILinkClient, now?: () => number);
+    constructor(storage: ClawbotStorage, host: ClawbotHost, client?: ILinkClient, now?: () => number, access?: ClawbotAccess | undefined);
     private commit;
     private checkRevision;
     private checkOperational;
+    private accessFailure;
+    private authorize;
+    private sameOwner;
+    private currentAccess;
+    private requiresAccess;
     snapshot(): ClawbotStatus;
     private endLogin;
     private expireLogin;
@@ -61,3 +73,4 @@ export declare class ClawbotRuntime {
 }
 /** Conservative local text chunk size, counted as UTF-8 without splitting emoji. */
 export declare function splitText(text: string): string[];
+export {};

@@ -242,8 +242,8 @@ function settlement(log: Native[], run: AutomationRun): AutomationRunResult {
   }
   return { state: 'unknown', reason: '原生记录尚不能证明此消息已结束；不会重新调用模型' }
 }
-export function createNativeAutomationAdapter(host: Host): NativeAutomationAdapter {
-  return new DshAutomationAdapter(host)
+export function createNativeAutomationAdapter(host: Host, access?: { authorize(): Promise<void>; current(): void }): NativeAutomationAdapter {
+  return new DshAutomationAdapter(host, access)
 }
 class DshAutomationAdapter implements NativeAutomationAdapter {
   private stopped = false
@@ -251,7 +251,7 @@ class DshAutomationAdapter implements NativeAutomationAdapter {
   private readonly unregister: (() => void)[] = []
   private readonly runs = new Set<Promise<AutomationRunResult>>()
   private readonly lifetime = new AbortController()
-  constructor(private readonly host: Host) {
+  constructor(private readonly host: Host, private readonly access?: { authorize(): Promise<void>; current(): void }) {
     this.unregister.push(installNativeAutomationGate(host))
     this.unregister.push(host.on('session/event', (session, event) => {
       if (event?.type === 'turn/end' && event.data?.reason?.kind === 'aborted' && event.data.reason.reason?.kind === 'user') for (const listener of this.stops) listener(String(session.id))
@@ -346,6 +346,7 @@ class DshAutomationAdapter implements NativeAutomationAdapter {
     const owned = () => !!agent && this.host.get('agents').get(run.scope.sessionId) === agent && ownTurn !== undefined && currentTurn === ownTurn
     const abort = () => { if (owned()) agent!.cancel({ kind: 'hook', reason: 'human automation stopped' }, { keepInbox: true }); else if (agent && run.messageId) agent.inbox?.remove?.(run.messageId) }
     try {
+      await this.access?.authorize()
       await request.authorize(signal)
       let inspection = await this.inspect(run.scope, signal)
       if (inspection.busy) return { state: 'cancelled', reason: '会话已有其他待处理工作；未调用模型' }
@@ -432,6 +433,7 @@ class DshAutomationAdapter implements NativeAutomationAdapter {
       await request.authorize(signal); signal.throwIfAborted()
       if (target.status !== 'idle' || target.inbox.hasPending) return { state: 'cancelled', reason: '会话刚有其他工作；未调用模型' }
       lease = { agent: target, messageId: run.messageId! }; gates.get(this.host)!.leases.add(lease)
+      this.access?.current()
       dispatched = true; target.followup(NativeMessages.freezeMessage(request.message as any))
       if (!await this.host.get('sessions').flush(target.session)) { failure = true; abort() }
       const result = await Promise.race([ended, target.whenIdle().then(() => settlement(readEvents(target.session), { ...run, turn: ownTurn }))])

@@ -11,6 +11,7 @@ import { pageStore, type RemotePageStore } from './remote-page-store.js'
 import { AssistantPresetsPanel } from './AssistantPresetsPanel.tsx'
 import type { AssistantStore } from './assistant-store.js'
 import { ClawbotPanel, type ClawbotCall } from './ClawbotPanel.js'
+import type { FeatureCall } from './feature-client.js'
 export type { HarnessRemoteHostDescription } from './pairing-client.js'
 
 export interface HarnessRemoteSettingsProps {
@@ -19,6 +20,7 @@ export interface HarnessRemoteSettingsProps {
   store?: RemotePageStore
   assistants?: AssistantStore
   clawbotCall?: ClawbotCall
+  featureCall?: FeatureCall
 }
 
 function StatusDot({ ok, busy = false }: { ok: boolean; busy?: boolean }): JSX.Element {
@@ -59,6 +61,7 @@ export function HarnessRemoteSettings({
   store = pageStore(describeHost, callManagement),
   assistants,
   clawbotCall,
+  featureCall,
 }: HarnessRemoteSettingsProps): JSX.Element {
   const { loadState, qrState, status, runtime, host, localOrigin, qr, error } = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
   const { refresh: loadStatus, generateQr } = store
@@ -203,7 +206,7 @@ export function HarnessRemoteSettings({
         {runtime?.profileScope === 'desktop' && store.nativeUpdates ? <NativeUpdateCard store={store.nativeUpdates} embedded /> : null}
         <CompanionPanel describeHost={describeHost} callManagement={callManagement} store={store} compact />
       </section>
-      {assistants ? <AssistantPresetsPanel store={assistants} /> : null}
+      {assistants ? <AssistantPresetsPanel store={assistants} featureCall={featureCall} /> : null}
       {clawbotCall ? <ClawbotPanel call={clawbotCall} nodeName={agentName} hostName={hostName} /> : null}
     </section>
   )

@@ -15,6 +15,8 @@ export declare class BuiltinAssistantComponent {
     private unregister?;
     private expected?;
     private settled;
+    private changes;
+    private unsubscribe?;
     private issue;
     private readonly definition;
     constructor(host: Host, templateId: BuiltinTemplateId);

@@ -11,13 +11,15 @@ const MAX_RECEIPTS = 1000
 const MAX_INPUT = 8000
 const MAX_OUTPUT = 12000
 const LOGIN_LIFETIME = 5 * 60_000 // Local attempt limit, not a Tencent expiry guarantee.
-const LOGIN_RETRY_MESSAGE = '暂时无法读取微信配对状态，正在重试。'
+const LOGIN_RETRY_MESSAGE = '暂时无法读取微信绑定状态，正在重试。'
 const RESTART_MESSAGE = 'ClawBot 本地记录出现异常，接入已停止。请核对记录后重启组件。'
 const activeLoginStatus = (status: string) => ['wait', 'scaned', 'scaned_but_redirect', 'need_verifycode'].includes(status)
 const terminal = (r: Receipt) => r.state === 'done' || r.state === 'uncertain'
 const fail = (code: string, message: string): never => { throw new ClawbotError(code, message) }
-type Login = { id: string; qrcode: string; url: string; qrDataUrl: string; status: string; started: number; abort: AbortController }
+type AccessBinding = NonNullable<ClawbotData['accessBinding']>
+type Login = { id: string; qrcode: string; url: string; qrDataUrl: string; status: string; started: number; abort: AbortController; owner?: AccessBinding }
 type LoginWatch = { login: Login; timer?: NodeJS.Timeout; deadline?: NodeJS.Timeout; task?: Promise<void>; failures: number }
+export interface ClawbotAccess { authorize(): Promise<void>; current(): void; identity?(): AccessBinding }
 
 /** Independently owned channel. No phone connection, relay account, model tool,
  * native preset mutation, or host process lifecycle is used here. */
@@ -38,7 +40,7 @@ export class ClawbotRuntime {
   private closed = false
   private commandQueue: Promise<unknown> = Promise.resolve()
   constructor(private readonly storage: ClawbotStorage, private readonly host: ClawbotHost,
-    private readonly client = new ILinkClient(), private readonly now = Date.now) {
+    private readonly client = new ILinkClient(), private readonly now = Date.now, private readonly access?: ClawbotAccess) {
     this.data = storage.read()
     // A hot component reload may retain the phone/gateway connection epoch but
     // never restores an in-memory QR attempt. Fence all prior instance replies.
@@ -50,6 +52,12 @@ export class ClawbotRuntime {
         r.state = 'uncertain'; r.input = ''; r.output = undefined; r.parts = undefined; r.contextToken = ''
       } })
       this.message = '有上次中断的处理或发送，未自动重试，请在原会话核对。'
+    }
+    // Pre-entitlement versions never captured an account owner. Do not adopt
+    // their token in the background: the owner must explicitly enable once.
+    if (access?.identity && this.data.enabled && !this.data.accessBinding) {
+      this.commit(d => { d.enabled = false; d.revision++ })
+      this.message = '升级后请核对绑定的微信，并重新启用私聊接入。原绑定和会话已保留。'
     }
     this.resume()
   }
@@ -69,6 +77,27 @@ export class ClawbotRuntime {
     // never return a successful enable/bind receipt while resume() is fenced off.
     const safe = request?.action === 'login.cancel' || request?.action === 'enabled' && request.enabled === false
     if (this.broken && !safe) fail('clawbot-restart-required', RESTART_MESSAGE)
+  }
+  private accessFailure(error: unknown): never {
+    const message = error instanceof Error ? error.message : '暂时无法核对使用资格，请联网后刷新。'
+    if (this.data.enabled) this.commit(d => { d.enabled = false; d.revision++ })
+    this.polling?.abort()
+    if (this.login && activeLoginStatus(this.login.status)) { this.commit(d => { d.revision++ }); this.login.status = 'error'; this.endLogin(this.login) }
+    if (!this.broken) this.message = message
+    return fail('feature-access-denied', message)
+  }
+  private async authorize(): Promise<void> { try { await this.access?.authorize() } catch (error) { this.accessFailure(error) }; this.currentAccess() }
+  private sameOwner(a: AccessBinding, b: AccessBinding): boolean { return a.nodeId === b.nodeId && a.accountInstance === b.accountInstance }
+  private currentAccess(): void {
+    try {
+      this.access?.current()
+      const owner = this.access?.identity?.()
+      if (owner && ((this.data.accessBinding && !this.sameOwner(this.data.accessBinding, owner)) || (this.login?.owner && !this.sameOwner(this.login.owner, owner))))
+        throw new Error('此节点的账号绑定已变化。请移除原本地微信绑定后重新绑定，不会沿用旧账号的连接。')
+    } catch (error) { this.accessFailure(error) }
+  }
+  private requiresAccess(request: ClawbotRequest): boolean {
+    return !['status', 'sessions', 'login.cancel', 'disconnect'].includes(request.action) && !(request.action === 'enabled' && request.enabled === false)
   }
   snapshot(): ClawbotStatus {
     this.expireLogin()
@@ -119,7 +148,7 @@ export class ClawbotRuntime {
     // rejection or an apparently successful binding. Preserve the old file.
     this.broken = true; this.state = 'error'
     login.status = 'error'; this.endLogin(login)
-    this.message = '配对记录未能保存，已停止接入。请核对本地记录后重启组件。'
+    this.message = '绑定记录未能保存，已停止接入。请核对本地记录后重启组件。'
   }
   private scheduleLoginWatch(login: Login): void {
     const watch = this.loginWatch
@@ -145,7 +174,7 @@ export class ClawbotRuntime {
             const retry = ['clawbot-network-error', 'clawbot-timeout', 'clawbot-http-error', 'clawbot-api-error']
               .includes((error as { code?: string }).code || '')
             const message = retry ? LOGIN_RETRY_MESSAGE
-              : '配对状态未能确认，请重新生成二维码。'
+              : '绑定状态未能确认，请重新生成二维码。'
             if (this.message !== message || !retry) this.commit(d => { d.revision++ })
             this.message = message
             if (retry) watch.failures++
@@ -165,6 +194,7 @@ export class ClawbotRuntime {
     if (request.action === 'status') return this.snapshot()
     if (request.action === 'sessions') return { sessions: await this.host.listSessions(signal) }
     this.checkOperational(request)
+    if (this.requiresAccess(request)) await this.authorize()
     if (request.action === 'login.poll') return this.mutate(request, signal)
     const activeLogin = this.login
     if (request.action === 'login.cancel' && activeLogin && activeLogin.id === request.loginId) activeLogin.abort.abort()
@@ -176,6 +206,7 @@ export class ClawbotRuntime {
   private async mutate(request: ClawbotRequest, signal: AbortSignal): Promise<ClawbotStatus> {
     signal.throwIfAborted(); this.lifetime.signal.throwIfAborted()
     this.checkOperational(request)
+    if (this.requiresAccess(request)) this.currentAccess()
     switch (request.action) {
       case 'route': {
         this.checkRevision(request)
@@ -183,6 +214,7 @@ export class ClawbotRuntime {
         const found = await this.host.describeSession(request.sessionId!, signal)
         signal.throwIfAborted(); this.lifetime.signal.throwIfAborted()
         this.checkOperational(request); this.checkRevision(request)
+        this.currentAccess()
         if (!found) fail('clawbot-session-missing', '此会话已不可选择，请刷新列表。')
         this.commit(d => { d.target = found!; d.revision++ })
         break
@@ -192,11 +224,12 @@ export class ClawbotRuntime {
         if (typeof request.enabled !== 'boolean') fail('clawbot-invalid', '请指定开启或暂停')
         if (this.broken && !this.data.enabled) return this.snapshot()
         this.expireLogin()
-        if (request.enabled && this.login && activeLoginStatus(this.login.status)) fail('clawbot-login-active', '请先完成或取消微信配对。')
-        if (request.enabled && !this.data.credentials) fail('clawbot-unpaired', '请先配对微信。')
-        if (request.enabled && this.data.authExpired) fail('clawbot-auth-expired', '微信连接已失效，请重新配对。')
+        if (request.enabled && this.login && activeLoginStatus(this.login.status)) fail('clawbot-login-active', '请先完成或取消微信绑定。')
+        if (request.enabled && !this.data.credentials) fail('clawbot-unpaired', '请先绑定微信。')
+        if (request.enabled && this.data.authExpired) fail('clawbot-auth-expired', '微信连接已失效，请重新绑定。')
         if (request.enabled && !this.data.target) fail('clawbot-target-required', '请先选择一个会话。')
-        this.commit(d => { d.enabled = request.enabled!; d.revision++ })
+        const owner = request.enabled ? this.access?.identity?.() : undefined
+        this.commit(d => { d.enabled = request.enabled!; if (owner && !d.accessBinding) d.accessBinding = owner; d.revision++ })
         if (this.login && !activeLoginStatus(this.login.status)) this.login = undefined
         if (request.enabled) { this.message = ''; this.resume() }
         else { this.polling?.abort(); if (!this.broken) this.message = '已暂停接入；DSH 中已经开始的任务不会被取消。' }
@@ -208,19 +241,22 @@ export class ClawbotRuntime {
         // Both control surfaces observe the same attempt. Merely opening the
         // second surface must not rotate a QR that is already being scanned.
         if (this.login && activeLoginStatus(this.login.status)) return this.snapshot()
-        if (this.data.enabled && this.data.credentials) fail('clawbot-busy', '请先暂停接入，再重新配对。')
+        if (this.data.enabled && this.data.credentials) fail('clawbot-busy', '请先暂停接入，再重新绑定。')
         // Repair the old enabled-without-credentials dead end without touching a
         // running identity or changing the user's eventual start preference.
         if (this.data.enabled) this.commit(d => { d.enabled = false; d.revision++ })
         const abort = new AbortController()
+        const owner = this.access?.identity?.()
         const combined = AbortSignal.any([signal, this.lifetime.signal, abort.signal])
         const qr = await this.client.getQr(combined, this.data.credentials && !this.data.authExpired ? [this.data.credentials.token] : [])
         try {
           const qrDataUrl = await QRCode.toDataURL(qr.url, { width: 240, margin: 2 })
           combined.throwIfAborted()
           this.checkOperational(request)
+          this.currentAccess()
+          if (owner && !this.sameOwner(owner, this.access!.identity!())) this.accessFailure(new Error('节点或账号已变化，请重新开始绑定。'))
           this.commit(d => { d.revision++ })
-          this.login = { id: randomUUID(), qrcode: qr.qrcode, url: qr.url, qrDataUrl, status: 'wait', started: this.now(), abort }
+          this.login = { id: randomUUID(), qrcode: qr.qrcode, url: qr.url, qrDataUrl, status: 'wait', started: this.now(), abort, ...(owner ? { owner } : {}) }
           this.watchLogin(this.login)
         } catch (error) { this.client.forgetQr?.(qr.qrcode); throw error }
         this.message = '请用微信扫一扫扫描电脑上的二维码，并在微信中确认。'
@@ -229,12 +265,12 @@ export class ClawbotRuntime {
       case 'login.poll': {
         this.expireLogin()
         const login = this.login
-        if (!login || login.id !== request.loginId) fail('clawbot-login-stale', '配对已取消或更新，请刷新。')
+        if (!login || login.id !== request.loginId) fail('clawbot-login-stale', '绑定已取消或更新，请刷新。')
         if (!activeLoginStatus(login!.status)) return this.snapshot()
         const previous = this.loginPoll
         if (previous && previous.login === login) {
           if (request.verifyCode === undefined) return this.snapshot()
-          if (previous.verifying) fail('clawbot-login-busy', '微信确认码仍在提交，请稍候核对或取消配对；不要重复提交。')
+          if (previous.verifying) fail('clawbot-login-busy', '微信确认码仍在提交，请稍候核对或取消绑定；不要重复提交。')
           previous.abort.abort()
         }
         const polling = { login: login!, abort: new AbortController(), verifying: request.verifyCode !== undefined }
@@ -244,6 +280,8 @@ export class ClawbotRuntime {
           const result = await this.client.pollQr(login!.qrcode, combined, request.verifyCode)
           combined.throwIfAborted()
           if (this.login !== login) return this.snapshot()
+          await this.authorize()
+          combined.throwIfAborted()
           const finish = this.commandQueue.then(() => { combined.throwIfAborted(); this.completeLogin(login!, result) })
           this.commandQueue = finish.catch(() => {}); await finish
         } finally {
@@ -253,14 +291,14 @@ export class ClawbotRuntime {
         break
       }
       case 'login.cancel': {
-        if (this.login && (!request.loginId || this.login.id !== request.loginId)) fail('clawbot-login-stale', '配对状态已更新，请刷新。')
+        if (this.login && (!request.loginId || this.login.id !== request.loginId)) fail('clawbot-login-stale', '绑定状态已更新，请刷新。')
         if (this.login) { this.commit(d => { d.revision++ }); this.endLogin(this.login) }
         this.login = undefined; if (!this.broken) this.message = ''; break
       }
       case 'disconnect': {
         this.checkRevision(request)
         this.expireLogin()
-        if (this.login && activeLoginStatus(this.login.status)) fail('clawbot-login-active', '请先取消正在进行的配对。')
+        if (this.login && activeLoginStatus(this.login.status)) fail('clawbot-login-active', '请先取消正在进行的绑定。')
         if (this.data.enabled) fail('clawbot-busy', '请先暂停接入，再移除本地绑定。')
         if (this.data.receipts.some(r => !terminal(r)) && request.abandonPending !== true)
           fail('clawbot-pending', '仍有待处理或待发消息；须明确确认停止这些渠道消息后才能解绑。电脑上已开始的任务不会被取消。')
@@ -268,7 +306,7 @@ export class ClawbotRuntime {
           for (const r of d.receipts) if (!terminal(r)) {
             r.state = 'uncertain'; r.input = ''; r.output = undefined; r.parts = undefined; r.contextToken = ''
           }
-          d.credentials = null; d.authExpired = false; d.target = null; d.cursor = ''; d.revision++
+          d.credentials = null; d.accessBinding = undefined; d.authExpired = false; d.target = null; d.cursor = ''; d.revision++
         })
         if (this.login) { this.endLogin(this.login); this.login = undefined }
         this.message = '已移除此节点的本地绑定。未完成的渠道消息已停止续发；电脑上已开始的任务仍会继续。这不是腾讯账号端的撤销授权。'
@@ -281,9 +319,10 @@ export class ClawbotRuntime {
   private completeLogin(login: Login, result: ILinkQrResult): void {
     this.lifetime.signal.throwIfAborted()
     this.checkOperational()
+    this.currentAccess()
     this.expireLogin()
     if (this.login !== login || login.abort.signal.aborted) return
-    if (this.data.enabled) fail('clawbot-busy', '请先暂停接入，再完成配对。')
+    if (this.data.enabled) fail('clawbot-busy', '请先暂停接入，再完成绑定。')
     if (result.credentials) {
       if (this.data.credentials && this.data.credentials.userId !== result.credentials.userId) {
         this.commit(d => { d.revision++ })
@@ -302,14 +341,14 @@ export class ClawbotRuntime {
         if (d.credentials?.accountId !== result.credentials!.accountId) {
           d.cursor = ''
         }
-        d.credentials = result.credentials!; d.authExpired = false; d.revision++
+        d.credentials = result.credentials!; if (login.owner) d.accessBinding = login.owner; d.authExpired = false; d.revision++
       })
       this.endLogin(login); this.login = undefined
-      this.message = '微信已绑定。选择目标会话并开启接入后，即可在 ClawBot 私聊。'
+      this.message = '微信已绑定。选择接入会话并启用私聊接入后即可使用。'
     } else if (result.status === 'binded_redirect' && this.data.credentials) {
-      this.commit(d => { d.revision++ })
+      this.commit(d => { if (login.owner && !d.accessBinding) d.accessBinding = login.owner; d.revision++ })
       this.endLogin(login); this.login = undefined
-      this.message = this.data.authExpired ? '原微信连接已失效，请重新配对。'
+      this.message = this.data.authExpired ? '原微信连接已失效，请重新绑定。'
         : '微信确认本节点已有绑定。选择会话并开启接入后即可使用。'
     } else {
       // Only an actual successful provider read can clear our transient retry
@@ -345,8 +384,14 @@ export class ClawbotRuntime {
     let failures = 0
     while (!signal.aborted && !this.closed && this.data.enabled && this.data.credentials) {
       try {
+        await this.authorize()
+        signal.throwIfAborted()
         this.state = 'connecting'
         const updates = await this.client.getUpdates(this.data.credentials, this.data.cursor, signal)
+        signal.throwIfAborted()
+        // A normal long-poll may span the short authority lease. Revalidate
+        // before accepting its data; never extend stale cached permission.
+        await this.authorize()
         signal.throwIfAborted()
         // Durably accept the entire batch with its cursor. Never acknowledge a
         // batch before enqueueing it or after only accepting part of it.
@@ -358,7 +403,7 @@ export class ClawbotRuntime {
         failures++
         const code = (error as { code?: string }).code
         this.state = 'error'
-        this.message = code === 'clawbot-auth-expired' ? '微信连接已失效，请重新配对。'
+        this.message = code === 'clawbot-auth-expired' ? '微信连接已失效，请重新绑定。'
           : code === 'clawbot-capacity' ? '本机收件记录已满，接入已暂停；原记录未删除。'
           : 'ClawBot 连接暂不可用，正在等待重连；不会重复提交已有任务。'
         if (code === 'clawbot-auth-expired' || code === 'clawbot-capacity') {
@@ -370,6 +415,7 @@ export class ClawbotRuntime {
   }
   /** Exposed for deterministic contract testing, not a public RPC. */
   ingest(messages: ILinkMessage[], cursor: string): void {
+    this.currentAccess()
     if (!this.data.credentials) fail('clawbot-unpaired', '尚未绑定微信')
     this.commit(d => {
       d.receipts = d.receipts.filter(r => !terminal(r) || this.now() - r.createdAt < RETENTION)
@@ -402,10 +448,11 @@ export class ClawbotRuntime {
     this.commit(d => { const r = d.receipts.find(r => r.id === id); if (r) Object.assign(r, patch) })
   }
   private async command(r: Receipt): Promise<string | null> {
+    this.currentAccess()
     const text = r.input.trim()
     if (!text.startsWith('/')) return null
-    if (text === '/帮助' || text === '/help') return '/会话：列出可连接的会话\n/切换 编号：切换后续输入的会话\n/状态：查看目标\n普通文字直接发送到当前目标。'
-    if (text === '/状态') return `当前目标：${this.data.target?.title || '尚未选择'}。接入${this.data.enabled ? '已开启' : '已暂停'}。`
+    if (text === '/帮助' || text === '/help') return '/会话：列出可接入的会话\n/切换 编号：切换接入会话\n/状态：查看当前接入\n普通文字直接发送到接入会话。'
+    if (text === '/状态') return `接入会话：${this.data.target?.title || '尚未选择'}。私聊接入${this.data.enabled ? '已启用' : '已暂停'}。`
     if (text === '/会话') {
       const sessions = await this.host.listSessions(this.lifetime.signal)
       return sessions.length ? sessions.slice(0, 40).map(s => `${this.shortId(s.id)} · ${s.title}`).join('\n') + '\n发送 /切换 编号。' : '当前节点没有可选择的普通会话，请先在 DSH 新建会话。'
@@ -421,6 +468,7 @@ export class ClawbotRuntime {
       const operation = this.commandQueue.then(() => {
         this.lifetime.signal.throwIfAborted()
         this.checkOperational()
+        this.currentAccess()
         if (this.data.receipts.find(item => item.id === r.id)?.state !== 'running') return
         this.commit(d => { d.target = target; d.revision++ })
       })
@@ -434,6 +482,8 @@ export class ClawbotRuntime {
     while (!this.closed && !this.broken && this.data.enabled && this.data.credentials) {
       const r = this.data.receipts.find(r => r.state === 'pending' && r.input.trim().startsWith('/') === commands)
       if (!r) return
+      try { await this.authorize() } catch { return }
+      if (this.closed || this.broken || !this.data.enabled) return
       if (r.state === 'pending') {
         this.update(r.id, { state: 'running' })
         let output: string
@@ -441,9 +491,10 @@ export class ClawbotRuntime {
           const command = await this.command(r)
           if (this.broken) return
           if (command !== null) output = command
-          else if (!r.target) output = '尚未选择目标会话。请发送 /会话，或在电脑插件／小程序中选择。'
-          else if (!Number.isSafeInteger(r.target.generation)) output = '目标会话需要重新选择，未派发此次输入。'
+          else if (!r.target) output = '尚未选择接入会话。请发送 /会话，或在电脑插件／小程序中选择。'
+          else if (!Number.isSafeInteger(r.target.generation)) output = '接入会话需要重新选择，未派发此次输入。'
           else {
+            this.currentAccess()
             const result = await this.host.run({ sessionId: r.target.id, expectedGeneration: r.target.generation!, requestId: `clawbot-${r.id}`, text: r.input }, this.lifetime.signal)
             output = `【${r.target.title}】\n${result.text || '本轮已结束，没有可发送的文字回复。'}`
           }
@@ -474,6 +525,7 @@ export class ClawbotRuntime {
       const r = current
       const parts = current.parts || splitText(current.output || '')
       for (let index = current.sentParts || 0; index < parts.length; index++) {
+        try { await this.authorize() } catch { return }
         if (this.closed || this.broken || !this.data.enabled) return
         this.update(r.id, { state: 'sending', parts, sentParts: index })
         const sendingCredentials = this.data.credentials!
@@ -491,7 +543,7 @@ export class ClawbotRuntime {
             && this.data.credentials?.token === sendingCredentials.token) {
             this.commit(d => { d.enabled = false; d.authExpired = true; d.revision++ })
             this.polling?.abort()
-            this.message = '微信连接已失效，请重新配对。未确认送达的回复请在原会话查看。'
+            this.message = '微信连接已失效，请重新绑定。未确认送达的回复请在原会话查看。'
           } else this.message = '有回复发送结果不确定，未自动重发；完整结果仍在原 DSH 会话。'
           break
         }

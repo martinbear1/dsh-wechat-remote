@@ -1,5 +1,5 @@
 /** A transport, never a preset or a model tool. Public DTOs contain no credentials. */
-export interface ClawbotSession { id: string; title: string; generation?: number }
+export interface ClawbotSession { id: string; title: string; generation?: number; workspaceId?: string; workspaceTitle?: string }
 export interface ClawbotHost {
   listSessions(signal: AbortSignal): Promise<ClawbotSession[]>
   describeSession(sessionId: string, signal: AbortSignal): Promise<ClawbotSession & { generation: number }>
@@ -17,6 +17,7 @@ export interface ClawbotStatus {
   message: string
   pending: number
   uncertain: number
+  access?: { allowed: boolean; reason: string; validUntil: number | null; message?: string; checkedAt: number; expiresAt: number }
   pairing?: { id: string; url: string; qrDataUrl: string; status: string; expiresAt?: number }
 }
 export interface ClawbotRequest {

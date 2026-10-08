@@ -24,8 +24,9 @@ export declare class DshClawbotHostError extends ClawbotError {
  */
 export declare class DshClawbotHost implements ClawbotHost {
     private readonly ctx;
+    private readonly assertAccess?;
     private readonly running;
-    constructor(ctx: DshClawbotContext);
+    constructor(ctx: DshClawbotContext, assertAccess?: (() => void) | undefined);
     private gateway;
     private archived;
     /** Selectable ordinary sessions, including cold ones; admission decides writability. */

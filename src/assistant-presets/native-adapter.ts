@@ -32,7 +32,7 @@ interface Manager {
 /** Native YAML reader is injectable for hosts with bundled module resolution.
  * It reads native declarations only; no model supplies YAML to this boundary. */
 export interface NativePresetCodec { load(content: string): unknown }
-export interface NativeAssistantAdapterOptions { codec?: NativePresetCodec }
+export interface NativeAssistantAdapterOptions { codec?: NativePresetCodec; access?: { authorize(): Promise<void>; current(): void } }
 interface Environment { presets: Presets; manager: Manager; profileDir: string; anchor: string; fingerprint: string; codec: NativePresetCodec }
 interface Receipt { schema: 'assistant.native.install.v1'; patchDigest: string; requestId: string; phase: 'started' | 'settled'; application?: string }
 const isRow = (value: unknown): value is Row => value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -370,6 +370,7 @@ class Adapter implements NativeAssistantAdapter {
     return result
   }
   private async performInstall(preview: NativeAssistantPreview, signal: AbortSignal): Promise<NativeAssistantInstallation> {
+    await this.options.access?.authorize()
     this.validate(preview)
     const env = await this.environment(signal)
     if (env.fingerprint !== preview.profileFingerprint) throw error('assistant-native-profile-changed', '预览不属于当前宿主 profile')
@@ -377,6 +378,7 @@ class Adapter implements NativeAssistantAdapter {
     if (prior) return this.verify(preview, signal) // Never repeat an uncertain native package operation.
     const rebuilt = await this.preview({ presetId: preview.presetId, definition: preview.definition }, signal)
     if (canonical(rebuilt) !== canonical(preview)) throw error('assistant-native-preview-stale', '基础预设、默认项或能力已变化，请重新预览')
+    this.options.access?.current()
     await this.artifact(env, preview, true)
     const active = AbortSignal.any([signal, this.lifetime.signal]); active.throwIfAborted()
     const receipt: Receipt = { schema: 'assistant.native.install.v1', patchDigest: preview.patchDigest, requestId: randomUUID(), phase: 'started' }
@@ -385,7 +387,13 @@ class Adapter implements NativeAssistantAdapter {
       await this.saveReceipt(target, { ...receipt, phase: 'settled', application: 'cancelled' })
       active.throwIfAborted()
     }
-    const request = Promise.resolve().then(() => env.manager.installBundle(target, { enabled: true, requestId: receipt.requestId }))
+    // Admission must still be live after artifact preparation. Once native
+    // installation has begun, expiry does not cancel a host-owned operation.
+    this.options.access?.current()
+    const request = Promise.resolve().then(() => {
+      this.options.access?.current()
+      return env.manager.installBundle(target, { enabled: true, requestId: receipt.requestId })
+    })
     this.active.add(request)
     let cancellation: Promise<unknown> | undefined
     const abort = () => { cancellation ??= Promise.resolve().then(() => env.manager.cancelInstall(receipt.requestId)).catch(() => undefined) }

@@ -1,4 +1,5 @@
 import test from 'node:test'
+import { allowedFeatureFixture } from './feature-access-fixture.mjs'
 import assert from 'node:assert/strict'
 import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
@@ -560,6 +561,7 @@ test('real filesystem ledger survives restart, stays bounded and never resets co
 
 function sdk(mode = 'native', live = true) {
   const ctx = new Context()
+  ctx.provide('wechatFeatures', allowedFeatureFixture())
   new SystemPrompt(ctx, {})
   const tools = new ToolRuntime(ctx, { mode })
   const sessions = new SessionStore(ctx)

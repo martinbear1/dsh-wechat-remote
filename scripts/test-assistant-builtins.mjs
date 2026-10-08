@@ -1,4 +1,7 @@
 import test from 'node:test'
+import { allowedFeatureFixture } from './feature-access-fixture.mjs'
+import { FeatureAccess } from '../lib/feature-access.js'
+import { setImmediate } from 'node:timers/promises'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
@@ -21,6 +24,7 @@ function hostFixture(options = {}) {
     prefix: 'You are a coding agent powered by the {{model}} model.\nKeep host policy.', suffix: 'Retain suffix.', complete: false, includeRuntimeContext: true,
   } }, { id: 'extra', name: '@deepseek-ai/dsh-tool-runtime' }]
   const registered = new Map(), cleanups = [], services = new Map(), scopes = new Map()
+  services.set('wechatFeatures', options.features || allowedFeatureFixture())
   let registrations = 0
   const registry = {
     async readDocument(id) { const plugins = id === 'standard' ? base : registered.get(id)?.plugins; if (!plugins) throw Error('missing'); return { agentPreset: id, content: JSON.stringify(plugins) } },
@@ -55,6 +59,21 @@ test('built-in components register stable native presets after loader settles; p
   }
   await h.close(); assert.equal(h.registered.size, 0)
   assert((await Promise.all(components.map(component => component.status()))).every(item => item.state === 'unknown'))
+})
+
+test('account qualification does not enable presets; explicit opt-in only mounts our entries and local pause retires them', async t => {
+  const access = new FeatureAccess({ nodeId: () => 'test-node', read: async () => ({ schemaVersion:1,nodeId:'test-node',accountInstance:'account-1',checkedAt:1000,expiresAt:61000,
+    features:{group_assistant:{allowed:true,reason:'allowed',validUntil:120000},clawbot:{allowed:true,reason:'allowed',validUntil:120000}} }) })
+  t.after(() => access.close()); await access.refresh()
+  const h = hostFixture({features:{access}}); t.after(() => h.close())
+  h.registered.set('unrelated', { id:'unrelated', name:'Other plugin', plugins:h.base })
+  const components = builtinAssistants().map(item => new BuiltinAssistantComponent(h.host, item.templateId))
+  await Promise.all(components.map(component => component.status())); assert.equal(h.registrations,0)
+  await access.setGroupEnabled(true); await setImmediate(); await setImmediate()
+  assert.equal(h.registrations,3); assert.equal(h.registered.size,4)
+  await access.setGroupEnabled(false); await setImmediate()
+  assert.deepEqual([...h.registered.keys()],['unrelated']); assert.equal(access.groupEnabled(),false)
+  await access.refresh(true); await setImmediate(); assert.equal(h.registrations,3,'qualification refresh cannot undo explicit off')
 })
 test('component refuses foreign duplicates and observes changed or missing composition instead of claiming success', async t => {
   const h = hostFixture(); t.after(() => h.close())

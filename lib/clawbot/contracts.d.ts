@@ -3,6 +3,8 @@ export interface ClawbotSession {
     id: string;
     title: string;
     generation?: number;
+    workspaceId?: string;
+    workspaceTitle?: string;
 }
 export interface ClawbotHost {
     listSessions(signal: AbortSignal): Promise<ClawbotSession[]>;
@@ -30,6 +32,14 @@ export interface ClawbotStatus {
     message: string;
     pending: number;
     uncertain: number;
+    access?: {
+        allowed: boolean;
+        reason: string;
+        validUntil: number | null;
+        message?: string;
+        checkedAt: number;
+        expiresAt: number;
+    };
     pairing?: {
         id: string;
         url: string;

@@ -18,6 +18,11 @@ export interface ClawbotData {
     revision: number;
     enabled: boolean;
     credentials: ILinkCredentials | null;
+    /** Entitlement owner only; never a Tencent credential or a phone claim. */
+    accessBinding?: {
+        nodeId: string;
+        accountInstance: string;
+    };
     /** Preserve the identity and pending ledger when Tencent rejects its token. */
     authExpired?: boolean;
     target: ClawbotSession | null;

@@ -13,7 +13,7 @@ export class ScopedCapabilities {
   private readonly contributions = new Set<Contribution>()
   private readonly mounts = new Map<object, Dispose>()
   private closed = false
-  constructor(private readonly lifetime: AbortSignal) {}
+  constructor(private readonly lifetime: AbortSignal, private readonly authorize?: (tool: string, signal: AbortSignal) => Promise<void>) {}
 
   has(name: string): boolean { return !this.closed && this.definitions.has(name) }
 
@@ -48,9 +48,12 @@ export class ScopedCapabilities {
       if (failure) throw failure
     }
     try {
+      const authorize = this.authorize
       for (const definition of this.definitions.values()) {
         removers.push(tools.register({ ...definition, async execute(args, exec) {
           signal.throwIfAborted()
+          if (authorize) await authorize(definition.name, AbortSignal.any([exec.signal, signal]))
+          signal.throwIfAborted(); exec.signal.throwIfAborted()
           const result = await definition.execute(args, { ...exec, signal: AbortSignal.any([exec.signal, signal]) })
           signal.throwIfAborted()
           return result

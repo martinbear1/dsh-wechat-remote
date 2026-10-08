@@ -10,8 +10,15 @@ import { TurnActivityCompatibility } from '../lib/turn-activity.js'
 import { nativeInstallSessions, quiesceNativeHost } from '../lib/install-control.js'
 
 test('final generated manifest exposes identical strict schemas to old and new loaders', () => {
-  assert.equal(TYPERT.invocations.filter(i => !['humanTools', 'wechatClawbot'].includes(i.namespace)).length, 17)
+  assert.equal(TYPERT.invocations.filter(i => !['humanTools', 'wechatClawbot', 'wechatFeatures'].includes(i.namespace)).length, 17)
   assert.deepEqual(TYPERT.invocations.filter(i => i.namespace === 'wechatClawbot').map(i => i.method), ['control'])
+  const features = TYPERT.invocations.filter(i => i.namespace === 'wechatFeatures')
+  assert.deepEqual(features.map(i => i.method), ['control'])
+  const request = features[0].parameters[0].codec.schema
+  assert(request.safeParse({ action: 'status' }).success)
+  assert(request.safeParse({ action: 'group.enabled', enabled: true }).success)
+  assert(!request.safeParse({ action: 'grant', allowed: true }).success)
+  assert(!request.safeParse({ action: 'group.enabled', enabled: 'true' }).success)
   assert.deepEqual(TYPERT.invocations.filter(i => i.namespace === 'humanTools').map(i => i.method).sort(),
     ['ack', 'assistantCatalog', 'assistantDraft', 'assistantInstall', 'assistantPreview', 'assistantSessionPrepare', 'assistantSessionStatus', 'assistantStatus',
       'automationApprove', 'automationList', 'automationPause', 'automationPreview', 'automationProposals', 'automationStatus',

@@ -247,6 +247,24 @@ export class PublicRelayAgent {
     return { ...this.status }
   }
 
+  /** Read account features with this node's existing proof; never mobile state. */
+  async readFeatures(signal: AbortSignal): Promise<unknown> {
+    const identity = this.identity, pathname = `/v1/agents/${encodeURIComponent(identity.nodeId)}/features`
+    const origin = new URL(this.config.relayOrigin)
+    if (origin.protocol !== 'https:' || origin.username || origin.password) throw new Error('Feature source unavailable')
+    const response = await this.fetchImpl(origin.origin + pathname, { method: 'GET', redirect: 'error', signal,
+      headers: createAgentHttpProof(identity, 'GET', pathname) })
+    if (!response.ok || !response.body) { await response.body?.cancel(); throw new Error('Feature source unavailable') }
+    const reader = response.body.getReader(), parts: Uint8Array[] = []; let bytes = 0
+    try { while (true) {
+      signal.throwIfAborted(); const { done, value } = await reader.read(); if (done) break
+      bytes += value.byteLength; if (bytes > 16_384) throw new Error('Feature source unavailable'); parts.push(value)
+    } } finally { await reader.cancel().catch(() => {}); reader.releaseLock() }
+    signal.throwIfAborted()
+    if (this.identity !== identity) throw new Error('Node identity changed')
+    return JSON.parse(Buffer.concat(parts).toString('utf8'))
+  }
+
   async start(): Promise<void> {
     if (!this.stopped) return
     this.stopped = false

@@ -11,6 +11,10 @@ export interface NativePresetCodec {
 }
 export interface NativeAssistantAdapterOptions {
     codec?: NativePresetCodec;
+    access?: {
+        authorize(): Promise<void>;
+        current(): void;
+    };
 }
 export declare const COLLABORATION_COMPONENT_ID = "harness-collaboration";
 declare const collaborationModules: readonly ["dsh-wechat-remote/collaboration", "@harness-remote/dsh-wechat-remote/collaboration"];

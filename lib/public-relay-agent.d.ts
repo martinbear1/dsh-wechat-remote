@@ -89,6 +89,8 @@ export declare class PublicRelayAgent {
     private status;
     constructor(config: PublicRelayConfig, options: PublicRelayAgentOptions);
     snapshot(): AgentStatus;
+    /** Read account features with this node's existing proof; never mobile state. */
+    readFeatures(signal: AbortSignal): Promise<unknown>;
     start(): Promise<void>;
     /** Background status can reuse a ticket; an explicit pairing surface must
      * refresh because an unexpired single-use ticket may already be consumed.

@@ -1,4 +1,6 @@
-import { useEffect, useId, useRef, useSyncExternalStore } from 'react'
+import { useEffect, useId, useRef, useState, useSyncExternalStore } from 'react'
+import type { FeatureCall, FeatureView } from './feature-client.js'
+import { featureLeaseAllows } from './feature-client.js'
 import type { AssistantStore } from './assistant-store.js'
 import styles from './HarnessRemoteSettings.module.css'
 
@@ -17,9 +19,37 @@ function Help({ label, children }: { label: string; children: string }): JSX.Ele
 }
 
 /** Native-mode shortcuts, not a second conversation or preset implementation. */
-export function AssistantPresetsPanel({ store }: { store: AssistantStore }): JSX.Element {
+export function AssistantPresetsPanel({ store, featureCall }: { store: AssistantStore; featureCall?: FeatureCall }): JSX.Element {
   const { catalog, preview, busy, message, error } = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
   const lifetime = useRef<AbortController>()
+  const [feature, setFeature] = useState<FeatureView>()
+  const [accessError, setAccessError] = useState('')
+  const [accessBusy, setAccessBusy] = useState(false)
+  const featureFlight = useRef(false)
+  const featureEpoch = useRef(0)
+  const refreshFeature = async (enabled?: boolean) => {
+    if (!featureCall || featureFlight.current) return
+    featureFlight.current = true
+    const epoch = featureEpoch.current
+    setAccessBusy(true)
+    try {
+      const next = await featureCall(enabled === undefined ? { action: 'status' } : { action: 'group.enabled', enabled })
+      if (epoch !== featureEpoch.current) return
+      setFeature(next); setAccessError('')
+      if (enabled !== undefined) void store.load()
+    } catch (cause) {
+      if (epoch === featureEpoch.current) { setFeature(undefined); setAccessError(cause instanceof Error ? cause.message : '暂时无法核对资格。') }
+    } finally { if (epoch === featureEpoch.current) { featureFlight.current = false; setAccessBusy(false) } }
+  }
+  useEffect(() => {
+    featureEpoch.current++; featureFlight.current = false; setFeature(undefined)
+    void refreshFeature()
+    const timer = setInterval(() => void refreshFeature(), 15000)
+    return () => { featureEpoch.current++; featureFlight.current = false; clearInterval(timer) }
+  }, [featureCall])
+  const access = feature?.features.group_assistant
+  const allowed = featureLeaseAllows(feature, access)
+  const unlocked = allowed && feature?.groupEnabled === true
   useEffect(() => { const controller = new AbortController(); lifetime.current = controller; void store.load(); return () => controller.abort() }, [store])
   const drafts = catalog?.drafts || []
   const active = drafts.filter((item: any) => available(item) && !item.replacement)
@@ -59,8 +89,17 @@ export function AssistantPresetsPanel({ store }: { store: AssistantStore }): JSX
   </div>
   return <section className={styles.assistantsCard} aria-label="微信群协作助手" aria-busy={busy}>
     <div className={styles.assistantsHeading}><div className={styles.assistantChoiceHead}><h3>微信群协作助手</h3>
-      <Help label="电脑助手与手机群协作">{'电脑助手可独立使用，组件开关由 DSH 管理。手机发任务和提醒，需在小程序「设置 → 实验性功能」开启「微信群协作助手」。各手机独立设置，不会关闭电脑助手或已发布任务。'}</Help></div>
-      <button type="button" className={styles.assistantTextButton} disabled={busy} onClick={() => void store.load()}>{busy ? '读取中…' : '刷新'}</button></div>
+      <Help label="电脑助手与手机群协作">{'需要群协作资格、有效公网访问和剩余流量。开启本节点助手后，再在小程序设置中开启手机入口。暂停不删除资料，不取消 DSH 已开始的任务。'}</Help></div>
+      <button type="button" className={styles.assistantTextButton} disabled={busy || accessBusy} onClick={() => { void refreshFeature(); void store.load() }}>{busy || accessBusy ? '读取中…' : '刷新'}</button></div>
+    <div className={styles.clawbotReceiveRow}>
+      <div><strong>启用本节点助手</strong><p className={styles.clawbotNote} role="status">{accessError || (!allowed ? access?.message || '请联网核对资格，在小程序设置中兑换体验码。' : feature?.groupEnabled ? '已开启' : '有使用资格，尚未开启')}</p></div>
+      <label className={styles.clawbotToggle}>
+        <input type="checkbox" role="switch" aria-label="启用本节点助手" checked={feature?.groupEnabled || false}
+          disabled={accessBusy || !featureCall || !allowed && !feature?.groupEnabled} onChange={event => void refreshFeature(event.target.checked)} />
+        <span className={styles.clawbotSwitchTrack} aria-hidden />
+      </label>
+    </div>
+    <fieldset className={styles.assistantFeatureBody} disabled={!unlocked || accessBusy} aria-label="助手功能">
     {!catalog && !error ? <p role="status">正在读取当前电脑的助手…</p> : null}
     {catalog && !catalog.native?.supported ? <p role="status">{catalog.native?.reason || '当前 DSH 暂不支持安装助手，请先检查版本。'}</p> : null}
     {catalog && (catalog.native?.supported || templates.some((item: any) => item.builtin)) ? <>
@@ -94,5 +133,6 @@ export function AssistantPresetsPanel({ store }: { store: AssistantStore }): JSX
     </details> : null}
     {message ? <p role="status">{message}</p> : null}
     {error ? <p role="alert">{error}</p> : null}
+    </fieldset>
   </section>
 }

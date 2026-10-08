@@ -90,7 +90,7 @@ async function fixture(t, options = {}) {
     humanTools: { mountCapabilities() { assert.fail('authoring does not mount a component') } },
     skills: { async get(name, lookup) { assert.equal(name, 'human-workflow'); assert([...scopes.values()].includes(lookup.scope)); return HUMAN_WORKFLOW_SKILL } },
     tools: { get(_name, scope) { assert([...scopes.values()].includes(scope)); return {} } } }
-  const host = { get: name => services[name] }, adapter = createNativeAssistantAdapter(host, { codec })
+  const host = { get: name => services[name] }, adapter = createNativeAssistantAdapter(host, { codec, access: options.access })
   t.after(async () => { gate.resolve(); await adapter.close(); await rm(directory, { recursive: true, force: true }) })
   return { adapter, host, services, profile, declarations, bundles, calls, cancellations, nativeInstall, gate,
     set behavior(value) { behavior = value }, set defaultId(value) { defaultId = value }, set broken(value) { broken = value }, set delayed(value) { delayed = value },
@@ -113,6 +113,15 @@ async function historicalPreview(f, version = 1) {
   assert.notEqual(oldPatch, preview.patch, 'newly prepared native bundles must use current guidance, not silently keep historical text')
   return { ...preview, patch: oldPatch, patchDigest: sha256(oldPatch) }
 }
+
+test('account admission is checked again before native assistant install, without touching host defaults', async t => {
+  let allowed = true
+  const f=await fixture(t,{access:{async authorize(){if(!allowed)throw Error('feature denied')},current(){if(!allowed)throw Error('feature denied')}}})
+  const preview=await f.preview(), original=f.services.pluginManager.listBundles
+  f.services.pluginManager.listBundles=async()=>{const result=await original();allowed=false;return result}
+  await assert.rejects(f.adapter.install(preview,signal),/feature denied/)
+  assert.equal(f.calls.length,0); assert.equal(f.cancellations.length,0); await f.assertUnchanged()
+})
 
 async function seedHistoricalArtifact(f, preview, state) {
   // Seed what the OLD owner-approved native install already persisted. Calling

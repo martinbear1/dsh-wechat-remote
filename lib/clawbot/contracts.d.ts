@@ -6,6 +6,7 @@ export interface ClawbotSession {
     workspaceId?: string;
     workspaceTitle?: string;
 }
+export type ClawbotAttention = 'approval' | 'question';
 export interface ClawbotHost {
     listSessions(signal: AbortSignal): Promise<ClawbotSession[]>;
     describeSession(sessionId: string, signal: AbortSignal): Promise<ClawbotSession & {
@@ -16,7 +17,7 @@ export interface ClawbotHost {
         expectedGeneration: number;
         requestId: string;
         text: string;
-    }, signal: AbortSignal): Promise<{
+    }, signal: AbortSignal, onAttention?: (kind: ClawbotAttention) => void): Promise<{
         text: string;
     }>;
 }

@@ -1,4 +1,4 @@
-import { ClawbotError, type ClawbotHost, type ClawbotSession } from './contracts.js';
+import { ClawbotError, type ClawbotAttention, type ClawbotHost, type ClawbotSession } from './contracts.js';
 export interface DshClawbotContext {
     get(name: string): any;
     on(name: any, listener: (...args: any[]) => void, options?: {
@@ -35,12 +35,13 @@ export declare class DshClawbotHost implements ClawbotHost {
     describeSession(sessionId: string, signal: AbortSignal): Promise<ClawbotSession & {
         generation: number;
     }>;
+    private checkPreset;
     run(input: {
         sessionId: string;
         requestId: string;
         text: string;
         expectedGeneration: number;
-    }, signal: AbortSignal): Promise<{
+    }, signal: AbortSignal, onAttention?: (kind: ClawbotAttention) => void): Promise<{
         text: string;
     }>;
     private observeAndSubmit;

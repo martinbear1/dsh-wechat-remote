@@ -123,6 +123,26 @@ function realtime(t) {
 }
 const permissions = peer => peer.frames.filter(f => f.type === 'session/projection' && f.key === 'permissions')
 
+test('current preset and exact model tuple survive reconnect baselines and native desktop deltas unchanged', async t => {
+  const f = realtime(t), control = f.sources.get('session/control')
+  const model = { provider: 'account', model: 'shared-model-name', reasoningEffort: 'max' }
+  const values = { agentPreset: 'harness-teacher', modelSelection: { next: model, lastUsed: null } }
+  control.push({ type: 'baseline', value: { projections: { s: { asOfSeq: 20, values } } } })
+  await tick()
+  for (const [key, value] of Object.entries(values)) {
+    assert.deepEqual(f.peer.frames.find(frame => frame.type === 'session/projection' && frame.key === key),
+      { type: 'session/projection', sessionId: 's', key, value, seq: 20 })
+  }
+  const changed = { provider: 'api', model: model.model, reasoningEffort: 'low' }
+  control.push({ type: 'projection', sessionId: 's', key: 'modelSelection', seq: 21, value: { next: changed, lastUsed: model } })
+  control.push({ type: 'projection', sessionId: 's', key: 'agentPreset', seq: 22, value: 'standard' })
+  await tick()
+  assert.deepEqual(f.peer.frames.filter(frame => frame.key === 'modelSelection').at(-1).value, { next: changed, lastUsed: model })
+  assert.equal(f.peer.frames.filter(frame => frame.key === 'agentPreset').at(-1).value, 'standard')
+  assert.deepEqual(values.modelSelection.next, model, 'no provider alias or current-mode mutation in the native projection')
+  assert.deepEqual(f.peer.closes, [])
+})
+
 test('baseline, live selection and catalog changes all feed the unchanged phone permission reader', async t => {
   const f = realtime(t)
   const baseline = { type: 'baseline', value: { projections: { s: { asOfSeq: 20, values: { permissions: selection } } } } }

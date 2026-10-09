@@ -193,6 +193,113 @@ test('safety: interrupted dispatch and uncertain delivery do not automatically r
   } finally { await runtime.dispose() }
 })
 
+test('attention uses durable outbox once, then forwards final reply without a second native prompt', async () => {
+  const run = deferred(), storage = memory(), sent = []; let notify, prompts = 0
+  const runtime = new ClawbotRuntime(storage, host(async (_input, _signal, onAttention) => {
+    prompts++; notify = onAttention; return run.promise
+  }), client({ async sendText(_auth, message) { sent.push(message) } }))
+  try {
+    runtime.ingest([incoming('attention', 'work')], 'cursor'); await enabled(runtime, true); await setImmediate()
+    notify('question'); notify('question'); await setImmediate()
+    assert.equal(sent.length, 1); assert.match(sent[0].text, /回答问题/)
+    assert.equal(storage.data.receipts[0].state, 'running')
+    run.resolve({ text: 'native final' }); await setImmediate()
+    assert.equal(prompts, 1); assert.equal(sent.length, 2); assert.match(sent[1].text, /native final/)
+    assert.notEqual(sent[0].clientId, sent[1].clientId)
+    assert.ok(storage.data.receipts.every(row => row.state === 'done' && row.contextToken === ''))
+  } finally { run.resolve({ text: 'cleanup' }); await runtime.dispose() }
+})
+
+test('finishing while paused retires unsent attention and sends only final reply on resume', async () => {
+  const run = deferred(), storage = memory(), sent = []; let notify
+  const runtime = new ClawbotRuntime(storage, host(async (_input, _signal, onAttention) => {
+    notify = onAttention; return run.promise
+  }), client({ async sendText(_auth, message) { sent.push(message) } }))
+  try {
+    runtime.ingest([incoming('paused-attention', 'work')], 'cursor'); await enabled(runtime, true); await setImmediate()
+    await enabled(runtime, false); notify('approval')
+    run.resolve({ text: 'completed while paused' }); await setImmediate()
+    assert.equal(sent.length, 0)
+    await enabled(runtime, true); await setImmediate()
+    assert.equal(sent.length, 1); assert.match(sent[0].text, /completed while paused/)
+  } finally { run.resolve({ text: 'cleanup' }); await runtime.dispose() }
+})
+
+test('completion during notice authorization cannot revive a retired attention receipt', async () => {
+  const run = deferred(), authorization = deferred(), storage = memory(), sent = []
+  const gate = featureGate(); let notify, delaying = false, authorizations = 0
+  gate.authorize = async () => { gate.current(); if (delaying && ++authorizations === 1) await authorization.promise }
+  const runtime = new ClawbotRuntime(storage, host(async (_input, _signal, onAttention) => {
+    notify = onAttention; return run.promise
+  }), client({ async sendText(_auth, message) { sent.push(message) } }), Date.now, gate)
+  try {
+    runtime.ingest([incoming('late-notice', 'work')], 'cursor'); await enabled(runtime, true); await setImmediate()
+    delaying = true; notify('question'); await setImmediate()
+    assert.equal(authorizations, 1); assert.equal(sent.length, 0)
+    run.resolve({ text: 'finished during authorization' }); await setImmediate()
+    assert.equal(storage.data.receipts[1].state, 'done')
+    authorization.resolve(); await setImmediate()
+    assert.equal(sent.length, 1); assert.match(sent[0].text, /finished during authorization/)
+    assert.ok(storage.data.receipts.every(row => row.state === 'done' && row.contextToken === ''))
+  } finally { authorization.resolve(); run.resolve({ text: 'cleanup' }); await runtime.dispose() }
+})
+
+test('disconnect during authorization cannot revive pending dispatch or ready delivery', async () => {
+  for (const state of ['pending', 'ready']) {
+    const gate = featureGate(), authorization = deferred(), storage = memory(seed({ receipts: [receipt('sealed', state, { output: 'old reply' })] }))
+    let authorized = 0, delay = false, runs = 0, sends = 0
+    gate.authorize = async () => { gate.current(); if (delay && ++authorized <= 2) await authorization.promise }
+    const runtime = new ClawbotRuntime(storage, host(async () => { runs++; return { text: 'must not run' } }),
+      client({ async sendText() { sends++ },
+        async getQr() { return { qrcode: 'replacement-qr', url: 'https://example.invalid/qr' } },
+        async pollQr() { return { status: 'confirmed', credentials: { ...auth, accountId: 'replacement@im.bot' } } },
+      }), Date.now, gate)
+    try {
+      // Enable authorization completes first; subsequent work is delayed.
+      const original = gate.authorize
+      gate.authorize = async () => { await original(); delay = true }
+      await enabled(runtime, true); await setImmediate()
+      assert.equal(authorized, 2, 'receive poll and dispatch/delivery are both held')
+      await enabled(runtime, false)
+      await runtime.control({ action: 'disconnect', expectedRevision: runtime.snapshot().revision, abandonPending: true }, signal())
+      const pairing = await runtime.control({ action: 'login.start' }, signal())
+      await runtime.control({ action: 'login.poll', loginId: pairing.pairing.id }, signal())
+      await runtime.control({ action: 'route', sessionId: sessions[0].id, expectedRevision: runtime.snapshot().revision }, signal())
+      await enabled(runtime, true)
+      authorization.resolve(); await setImmediate()
+      assert.equal(runs, 0); assert.equal(sends, 0)
+      assert.equal(storage.data.receipts[0].state, 'uncertain'); assert.equal(storage.data.credentials.accountId, 'replacement@im.bot')
+    } finally { authorization.resolve(); await runtime.dispose() }
+  }
+})
+
+test('restart does not send a stale continue-waiting notice or resubmit an interrupted run', async () => {
+  const parent = receipt('restart-attention', 'running')
+  const notice = receipt('ignored', 'ready', { id: createHash('sha256').update(`attention\0${parent.id}\0question`).digest('hex'), input: '', output: 'continue waiting' })
+  const storage = memory(seed({ enabled: true, receipts: [parent, notice] })), sent = []
+  const runtime = new ClawbotRuntime(storage, host(() => assert.fail('no replay')), client({ async sendText(_auth, message) { sent.push(message) } }))
+  try {
+    await setImmediate(); assert.equal(sent.length, 0)
+    assert.equal(storage.data.receipts[0].state, 'uncertain'); assert.equal(storage.data.receipts[1].state, 'done')
+  } finally { await runtime.dispose() }
+})
+
+test('unknown notice delivery is not retried and does not suppress the final reply', async () => {
+  const run = deferred(), storage = memory(), sent = []; let notify
+  const runtime = new ClawbotRuntime(storage, host(async (_input, _signal, onAttention) => {
+    notify = onAttention; return run.promise
+  }), client({ async sendText(_auth, message) {
+    sent.push(message); if (sent.length === 1) throw Error('uncertain response')
+  } }))
+  try {
+    runtime.ingest([incoming('uncertain-attention', 'work')], 'cursor'); await enabled(runtime, true); await setImmediate()
+    notify('approval'); await setImmediate(); notify('approval')
+    run.resolve({ text: 'native final' }); await setImmediate()
+    assert.equal(sent.length, 2); assert.match(sent[1].text, /native final/)
+    assert.equal(runtime.snapshot().uncertain, 1)
+  } finally { run.resolve({ text: 'cleanup' }); await runtime.dispose() }
+})
+
 test('safety: pausing a run keeps its result; resuming sends it without resubmitting', async () => {
   const run = deferred(), storage = memory(), sent = []
   let submitted = 0

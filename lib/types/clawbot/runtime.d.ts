@@ -66,6 +66,9 @@ export declare class ClawbotRuntime {
     private update;
     private command;
     private shortId;
+    /** Notices reuse the same durable outbox and delivery fences as final replies.
+     * At most two per request; no new sender, polling loop or replay permission. */
+    private attention;
     private process;
     private deliver;
     private drain;

@@ -1,4 +1,5 @@
-import { ClawbotError, type ClawbotHost, type ClawbotSession } from './contracts.js'
+import { ClawbotError, type ClawbotAttention, type ClawbotHost, type ClawbotSession } from './contracts.js'
+import { assertColdSessionPresetAvailable } from '../dsh-host-contract.js'
 
 type Row = Record<string, any>
 export interface DshClawbotContext {
@@ -93,13 +94,25 @@ export class DshClawbotHost implements ClawbotHost {
     if (!id(sessionId)) throw fail('invalid-input', '会话标识无效。')
     const selected = (await this.listSessions(signal)).find(item => item.id === sessionId)
     if (!selected) throw fail('not-found', '此会话已不存在、已归档或属于子代理，请重新选择普通会话。')
+    await this.checkPreset(sessionId, signal)
     const { generation } = await this.metadata(sessionId, signal)
     signal.throwIfAborted()
     if (this.archived().has(sessionId)) throw fail('not-found', '此会话已归档，请重新选择。')
     return { ...selected, generation }
   }
 
-  async run(input: { sessionId: string; requestId: string; text: string; expectedGeneration: number }, signal: AbortSignal): Promise<{ text: string }> {
+  private async checkPreset(sessionId: string, signal: AbortSignal): Promise<void> {
+    try { await assertColdSessionPresetAvailable(this.ctx, sessionId, signal) }
+    catch (error) {
+      signal.throwIfAborted()
+      if (row(error) && error.code === 'adapter/session-preset-unavailable')
+        throw fail('preset-unavailable', '此会话的原模式已停用或不可用，本条消息未发送。请在电脑恢复原模式，或选择其他可用会话。')
+      throw fail('unavailable', '暂时无法核对会话模式，本条消息未发送，请在电脑或小程序核对。')
+    }
+  }
+
+  async run(input: { sessionId: string; requestId: string; text: string; expectedGeneration: number }, signal: AbortSignal,
+    onAttention?: (kind: ClawbotAttention) => void): Promise<{ text: string }> {
     if (!id(input.sessionId) || !id(input.requestId) || typeof input.text !== 'string' || !input.text.trim()
       || !Number.isSafeInteger(input.expectedGeneration)
       || Buffer.byteLength(input.text) > MAX_TEXT_BYTES) throw fail('invalid-input', '消息或会话标识无效。')
@@ -122,16 +135,19 @@ export class DshClawbotHost implements ClawbotHost {
         || agent.inbox?.nextTurn?.length || agent.inbox?.nextStep?.length)) {
         throw fail('busy', '此会话正在运行或有排队消息，请先在电脑或小程序处理。')
       }
-      return await this.observeAndSubmit(input, generation, cursor, signal)
+      await this.checkPreset(input.sessionId, signal)
+      signal.throwIfAborted()
+      return await this.observeAndSubmit(input, generation, cursor, signal, onAttention)
     } finally { this.running.delete(input.sessionId) }
   }
 
   private observeAndSubmit(input: { sessionId: string; requestId: string; text: string }, generation: number,
-    cursor: number, signal: AbortSignal): Promise<{ text: string }> {
+    cursor: number, signal: AbortSignal, onAttention?: (kind: ClawbotAttention) => void): Promise<{ text: string }> {
     return new Promise((resolve, reject) => {
       let settled = false, dispatched = false, accepted = false, currentTurn: number | undefined
       let matchedTurn: number | undefined, foreignInput = false, finalText: string | undefined, completion: string | undefined
       let observedSession: Row | undefined, eventCount = 0
+      const attention = new Set<ClawbotAttention>()
       const offs: (() => void)[] = []
       const submission = (): DshClawbotSubmission => accepted ? 'accepted' : dispatched ? 'unknown' : 'not-submitted'
       const finish = (error?: unknown, text?: string) => {
@@ -143,6 +159,17 @@ export class DshClawbotHost implements ClawbotHost {
         if (error) reject(error); else resolve({ text: text! })
       }
       const stop = (code: string, message: string) => finish(fail(code, message, submission()))
+      const notify = (kind: ClawbotAttention) => {
+        if (!onAttention) return stop(kind + '-required', kind === 'approval'
+          ? '此任务需要你的原生审批，请回电脑或小程序处理；任务未被取消。'
+          : '此任务需要回答问题，请回电脑或小程序处理；任务未被取消。')
+        if (attention.has(kind)) return
+        attention.add(kind)
+        // The durable matching input proves ownership. The notice does not
+        // decide an approval, answer a question or end this run's observation.
+        try { onAttention(kind) }
+        catch { stop('attention-unavailable', '未能保存待处理提醒。任务未被取消，请在电脑或小程序处理并查看结果。') }
+      }
       const abort = () => stop('observation-stopped', dispatched
         ? '已停止等待回复；电脑端任务可能仍在继续，请在电脑或小程序核对，勿重复发送。'
         : '已停止发送。')
@@ -183,9 +210,9 @@ export class DshClawbotHost implements ClawbotHost {
               if (matchedTurn !== undefined) return stop('ambiguous-turn', '此轮次加入了其他输入，请在电脑或小程序查看完整回复。')
             }
           } else if (matchedTurn !== undefined && currentTurn === matchedTurn) {
-            if (event.type === 'approval/asked') return stop('approval-required', '此任务需要你的原生审批，请回电脑或小程序处理；任务未被取消。')
+            if (event.type === 'approval/asked') return notify('approval')
             if (event.type === 'tool/call' && data.name === 'ask_user_question') {
-              return stop('question-required', '此任务需要回答问题，请回电脑或小程序处理；任务未被取消。')
+              return notify('question')
             }
             if (event.type === 'assistant/message' && data.turn === matchedTurn) {
               const content = data.message?.content

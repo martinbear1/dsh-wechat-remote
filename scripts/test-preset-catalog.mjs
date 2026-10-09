@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { invokeHostRemote, nativeSessionPresetSelection } from '../lib/dsh-host-contract.js'
+import { invokeHostRemote, nativeSessionPresetSelection, assertColdSessionPresetAvailable } from '../lib/dsh-host-contract.js'
 import { z } from 'zod'
 
 const request = () => ({ namespace: 'agentPresets', method: 'list', args: {}, signal: new AbortController().signal })
@@ -52,4 +52,78 @@ test('explicit selection requires both native request and receipt codecs, not a 
   }
   assert.equal(nativeSessionPresetSelection({ get: () => undefined }), false)
   assert.equal(nativeSessionPresetSelection({ get: () => { throw Error('withdrawn') } }), false)
+})
+
+function coldMode(selected = 'harness-teacher') {
+  const f = { live: false, reads: 0, disposed: 0, resolutions: [], invocations: [], selected }
+  f.presets = { async resolve(id) { f.resolutions.push(id); return {} } }
+  f.ctx = { get: key => ({
+    agents: { get: () => f.live ? {} : undefined }, agentPresets: f.presets,
+    sessionQuery: { async observeSession(id, options) {
+      assert.equal(id, 'cold'); assert.equal(options.projectionMode, 'all'); f.reads++
+      return { header: { agentPreset: 'stale-creation-mode' }, projections: { values: { agentPreset: f.selected } },
+        [Symbol.dispose]() { f.disposed++ } }
+    } },
+  })[key] }
+  f.gateway = { async invoke(request) { f.invocations.push(request); return { accepted: true } } }
+  f.request = { namespace: 'session', method: 'prompt', args: { request: { sessionId: 'cold', content: [] } } }
+  return f
+}
+
+test('cold prompt checks the current native projection, not the creation header; null uses native default', async () => {
+  for (const selected of ['harness-teacher', null]) {
+    const f = coldMode(selected)
+    assert.deepEqual(await invokeHostRemote(f.ctx, f.gateway, f.request), { accepted: true })
+    assert.deepEqual(f.resolutions, [selected ?? undefined])
+    assert.equal(f.reads, 1); assert.equal(f.disposed, 1); assert.equal(f.invocations.length, 1)
+  }
+})
+
+test('missing, disabled and broken cold modes reject before a native prompt; unknown failures stay unknown', async () => {
+  for (const code of ['agent-preset/not-found', 'agent-preset/invalid', 'broken', 'storage/failure']) {
+    const f = coldMode()
+    const nativeFailure = Object.assign(new Error('private native diagnostic'), { code })
+    f.presets.resolve = async () => { if (code === 'broken') return { broken: 'private loader path' }; throw nativeFailure }
+    await assert.rejects(invokeHostRemote(f.ctx, f.gateway, f.request), error => {
+      if (code === 'storage/failure') return error === nativeFailure
+      assert.equal(error.code, 'adapter/session-preset-unavailable')
+      assert.match(error.message, /未发送/); assert.doesNotMatch(error.message, /private/)
+      assert.deepEqual(error.details, { sessionId: 'cold', agentPreset: 'harness-teacher' })
+      return true
+    })
+    assert.equal(f.invocations.length, 0); assert.equal(f.disposed, 1)
+  }
+})
+
+test('retained live revisions remain native; activation during lookup is not falsely blocked', async () => {
+  const live = coldMode(); live.live = true
+  live.presets.resolve = async () => assert.fail('live revision must not resolve a retired declaration')
+  await invokeHostRemote(live.ctx, live.gateway, live.request)
+  assert.equal(live.reads, 0); assert.equal(live.invocations.length, 1)
+  const racing = coldMode()
+  racing.presets.resolve = async () => { racing.live = true; throw Object.assign(new Error('retired'), { code: 'agent-preset/not-found' }) }
+  await invokeHostRemote(racing.ctx, racing.gateway, racing.request)
+  assert.equal(racing.disposed, 1); assert.equal(racing.invocations.length, 1)
+})
+
+test('preflight does not intercept commands, permission changes, model selection, reads or old hosts', async () => {
+  const f = coldMode()
+  for (const [namespace, method] of [['commands', 'execute'], ['session', 'selectModel'], ['session', 'page']]) {
+    await invokeHostRemote(f.ctx, f.gateway, { ...f.request, namespace, method })
+  }
+  assert.equal(f.reads, 0); assert.equal(f.invocations.length, 3)
+  await invokeHostRemote({ get: () => undefined }, f.gateway, f.request)
+  assert.equal(f.invocations.length, 4)
+  f.selected = undefined
+  await assertColdSessionPresetAvailable(f.ctx, 'cold')
+  assert.deepEqual(f.resolutions, [], 'no projection must not fall back to a stale header')
+})
+
+test('aborted preflight is read-only and releases an acquired observation without sending', async () => {
+  const f = coldMode(), lifetime = new AbortController()
+  await assert.rejects(assertColdSessionPresetAvailable(f.ctx, 'cold', AbortSignal.abort()))
+  assert.equal(f.reads, 0)
+  f.presets.resolve = async () => { lifetime.abort(); return {} }
+  await assert.rejects(invokeHostRemote(f.ctx, f.gateway, { ...f.request, signal: lifetime.signal }), error => error.name === 'AbortError')
+  assert.equal(f.disposed, 1); assert.equal(f.invocations.length, 0)
 })

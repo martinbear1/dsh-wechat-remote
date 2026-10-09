@@ -86,7 +86,48 @@ export function nativeSessionPresetSelection(ctx: HostContext): boolean {
       && output?.success === true && output.data?.agentPreset === sample.agentPreset
   } catch { return false }
 }
+
+/** Check a cold Session's recorded mode without acquiring a writer or changing
+ * its composition. Live Agents retain their native preset revision even after
+ * its declaration is removed. Missing optional APIs leave admission to DSH. */
+export async function assertColdSessionPresetAvailable(ctx: HostContext, sessionId: string, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted()
+  const agents = ctx.get('agents') as { get?: (id: string) => unknown } | undefined
+  const presets = ctx.get('agentPresets') as { resolve?: (id?: string) => Promise<{ broken?: string }> } | undefined
+  const query = ctx.get('sessionQuery') as { observeSession?: (id: string, options: {
+    signal?: AbortSignal; projectionMode: 'all'
+  }) => Promise<{ projections?: { values?: { agentPreset?: unknown } }; [Symbol.dispose](): void }> } | undefined
+  if (typeof agents?.get !== 'function' || agents.get(sessionId)
+      || typeof presets?.resolve !== 'function' || typeof query?.observeSession !== 'function') return
+  const observation = await query.observeSession(sessionId, { signal, projectionMode: 'all' })
+  try {
+    signal?.throwIfAborted()
+    const selected = observation.projections?.values?.agentPreset
+    // The header is only the creation-time preset, not the current selection.
+    if (selected !== null && typeof selected !== 'string') return
+    try {
+      const mode = await presets.resolve(selected ?? undefined)
+      signal?.throwIfAborted()
+      if (mode.broken === undefined) return
+    } catch (error) {
+      signal?.throwIfAborted()
+      const code = (error as { code?: unknown } | null)?.code
+      if (code !== 'agent-preset/not-found' && code !== 'agent-preset/invalid') throw error
+    }
+    // Native activation may have completed while this read was in flight.
+    if (agents.get(sessionId)) return
+    throw Object.assign(new Error('此会话的模式未启用或暂不可用；请在电脑上检查对应模式，或选择其他会话。未发送本次消息。'), {
+      code: 'adapter/session-preset-unavailable',
+      details: { sessionId, ...(typeof selected === 'string' ? { agentPreset: selected } : {}) },
+    })
+  } finally { observation[Symbol.dispose]() }
+}
+
 export async function invokeHostRemote(ctx: HostContext, gateway: Row, request: Row): Promise<unknown> {
+  if (request.namespace === 'session' && request.method === 'prompt' && typeof request.args?.request?.sessionId === 'string') {
+    await assertColdSessionPresetAvailable(ctx, request.args.request.sessionId, request.signal)
+    request.signal?.throwIfAborted()
+  }
   if (request.namespace === 'agentPresets' && request.method === 'list') {
     // The native roster marks defaults only when that definition still exists.
     // Uninstalling/turning off a selected mode can therefore leave zero marked

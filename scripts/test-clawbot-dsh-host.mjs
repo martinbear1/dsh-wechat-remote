@@ -40,7 +40,7 @@ function fixture() {
     workspaceRegistry: { get archivedSessionIds() { return h.archived } },
     sessions: { get: id => sessions.get(id) }, agents: { get: id => agents.get(id) },
     sessionQuery: { async observeSession(id, options) {
-      assert.equal(options.projectionMode, 'none')
+      assert.ok(['none', 'all'].includes(options.projectionMode))
       return { ...metadata.get(id), get events() { throw Error('Historical body must never be accessed') },
         [Symbol.dispose]() { h.observersDisposed++ } }
     } },
@@ -52,6 +52,7 @@ function fixture() {
       return h.prompt(request)
     } },
   }
+  h.services = services
   h.ctx = {
     get: name => services[name],
     on(name, listener, options) {
@@ -177,6 +178,76 @@ for (const [type, data, code] of [
   const h = fixture(), promise = h.host.run(input(), signal()), rejected = assert.rejects(promise, failure(code))
   await h.started; h.turn(); h.event(type, data)
   await rejected; assert.equal(h.listenerCount(), 0); assert.deepEqual(h.nativeCalls.map(c => c.method), ['list', 'prompt'])
+})
+
+test('native questions and approval remain pending until owner answers; same turn final reply continues', async () => {
+  const h = fixture(), notices = [], promise = h.host.run(input(), signal(), kind => notices.push(kind))
+  let settled = false; void promise.then(() => { settled = true })
+  await h.started; h.turn()
+  h.event('tool/call', { name: 'ask_user_question', turn: 3 })
+  h.event('tool/call', { name: 'ask_user_question', turn: 3 })
+  h.event('approval/asked', { id: 'a', toolName: 'shell' })
+  assert.deepEqual(notices, ['question', 'approval'])
+  await Promise.resolve(); assert.equal(settled, false)
+  h.event('approval/decided', { id: 'a', approved: true })
+  h.event('tool/result', { turn: 3, message: { content: [{ type: 'text', text: 'owner answered' }] } })
+  h.assistant('completed after owner action'); h.end()
+  assert.deepEqual(await promise, { text: 'completed after owner action' })
+  assert.deepEqual(h.nativeCalls.map(c => c.method), ['list', 'prompt']); assert.equal(h.listenerCount(), 0)
+})
+
+test('unrelated interaction is not forwarded and handoff does not weaken foreign input fence', async () => {
+  const h = fixture(), notices = [], promise = h.host.run(input(), signal(), kind => notices.push(kind))
+  const rejected = assert.rejects(promise, failure('ambiguous-turn'))
+  await h.started; h.turn()
+  h.event('approval/asked', { id: 'other', toolName: 'shell' }, 'other')
+  assert.deepEqual(notices, [])
+  h.event('tool/call', { name: 'ask_user_question', turn: 3 })
+  h.event('user/message', { source: { kind: 'user', rpcId: 'other-input' }, content: [{ type: 'text', text: 'another task' }] })
+  h.assistant('must not forward mixed task'); h.end()
+  await rejected; assert.equal(h.listenerCount(), 0); assert.equal(h.calls().length, 1)
+})
+
+test('waiting for a native answer stays bounded and timeout never cancels or resubmits the task', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const h = fixture(), notices = [], promise = h.host.run(input(), signal(), kind => notices.push(kind))
+  const rejected = assert.rejects(promise, failure('observation-timeout', 'accepted'))
+  await h.started; await new Promise(setImmediate); h.turn()
+  h.event('tool/call', { name: 'ask_user_question', turn: 3 })
+  t.mock.timers.tick(15 * 60 * 1000)
+  await rejected
+  h.assistant('late result stays in native session'); h.end()
+  assert.deepEqual(notices, ['question']); assert.equal(h.listenerCount(), 0)
+  assert.deepEqual(h.nativeCalls.map(call => call.method), ['list', 'prompt'])
+})
+
+test('notice persistence failure detaches observation without throwing into native session events', async () => {
+  const h = fixture(), promise = h.host.run(input(), signal(), () => { throw Error('private disk path') })
+  const rejected = assert.rejects(promise, failure('attention-unavailable'))
+  await h.started; h.turn()
+  assert.doesNotThrow(() => h.event('approval/asked', { id: 'a', toolName: 'shell' }))
+  await rejected; assert.equal(h.listenerCount(), 0); assert.equal(h.calls().length, 1)
+})
+
+test('cold missing current preset fails before route selection or prompt, never uses old header preset', async () => {
+  const h = fixture(), resolved = []
+  h.metadata.get('s1').header.agentPreset = 'standard'
+  h.metadata.get('s1').projections = { values: { agentPreset: 'harness-teacher' } }
+  h.services.agentPresets = { async resolve(preset) {
+    resolved.push(preset); throw Object.assign(Error('private path'), { code: 'agent-preset/not-found' })
+  } }
+  await assert.rejects(h.host.describeSession('s1', signal()), failure('preset-unavailable', 'not-submitted'))
+  await assert.rejects(h.host.run(input(), signal()), failure('preset-unavailable', 'not-submitted'))
+  assert.deepEqual(resolved, ['harness-teacher', 'harness-teacher']); assert.equal(h.calls().length, 0)
+})
+
+test('a live native Agent may keep its retired preset revision', async () => {
+  const h = fixture()
+  h.agents.set('s1', { status: 'idle' })
+  h.services.agentPresets = { resolve() { assert.fail('live composition is owned by DSH') } }
+  const promise = h.host.run(input(), signal()); await h.started
+  h.turn(); h.assistant(); h.end()
+  assert.deepEqual(await promise, { text: 'the answer' })
 })
 
 test('preexisting running/queued Agent is busy and sends nothing', async () => {

@@ -14,7 +14,7 @@ import { assistantGuidance } from '../lib/assistant-presets/definition.js'
 import { AssistantRegistry } from '../lib/assistant-presets/registry.js'
 import { createNativeAssistantAdapter, nativeAssistantCodec, parseNativeAssistantBase, transformNativeAssistantBase } from '../lib/assistant-presets/native-adapter.js'
 import { HUMAN_WORKFLOW_SKILL } from '../lib/human-workflow/dsh-skill.js'
-import { invokeHostRemote, nativeSessionPresetSelection } from '../lib/dsh-host-contract.js'
+import { invokeHostRemote, nativeSessionPresetSelection, assertColdSessionPresetAvailable } from '../lib/dsh-host-contract.js'
 import { verifyNativePresetSettings } from './native-preset-settings-fixture.mjs'
 import { FeatureAccess } from '../lib/feature-access.js'
 
@@ -126,7 +126,14 @@ try {
   ctx.provide('workspaceRegistry', { archivedSessionIds: [], list: () => [], get: id => id === 'fixture-workspace'
     ? { id, path: work, attachSession: async sessionId => attached.push(sessionId) } : undefined })
   ctx.provide('fs', { resolve() { throw Error('no filesystem tool in fixture') } })
-  ctx.provide('sessionQuery', { listSessions: async () => [] })
+  let presetReads = 0, presetReleases = 0
+  ctx.provide('sessionQuery', { listSessions: async () => [], async observeSession(id, options) {
+    assert.equal(options.projectionMode, 'all')
+    const session = ctx.sessions.get(id); assert(session); presetReads++
+    return { header: session.header, projections: { asOfSeq: session.seq - 1,
+      values: { agentPreset: ctx.sessionProjections.stateOf(session, 'agentPreset') } },
+      [Symbol.dispose]() { presetReleases++ } }
+  } })
   await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 10 })
   const controller = new SessionController(ctx)
   await ctx.plugin(AgentPresets, { default: 'standard' })
@@ -212,6 +219,11 @@ try {
     assert.match(doc.content, /Native fixture policy/); assert.match(doc.content, /Native suffix/)
   }
   const teacher = ctx.agents.get(created.sessionId), originalCancel = teacher.cancel
+  const cold = ctx.sessions.create(undefined, { meta: { cwd: work, agentPreset: 'standard' } })
+  cold.append('agent-preset/selected', { agentPreset: 'harness-teacher' })
+  const coldEvents = JSON.stringify(cold.snapshotEvents())
+  await assertColdSessionPresetAvailable(ctx, cold.id)
+  assert.equal(ctx.agents.get(cold.id), undefined, 'availability reads do not resume a cold Agent')
   const teacherEvents = JSON.stringify(teacher.session.snapshotEvents()), ordinaryEvents = JSON.stringify(ordinaryAgent.session.snapshotEvents())
   teacher.cancel = () => assert.fail('turning off group features must not cancel a native Agent')
   try {
@@ -222,6 +234,12 @@ try {
     assert.equal(JSON.stringify(teacher.session.snapshotEvents()),teacherEvents); assert.equal(JSON.stringify(ordinaryAgent.session.snapshotEvents()),ordinaryEvents)
     assert.equal(JSON.stringify(ctx.agentPresets.config),originalDefaultConfig); assert.deepEqual(ctx.agentDefaultModel.currentSelection(),originalModelSelection)
     assert.equal(ctx.tools.get('human_capabilities',ordinaryAgent),undefined)
+    await assert.rejects(assertColdSessionPresetAvailable(ctx, cold.id), error =>
+      error.code === 'adapter/session-preset-unavailable' && error.details.agentPreset === 'harness-teacher')
+    await assertColdSessionPresetAvailable(ctx, created.sessionId)
+    assert.equal(presetReads, 2); assert.equal(presetReleases, 2, 'live retained revisions do not consult the retired declaration')
+    assert.equal(ctx.agents.get(cold.id), undefined)
+    assert.equal(JSON.stringify(cold.snapshotEvents()), coldEvents, 'native projection availability reads never write or replace a mode')
   } finally {teacher.cancel=originalCancel}
   await ctx.loader.root.update([]); await ctx.loader.await()
   assert.deepEqual((await ctx.agentPresets.list()).map(item => item.id), ['standard'])
@@ -327,6 +345,7 @@ try {
     checks: ['complete shipped standard declaration non-persona rows preserved field-for-field; original preset files byte-identical',
       'native Loader component lifecycle', 'three actual registry modes', 'native acquireScope mount', 'default unchanged', 'owned dispose removes only builtins',
       'account-qualified group pause withdraws only owned presets, preserves both existing native Agents and events, and never cancels tasks',
+      'cold prompt preflight reads the current native preset projection, rejects retired modes without sending, and permits live retained revisions',
       'actual exported collaboration component mounts only in native preset scopes', 'standard Agent and host have no collaboration tools or skill',
       'scoped readiness cannot be supplied by a global skill', 'core and Desktop authoring choose their actual owning package exports',
       'native request and result retain per-session mode', 'withdrawn selected default is reported without mutation',

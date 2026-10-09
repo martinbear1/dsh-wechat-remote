@@ -1,9 +1,11 @@
 /** A transport, never a preset or a model tool. Public DTOs contain no credentials. */
 export interface ClawbotSession { id: string; title: string; generation?: number; workspaceId?: string; workspaceTitle?: string }
+export type ClawbotAttention = 'approval' | 'question'
 export interface ClawbotHost {
   listSessions(signal: AbortSignal): Promise<ClawbotSession[]>
   describeSession(sessionId: string, signal: AbortSignal): Promise<ClawbotSession & { generation: number }>
-  run(input: { sessionId: string; expectedGeneration: number; requestId: string; text: string }, signal: AbortSignal): Promise<{ text: string }>
+  run(input: { sessionId: string; expectedGeneration: number; requestId: string; text: string }, signal: AbortSignal,
+    onAttention?: (kind: ClawbotAttention) => void): Promise<{ text: string }>
 }
 export interface ClawbotStatus {
   supported: true

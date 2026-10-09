@@ -19,4 +19,8 @@ export declare function projectedSubagentCatalog(parent: string, projection: Row
 /** Pure codec inspection, never a trial session creation. Both request and
  * acknowledgement must retain the selected mode; old schemas may strip it. */
 export declare function nativeSessionPresetSelection(ctx: HostContext): boolean;
+/** Check a cold Session's recorded mode without acquiring a writer or changing
+ * its composition. Live Agents retain their native preset revision even after
+ * its declaration is removed. Missing optional APIs leave admission to DSH. */
+export declare function assertColdSessionPresetAvailable(ctx: HostContext, sessionId: string, signal?: AbortSignal): Promise<void>;
 export declare function invokeHostRemote(ctx: HostContext, gateway: Row, request: Row): Promise<unknown>;

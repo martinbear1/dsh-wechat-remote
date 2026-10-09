@@ -31,7 +31,7 @@ export declare class ClawbotRuntime {
     private state;
     private closed;
     private commandQueue;
-    private readonly questions;
+    private readonly nativeAttention;
     constructor(storage: ClawbotStorage, host: ClawbotHost, client?: ILinkClient, now?: () => number, access?: ClawbotAccess | undefined);
     private commit;
     private checkRevision;
@@ -67,12 +67,6 @@ export declare class ClawbotRuntime {
     private update;
     private command;
     private shortId;
-    /** The native capability lives only while the original observer is alive.
-     * Text receipts stay durable, but restart never reconstructs an answerer. */
-    private question;
-    private retireQuestion;
-    private retireQuestions;
-    private answerQuestion;
     /** Notices reuse the same durable outbox and delivery fences as final replies.
      * At most two per request; no new sender, polling loop or replay permission. */
     private attention;

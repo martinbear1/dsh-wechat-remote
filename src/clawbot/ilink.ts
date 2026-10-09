@@ -8,9 +8,11 @@
  */
 import { randomBytes } from 'node:crypto'
 import { ILinkError } from './ilink-types.js'
-import type { ILinkCredentials, ILinkMessage, ILinkQrResult, ILinkText, ILinkUpdates } from './ilink-types.js'
+import { downloadMedia, mediaFromItem, MEDIA_MAX_ITEMS, prepareMedia, validatePreparedMedia } from './ilink-media.js'
+import type { ILinkCredentials, ILinkMedia, ILinkMediaInput, ILinkMediaSend, ILinkMessage, ILinkPreparedMedia, ILinkQrResult, ILinkText, ILinkUpdates } from './ilink-types.js'
 export { ILinkError } from './ilink-types.js'
-export type { ILinkCredentials, ILinkMessage, ILinkQrResult, ILinkText, ILinkUpdates } from './ilink-types.js'
+export { validatePreparedMedia } from './ilink-media.js'
+export type { ILinkCredentials, ILinkMedia, ILinkMediaInput, ILinkMediaSend, ILinkMessage, ILinkPreparedMedia, ILinkQrResult, ILinkText, ILinkUpdates } from './ilink-types.js'
 
 const API_BASE = 'https://ilinkai.weixin.qq.com'
 // Wire compatibility version of the extracted upstream code, not this plugin's version.
@@ -177,6 +179,27 @@ async function readJson(response: Response, signal: AbortSignal): Promise<JsonOb
   }
 }
 
+/** Inline quotes are context, not a new command or an invitation to fetch history. */
+function inlineQuote(items: JsonObject[]): string {
+  const ref = items.find((item) => object(item.ref_msg))?.ref_msg
+  if (!object(ref)) return ''
+  const parts: string[] = []
+  if (boundedString(ref.title, 1024)) parts.push(ref.title)
+  if (object(ref.message_item)) {
+    const item = ref.message_item
+    const body = item.type === 1 && object(item.text_item) ? item.text_item.text
+      : item.type === 3 && object(item.voice_item) ? item.voice_item.text : undefined
+    if (boundedString(body, 16 * 1024)) parts.push(body)
+    else {
+      const labels: Record<number, string> = { 2: '[图片]', 3: '[语音]', 4: '[文件]', 5: '[视频]' }
+      if (labels[item.type as number]) parts.push(labels[item.type as number])
+    }
+  }
+  // One level only. Do not replay quoted slash commands, resolve IDs from another
+  // account, follow referenced media URLs, or fabricate missing cached content.
+  return '[引用消息]\n' + (parts.length ? parts.join('\n') : '[引用内容不可用]') + '\n[/引用消息]\n'
+}
+
 function normalizeMessage(value: unknown): ILinkMessage | undefined {
   if (!object(value)) invalid()
   if (value.group_id !== undefined && value.group_id !== null && typeof value.group_id !== 'string') invalid()
@@ -189,19 +212,42 @@ function normalizeMessage(value: unknown): ILinkMessage | undefined {
   const id = value.message_id ?? items.find((item) => messageId(item.msg_id))?.msg_id
   if (!messageId(id)) invalid('微信消息缺少有效标识，已停止处理此批消息')
   const text: string[] = []
+  const media: ILinkMedia[] = []
   let unsupported = false
+  let unsupportedReason: string | undefined
   for (const item of items) {
     if (typeof item.type !== 'number' || !Number.isSafeInteger(item.type)) invalid()
     if (item.type === 1) {
       if (!object(item.text_item) || !boundedString(item.text_item.text, MAX_TEXT_BYTES, true)) invalid()
       text.push(item.text_item.text)
-    } else unsupported = true
+    } else if (item.type === 3 && object(item.voice_item) && typeof item.voice_item.text === 'string' && item.voice_item.text.trim()) {
+      // Tencent already transcribed this voice item. Do not fetch/decrypt it or
+      // claim that the plugin itself can transcribe raw audio.
+      if (!boundedString(item.voice_item.text, MAX_TEXT_BYTES)) invalid()
+      text.push(item.voice_item.text)
+    } else if ([2, 3, 4, 5].includes(item.type)) {
+      try { media.push(mediaFromItem(item)) }
+      catch (error) {
+        unsupported = true
+        unsupportedReason = error instanceof ILinkError ? error.message : '微信附件暂不支持，未发送到会话'
+      }
+    } else {
+      unsupported = true
+      unsupportedReason = '这条消息包含暂不支持的微信内容，整条消息未发送到会话。请改用文字或在小程序、电脑上传附件。'
+    }
   }
-  const joined = text.join('\n')
+  const directText = text.join('\n')
+  // Explicit channel controls keep their meaning when the user quotes a
+  // message. Quoted commands themselves never acquire execution authority.
+  const joined = !media.length && directText.trim().startsWith('/') ? directText : inlineQuote(items) + directText
   if (!boundedString(joined, MAX_TEXT_BYTES, true)) invalid()
-  if (!joined.trim()) unsupported = true
+  if (media.length > MEDIA_MAX_ITEMS || media.reduce((sum, item) => sum + (item.bytes || 0), 0) > 30 * 1024 * 1024) {
+    unsupported = true; unsupportedReason = '每条消息最多接收 6 个附件、合计 30 MiB，整条消息未发送到会话'
+  }
+  if (!directText.trim() && !media.length) unsupported = true
   return { id, userId: value.from_user_id, contextToken: value.context_token, text: joined,
-    ...(unsupported ? { unsupported: true } : {}) }
+    ...(unsupported ? { unsupported: true, ...(unsupportedReason ? { unsupportedReason } : {}) }
+      : media.length ? { media } : {}) }
 }
 
 export class ILinkClient {
@@ -212,6 +258,40 @@ export class ILinkClient {
 
   constructor(options: { fetch?: typeof fetch } = {}) {
     this.fetchImpl = options.fetch ?? globalThis.fetch
+  }
+
+  /** Provider-only download; no token forwarding, filesystem writes or retries. */
+  downloadMedia(media: ILinkMedia, signal?: AbortSignal): Promise<{ name: string; data: Uint8Array }> {
+    return downloadMedia(media, this.fetchImpl, signal)
+  }
+
+  /** Upload only; runtime records the result before a separate, single send. */
+  async prepareMedia(auth: ILinkCredentials, input: ILinkMediaInput, signal?: AbortSignal,
+    check?: () => void): Promise<ILinkPreparedMedia> {
+    const snapshot = { ...auth }, baseUrl = credentials(snapshot)
+    return prepareMedia(snapshot, input, this.fetchImpl, (body) => this.request(baseUrl, 'ilink/bot/getuploadurl', {
+      token: snapshot.token, signal, body: { ...body, base_info: { ...BASE_INFO } },
+    }), signal, check)
+  }
+
+  async sendMedia(auth: ILinkCredentials, input: ILinkMediaSend, signal?: AbortSignal): Promise<void> {
+    const baseUrl = credentials(auth)
+    if (!object(input) || !privateUser(input.userId) || input.userId !== auth.userId
+      || !identifier(input.clientId) || !secret(input.contextToken) || !validatePreparedMedia(input.media)
+      || input.media.accountId !== auth.accountId || input.media.userId !== input.userId) {
+      throw new ILinkError('clawbot-invalid-input', '微信附件缺少有效收件人、上下文或上传结果')
+    }
+    const part = input.media
+    const media = { encrypt_query_param: part.query, aes_key: part.aesKey, encrypt_type: 1 }
+    const item = part.kind === 'image' ? { type: 2, image_item: { media, mid_size: part.cipherBytes } }
+      : part.kind === 'video' ? { type: 5, video_item: { media, video_size: part.cipherBytes } }
+        : { type: 4, file_item: { media, file_name: part.name, len: String(part.bytes) } }
+    // Exactly one item/request, just like native media sends. Captions are a
+    // separate text part owned by the runtime's durable, non-retrying outbox.
+    await this.request(baseUrl, 'ilink/bot/sendmessage', { token: auth.token, signal,
+      body: { msg: { from_user_id: '', to_user_id: input.userId, client_id: input.clientId,
+        message_type: 2, message_state: 2, context_token: input.contextToken, item_list: [item] }, base_info: { ...BASE_INFO } },
+    })
   }
 
   private async request(baseUrl: string, endpoint: string, options: {

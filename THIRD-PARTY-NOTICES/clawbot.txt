@@ -2,10 +2,14 @@ Tencent/openclaw-weixin
 Source: https://github.com/Tencent/openclaw-weixin
 Revision: 24de5c9eb0dd5e595d7e2d090ed8a3f82870d42c (package version 2.4.9)
 Adapted portions: src/api/api.ts, src/api/types.ts, src/auth/login-qr.ts,
-src/messaging/send.ts and docs/protocol_zh_CN.md.
+src/messaging/send.ts, src/messaging/send-media.ts, src/messaging/inbound.ts, src/media/media-download.ts,
+src/cdn/pic-decrypt.ts, src/cdn/cdn-url.ts, src/cdn/aes-ecb.ts,
+src/cdn/upload.ts, src/cdn/cdn-upload.ts, src/auth/accounts.ts and docs/protocol_zh_CN.md.
 
 This project adapts the HTTP JSON request formats, QR confirmation states, text
-message construction and lossless message-ID parser. It adds its own validation,
+message construction, inline quoted text, inbound media references/voice text,
+AES CDN encryption/decryption, media upload and outbound media messages
+and lossless message-ID parser. It adds its own validation,
 bounded transport, error handling and host policy. It does not include or require
 the OpenClaw runtime. Local limits are not represented as upstream guarantees.
 The upstream software license does not constitute permission to use Tencent,

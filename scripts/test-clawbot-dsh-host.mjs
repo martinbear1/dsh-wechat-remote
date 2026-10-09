@@ -8,6 +8,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { createRequire } from 'node:module'
+import { createHash } from 'node:crypto'
 
 const { outputFiles } = await build({ entryPoints: [fileURLToPath(new URL('../src/clawbot/dsh-host.ts', import.meta.url))],
   bundle: true, write: false, platform: 'node', format: 'esm', target: 'node22' })
@@ -24,7 +25,6 @@ function fixture() {
     rows: [{ sessionId: 's1', cwd: 'fixture-workspace', projections: { values: { title: 'Target' } } }],
     archived: [], observersDisposed: 0, prompt: async () => ({ accepted: true }),
     emit(name, ...args) { for (const listener of [...listeners.get(name) ?? []]) listener(...args) },
-    askNative(request, next) { return [...listeners.get('user-questions/request') ?? []][0](request, next) },
     event(type, data, id = 's1') { const s = sessions.get(id); h.emit('session/event', s, { seq: s.seq++, type, data }) },
     turn(turn = 3, requestId = 'r1') {
       h.event('turn/start', { turn })
@@ -58,6 +58,8 @@ function fixture() {
     get: name => services[name],
     on(name, listener, options) {
       assert.equal(options.global, true)
+      assert.ok(['session/event', 'session/disposed'].includes(name), 'ClawBot is an observer, never a native question/approval answerer')
+      assert.equal(options.prepend, undefined)
       const set = listeners.get(name) ?? new Set(); set.add(listener); listeners.set(name, set)
       return () => set.delete(listener)
     },
@@ -72,6 +74,247 @@ const failure = (code, submission) => error => {
   if (submission) assert.equal(error.submission, submission)
   return true
 }
+const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jS1kAAAAASUVORK5CYII=', 'base64')
+const fileRef = (name, data) => ({ name, bytes: data.byteLength, attachmentId: 'sha256:' + createHash('sha256').update(data).digest('hex') })
+const imageRef = name => ({ name, attachmentId: 'sha256:' + 'a'.repeat(64), mediaType: 'image/webp', bytes: 46, width: 1, height: 1 })
+function mediaTurn(h, content, requestId = 'r1') {
+  h.event('turn/start', { turn: 3 })
+  h.event('user/message', { source: { kind: 'user', rpcId: requestId }, content })
+  h.assistant(); h.end()
+}
+
+test('mixed media uses native image admission and opaque session-scoped file receipts in original order', async () => {
+  const h = fixture(), data = Buffer.from('synthetic file'), saved = fileRef('notes.txt', data), writes = []
+  h.services.fileUploads = { async uploadStream(request) {
+    const chunks = []; for await (const chunk of request.data) chunks.push(chunk)
+    writes.push({ sessionId: request.sessionId, name: request.name, data: Buffer.concat(chunks) })
+    return { receiptId: 'native-file-receipt', file: saved }
+  } }
+  const promise = h.host.run({ ...input(), attachments: [
+    { kind: 'image', name: 'picture.png', data: png }, { kind: 'file', name: 'notes.txt', data },
+  ] }, signal())
+  const { args: { request } } = await h.started
+  assert.deepEqual(request.content, [{ type: 'text', text: 'my request' },
+    { type: 'image', name: 'picture.png', mediaType: 'image/png', data: png.toString('base64') },
+    { type: 'file', receiptId: 'native-file-receipt' }])
+  assert.deepEqual(writes, [{ sessionId: 's1', name: 'notes.txt', data }])
+  // Native image normalization legitimately changes bytes, MIME and digest.
+  mediaTurn(h, [{ type: 'text', text: 'my request' }, { type: 'image', attachment: imageRef('picture.png') }, { type: 'file', attachment: saved }])
+  assert.deepEqual(await promise, { text: 'the answer' }); assert.equal(h.calls().length, 1)
+})
+
+for (const kind of ['file', 'voice', 'video']) test(`attachment-only ${kind} uses native generic file without invented transcript`, async () => {
+  const h = fixture(), data = Buffer.from('synthetic media'), saved = fileRef('media.bin', data)
+  h.services.fileUploads = { async uploadStream() { return { receiptId: 'receipt', file: saved } } }
+  const promise = h.host.run({ ...input(), text: '', attachments: [{ kind, name: 'media.bin', data }] }, signal())
+  assert.deepEqual((await h.started).args.request.content, [{ type: 'file', receiptId: 'receipt' }])
+  mediaTurn(h, [{ type: 'file', attachment: saved }]); assert.deepEqual(await promise, { text: 'the answer' })
+})
+
+test('cold attachment stages through native resolver, then observes that same native session', async () => {
+  const h = fixture(), session = h.sessions.get('s1'), data = Buffer.from('cold file'), saved = fileRef('cold.txt', data)
+  h.sessions.delete('s1')
+  h.services.fileUploads = { async uploadStream(request) {
+    assert.equal(request.sessionId, 's1'); h.sessions.set('s1', session)
+    h.agents.set('s1', { status: 'idle', session }); return { receiptId: 'cold-receipt', file: saved }
+  } }
+  const promise = h.host.run({ ...input(), text: '', attachments: [{ kind: 'file', name: 'cold.txt', data }] }, signal())
+  await h.started; mediaTurn(h, [{ type: 'file', attachment: saved }])
+  assert.deepEqual(await promise, { text: 'the answer' }); assert.deepEqual(h.nativeCalls.map(c => c.method), ['list', 'prompt'])
+})
+
+for (const corruption of ['extra', 'name', 'digest', 'order', 'inline']) test(`media correlation rejects ${corruption} content despite a matching request id`, async () => {
+  const h = fixture(), data = Buffer.from('file'), saved = fileRef('one.txt', data)
+  h.services.fileUploads = { async uploadStream() { return { receiptId: 'receipt', file: saved } } }
+  const promise = h.host.run({ ...input(), attachments: [{ kind: 'image', name: 'one.png', data: png }, { kind: 'file', name: 'one.txt', data }] }, signal())
+  const rejected = assert.rejects(promise, failure('ambiguous-turn'))
+  await h.started
+  const content = [{ type: 'text', text: 'my request' }, { type: 'image', attachment: imageRef('one.png') }, { type: 'file', attachment: { ...saved } }]
+  if (corruption === 'extra') content.push({ type: 'text', text: 'private extra' })
+  if (corruption === 'name') content[1].attachment.name = 'other.png'
+  if (corruption === 'digest') content[2].attachment.attachmentId = 'sha256:' + 'b'.repeat(64)
+  if (corruption === 'order') content.reverse()
+  if (corruption === 'inline') content[1] = { type: 'image', name: 'one.png', data: png.toString('base64'), mediaType: 'image/png' }
+  mediaTurn(h, content); await rejected; assert.equal(h.listenerCount(), 0)
+})
+
+for (const change of ['pause', 'access', 'archive', 'reset', 'replace', 'busy', 'abort']) test(`attachment preparation revalidates ${change} before sending, without deleting native files`, async () => {
+  const h = fixture(), prepared = deferred(), release = deferred(), controller = new AbortController(), data = Buffer.from('file'), saved = fileRef('one.txt', data)
+  let allowed = true, access = true, writes = 0
+  h.host = new DshClawbotHost(h.ctx, () => { if (!access) throw Error('access revoked') })
+  h.services.fileUploads = { async uploadStream() { writes++; prepared.resolve(); await release.promise; return { receiptId: 'receipt', file: saved } },
+    delete() { assert.fail('native shared store must not be deleted') } }
+  const promise = h.host.run({ ...input(), attachments: [{ kind: 'file', name: 'one.txt', data }],
+    checkAdmission() { if (!allowed) throw Error('paused') } }, controller.signal)
+  const rejected = assert.rejects(promise)
+  await prepared.promise
+  if (change === 'pause') allowed = false
+  if (change === 'access') access = false
+  if (change === 'archive') h.archived.push('s1')
+  if (change === 'reset') h.sessions.get('s1').header.createdAt++
+  if (change === 'replace') h.sessions.set('s1', { ...h.sessions.get('s1') })
+  if (change === 'busy') h.agents.set('s1', { status: 'running' })
+  if (change === 'abort') controller.abort()
+  release.resolve(); await rejected
+  assert.equal(writes, 1); assert.equal(h.calls().length, 0); assert.equal(h.listenerCount(), 0)
+})
+
+test('invalid media shape, content and limits reject before any native access', async () => {
+  const media = (changes = {}) => ({ kind: 'file', name: 'one.txt', data: Buffer.from('file'), ...changes })
+  for (const attachments of [[media({ name: '../one.txt' })], [media({ name: 'a\\one.txt' })], [media({ data: new Uint8Array() })],
+    [media({ data: new Uint8Array(10 * 1024 * 1024 + 1) })], Array(7).fill(media()), [media({ kind: 'audio' })],
+    [media({ kind: 'image' })], Array(4).fill(media({ data: new Uint8Array(8 * 1024 * 1024) }))]) {
+    const h = fixture()
+    await assert.rejects(h.host.run({ ...input(), attachments }, signal()), failure('invalid-input', 'not-submitted'))
+    assert.equal(h.nativeCalls.length, 0)
+  }
+})
+
+test('unavailable or mismatched native upload receipt never falls back to local file writes or plain text', async () => {
+  const data = Buffer.from('file')
+  for (const upload of [undefined, async () => { throw Error('private path') }, async () => ({ receiptId: 'r', file: fileRef('one.txt', Buffer.from('other')) })]) {
+    const h = fixture(); if (upload) h.services.fileUploads = { uploadStream: upload }
+    await assert.rejects(h.host.run({ ...input(), attachments: [{ kind: 'file', name: 'one.txt', data }] }, signal()), error => {
+      assert.equal(error.submission, 'not-submitted'); assert(!error.message.includes('private path')); return true
+    })
+    assert.equal(h.calls().length, 0)
+  }
+})
+
+test('native model image rejection sends no replacement, never changes selected model or preset', async () => {
+  const h = fixture(); h.prompt = async () => { throw Object.assign(Error('text-only model'), { code: 'session/attachment-invalid' }) }
+  await assert.rejects(h.host.run({ ...input(), attachments: [{ kind: 'image', name: 'one.png', data: png }] }, signal()), failure('attachment-rejected', 'not-submitted'))
+  assert.deepEqual(h.nativeCalls.map(c => c.method), ['list', 'prompt']); assert.equal(h.listenerCount(), 0)
+})
+
+test('native input accepts safe 240-byte names without truncating extensions and rejects overlong UTF-8 names', async () => {
+  const name = 'a'.repeat(236) + '.pdf', data = Buffer.from('file'), h = fixture(), ref = fileRef(name, data)
+  h.services.fileUploads = { async uploadStream(request) { assert.equal(request.name, name); return { receiptId: 'receipt', file: ref } } }
+  const promise = h.host.run({ ...input(), text: '', attachments: [{ kind: 'file', name, data }] }, signal())
+  await h.started; mediaTurn(h, [{ type: 'file', attachment: ref }]); await promise
+  for (const name of ['a'.repeat(237) + '.pdf', '字'.repeat(80) + '.txt']) {
+    const h = fixture()
+    await assert.rejects(h.host.run({ ...input(), attachments: [{ kind: 'file', name, data }] }, signal()), failure('invalid-input', 'not-submitted'))
+    assert.equal(h.nativeCalls.length, 0)
+  }
+})
+
+test('pause during native cold resolver stops byte delivery before the native store consumes it', async () => {
+  const h = fixture(), data = Buffer.from('file'); let allowed = true, consumed = 0
+  h.services.fileUploads = { async uploadStream(request) {
+    // Native uploadStream first awaits cold Agent resolution, then pulls data.
+    allowed = false
+    for await (const chunk of request.data) consumed += chunk.byteLength
+    assert.fail('paused channel must not supply bytes')
+  } }
+  await assert.rejects(h.host.run({ ...input(), attachments: [{ kind: 'file', name: 'one.txt', data }],
+    checkAdmission() { if (!allowed) throw Error('paused') } }, signal()), failure('attachment-unavailable', 'not-submitted'))
+  assert.equal(consumed, 0); assert.equal(h.calls().length, 0)
+})
+
+function resourceFixture(h, files) {
+  const calls = [], transfers = new Map(), reply = value => ({ ok: true, valueJson: JSON.stringify(value) })
+  h.services.agentResources = {
+    async resolve(request) {
+      calls.push(['resolve', request]); assert.equal(request.scope, 's1')
+      const file = files.get(request.reference); if (!file) return { ok: false }
+      return reply({ kind: 'file', id: request.reference, bytes: file.data.length, name: file.name })
+    },
+    async prepare(request) {
+      calls.push(['prepare', request]); assert.equal(request.scope, 's1'); assert.equal(request.delivery, 'chunks')
+      const file = files.get(request.id), transferId = 'snapshot-' + transfers.size
+      transfers.set(transferId, file)
+      return reply({ transferId, delivery: 'chunks', bytes: file.data.length, name: file.name, chunkBytes: 3,
+        sha256: createHash('sha256').update(file.data).digest('hex') })
+    },
+    async chunk(request) {
+      calls.push(['chunk', request]); assert.equal(request.scope, 's1')
+      const file = transfers.get(request.transferId)
+      return reply({ offset: request.offset, data: file.data.subarray(request.offset, request.offset + 3).toString('base64') })
+    },
+    async release(request) { calls.push(['release', request]); transfers.delete(request.transferId); return { ok: true } },
+  }
+  return { calls, transfers }
+}
+const presented = (h, paths, turn = 3, sessionId = 's1') => h.event('deliverables/presented', {
+  turn, callId: 'native-present', files: paths.map(path => ({ path })),
+}, sessionId)
+
+test('only matched-turn native present declarations return bounded attachments, not paths in prose or tool reads', async () => {
+  const h = fixture(), doc = Buffer.from('synthetic PDF'), resources = resourceFixture(h, new Map([
+    ['results/one.pdf', { name: 'one.pdf', data: doc }], ['results/image.png', { name: 'image.png', data: png }],
+  ]))
+  const promise = h.host.run(input(), signal()); await h.started
+  presented(h, ['foreign.pdf'], 2, 'other'); h.turn()
+  presented(h, ['previous.pdf'], 2)
+  h.event('tool/result', { turn: 3, message: { content: [{ type: 'text', text: 'secret.txt' }, { type: 'image', attachment: imageRef('private.png') }] } })
+  presented(h, ['results/one.pdf', 'results/one.pdf', 'results/image.png'])
+  assert.equal(resources.calls.length, 0, 'files are read only after successful native completion')
+  h.assistant('See result. Also mention unrelated secret.txt'); h.end()
+  assert.deepEqual(await promise, { text: 'See result. Also mention unrelated secret.txt', attachments: [
+    { kind: 'file', name: 'one.pdf', data: doc }, { kind: 'image', name: 'image.png', data: png },
+  ] })
+  assert.deepEqual(resources.calls.filter(c => c[0] === 'resolve').map(c => c[1].reference), ['results/one.pdf', 'results/image.png'])
+  assert.equal(resources.transfers.size, 0); assert.equal(h.calls().length, 1)
+})
+
+test('native presented artifact-only completion works without inventing a second prompt', async () => {
+  const h = fixture(), data = Buffer.from('empty final text but real artifact')
+  resourceFixture(h, new Map([['result.txt', { name: 'result.txt', data }]]))
+  const promise = h.host.run(input(), signal()); await h.started; h.turn(); presented(h, ['result.txt']); h.end()
+  assert.deepEqual(await promise, { text: '已生成文件。', attachments: [{ kind: 'file', name: 'result.txt', data }] })
+  assert.equal(h.calls().length, 1)
+})
+
+for (const problem of ['missing-service', 'missing-file', 'oversize', 'corrupt-chunk', 'session-reset', 'access', 'abort']) test(`unavailable ${problem} artifact preserves final text and releases snapshot without native task mutation`, async () => {
+  const h = fixture(), data = problem === 'oversize' ? Buffer.alloc(10 * 1024 * 1024 + 1) : Buffer.from('result'), controller = new AbortController()
+  const resources = resourceFixture(h, new Map(problem === 'missing-file' ? [] : [['result.txt', { name: 'result.txt', data }]]))
+  let access = true
+  h.host = new DshClawbotHost(h.ctx, () => { if (!access) throw Error('revoked') })
+  const service = h.services.agentResources, originalChunk = service.chunk
+  service.chunk = async request => {
+    if (problem === 'session-reset') h.sessions.get('s1').header.createdAt++
+    if (problem === 'access') access = false
+    if (problem === 'abort') controller.abort()
+    if (problem === 'corrupt-chunk') return { ok: true, valueJson: JSON.stringify({ offset: request.offset, data: 'AAAA' }) }
+    return originalChunk(request)
+  }
+  if (problem === 'missing-service') delete h.services.agentResources
+  const promise = h.host.run(input(), controller.signal); await h.started; h.turn(); presented(h, ['result.txt']); h.assistant('Final answer'); h.end()
+  const result = await promise
+  assert(result.text.startsWith('Final answer')); assert(result.text.includes('文件未能回传'))
+  assert.equal(result.attachments, undefined); assert.equal(resources.transfers.size, 0)
+  assert.equal(h.calls().length, 1); assert.equal(h.listenerCount(), 0)
+})
+
+test('failed native turn never exports previously presented files', async () => {
+  const h = fixture(), resources = resourceFixture(h, new Map([['one.txt', { name: 'one.txt', data: Buffer.from('secret') }]]))
+  const promise = h.host.run(input(), signal()), rejected = assert.rejects(promise, failure('interrupted'))
+  await h.started; h.turn(); presented(h, ['one.txt']); h.assistant('partial'); h.end(3, 'cancelled')
+  await rejected; assert.equal(resources.calls.length, 0)
+})
+
+test('final native durable image is verified by its stored digest; tool images never leak', async () => {
+  const h = fixture(), ref = { ...imageRef('answer.png'), attachmentId: 'sha256:' + createHash('sha256').update(png).digest('hex'), bytes: png.length, mediaType: 'image/png' }
+  let reads = 0
+  h.services.attachments = { async readImage(value) { reads++; assert.deepEqual(value, ref); return { data: png } } }
+  const promise = h.host.run(input(), signal()); await h.started; h.turn()
+  h.event('tool/result', { turn: 3, message: { content: [{ type: 'image', attachment: imageRef('private.png') }] } })
+  h.assistant('Image ready', 3, [{ type: 'image', attachment: ref }]); h.end()
+  assert.deepEqual(await promise, { text: 'Image ready', attachments: [{ kind: 'image', name: 'answer.png', data: png }] })
+  assert.equal(reads, 1)
+})
+
+test('pause does not interrupt original task observation but prevents any new output read', async () => {
+  const h = fixture(), data = Buffer.from('complete'), media = resourceFixture(h, new Map([['one.txt', { name: 'one.txt', data }]]))
+  let admission = true
+  const promise = h.host.run({ ...input(), checkAdmission() { assert.equal(admission, true) } }, signal())
+  await h.started; admission = false; h.turn(); presented(h, ['one.txt']); h.assistant(); h.end()
+  const result = await promise
+  assert(result.text.startsWith('the answer')); assert(result.text.includes('文件未能回传'))
+  assert.equal(result.attachments, undefined); assert.equal(media.calls.length, 0)
+  assert.equal(h.calls().length, 1); assert.equal(h.listenerCount(), 0)
+})
 
 test('directory includes ordinary cold/fork sessions, excludes archive/subagent and does no mutation', async () => {
   const h = fixture()
@@ -251,30 +494,25 @@ test('a live native Agent may keep its retired preset revision', async () => {
   assert.deepEqual(await promise, { text: 'the answer' })
 })
 
-test('local input in the same session immediately delegates a claimed private question without cancelling it', async () => {
-  const h = fixture(), agent = { id: 's1', status: 'idle', session: h.sessions.get('s1') }
-  h.agents.set('s1', agent)
-  const questions = [], run = h.host.run(input(), signal(), () => {}, q => questions.push(q))
-  const rejected = assert.rejects(run, failure('ambiguous-turn'))
-  await h.started; h.turn()
-  let nextCalls = 0
-  const fallback = deferred(), nativeLife = new AbortController()
-  const native = h.askNative({ agent, questions: [{ id: 'q', question: 'Pick?' }], signal: nativeLife.signal },
-    () => { nextCalls++; return fallback.promise })
-  assert.equal(questions.length, 1); assert.equal(nextCalls, 0)
-  h.event('user/message', { source: { kind: 'user', rpcId: 'desktop-input' }, content: [{ type: 'text', text: 'local work' }] })
-  assert.equal(nextCalls, 1); assert.equal(questions[0].signal.aborted, true)
-  assert.equal(nativeLife.signal.aborted, false)
-  await rejected; await assert.rejects(questions[0].answer({ answers: [{ id: 'q', selected: [], custom: 'late' }] }), /已结束/)
-  const result = { answers: [{ id: 'q', selected: [], custom: 'native owner' }] }
-  fallback.resolve(result); assert.equal(await native, result); assert.equal(h.calls().length, 1)
-  assert.equal(h.listenerCount(), 0)
-})
-
 test('preexisting running/queued Agent is busy and sends nothing', async () => {
   for (const state of [{ status: 'running' }, { inbox: { nextTurn: [{}], nextStep: [] } }]) {
     const h = fixture(); h.agents.set('s1', state)
     await assert.rejects(h.host.run(input(), signal()), failure('busy', 'not-submitted'))
+    assert.equal(h.calls().length, 0); assert.equal(h.listenerCount(), 0)
+  }
+})
+
+test('native work starting during the awaited preset check cannot receive a late ClawBot prompt', async () => {
+  for (const busy of [{ status: 'running' }, { status: 'idle', inbox: { hasPending: true } },
+    { status: 'idle', inbox: { nextTurn: [{}] } }, { status: 'idle', inbox: { nextStep: [{}] } }]) {
+    const h = fixture(), checking = deferred(), checked = deferred()
+    h.metadata.get('s1').header.agentPreset = 'standard'
+    h.metadata.get('s1').projections = { values: { agentPreset: 'standard' } }
+    h.services.agentPresets = { resolve() { checking.resolve(); return checked.promise } }
+    const run = h.host.run(input(), signal()), rejected = assert.rejects(run, failure('busy', 'not-submitted'))
+    await checking.promise
+    h.agents.set('s1', busy); checked.resolve({})
+    await rejected
     assert.equal(h.calls().length, 0); assert.equal(h.listenerCount(), 0)
   }
 })

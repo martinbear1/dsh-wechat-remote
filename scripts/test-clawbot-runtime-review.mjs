@@ -22,6 +22,10 @@ const auth = { token: 'synthetic-token', baseUrl: 'https://ilinkai.weixin.qq.com
 const sessions = [{ id: 'session-a', title: 'A', generation: 101 }, { id: 'session-b', title: 'B', generation: 102 }]
 const signal = () => new AbortController().signal
 const incoming = (id, text) => ({ id, text, userId: auth.userId, contextToken: 'synthetic-context' })
+const mediaFixture = (kind = 'file', name = 'note.txt') => ({ kind, name,
+  url: 'https://novac2c.cdn.weixin.qq.com/c2c/download?encrypted_query_param=fixture', aesKey: Buffer.alloc(16, 1).toString('base64') })
+const preparedFixture = (kind = 'file', name = 'result.pdf') => ({ kind, name, bytes: 3, cipherBytes: 16,
+  query: 'synthetic-upload', aesKey: Buffer.from('1234567890abcdef1234567890abcdef').toString('base64'), accountId: auth.accountId, userId: auth.userId })
 const seed = (patch = {}) => ({ ...emptyClawbotData(), credentials: auth, target: sessions[0], ...patch })
 const receipt = (id, state = 'pending', patch = {}) => ({
   id: createHash('sha256').update(id).digest('hex'), userId: auth.userId, contextToken: 'synthetic-context',
@@ -324,12 +328,12 @@ test('safety: pausing a run keeps its result; resuming sends it without resubmit
 })
 
 test('expired auth can be repaired while retaining the accepted run and same-account cursor', async () => {
-  const run = deferred(), storage = memory(), sent = []
+  const run = deferred(), expiredPoll = deferred(), storage = memory(), sent = []
   let submitted = 0
   const refreshed = { ...auth, token: 'refreshed-token' }
   const runtime = new ClawbotRuntime(storage, host(() => { submitted++; return run.promise }), client({
     getUpdates(credentials, cursor, abort) {
-      if (credentials.token === auth.token) return Promise.reject(Object.assign(new Error('expired'), { code: 'clawbot-auth-expired' }))
+      if (credentials.token === auth.token) return expiredPoll.promise
       return blockedPoll(credentials, cursor, abort)
     },
     async getQr() { return { qrcode: 'test-qr', url: 'https://liteapp.weixin.qq.com/q/test-only' } },
@@ -339,6 +343,9 @@ test('expired auth can be repaired while retaining the accepted run and same-acc
   try {
     runtime.ingest([incoming('1', 'work')], 'cursor')
     await enabled(runtime, true)
+    await setImmediate()
+    assert.equal(submitted, 1, 'the fixture must admit the original run before the token expires')
+    expiredPoll.reject(Object.assign(new Error('expired'), { code: 'clawbot-auth-expired' }))
     await setImmediate()
     run.resolve({ text: 'completed' })
     await setImmediate()
@@ -1345,254 +1352,494 @@ test('safety: a second same-profile owner is rejected and cannot remove the firs
   } finally { fixture.close() }
 })
 
-async function questionFixture(patch = {}) {
-  const storage = memory(seed()), sent = [], runs = [], answers = [], handoffs = [], native = deferred(), gate = featureGate()
-  let onQuestion, count = 0
-  const runtime = new ClawbotRuntime(storage, host(async (input, abort, _attention, publish) => {
-    runs.push(input); onQuestion = publish
+async function nativeAttentionFixture(patch = {}) {
+  const storage = memory(seed()), sent = [], runs = [], native = deferred(), gate = featureGate()
+  let notify, count = 0, observationSignal
+  const runtime = new ClawbotRuntime(storage, { ...host(async (...args) => {
+    assert.equal(args.length, 3, 'runtime must not install an exclusive question answerer')
+    const [input, abort, onAttention] = args
+    runs.push(input); notify = onAttention; observationSignal = abort
     if (runs.length > 1) return { text: 'ordinary chat reply' }
-    abort.addEventListener('abort', () => native.resolve({ text: 'stopped observation' }), { once: true })
+    abort.addEventListener('abort', () => native.resolve({ text: 'observation ended' }), { once: true })
     return native.promise
-  }), client({ async sendText(_auth, message) { sent.push(message.text) }, ...patch.client }), Date.now, gate)
-  const send = async (text, id = `q-in-${++count}`, userId = auth.userId) => {
-    runtime.ingest([{ ...incoming(id, text), userId }], `cursor-${count}`); runtime.work(); await setImmediate()
+  }), ...patch.host }, client({ async sendText(_auth, message) { sent.push(message.text) }, ...patch.client }), Date.now, gate)
+  const send = async (text, id = 'attention-in-' + (++count), userId = auth.userId) => {
+    runtime.ingest([{ ...incoming(id, text), userId }], 'cursor-' + count); runtime.work(); await setImmediate()
   }
   await enabled(runtime, true); await send('begin original task')
-  const ask = async (questions = [{ id: 'choice', question: 'Which?', options: [{ label: 'A' }, { label: 'B' }] }], reply = async () => {}) => {
-    const cancel = new AbortController(), start = sent.length, id = `native-${++count}`
-    let settled = false
-    onQuestion({ id, questions, signal: cancel.signal,
-      async answer(value) { assert.equal(settled, false); settled = true; answers.push(value); await reply(value); cancel.abort() },
-      handoff() { if (settled || cancel.signal.aborted) return; settled = true; handoffs.push(id); cancel.abort() } })
-    await setImmediate()
-    const codes = [...new Set(sent.slice(start).join('\n').match(/Q[A-F0-9]{10}/g) || [])]
-    return { cancel, codes }
-  }
-  return { runtime, storage, sent, runs, answers, handoffs, native, gate, ask, send,
+  return { runtime, storage, sent, runs, native, gate, send,
+    async attention(kind = 'question') { notify(kind); await setImmediate() },
+    async route(sessionId) { await runtime.control({ action: 'route', sessionId, expectedRevision: runtime.snapshot().revision }, signal()) },
+    get observationSignal() { return observationSignal },
     async close() { native.resolve({ text: 'final result' }); await setImmediate(); await runtime.dispose() } }
 }
 
-test('private answer bypasses the waiting task without another prompt, and duplicate messages or codes never answer twice', async () => {
-  const f = await questionFixture()
-  try {
-    const { codes } = await f.ask(); assert.equal(codes.length, 1)
-    await f.send(`/回答 ${codes[0]} 2`, 'same-answer')
-    assert.deepEqual(f.answers, [{ answers: [{ id: 'choice', selected: ['B'] }] }]); assert.equal(f.runs.length, 1)
-    await f.send(`/回答 ${codes[0]} 1`, 'same-answer'); await f.send(`/回答 ${codes[0]} 1`)
-    assert.equal(f.answers.length, 1); assert.match(f.sent.join('\n'), /已失效或已处理/)
-    f.native.resolve({ text: 'same native turn continued' }); await setImmediate()
-    assert.equal(f.sent.filter(text => text.includes('same native turn continued')).length, 1)
-  } finally { await f.close() }
-})
-
-test('native question batches preserve single, multi and free-text values and only submit when the whole batch is answered', async () => {
-  const f = await questionFixture()
-  try {
-    const { codes } = await f.ask([
-      { id: 'single', question: 'Pick', options: [{ label: 'A' }, { label: 'B' }] },
-      { id: 'multi', question: 'Pick several', multiSelect: true, options: [{ label: 'X' }, { label: 'Y' }] },
-      { id: 'free', question: 'Explain' },
-    ])
-    assert.equal(codes.length, 3)
-    await f.send(`/回答 ${codes[0]} 1,2`); assert.equal(f.answers.length, 0)
-    await f.send(`/回答 ${codes[0]} 2`); await f.send(`/回答 ${codes[0]} 1`)
-    await f.send(`/回答 ${codes[1]} 1,2`); assert.equal(f.answers.length, 0)
-    await f.send(`/回答 ${codes[2]} 文字 保留数字 1\n第二行`)
-    assert.deepEqual(f.answers, [{ answers: [
-      { id: 'single', selected: ['B'] }, { id: 'multi', selected: ['X', 'Y'] },
-      { id: 'free', selected: [], custom: '保留数字 1\n第二行' },
-    ] }])
-    assert.equal(f.runs.length, 1)
-    const later = await f.ask(); await f.send(`/回答 ${later.codes[0]} 1`)
-    assert.equal(f.answers.length, 2, 'a later native question is not suppressed by the once-per-kind notice')
-  } finally { await f.close() }
-})
-
-test('ordinary chat never becomes a question answer, and unknown answer syntax never becomes a new prompt', async () => {
-  const f = await questionFixture()
-  try {
-    await f.ask(); await f.send('好'); await f.send('1'); await f.send('/回答 Q0000000000 1'); await f.send('/回答 bad')
-    assert.equal(f.answers.length, 0); assert.equal(f.runs.length, 1)
-    f.native.resolve({ text: 'answered elsewhere' }); await setImmediate()
-    assert.deepEqual(f.runs.map(r => r.text), ['begin original task', '好', '1'])
-    assert.equal(f.answers.length, 0)
-  } finally { await f.close() }
-})
-
-test('oversized combined UTF-8 answers are rejected before consuming the question capability', async () => {
-  const f = await questionFixture()
-  try {
-    const { codes } = await f.ask([{ id: 'first', question: 'First?' }, { id: 'second', question: 'Second?' }])
-    await f.send(`/回答 ${codes[0]} 文字 ${'字'.repeat(6000)}`)
-    await f.send(`/回答 ${codes[1]} 文字 ${'字'.repeat(6000)}`)
-    assert.equal(f.answers.length, 0); assert.match(f.sent.at(-1), /本题尚未记录/)
-    await f.send(`/回答 ${codes[1]} 文字 简短回答`)
-    assert.equal(f.answers.length, 1); assert.equal(f.answers[0].answers[1].custom, '简短回答')
-  } finally { await f.close() }
-})
-
-test('switching target never retargets a question; only the bound sender can answer the captured original task', async () => {
-  const f = await questionFixture()
-  try {
-    const { codes } = await f.ask()
-    await f.runtime.control({ action: 'route', sessionId: sessions[1].id, expectedRevision: f.runtime.snapshot().revision }, signal())
-    await f.send(`/回答 ${codes[0]} 1`, 'foreign', 'another@im.wechat'); assert.equal(f.answers.length, 0)
-    await f.send(`/回答 ${codes[0]} 2`)
-    assert.equal(f.answers.length, 1); assert.equal(f.runs[0].sessionId, sessions[0].id)
-    assert.match(f.sent.at(-1), /【A】/); assert.equal(f.storage.data.target.id, sessions[1].id)
-  } finally { await f.close() }
-})
-
-test('Desktop completion, native cancellation and original observation end invalidate question codes', async () => {
-  for (const end of ['desktop', 'observation']) {
-    const f = await questionFixture()
+test('question and approval observation never installs a private answerer or resubmits the native task', async () => {
+  for (const kind of ['question', 'approval']) {
+    const f = await nativeAttentionFixture()
     try {
-      const { codes, cancel } = await f.ask()
-      if (end === 'desktop') cancel.abort()
-      else { f.native.resolve({ text: 'done' }); await setImmediate() }
-      await f.send(`/回答 ${codes[0]} 1`)
-      assert.equal(f.answers.length, 0); assert.match(f.sent.at(-1), /已失效或已处理/)
+      const originalRequest = f.runs[0].requestId
+      await f.attention(kind); await f.attention(kind)
+      assert.equal(f.sent.length, 1)
+      assert.match(f.sent[0], /小程序或电脑/)
+      assert.doesNotMatch(f.sent[0], /\/回答|Q[A-F0-9]{10}/)
+      assert.equal(f.observationSignal.aborted, false)
+      assert.equal(f.storage.data.receipts[0].state, 'running')
+      f.native.resolve({ text: 'native card answered and same task finished' }); await setImmediate()
+      assert.equal(f.runs.length, 1); assert.equal(f.runs[0].requestId, originalRequest)
+      assert.equal(f.sent.filter(text => text.includes('same task finished')).length, 1)
     } finally { await f.close() }
   }
 })
 
-test('uncertain native answer retires the code before awaiting and never retries after a new message', async () => {
-  const f = await questionFixture(), response = deferred()
+test('plain numeric and free-text replies while native input is waiting receive guidance and are never replayed', async () => {
+  const f = await nativeAttentionFixture()
   try {
-    const { codes } = await f.ask(undefined, () => response.promise)
-    await f.send(`/回答 ${codes[0]} 1`); assert.equal(f.answers.length, 1)
-    await f.send(`/回答 ${codes[0]} 2`)
-    response.reject(Error('unknown native result')); await setImmediate()
-    assert.equal(f.answers.length, 1); assert.match(f.sent.join('\n'), /未能确认这次回答/)
-  } finally { response.resolve(); await f.close() }
-})
-
-test('revocation or disconnect during asynchronous command authorization cannot revive a question answer', async () => {
-  for (const action of ['revoke', 'disconnect']) {
-    const f = await questionFixture(), authority = deferred()
-    try {
-      const { codes } = await f.ask()
-      f.gate.authorize = () => authority.promise
-      await f.send(`/回答 ${codes[0]} 1`)
-      if (action === 'revoke') f.gate.allowed = false
-      else {
-        await enabled(f.runtime, false)
-        await f.runtime.control({ action: 'disconnect', expectedRevision: f.runtime.snapshot().revision, abandonPending: true }, signal())
-      }
-      authority.resolve(); await setImmediate()
-      assert.equal(f.answers.length, 0); assert.equal(f.runtime.snapshot().enabled, false)
-    } finally { authority.resolve(); await f.close() }
-  }
-})
-
-test('restart discards partial answers and seals unsent question notices without reconstructing a native answerer', async () => {
-  const f = await questionFixture()
-  let snapshot, code
-  try {
-    const first = await f.ask([{ id: 'one', question: 'One?' }, { id: 'two', question: 'Two?' }])
-    code = first.codes[1]; await f.send(`/回答 ${first.codes[0]} 文字 first`)
-    await enabled(f.runtime, false)
-    // Simulate an unsent durable question notice at crash. No capability is stored.
-    const notice = f.storage.data.receipts.find(r => r.parentId)
-    Object.assign(notice, { state: 'ready', output: 'stale question notice', parts: undefined, sentParts: undefined })
-    snapshot = structuredClone(f.storage.data)
-  } finally { await f.close() }
-  const sent = [], storage = memory(snapshot), runtime = new ClawbotRuntime(storage, host(() => assert.fail('no replay')), client({ async sendText(_a, m) { sent.push(m.text) } }))
-  try {
-    runtime.ingest([incoming('after-restart', `/回答 ${code} 文字 second`)], 'restart')
-    await enabled(runtime, true); await setImmediate()
-    assert.equal(f.answers.length, 0); assert.match(sent.join('\n'), /已失效或已处理/)
-    assert.ok(!sent.some(text => text.includes('stale question notice')))
-  } finally { await runtime.dispose() }
-})
-
-test('native review intents and oversized question batches fall back to the native UI without private answer codes', async () => {
-  for (const questions of [[{ id: 'plan', question: 'Approve?', intent: { kind: 'plan-review', approve: 'yes' }, options: [{ label: 'yes' }], detail: 'plan' }],
-    Array.from({ length: 9 }, (_, id) => ({ id: String(id), question: 'Too many?' }))]) {
-    const f = await questionFixture()
-    try { const asked = await f.ask(questions); assert.equal(asked.codes.length, 0); assert.match(f.sent.join('\n'), /小程序或电脑/); assert.equal(f.answers.length, 0) }
-    finally { await f.close() }
-  }
-})
-
-test('completed question retires remaining notice fragments without replaying an already-handed-off send', async () => {
-  const first = deferred(), sent = []
-  const f = await questionFixture({ client: { async sendText(_a, message) { sent.push(message.text); if (sent.length === 1) await first.promise } } })
-  try {
-    const { cancel } = await f.ask([{ id: 'long', question: '问'.repeat(1500) }])
-    assert.equal(sent.length, 1); cancel.abort(); first.resolve(); await setImmediate()
-    assert.equal(sent.length, 1)
-    assert.equal(f.storage.data.receipts.find(r => r.parentId).state, 'uncertain')
-    assert.equal(f.answers.length, 0)
-  } finally { first.resolve(); await f.close() }
-})
-
-test('answer acknowledgement persistence failure cannot make a native write replayable after restart', async () => {
-  const f = await questionFixture()
-  let snapshot, command
-  try {
-    const { codes } = await f.ask(undefined, async () => { f.storage.fail = true })
-    command = `/回答 ${codes[0]} 1`
-    await f.send(command)
-    assert.equal(f.answers.length, 1); assert.match(f.runtime.snapshot().message, /保存失败/)
-    snapshot = structuredClone(f.storage.data)
-  } finally { f.storage.fail = false; await f.close() }
-  const storage = memory(snapshot), sent = [], runtime = new ClawbotRuntime(storage, host(() => assert.fail('no replay')), client({ async sendText(_a, m) { sent.push(m.text) } }))
-  try {
-    await setImmediate(); runtime.ingest([incoming('new-answer-after-crash', command)], 'new')
-    runtime.work(); await setImmediate()
-    assert.equal(f.answers.length, 1); assert.match(sent.join('\n'), /已失效或已处理/)
-  } finally { await runtime.dispose() }
-})
-
-test('explicit native handoff discards a partial batch and never replays its task or private answers', async () => {
-  const f = await questionFixture()
-  try {
-    const { codes } = await f.ask([{ id: 'one', question: 'One?' }, { id: 'two', question: 'Two?' }])
-    await f.send(`/回答 ${codes[0]} 文字 first`)
-    await f.send(`/回答 ${codes[0]} 转原会话`)
-    assert.equal(f.handoffs.length, 1); assert.equal(f.answers.length, 0)
-    assert.match(f.sent.at(-1), /需重新填写/)
-    await f.send(`/回答 ${codes[1]} 文字 second`)
-    assert.match(f.sent.at(-1), /已失效或已处理/)
-    assert.equal(f.answers.length, 0); assert.equal(f.runs.length, 1)
+    await f.attention()
+    for (const text of ['5', '好', '我选择第五项']) {
+      const start = f.sent.length
+      await f.send(text)
+      assert.equal(f.sent.length, start + 1)
+      assert.match(f.sent.at(-1), /本条消息未发送/)
+      assert.match(f.sent.at(-1), /小程序或电脑/)
+      assert.equal(f.runs.length, 1)
+    }
+    f.native.resolve({ text: 'native completion' }); await setImmediate()
+    assert.equal(f.runs.length, 1, 'possible answers must not become delayed new prompts')
+    await f.send('new ordinary task after completion')
+    assert.deepEqual(f.runs.map(row => row.text), ['begin original task', 'new ordinary task after completion'])
   } finally { await f.close() }
 })
 
-test('pause, lost access and disposal return private questions without cancelling the native task', async () => {
-  for (const end of ['pause', 'revoke', 'dispose', 'revoke-disk-failure']) {
-    const f = await questionFixture()
+test('duplicate ambiguous input produces one receipt and one guidance, not a second native prompt', async () => {
+  const f = await nativeAttentionFixture()
+  try {
+    await f.attention(); await f.send('5', 'duplicate-five')
+    const count = f.sent.length, receipts = f.storage.data.receipts.length
+    await f.send('5', 'duplicate-five')
+    assert.equal(f.sent.length, count); assert.equal(f.storage.data.receipts.length, receipts)
+    f.native.resolve({ text: 'native final' }); await setImmediate()
+    assert.equal(f.runs.length, 1)
+  } finally { await f.close() }
+})
+
+test('already queued ordinary inputs for the captured target are rejected when the original task requests native input', async () => {
+  const f = await nativeAttentionFixture()
+  try {
+    await f.send('5'); await f.send('ordinary input received before attention')
+    assert.equal(f.runs.length, 1)
+    await f.attention()
+    assert.equal(f.sent.filter(text => text.includes('本条消息未发送')).length, 2)
+    assert.equal(f.storage.data.receipts.filter(row => row.state === 'pending').length, 0)
+    f.native.resolve({ text: 'native final' }); await setImmediate()
+    assert.equal(f.runs.length, 1)
+  } finally { await f.close() }
+})
+
+test('native input marker persists for the original observation and does not block another captured target', async () => {
+  const f = await nativeAttentionFixture()
+  try {
+    await f.attention()
+    await f.route(sessions[1].id); await f.send('other target task')
+    assert.equal(f.sent.filter(text => text.includes('本条消息未发送')).length, 0)
+    await f.route(sessions[0].id); await f.send('5')
+    assert.equal(f.sent.filter(text => text.includes('本条消息未发送')).length, 1)
+    await f.attention('approval'); await f.send('yes')
+    assert.equal(f.sent.filter(text => text.includes('本条消息未发送')).length, 2)
+    assert.equal(f.runs.length, 1)
+    f.native.resolve({ text: 'A completed natively' }); await setImmediate()
+    assert.deepEqual(f.runs.map(row => [row.sessionId, row.text]), [
+      [sessions[0].id, 'begin original task'], [sessions[1].id, 'other target task'],
+    ])
+  } finally { await f.close() }
+})
+
+test('native input marker is scoped to the captured generation and never rejects a replacement session', async () => {
+  let selected = sessions[0]
+  const f = await nativeAttentionFixture({ host: { async describeSession() { return selected } } })
+  try {
+    await f.attention()
+    selected = { ...sessions[0], generation: 201 }
+    await f.route(selected.id); await f.send('new generation task')
+    assert.equal(f.sent.filter(text => text.includes('本条消息未发送')).length, 0)
+    f.native.resolve({ text: 'old generation done' }); await setImmediate()
+    assert.equal(f.runs.length, 2)
+    assert.equal(f.runs[1].expectedGeneration, 201)
+    assert.equal(f.runs[1].text, 'new generation task')
+  } finally { await f.close() }
+})
+
+test('only the bound sender receives waiting-task guidance; unrelated sender remains ignored', async () => {
+  const f = await nativeAttentionFixture()
+  try {
+    await f.attention()
+    const count = f.sent.length, receipts = f.storage.data.receipts.length
+    await f.send('5', 'foreign', 'another@im.wechat')
+    assert.equal(f.sent.length, count); assert.equal(f.storage.data.receipts.length, receipts)
+    assert.equal(f.runs.length, 1)
+  } finally { await f.close() }
+})
+
+test('legacy answer syntax always points to native UI, never executes or answers a host question', async () => {
+  const f = await nativeAttentionFixture()
+  try {
+    for (const text of ['/回答 QB9DBE4CC72 5', '/回答 bad', '/回答', '/回答 QB9DBE4CC72 转原会话']) {
+      await f.send(text)
+      assert.match(f.sent.at(-1), /小程序或电脑/)
+      assert.equal(f.runs.length, 1)
+    }
+    await f.attention()
+    await f.send('/帮助'); assert.doesNotMatch(f.sent.at(-1), /\/回答/)
+    await f.send('/状态'); assert.match(f.sent.at(-1), /接入会话/)
+    await f.send('/会话'); assert.match(f.sent.at(-1), /发送 \/切换/)
+    await f.send('/切换 ' + createHash('sha256').update(sessions[1].id).digest('hex').slice(0, 8))
+    assert.equal(f.storage.data.target.id, sessions[1].id)
+    assert.equal(f.runs.length, 1)
+  } finally { await f.close() }
+})
+
+test('pause and access revocation retain the original native observation without cancelling or replaying work', async () => {
+  for (const end of ['pause', 'revoke']) {
+    const f = await nativeAttentionFixture()
     try {
-      const { codes } = await f.ask()
+      await f.attention()
       if (end === 'pause') await enabled(f.runtime, false)
-      else if (end === 'dispose') await f.runtime.dispose()
-      else {
-        f.gate.allowed = false; f.storage.fail = end === 'revoke-disk-failure'
-        assert.throws(() => f.runtime.currentAccess())
-      }
-      assert.equal(f.handoffs.length, 1); assert.equal(f.answers.length, 0); assert.equal(f.runs.length, 1)
-      if (end === 'pause') {
-        await enabled(f.runtime, true); await f.send(`/回答 ${codes[0]} 1`)
-        assert.equal(f.answers.length, 0); assert.match(f.sent.at(-1), /已失效或已处理/)
-      }
-    } finally { f.storage.fail = false; await f.close() }
+      else { f.gate.allowed = false; assert.throws(() => f.runtime.currentAccess()) }
+      assert.equal(f.observationSignal.aborted, false)
+      assert.equal(f.runs.length, 1)
+      f.native.resolve({ text: 'completed natively while disabled' }); await setImmediate()
+      assert.equal(f.runs.length, 1)
+      f.gate.allowed = true
+      await enabled(f.runtime, true); await setImmediate()
+      assert.equal(f.sent.filter(text => text.includes('completed natively while disabled')).length, 1)
+    } finally { await f.close() }
   }
 })
 
-test('failed private question delivery returns the original question immediately', async () => {
-  const f = await questionFixture({ client: { async sendText() { throw Error('synthetic send failure') } } })
+test('failed waiting-task guidance cannot make an ambiguous answer replayable after pause or restart', async () => {
+  const sent = [], f = await nativeAttentionFixture({ client: { async sendText(_a, message) {
+    sent.push(message.text)
+    if (message.text.includes('本条消息未发送')) throw Error('synthetic send failure')
+  } } })
+  let snapshot
   try {
-    await f.ask(); assert.equal(f.handoffs.length, 1); assert.equal(f.answers.length, 0); assert.equal(f.runs.length, 1)
-    assert.equal(f.storage.data.receipts.find(r => r.parentId).state, 'uncertain')
+    await f.attention(); await f.send('5')
+    assert.equal(f.runs.length, 1)
+    assert.equal(f.storage.data.receipts.filter(row => row.state === 'uncertain').length, 1)
+    await enabled(f.runtime, false); await enabled(f.runtime, true); await setImmediate()
+    assert.equal(sent.filter(text => text.includes('本条消息未发送')).length, 1)
+    snapshot = structuredClone(f.storage.data)
+  } finally { await f.close() }
+  const runtime = new ClawbotRuntime(memory(snapshot), host(() => assert.fail('no interrupted or ambiguous input replay')), client())
+  try { await setImmediate(); assert.equal(runtime.snapshot().uncertain, 2) }
+  finally { await runtime.dispose() }
+})
+
+test('terminal receive failure disables only the channel while native interaction can still complete', async () => {
+  for (const code of ['clawbot-auth-expired', 'clawbot-capacity']) {
+    const poll = deferred(), f = await nativeAttentionFixture({ client: { getUpdates() { return poll.promise } } })
+    try {
+      await f.attention()
+      poll.reject(Object.assign(Error('synthetic terminal receive failure'), { code })); await setImmediate()
+      assert.equal(f.runtime.snapshot().enabled, false)
+      assert.equal(f.observationSignal.aborted, false)
+      f.native.resolve({ text: 'native task finished' }); await setImmediate()
+      assert.equal(f.runs.length, 1)
+      assert.equal(f.storage.data.receipts[0].state, 'ready')
+    } finally { poll.resolve({ messages: [], cursor: '' }); await f.close() }
+  }
+})
+
+test('disposal ends only observation and leaves the interrupted receipt non-replayable', async () => {
+  const f = await nativeAttentionFixture()
+  try {
+    await f.attention(); await f.runtime.dispose()
+    assert.equal(f.observationSignal.aborted, true, 'local observer stops at plugin disposal')
+    assert.equal(f.runs.length, 1)
+    const runtime = new ClawbotRuntime(memory(f.storage.data), host(() => assert.fail('no native task replay')), client())
+    try { await setImmediate(); assert.equal(runtime.snapshot().uncertain, 1) }
+    finally { await runtime.dispose() }
   } finally { await f.close() }
 })
 
-test('terminal receive failure returns private questions rather than holding them while disabled', async () => {
-  for (const code of ['clawbot-auth-expired', 'clawbot-capacity']) {
-    const poll = deferred(), f = await questionFixture({ client: { getUpdates() { return poll.promise } } })
+test('RC32 upgrade retires old question prompts and rejects only possible queued answers of interrupted parents', async () => {
+  for (const parentState of ['running', 'uncertain']) {
+    const now = Date.now(), parent = receipt('legacy-parent', parentState, { createdAt: now })
+    const notice = receipt('legacy-done-question', 'done', { input: '', parentId: parent.id, contextToken: '', createdAt: now + 1 })
+    const possible = receipt('legacy-five', 'pending', { input: '5', createdAt: now + 2 })
+    const preserved = [
+      receipt('before-parent', 'pending', { input: 'earlier input', createdAt: now - 1 }),
+      receipt('other-generation', 'pending', { target: { ...sessions[0], generation: 201 }, createdAt: now + 2 }),
+      receipt('other-session', 'pending', { target: sessions[1], createdAt: now + 2 }),
+      receipt('other-user', 'pending', { userId: 'another@im.wechat', createdAt: now + 2 }),
+      receipt('control-command', 'pending', { input: '/状态', createdAt: now + 2 }),
+    ]
+    const storage = memory(seed({ receipts: [parent, notice, possible, ...preserved] }))
+    const runtime = new ClawbotRuntime(storage, host(() => assert.fail('disabled upgrade must not dispatch')), client())
     try {
-      await f.ask(); poll.reject(Object.assign(Error('synthetic terminal receive failure'), { code })); await setImmediate()
-      assert.equal(f.runtime.snapshot().enabled, false); assert.equal(f.handoffs.length, 1); assert.equal(f.answers.length, 0)
-    } finally { poll.resolve({ messages: [], cursor: '' }); await f.close() }
+      const migrated = storage.data.receipts.find(row => row.id === possible.id)
+      assert.equal(migrated.state, 'ready'); assert.equal(migrated.input, '')
+      assert.match(migrated.output, /升级前待发消息未发送/)
+      assert.equal(storage.data.receipts[0].state, 'uncertain')
+      assert.ok(storage.data.receipts.every(row => row.parentId === undefined))
+      for (const original of preserved) assert.deepEqual(storage.data.receipts.find(row => row.id === original.id), original)
+      assert.deepEqual(storage.data.credentials, auth); assert.deepEqual(storage.data.target, sessions[0])
+    } finally { await runtime.dispose() }
+    const newInput = receipt('next-launch-input', 'pending', { input: 'a later ordinary task', createdAt: now + 3 })
+    const nextStore = memory({ ...storage.data, receipts: [...storage.data.receipts, newInput] })
+    const next = new ClawbotRuntime(nextStore, host(() => assert.fail('disabled restart must not dispatch')), client())
+    try {
+      assert.deepEqual(nextStore.data.receipts.find(row => row.id === newInput.id), newInput,
+        'migration must not permanently suppress new input to the same session on later launches')
+    } finally { await next.dispose() }
+  }
+})
+
+test('RC32 orphan ready and partially sent question notices are sealed without delivering stale answer commands', async () => {
+  for (const state of ['ready', 'sending']) {
+    const notice = receipt('orphan-question', state, { parentId: receipt('missing-parent').id, input: '',
+      output: 'stale /回答 QB9DBE4CC72 5', ...(state === 'sending' ? { parts: ['first', 'second'], sentParts: 0 } : {}) })
+    const storage = memory(seed({ enabled: true, receipts: [notice] }))
+    const runtime = new ClawbotRuntime(storage, host(() => assert.fail('no orphan dispatch')),
+      client({ async sendText() { assert.fail('no stale question delivery') } }))
+    try {
+      await setImmediate()
+      assert.equal(storage.data.receipts[0].state, state === 'sending' ? 'uncertain' : 'done')
+      for (const key of ['parentId', 'parts', 'output']) assert.equal(storage.data.receipts[0][key], undefined)
+      assert.equal(storage.data.receipts[0].contextToken, '')
+    } finally { await runtime.dispose() }
+  }
+})
+
+test('RC32 upgrade does not replay queued answers after a paused parent completed through its native card', async () => {
+  for (const state of ['ready', 'done']) {
+    const parent = receipt('completed-legacy-parent', state, { input: '', output: 'native finished' })
+    const notice = receipt('completed-legacy-question', 'done', { input: '', contextToken: '', parentId: parent.id })
+    const pending = receipt('completed-queued-five', 'pending', { input: '5', createdAt: parent.createdAt + 1 })
+    const storage = memory(seed({ receipts: [parent, notice, pending] }))
+    const sent = [], runtime = new ClawbotRuntime(storage, host(() => assert.fail('old queued answer must not become a new task')),
+      client({ async sendText(_a, message) { sent.push(message.text) } }))
+    try {
+      const migrated = storage.data.receipts.find(row => row.id === pending.id)
+      assert.equal(migrated.state, 'ready'); assert.equal(migrated.input, '')
+      assert.match(migrated.output, /升级前待发消息未发送/)
+      assert.ok(storage.data.receipts.every(row => row.parentId === undefined))
+      await enabled(runtime, true); await setImmediate()
+      assert.equal(sent.filter(text => text.includes('升级前待发消息未发送')).length, 1)
+      assert.equal(sent.filter(text => text.includes('native finished')).length, state === 'ready' ? 1 : 0)
+      await enabled(runtime, false)
+    } finally { await runtime.dispose() }
+    const nextInput = receipt('next-launch-after-native-completion', 'pending', {
+      input: 'new work after upgrade', createdAt: parent.createdAt + 2,
+    })
+    const nextStore = memory({ ...storage.data, receipts: [...storage.data.receipts, nextInput] }), runs = []
+    const next = new ClawbotRuntime(nextStore, host(async input => { runs.push(input); return { text: 'new work done' } }), client())
+    try {
+      assert.deepEqual(nextStore.data.receipts.find(row => row.id === nextInput.id), nextInput)
+      await enabled(next, true); await setImmediate()
+      assert.deepEqual(runs.map(row => row.text), ['new work after upgrade'])
+    } finally { await next.dispose() }
+  }
+})
+
+test('media uses the captured native target with exact downloaded bytes; command captions do not drop files', async () => {
+  const sent = [], runs = [], downloads = [], storage = memory()
+  const media = mediaFixture(), bytes = Buffer.from('synthetic file')
+  const runtime = new ClawbotRuntime(storage, host(async input => {
+    input.checkAdmission(); runs.push(input); return { text: 'received' }
+  }), client({ async downloadMedia(ref) { downloads.push(ref); return { name: ref.name, data: bytes } },
+    async sendText(_auth, message) { sent.push(message.text) } }))
+  try {
+    runtime.ingest([{ ...incoming('media', '/状态'), media: [media] }], 'media-cursor')
+    assert.deepEqual(storage.data.receipts[0].media, [media])
+    await enabled(runtime, true); await setImmediate()
+    assert.equal(runs.length, 1); assert.equal(downloads.length, 1); assert.equal(runs[0].sessionId, sessions[0].id)
+    assert.equal(runs[0].text, '/状态'); assert.deepEqual(runs[0].attachments, [{ kind: 'file', name: media.name, data: bytes }])
+    assert.ok(storage.data.receipts.every(row => row.media === undefined)); assert.match(sent[0], /received/)
+    runtime.ingest([{ ...incoming('media', '/状态'), media: [media] }], 'duplicate')
+    await setImmediate(); assert.equal(downloads.length, 1)
+  } finally { await runtime.dispose() }
+})
+
+test('media-only messages work but mixed unsupported items never partially submit', async () => {
+  const runs = [], storage = memory(), sent = []
+  const runtime = new ClawbotRuntime(storage, host(async input => { runs.push(input); return { text: 'file received' } }),
+    client({ async downloadMedia(ref) { return { name: ref.name, data: Buffer.from('fixture') } },
+      async sendText(_auth, message) { sent.push(message.text) } }))
+  try {
+    runtime.ingest([{ ...incoming('only-file', ''), media: [mediaFixture()] },
+      { ...incoming('unsupported-mixed', 'must not partially run'), media: [mediaFixture()], unsupported: true }], 'mixed')
+    await enabled(runtime, true); await setImmediate()
+    assert.equal(runs.length, 1); assert.equal(runs[0].text, ''); assert.equal(runs[0].attachments.length, 1)
+    assert.ok(sent.some(text => /未发送到会话/.test(text)))
+  } finally { await runtime.dispose() }
+})
+
+test('pause or entitlement revoke during download never submits the native task or leaks media secrets', async () => {
+  for (const action of ['pause', 'revoke', 'failure']) {
+    const gate = featureGate(), downloaded = deferred(), storage = memory(), sent = []
+    let count = 0
+    const runtime = new ClawbotRuntime(storage, host(() => assert.fail('must not submit')), client({
+      downloadMedia() { count++; return downloaded.promise }, async sendText(_auth, message) { sent.push(message.text) },
+    }), Date.now, gate)
+    try {
+      runtime.ingest([{ ...incoming(action, ''), media: [mediaFixture()] }], action)
+      await enabled(runtime, true); await setImmediate(); assert.equal(count, 1)
+      if (action === 'pause') await enabled(runtime, false)
+      if (action === 'revoke') gate.allowed = false
+      if (action === 'failure') downloaded.reject(Error('https://secret-url/?key=secret'))
+      else downloaded.resolve({ name: 'note.txt', data: Buffer.from('fixture') })
+      await setImmediate()
+      assert.ok(storage.data.receipts.every(row => row.media === undefined))
+      assert.doesNotMatch(JSON.stringify(sent), /secret-url|key=secret/)
+      if (action === 'failure') assert.match(sent[0], /附件未能完整接收/)
+    } finally { downloaded.resolve({ name: 'note.txt', data: Buffer.from('fixture') }); await runtime.dispose() }
+  }
+})
+
+test('a later file failure or total media budget never dispatches only the earlier files', async () => {
+  for (const mode of ['failure', 'budget']) {
+    const storage = memory(), sent = []; let downloads = 0
+    const runtime = new ClawbotRuntime(storage, host(() => assert.fail('must not submit partial files')), client({
+      async downloadMedia(ref) {
+        downloads++
+        if (mode === 'failure' && downloads === 2) throw Error('synthetic failure')
+        return { name: ref.name, data: Buffer.alloc(mode === 'budget' ? 10 * 1024 * 1024 : 1) }
+      }, async sendText(_auth, message) { sent.push(message.text) },
+    }))
+    try {
+      runtime.ingest([{ ...incoming(mode, 'files'), media: Array.from({ length: 4 }, (_, i) => mediaFixture('file', `${i}.txt`)) }], mode)
+      await enabled(runtime, true); await setImmediate()
+      assert.equal(downloads, mode === 'failure' ? 2 : 4); assert.equal(sent.length, 1)
+      assert.match(sent[0], /本条消息未发送/); assert.ok(storage.data.receipts.every(row => row.media === undefined))
+    } finally { await runtime.dispose() }
+  }
+})
+
+test('incoming media during native Q&A gets guidance without downloading, and media metadata is bounded on disk', async () => {
+  const done = deferred(), storage = memory(), sent = []
+  const runtime = new ClawbotRuntime(storage, host(async (_input, _signal, attention) => {
+    attention('question'); return done.promise
+  }), client({ downloadMedia: () => assert.fail('must not download answers'), async sendText(_auth, message) { sent.push(message.text) } }))
+  try {
+    runtime.ingest([incoming('question', 'ask')], 'ask')
+    await enabled(runtime, true); await setImmediate()
+    runtime.ingest([{ ...incoming('image-answer', ''), media: [mediaFixture('image', 'image.png')] }], 'answer')
+    // Wake the same delivery queue without creating another worker/task.
+    await enabled(runtime, true); await setImmediate()
+    assert.ok(sent.some(text => text.includes('本条消息未发送')))
+    assert.ok(storage.data.receipts.every(row => row.media === undefined))
+    done.resolve({ text: 'native completed' }); await setImmediate()
+    assert.throws(() => runtime.ingest([{ ...incoming('bad-ref', ''), media: [{ ...mediaFixture(), url: 'http://127.0.0.1/private' }] }], 'bad'), /记录格式/)
+    assert.equal(storage.data.cursor, 'answer')
+  } finally { done.resolve({ text: 'native completed' }); await runtime.dispose() }
+})
+
+test('native deliverables send text then separate image/file messages with captured identity and ordered durable parts', async () => {
+  const storage = memory(), uploads = [], sent = []
+  const runtime = new ClawbotRuntime(storage, host(async () => ({ text: '成果已完成', attachments: [
+    { kind: 'image', name: 'chart.png', data: Buffer.from('img') }, { kind: 'file', name: 'report.pdf', data: Buffer.from('pdf') },
+  ] })), client({
+    async prepareMedia(a, part, _s, check) { check(); assert.deepEqual(a, auth); uploads.push(part); return preparedFixture(part.kind, part.name) },
+    async sendText(a, part) { sent.push({ type: 'text', a, ...part }); assert.equal(storage.data.receipts[0].state, 'sending') },
+    async sendMedia(a, part) { sent.push({ type: part.media.kind, a, ...part }); assert.equal(storage.data.receipts[0].state, 'sending') },
+  }))
+  try {
+    runtime.ingest([incoming('outputs', '生成成果')], 'out'); await enabled(runtime, true); await setImmediate()
+    assert.deepEqual(sent.map(p => p.type), ['text', 'image', 'file']); assert.equal(uploads.length, 2)
+    assert.deepEqual(uploads.map(p => [...p.data]), [[105, 109, 103], [112, 100, 102]])
+    assert.ok(sent.every(p => p.userId === auth.userId && p.contextToken === 'synthetic-context'))
+    assert.equal(new Set(sent.map(p => p.clientId)).size, 3)
+    assert.equal(storage.data.receipts[0].state, 'done'); assert.equal(storage.data.receipts[0].parts, undefined)
+    assert.doesNotMatch(JSON.stringify(storage.data), /synthetic-upload|1234567890abcdef|chart.png/)
+  } finally { await runtime.dispose() }
+})
+
+test('failed media send after acknowledged text is uncertain and never replays text or subsequent media on restart', async () => {
+  const storage = memory(); let texts = 0, media = 0, runs = 0
+  const runtime = new ClawbotRuntime(storage, host(async () => {
+    runs++; return { text: 'final', attachments: [1, 2].map(i => ({ kind: 'file', name: `result${i}.pdf`, data: Buffer.from('pdf') })) }
+  }), client({ async prepareMedia(_a, p) { return preparedFixture(p.kind, p.name) },
+    async sendText() { texts++ }, async sendMedia() { media++; throw Error('ambiguous send') } }))
+  try {
+    runtime.ingest([incoming('uncertain-media', 'create')], 'out'); await enabled(runtime, true); await setImmediate()
+    assert.equal(texts, 1); assert.equal(media, 1); assert.equal(runs, 1)
+    assert.equal(storage.data.receipts[0].state, 'uncertain'); assert.equal(storage.data.receipts[0].parts, undefined)
+  } finally { await runtime.dispose() }
+  const restarted = new ClawbotRuntime(memory(storage.data), host(() => assert.fail('no rerun')), client({
+    sendText: () => assert.fail('no text replay'), sendMedia: () => assert.fail('no file replay'),
+  }))
+  try { await setImmediate(); assert.equal(restarted.snapshot().uncertain, 1) } finally { await restarted.dispose() }
+})
+
+test('pause/revoke/disconnect while preparing output prevents late media send and preserves completed native text when still bound', async () => {
+  for (const action of ['pause', 'revoke', 'disconnect']) {
+    const pending = deferred(), gate = featureGate(), storage = memory(); let sent = 0, uploads = 0, runs = 0
+    const runtime = new ClawbotRuntime(storage, host(async () => {
+      runs++; return { text: '原任务完成', attachments: [{ kind: 'file', name: 'a.pdf', data: Buffer.from('pdf') }] }
+    }), client({ async prepareMedia(_a, _p, _s, check) { uploads++; await pending.promise; check(); return preparedFixture() },
+      async sendText() { sent++ }, async sendMedia() { sent++ } }), Date.now, gate)
+    try {
+      runtime.ingest([incoming(action + '-output', 'create')], 'out'); await enabled(runtime, true); await setImmediate()
+      assert.equal(uploads, 1)
+      if (action === 'revoke') gate.allowed = false
+      else if (action === 'pause') await enabled(runtime, false)
+      else {
+        await enabled(runtime, false)
+        await runtime.control({ action: 'disconnect', abandonPending: true, expectedRevision: runtime.snapshot().revision }, signal())
+      }
+      pending.resolve(); await setImmediate()
+      assert.equal(runs, 1); assert.equal(sent, 0)
+      if (action !== 'disconnect') {
+        assert.equal(storage.data.receipts[0].state, 'ready'); assert.match(storage.data.receipts[0].output, /原任务完成/)
+        assert.match(storage.data.receipts[0].output, /部分附件/); assert.equal(storage.data.receipts[0].parts, undefined)
+      } else assert.ok(storage.data.receipts.every(r => ['done', 'uncertain'].includes(r.state)))
+    } finally { pending.resolve(); await runtime.dispose() }
+  }
+})
+
+test('acknowledged text plus pending media survives pause/restart without reupload or repeating text', async () => {
+  const gate = featureGate(), storage = memory(); let texts = 0, uploads = 0
+  const runtime = new ClawbotRuntime(storage, host(async () => ({ text: 'ready', attachments: [
+    { kind: 'file', name: 'a.pdf', data: Buffer.from('pdf') },
+  ] })), client({ async prepareMedia() { uploads++; return preparedFixture() },
+    async sendText() { texts++; gate.allowed = false }, sendMedia: () => assert.fail('revoked') }), Date.now, gate)
+  try {
+    runtime.ingest([incoming('pause-parts', 'create')], 'out'); await enabled(runtime, true); await setImmediate()
+    assert.equal(texts, 1); assert.equal(uploads, 1)
+    assert.equal(storage.data.receipts[0].state, 'ready'); assert.equal(storage.data.receipts[0].sentParts, 1)
+  } finally { await runtime.dispose() }
+  gate.allowed = true
+  const next = memory(storage.data); let media = 0
+  const restarted = new ClawbotRuntime(next, host(() => assert.fail('no rerun')), client({
+    prepareMedia: () => assert.fail('no reupload'), sendText: () => assert.fail('no text replay'), async sendMedia() { media++ },
+  }), Date.now, gate)
+  try { await enabled(restarted, true); await setImmediate(); assert.equal(media, 1); assert.equal(next.data.receipts[0].state, 'done') }
+  finally { await restarted.dispose() }
+})
+
+test('oversized/failed output preparation retains text, does not submit another task and exposes no provider details', async () => {
+  for (const count of [1, 7]) {
+    const storage = memory(), sent = []; let runs = 0, uploads = 0
+    const runtime = new ClawbotRuntime(storage, host(async () => {
+      runs++; return { text: '文本成果', attachments: Array.from({ length: count }, () => ({ kind: 'file', name: 'a.pdf', data: Buffer.from('pdf') })) }
+    }), client({ async prepareMedia() { uploads++; throw Error('provider secret path token') }, async sendText(_a, p) { sent.push(p.text) } }))
+    try {
+      runtime.ingest([incoming('failed-' + count, 'create')], 'out'); await enabled(runtime, true); await setImmediate()
+      assert.equal(runs, 1); assert.equal(uploads, count === 1 ? 1 : 0)
+      assert.equal(sent.length, 1); assert.match(sent[0], /文本成果/); assert.match(sent[0], /部分附件/)
+      assert.doesNotMatch(sent[0], /secret|token/)
+    } finally { await runtime.dispose() }
+  }
+})
+
+test('outbox rejects malformed or cross-account prepared media and never loses its old ledger', async () => {
+  for (const patch of [{ userId: 'foreign@im.wechat' }, { accountId: 'foreign@im.bot' }, { bytes: 100 * 1024 * 1024 }, { aesKey: 'bad' }]) {
+    const original = seed({ receipts: [receipt('bad-outbox', 'ready', { input: '', output: 'ready', parts: [{ ...preparedFixture(), ...patch }], sentParts: 0 })] })
+    const storage = memory(original)
+    // A revision update validates before persisting or starting any worker.
+    storage.data.revision = 1
+    assert.throws(() => new ClawbotRuntime(storage, host(), client()), /记录格式/)
+    assert.deepEqual(storage.data.receipts, original.receipts)
   }
 })

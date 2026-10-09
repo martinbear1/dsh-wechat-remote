@@ -189,11 +189,12 @@ test('missing ret never hides an explicit error or malformed error field on read
   }
 })
 
-test('media is flagged and group/bot events cannot become user commands', async () => {
+test('incomplete media is flagged and group/bot events cannot become user commands', async () => {
   const { client } = fixture([success([inbound({ item_list: [{ type: 2, image_item: {} }] }),
     inbound({ group_id: 'group' }), inbound({ message_type: 2 })])])
   assert.deepEqual(await client.getUpdates(auth, ''), { cursor: 'next-cursor', messages: [{
     id: '18446744073709551615', userId: auth.userId, contextToken: 'context-1', text: '', unsupported: true,
+    unsupportedReason: '微信附件信息不完整，未发送到会话',
   }] })
 })
 

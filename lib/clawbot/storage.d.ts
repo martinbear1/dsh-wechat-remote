@@ -1,18 +1,19 @@
-import type { ILinkCredentials } from './ilink-types.js';
+import type { ILinkCredentials, ILinkMedia, ILinkPreparedMedia } from './ilink-types.js';
 import type { ClawbotSession } from './contracts.js';
 export interface Receipt {
     id: string;
     userId: string;
     contextToken: string;
     input: string;
+    media?: ILinkMedia[];
     target: ClawbotSession | null;
     revision: number;
     createdAt: number;
     state: 'pending' | 'running' | 'ready' | 'sending' | 'done' | 'uncertain';
     output?: string;
-    parts?: string[];
+    parts?: (string | ILinkPreparedMedia)[];
     sentParts?: number;
-    /** Question notice outbox only: sealed with the original task, including after restart. */
+    /** Legacy RC32 question notice; retired once on upgrade, never recreated. */
     parentId?: string;
 }
 export interface ClawbotData {

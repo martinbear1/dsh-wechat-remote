@@ -7,46 +7,31 @@ export interface ClawbotSession {
     workspaceTitle?: string;
 }
 export type ClawbotAttention = 'approval' | 'question';
-export interface ClawbotQuestionItem {
-    id: string;
-    question: string;
-    header?: string;
-    detail?: string;
-    options?: {
-        label: string;
-        description?: string;
-    }[];
-    multiSelect?: boolean;
+export interface ClawbotAttachment {
+    kind: 'image' | 'file' | 'voice' | 'video';
+    name: string;
+    data: Uint8Array;
 }
-export interface ClawbotQuestionAnswer {
-    answers: {
-        id: string;
-        selected: string[];
-        custom?: string;
-    }[];
+/** In-memory native deliverables only; no host paths are retained by the channel. */
+export interface ClawbotResult {
+    text: string;
+    attachments?: ClawbotAttachment[];
 }
-/** Ephemeral native human-question capability, never persisted or replayed. */
-export interface ClawbotQuestion {
-    id: string;
-    questions: ClawbotQuestionItem[];
-    signal: AbortSignal;
-    answer(value: ClawbotQuestionAnswer): Promise<void>;
-    /** Delegate this still-pending question to the host's next native answerer. */
-    handoff(): void;
+export interface ClawbotInput {
+    sessionId: string;
+    expectedGeneration: number;
+    requestId: string;
+    text: string;
+    attachments?: ClawbotAttachment[];
+    /** Channel-only pre-admission fence; never serialized into the native prompt. */
+    checkAdmission?: () => void;
 }
 export interface ClawbotHost {
     listSessions(signal: AbortSignal): Promise<ClawbotSession[]>;
     describeSession(sessionId: string, signal: AbortSignal): Promise<ClawbotSession & {
         generation: number;
     }>;
-    run(input: {
-        sessionId: string;
-        expectedGeneration: number;
-        requestId: string;
-        text: string;
-    }, signal: AbortSignal, onAttention?: (kind: ClawbotAttention) => void, onQuestion?: (question: ClawbotQuestion) => void): Promise<{
-        text: string;
-    }>;
+    run(input: ClawbotInput, signal: AbortSignal, onAttention?: (kind: ClawbotAttention) => void): Promise<ClawbotResult>;
 }
 export interface ClawbotStatus {
     supported: true;

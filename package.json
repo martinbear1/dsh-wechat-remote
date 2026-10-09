@@ -1,6 +1,6 @@
 {
   "name": "@harness-remote/dsh-wechat-remote",
-  "version": "1.7.14-rc.32",
+  "version": "1.7.14-rc.33",
   "description": "Agent远程管理助手：支持 Windows、macOS 与 Linux 上的 DeepSeek Harness，提供微信配对、安全局域网直连及端到端加密公网连接",
   "private": true,
   "license": "MIT",
@@ -118,7 +118,7 @@
     "verify:pack": "node --test scripts/test-packed-plugin.mjs && node scripts/verify-packed-plugin.mjs",
     "test": "npm run test:features && npm run test:clawbot && npm run test:private-updates && npm run test:human-tools && npm run test:notifications && npm run test:lifecycle && npm run test:client && npm run test:attachment && npm run test:directory && npm run test:host-platform && npm run test:history && npm run test:gate-ports && npm run test:dsh-runtime && npm run test:dsh-protocol-compat && npm run test:dsh-realtime-compat && npm run test:dsh-compatibility-api && npm run test:public-relay && npm run test:updates && npm run test:native-update",
     "test:features": "node --test scripts/test-feature-access.mjs",
-    "test:clawbot": "node --test scripts/test-clawbot-ilink.mjs scripts/test-clawbot-runtime-review.mjs scripts/test-clawbot-dsh-host.mjs scripts/test-clawbot-panel.mjs scripts/test-clawbot-question-text.mjs scripts/test-clawbot-dsh-questions.mjs",
+    "test:clawbot": "node --test scripts/test-clawbot-ilink.mjs scripts/test-clawbot-media.mjs scripts/test-clawbot-runtime-review.mjs scripts/test-clawbot-dsh-host.mjs scripts/test-clawbot-panel.mjs",
     "test:clawbot:native": "node scripts/test-clawbot-native-boundary.mjs",
     "test:private-updates": "node --test scripts/test-human-private-publication.mjs scripts/test-private-input-native.mjs",
     "test:private-updates:desktop": "node scripts/test-private-input-desktop-native.mjs",

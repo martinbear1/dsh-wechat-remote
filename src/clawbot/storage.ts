@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, rmdirSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { writePrivateJsonAtomic } from '../secure-file.js'
-import type { ILinkCredentials } from './ilink-types.js'
+import type { ILinkCredentials, ILinkMedia, ILinkPreparedMedia } from './ilink-types.js'
+import { validateMedia, validatePreparedMedia, MEDIA_MAX_ITEMS } from './ilink-media.js'
 import type { ClawbotSession } from './contracts.js'
 import { ClawbotError } from './contracts.js'
 
@@ -11,14 +12,15 @@ export interface Receipt {
   userId: string
   contextToken: string
   input: string
+  media?: ILinkMedia[]
   target: ClawbotSession | null
   revision: number
   createdAt: number
   state: 'pending' | 'running' | 'ready' | 'sending' | 'done' | 'uncertain'
   output?: string
-  parts?: string[]
+  parts?: (string | ILinkPreparedMedia)[]
   sentParts?: number
-  /** Question notice outbox only: sealed with the original task, including after restart. */
+  /** Legacy RC32 question notice; retired once on upgrade, never recreated. */
   parentId?: string
 }
 export interface ClawbotData {
@@ -50,12 +52,15 @@ export function validateClawbotData(data: ClawbotData): void {
     || !Array.isArray(data.receipts) || data.receipts.length > 1000 || new Set(data.receipts.map(r => r?.id)).size !== data.receipts.length
     || data.receipts.some(r => !r || typeof r.id !== 'string' || !/^[a-f0-9]{64}$/.test(r.id) || typeof r.userId !== 'string'
       || typeof r.contextToken !== 'string' || typeof r.input !== 'string' || r.input.length > 8000 || !validTarget(r.target)
+      || r.media !== undefined && (!Array.isArray(r.media) || !r.media.length || r.media.length > MEDIA_MAX_ITEMS || !r.media.every(validateMedia))
       || !Number.isSafeInteger(r.createdAt) || !Number.isSafeInteger(r.revision)
       || r.parentId !== undefined && (typeof r.parentId !== 'string' || !/^[a-f0-9]{64}$/.test(r.parentId) || r.parentId === r.id)
       || !['pending', 'running', 'ready', 'sending', 'done', 'uncertain'].includes(r.state)
       || r.output !== undefined && (typeof r.output !== 'string' || r.output.length > 14000)
       || r.parts !== undefined && (!Array.isArray(r.parts) || !r.parts.length || r.parts.length > 100
-        || r.parts.some(p => typeof p !== 'string' || !p || Buffer.byteLength(p) > 1800)
+        || r.parts.some(p => typeof p === 'string' ? !p || Buffer.byteLength(p) > 1800
+          : !validatePreparedMedia(p) || p.userId !== r.userId || p.accountId !== data.credentials?.accountId)
+        || r.parts.filter(p => typeof p !== 'string').length > MEDIA_MAX_ITEMS
         || !Number.isSafeInteger(r.sentParts) || r.sentParts! < 0 || r.sentParts! >= r.parts.length)
       || !['done', 'uncertain'].includes(r.state) && r.parts === undefined && r.sentParts !== undefined && r.sentParts !== 0
       || r.state === 'ready' && r.parts === undefined && (typeof r.output !== 'string' || !r.output)))

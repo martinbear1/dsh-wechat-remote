@@ -1,6 +1,7 @@
-import type { ILinkCredentials, ILinkQrResult, ILinkText, ILinkUpdates } from './ilink-types.js';
+import type { ILinkCredentials, ILinkMedia, ILinkMediaInput, ILinkMediaSend, ILinkPreparedMedia, ILinkQrResult, ILinkText, ILinkUpdates } from './ilink-types.js';
 export { ILinkError } from './ilink-types.js';
-export type { ILinkCredentials, ILinkMessage, ILinkQrResult, ILinkText, ILinkUpdates } from './ilink-types.js';
+export { validatePreparedMedia } from './ilink-media.js';
+export type { ILinkCredentials, ILinkMedia, ILinkMediaInput, ILinkMediaSend, ILinkMessage, ILinkPreparedMedia, ILinkQrResult, ILinkText, ILinkUpdates } from './ilink-types.js';
 export declare class ILinkClient {
     private readonly fetchImpl;
     private readonly qrStates;
@@ -8,6 +9,14 @@ export declare class ILinkClient {
     constructor(options?: {
         fetch?: typeof fetch;
     });
+    /** Provider-only download; no token forwarding, filesystem writes or retries. */
+    downloadMedia(media: ILinkMedia, signal?: AbortSignal): Promise<{
+        name: string;
+        data: Uint8Array;
+    }>;
+    /** Upload only; runtime records the result before a separate, single send. */
+    prepareMedia(auth: ILinkCredentials, input: ILinkMediaInput, signal?: AbortSignal, check?: () => void): Promise<ILinkPreparedMedia>;
+    sendMedia(auth: ILinkCredentials, input: ILinkMediaSend, signal?: AbortSignal): Promise<void>;
     private request;
     getQr(signal?: AbortSignal, localTokens?: string[]): Promise<{
         qrcode: string;

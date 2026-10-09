@@ -1,9 +1,8 @@
-import { ClawbotError, type ClawbotAttention, type ClawbotHost, type ClawbotQuestion, type ClawbotSession } from './contracts.js';
+import { ClawbotError, type ClawbotAttention, type ClawbotHost, type ClawbotInput, type ClawbotResult, type ClawbotSession } from './contracts.js';
 export interface DshClawbotContext {
     get(name: string): any;
-    on(name: any, listener: (...args: any[]) => any, options?: {
-        global?: boolean;
-        prepend?: boolean;
+    on(name: any, listener: (...args: any[]) => void, options?: {
+        global: boolean;
     }): () => void;
 }
 export type DshClawbotSubmission = 'not-submitted' | 'unknown' | 'accepted';
@@ -21,8 +20,8 @@ export declare class DshClawbotHostError extends ClawbotError {
  * user/message, assistant/message, turn/end are the correlation boundaries.
  * dsh-session/lib/index.js:1400-1473: seq is the next append offset and
  * session/event observers run synchronously after the event enters the log.
- * This adapter owns no Agent/preset/tool or phone mux. Its scoped plain-question
- * answerer claims only this run, then answers or delegates to the native UI.
+ * This adapter owns no Agent/preset/tool; it never opens the phone mux/$events
+ * or registers a user-questions/approval answerer. Native cards keep ownership.
  */
 export declare class DshClawbotHost implements ClawbotHost {
     private readonly ctx;
@@ -38,13 +37,10 @@ export declare class DshClawbotHost implements ClawbotHost {
         generation: number;
     }>;
     private checkPreset;
-    run(input: {
-        sessionId: string;
-        requestId: string;
-        text: string;
-        expectedGeneration: number;
-    }, signal: AbortSignal, onAttention?: (kind: ClawbotAttention) => void, onQuestion?: (question: ClawbotQuestion) => void): Promise<{
-        text: string;
-    }>;
+    run(input: ClawbotInput, signal: AbortSignal, onAttention?: (kind: ClawbotAttention) => void): Promise<ClawbotResult>;
+    /** Read only this completed turn's native presentation declarations. Paths
+     * never come from model prose or tool reads and never leave this adapter. */
+    private readOutputs;
+    private prepareInput;
     private observeAndSubmit;
 }

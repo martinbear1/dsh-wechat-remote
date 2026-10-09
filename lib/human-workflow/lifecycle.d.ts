@@ -250,7 +250,7 @@ export declare class WorkflowLifecycle {
     exportFile(scope: WorkflowScope, taskRef: HumanTaskRef, submissionId: string, signal: AbortSignal): Promise<{
         path: string;
         displayName: string;
-        mediaType: "image/jpeg" | "image/png" | "application/pdf" | "application/vnd.openxmlformats-officedocument.wordprocessingml.document" | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" | "application/vnd.openxmlformats-officedocument.presentationml.presentation" | "text/plain" | "text/csv";
+        mediaType: "image/png" | "image/jpeg" | "application/pdf" | "application/vnd.openxmlformats-officedocument.wordprocessingml.document" | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" | "application/vnd.openxmlformats-officedocument.presentationml.presentation" | "text/plain" | "text/csv";
         bytes: number;
         sha256: string;
         manifest: import("./submission-crypto.js").SubmissionManifest;

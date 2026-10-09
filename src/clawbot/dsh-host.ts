@@ -1,11 +1,11 @@
-import { ClawbotError, type ClawbotAttention, type ClawbotHost, type ClawbotQuestion, type ClawbotSession } from './contracts.js'
+import { createHash } from 'node:crypto'
+import { ClawbotError, type ClawbotAttachment, type ClawbotAttention, type ClawbotHost, type ClawbotInput, type ClawbotResult, type ClawbotSession } from './contracts.js'
 import { assertColdSessionPresetAvailable } from '../dsh-host-contract.js'
-import { DshQuestionBridge } from './dsh-questions.js'
 
 type Row = Record<string, any>
 export interface DshClawbotContext {
   get(name: string): any
-  on(name: any, listener: (...args: any[]) => any, options?: { global?: boolean; prepend?: boolean }): () => void
+  on(name: any, listener: (...args: any[]) => void, options?: { global: boolean }): () => void
 }
 export type DshClawbotSubmission = 'not-submitted' | 'unknown' | 'accepted'
 /** A receipt for observing a run, never authority to replay its prompt. */
@@ -21,7 +21,34 @@ const id = (value: unknown): value is string => typeof value === 'string' && val
 const fail = (code: string, message: string, submission: DshClawbotSubmission = 'not-submitted') =>
   new DshClawbotHostError(code, message, submission)
 const MAX_TEXT_BYTES = 256 * 1024
+const MAX_MEDIA_BYTES = 10 * 1024 * 1024
+const MAX_INPUT_BYTES = 30 * 1024 * 1024
 const MAX_OBSERVATION_MS = 15 * 60 * 1000
+const imageType = (data: Uint8Array): string | undefined => {
+  const bytes = Buffer.from(data.buffer, data.byteOffset, data.byteLength)
+  if (bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) return 'image/png'
+  if (bytes.length >= 3 && bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255) return 'image/jpeg'
+  if (/^GIF8[79]a$/.test(bytes.subarray(0, 6).toString('ascii'))) return 'image/gif'
+  if (bytes.length >= 12 && bytes.subarray(0, 4).toString('ascii') === 'RIFF'
+    && bytes.subarray(8, 12).toString('ascii') === 'WEBP') return 'image/webp'
+}
+const nativeImage = (value: unknown, name: string): boolean => row(value) && value.name === name
+  && /^sha256:[a-f0-9]{64}$/.test(value.attachmentId) && ['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(value.mediaType)
+  && [value.bytes, value.width, value.height].every(number => Number.isSafeInteger(number) && number > 0)
+const nativeFile = (value: unknown): value is Row => row(value) && /^sha256:[a-f0-9]{64}$/.test(value.attachmentId)
+  && typeof value.name === 'string' && !!value.name && !/[\\/\u0000-\u001f]/.test(value.name)
+  && Number.isSafeInteger(value.bytes) && value.bytes > 0 && value.bytes <= MAX_MEDIA_BYTES
+type PreparedInput = { content: Row[]; expected: Row[]; session?: Row }
+type ObservedResult = { text: string; session: Row; files: string[]; images: Row[]; omitted: boolean }
+function matchesInput(value: unknown, expected: Row[]): boolean {
+  return Array.isArray(value) && value.length === expected.length && value.every((part, index) => {
+    const wanted = expected[index]
+    if (!row(part) || part.type !== wanted.type) return false
+    if (part.type === 'text') return part.text === wanted.text
+    if (part.type === 'image') return !part.offloaded && nativeImage(part.attachment, wanted.name)
+    return nativeFile(part.attachment) && ['attachmentId', 'name', 'bytes'].every(key => part.attachment[key] === wanted.attachment[key])
+  })
+}
 
 /**
  * Native contracts inspected in installed DSH 0.2.0-rc.1:
@@ -32,8 +59,8 @@ const MAX_OBSERVATION_MS = 15 * 60 * 1000
  * user/message, assistant/message, turn/end are the correlation boundaries.
  * dsh-session/lib/index.js:1400-1473: seq is the next append offset and
  * session/event observers run synchronously after the event enters the log.
- * This adapter owns no Agent/preset/tool or phone mux. Its scoped plain-question
- * answerer claims only this run, then answers or delegates to the native UI.
+ * This adapter owns no Agent/preset/tool; it never opens the phone mux/$events
+ * or registers a user-questions/approval answerer. Native cards keep ownership.
  */
 export class DshClawbotHost implements ClawbotHost {
   private readonly running = new Set<string>()
@@ -113,11 +140,23 @@ export class DshClawbotHost implements ClawbotHost {
     }
   }
 
-  async run(input: { sessionId: string; requestId: string; text: string; expectedGeneration: number }, signal: AbortSignal,
-    onAttention?: (kind: ClawbotAttention) => void, onQuestion?: (question: ClawbotQuestion) => void): Promise<{ text: string }> {
-    if (!id(input.sessionId) || !id(input.requestId) || typeof input.text !== 'string' || !input.text.trim()
+  async run(input: ClawbotInput, signal: AbortSignal,
+    onAttention?: (kind: ClawbotAttention) => void): Promise<ClawbotResult> {
+    if (!id(input.sessionId) || !id(input.requestId) || typeof input.text !== 'string'
       || !Number.isSafeInteger(input.expectedGeneration)
-      || Buffer.byteLength(input.text) > MAX_TEXT_BYTES) throw fail('invalid-input', '消息或会话标识无效。')
+      || Buffer.byteLength(input.text) > MAX_TEXT_BYTES || input.attachments !== undefined && !Array.isArray(input.attachments)
+      || (input.attachments?.length ?? 0) > 6 || !input.text.trim() && !input.attachments?.length)
+      throw fail('invalid-input', '消息或会话标识无效。')
+    let total = Buffer.byteLength(input.text)
+    for (const part of input.attachments ?? []) {
+      if (!row(part) || !['image', 'file', 'voice', 'video'].includes(part.kind)
+        || typeof part.name !== 'string' || !part.name.trim() || Buffer.byteLength(part.name) > 240 || /[\\/\u0000-\u001f]/.test(part.name)
+        || !(part.data instanceof Uint8Array) || part.data.byteLength < 1 || part.data.byteLength > MAX_MEDIA_BYTES
+        || (total += part.data.byteLength) > MAX_INPUT_BYTES || part.kind === 'image' && !imageType(part.data))
+        throw fail('invalid-input', '附件格式或大小不符合要求：最多 6 个，单个 10 MB、合计 30 MB。')
+    }
+    // Own one bounded immutable snapshot across asynchronous admission checks.
+    input = { ...input, attachments: input.attachments?.map(part => ({ ...part, data: Uint8Array.from(part.data) })) }
     signal.throwIfAborted()
     if (this.running.has(input.sessionId)) throw fail('busy', '此会话仍在处理上一条渠道消息，请先在电脑或小程序核对。')
     this.running.add(input.sessionId)
@@ -139,18 +178,134 @@ export class DshClawbotHost implements ClawbotHost {
       }
       await this.checkPreset(input.sessionId, signal)
       signal.throwIfAborted()
-      return await this.observeAndSubmit(input, generation, cursor, signal, onAttention, onQuestion)
+      const prepared = input.attachments?.length ? await this.prepareInput(input, generation, signal)
+        : { content: [{ type: 'text', text: input.text }], expected: [{ type: 'text', text: input.text }] }
+      const result = await this.observeAndSubmit(input, generation, cursor, prepared, signal, onAttention)
+      return await this.readOutputs(input.sessionId, generation, result, signal, input.checkAdmission)
     } finally { this.running.delete(input.sessionId) }
   }
 
-  private observeAndSubmit(input: { sessionId: string; requestId: string; text: string }, generation: number,
-    cursor: number, signal: AbortSignal, onAttention?: (kind: ClawbotAttention) => void,
-    onQuestion?: (question: ClawbotQuestion) => void): Promise<{ text: string }> {
+  /** Read only this completed turn's native presentation declarations. Paths
+   * never come from model prose or tool reads and never leave this adapter. */
+  private async readOutputs(sessionId: string, generation: number, result: ObservedResult, signal: AbortSignal, checkAdmission?: () => void): Promise<ClawbotResult> {
+    signal = AbortSignal.any([signal, AbortSignal.timeout(60_000)])
+    const attachments: ClawbotAttachment[] = []
+    let omitted = result.omitted, total = 0
+    const check = () => {
+      signal.throwIfAborted(); checkAdmission?.(); this.assertAccess?.()
+      const session = this.ctx.get('sessions')?.get(sessionId)
+      if (session !== result.session || session.header?.createdAt !== generation || this.archived().has(sessionId))
+        throw fail('session-changed', '会话已变化，文件未回传；请在原会话查看。', 'accepted')
+    }
+    const append = (name: unknown, bytes: unknown) => {
+      if (typeof name !== 'string' || !name.trim() || /[\\/\u0000-\u001f]/.test(name)
+        || !(bytes instanceof Uint8Array) || bytes.byteLength < 1 || bytes.byteLength > MAX_MEDIA_BYTES
+        || attachments.length >= 6 || total + bytes.byteLength > MAX_INPUT_BYTES) throw Error('output limit')
+      const data = Buffer.from(bytes), image = imageType(data)
+      const mp4 = /\.mp4$/i.test(name) && data.length >= 16 && data.readUInt32BE(0) >= 16
+        && data.readUInt32BE(0) <= data.length && data.subarray(4, 8).toString('ascii') === 'ftyp'
+        && /^(?:isom|iso[2-9]|mp4[12]|avc1|M4V )$/.test(data.subarray(8, 12).toString('ascii'))
+      total += data.length
+      attachments.push({ kind: image ? 'image' : mp4 ? 'video' : 'file', name, data })
+    }
+    for (const reference of result.files) {
+      let transferId: string | undefined, resources: Row | undefined
+      try {
+        check(); resources = this.ctx.get('agentResources')
+        if (!['resolve', 'prepare', 'chunk', 'release'].every(key => typeof resources?.[key] === 'function')) throw Error('no native resource reader')
+        const unpack = (value: Row): Row => {
+          if (!value?.ok || typeof value.valueJson !== 'string') throw Error('resource unavailable')
+          const parsed = JSON.parse(value.valueJson); if (!row(parsed)) throw Error('resource unavailable'); return parsed
+        }
+        const resolved = unpack(await resources!.resolve({ scope: sessionId, reference }, signal)); check()
+        if (resolved.kind !== 'file' || typeof resolved.id !== 'string' || !resolved.id || resolved.id.length > 12000
+          || !Number.isSafeInteger(resolved.bytes) || resolved.bytes < 1 || resolved.bytes > MAX_MEDIA_BYTES
+          || total + resolved.bytes > MAX_INPUT_BYTES || attachments.length >= 6) throw Error('output limit')
+        const prepared = unpack(await resources!.prepare({ scope: sessionId, id: resolved.id, delivery: 'chunks' }, signal))
+        transferId = prepared.transferId; check()
+        if (!id(transferId) || prepared.delivery !== 'chunks' || !Number.isSafeInteger(prepared.bytes)
+          || prepared.bytes < 1 || prepared.bytes > MAX_MEDIA_BYTES || total + prepared.bytes > MAX_INPUT_BYTES
+          || !Number.isSafeInteger(prepared.chunkBytes) || prepared.chunkBytes < 1 || prepared.chunkBytes > 1024 * 1024
+          || !/^[a-f0-9]{64}$/.test(prepared.sha256)) throw Error('invalid native snapshot')
+        const bytes = Buffer.alloc(prepared.bytes)
+        for (let offset = 0; offset < bytes.length; offset += prepared.chunkBytes) {
+          const chunk = unpack(await resources!.chunk({ scope: sessionId, transferId, offset }, signal)); check()
+          if (chunk.offset !== offset || typeof chunk.data !== 'string') throw Error('invalid native chunk')
+          const data = Buffer.from(chunk.data, 'base64')
+          if (data.toString('base64') !== chunk.data || data.length !== Math.min(prepared.chunkBytes, bytes.length - offset)) throw Error('invalid native chunk')
+          data.copy(bytes, offset)
+        }
+        if (createHash('sha256').update(bytes).digest('hex') !== prepared.sha256) throw Error('invalid native snapshot')
+        append(prepared.name, bytes)
+      } catch { omitted = true }
+      finally { if (id(transferId)) { try { await resources?.release({ scope: sessionId, transferId }) } catch { /* bounded native snapshot expires */ } } }
+    }
+    for (const ref of result.images) {
+      try {
+        check()
+        if (attachments.length >= 6 || ref.bytes > MAX_MEDIA_BYTES || total + ref.bytes > MAX_INPUT_BYTES) throw Error('output limit')
+        const value = await this.ctx.get('attachments')?.readImage(ref, signal); check()
+        if (!(value?.data instanceof Uint8Array) || value.data.byteLength !== ref.bytes
+          || 'sha256:' + createHash('sha256').update(value.data).digest('hex') !== ref.attachmentId) throw Error('image unavailable')
+        append(ref.name, value.data)
+      } catch { omitted = true }
+    }
+    // Missing, moved or oversized files do not turn a completed DSH task into
+    // an error or cause replay. The final text remains usable on every host.
+    const text = result.text + (omitted ? '\n\n部分文件未能回传微信，请在电脑或小程序查看。' : '')
+    return { text, ...(attachments.length ? { attachments } : {}) }
+  }
+
+  private async prepareInput(input: ClawbotInput, generation: number, signal: AbortSignal): Promise<PreparedInput> {
+    const content: Row[] = input.text.trim() ? [{ type: 'text', text: input.text }] : [], expected = [...content]
+    let session: Row | undefined, agent: Row | undefined
+    const check = () => {
+      signal.throwIfAborted(); input.checkAdmission?.(); this.assertAccess?.()
+      if (this.archived().has(input.sessionId)) throw fail('not-found', '此会话已归档，本条消息未发送。')
+      const live = this.ctx.get('sessions')?.get(input.sessionId), current = this.ctx.get('agents')?.get(input.sessionId)
+      if (live && (live.header?.createdAt !== generation || live.header?.origin === 'subagent')
+        || session && session !== live || agent && agent !== current || current?.session && current.session !== live)
+        throw fail('session-changed', '准备附件时会话已变化，本条消息未发送。')
+      session ??= live; agent ??= current
+      if (current && (current.status === 'running' || current.inbox?.hasPending || current.inbox?.nextTurn?.length || current.inbox?.nextStep?.length))
+        throw fail('busy', '此会话正在运行或有排队消息，附件未发送，请先在电脑或小程序处理。')
+    }
+    check()
+    for (const part of input.attachments ?? []) {
+      check()
+      if (part.kind === 'image') {
+        content.push({ type: 'image', mediaType: imageType(part.data), data: Buffer.from(part.data).toString('base64'), name: part.name })
+        expected.push({ type: 'image', name: part.name })
+      } else {
+        const uploads = this.ctx.get('fileUploads')
+        if (typeof uploads?.uploadStream !== 'function') throw fail('unavailable', '此节点尚不支持原生文件附件，请更新电脑端后重试。')
+        let saved: Row
+        try { saved = await uploads.uploadStream({ sessionId: input.sessionId, name: part.name, signal,
+          data: (async function* () { check(); yield part.data })() }) }
+        catch { signal.throwIfAborted(); throw fail('attachment-unavailable', '附件未能保存到原会话，本条消息未发送。') }
+        check()
+        if (!id(saved?.receiptId) || !nativeFile(saved?.file) || saved.file.bytes !== part.data.byteLength
+          || saved.file.attachmentId !== 'sha256:' + createHash('sha256').update(part.data).digest('hex'))
+          throw fail('attachment-unavailable', '无法确认原生附件保存结果，本条消息未发送。')
+        content.push({ type: 'file', receiptId: saved.receiptId }); expected.push({ type: 'file', attachment: { ...saved.file } })
+      }
+    }
+    const current = await this.metadata(input.sessionId, signal)
+    if (current.generation !== generation) throw fail('session-changed', '准备附件时会话已重置，本条消息未发送。')
+    check()
+    // Native uploads own their durable objects and staged receipts. Never delete
+    // shared attachment files or edit the host's receipt table on a failed send.
+    return { content, expected, session }
+  }
+
+  private observeAndSubmit(input: ClawbotInput, generation: number,
+    cursor: number, prepared: PreparedInput, signal: AbortSignal, onAttention?: (kind: ClawbotAttention) => void): Promise<ObservedResult> {
     return new Promise((resolve, reject) => {
       let settled = false, dispatched = false, accepted = false, currentTurn: number | undefined
       let matchedTurn: number | undefined, foreignInput = false, finalText: string | undefined, completion: string | undefined
-      let observedSession: Row | undefined, eventCount = 0
-      let questions: DshQuestionBridge | undefined
+      let observedSession: Row | undefined = prepared.session, eventCount = 0
+      const files = new Set<string>()
+      let images: Row[] = [], omitted = false
       const attention = new Set<ClawbotAttention>()
       const offs: (() => void)[] = []
       const submission = (): DshClawbotSubmission => accepted ? 'accepted' : dispatched ? 'unknown' : 'not-submitted'
@@ -158,10 +313,9 @@ export class DshClawbotHost implements ClawbotHost {
         if (settled) return
         settled = true
         clearTimeout(timer)
-        questions?.close()
         signal.removeEventListener('abort', abort)
         for (const off of offs.splice(0)) { try { off() } catch { /* no observer may remain */ } }
-        if (error) reject(error); else resolve({ text: text! })
+        if (error) reject(error); else resolve({ text: text!, session: observedSession!, files: [...files], images, omitted })
       }
       const stop = (code: string, message: string) => finish(fail(code, message, submission()))
       const notify = (kind: ClawbotAttention) => {
@@ -205,8 +359,7 @@ export class DshClawbotHost implements ClawbotHost {
           } else if (event.type === 'user/message' && data.source?.kind !== 'runtime-context') {
             if (data.source?.kind === 'user' && data.source.rpcId === input.requestId) {
               if (matchedTurn !== undefined || currentTurn === undefined || foreignInput
-                || !Array.isArray(data.content) || data.content.length !== 1
-                || data.content[0]?.type !== 'text' || data.content[0].text !== input.text) {
+                || !matchesInput(data.content, prepared.expected)) {
                 return stop('ambiguous-turn', '本次输入与其他输入混合或已变化，未转发无法确认归属的回复。')
               }
               matchedTurn = currentTurn
@@ -215,23 +368,37 @@ export class DshClawbotHost implements ClawbotHost {
               if (matchedTurn !== undefined) return stop('ambiguous-turn', '此轮次加入了其他输入，请在电脑或小程序查看完整回复。')
             }
           } else if (matchedTurn !== undefined && currentTurn === matchedTurn) {
+            if (event.type === 'deliverables/presented' && data.turn === matchedTurn && id(data.callId) && Array.isArray(data.files)) {
+              for (const file of data.files) {
+                if (!row(file) || typeof file.path !== 'string' || !file.path.trim() || file.path.length > 4096 || /[\u0000-\u001f]/.test(file.path)) { omitted = true; continue }
+                if (files.has(file.path)) continue
+                if (files.size >= 6) { omitted = true; continue }
+                files.add(file.path)
+              }
+              return
+            }
             if (event.type === 'approval/asked') return notify('approval')
             if (event.type === 'tool/call' && data.name === 'ask_user_question') {
-              if (!questions?.ready) notify('question')
-              return
+              return notify('question')
             }
             if (event.type === 'assistant/message' && data.turn === matchedTurn) {
               const content = data.message?.content
-              finalText = undefined
+              finalText = undefined; images = []
               if (data.interrupted || !Array.isArray(content) || content.some((part: Row) => part?.type === 'tool-call')) return
               const texts = content.filter((part: Row) => part?.type === 'text' && typeof part.text === 'string').map((part: Row) => part.text)
               const text = texts.join('\n').trim()
               if (Buffer.byteLength(text) > MAX_TEXT_BYTES) return stop('output-unavailable', '回复过长，请在电脑或小程序查看。')
               if (text) finalText = text
+              for (const part of content) if (part?.type === 'image') {
+                const ref = part.attachment
+                if (!nativeImage(ref, ref?.name) || images.length >= 6) { omitted = true; continue }
+                const suffix = ref.mediaType === 'image/jpeg' ? 'jpg' : ref.mediaType.slice(6)
+                images.push({ ...ref, name: typeof ref.name === 'string' && ref.name.trim() ? ref.name : `image-${images.length + 1}.${suffix}` })
+              }
             } else if (event.type === 'turn/end' && data.turn === matchedTurn) {
               if (data.reason?.kind !== 'completed') return stop('interrupted', '本次任务未正常完成，请在电脑或小程序核对状态；没有自动重发。')
-              if (!finalText) return stop('output-unavailable', '本次任务已结束，但没有可确认的最终文字回复，请在电脑或小程序查看。')
-              completion = finalText
+              if (!finalText && !files.size && !images.length) return stop('output-unavailable', '本次任务已结束，但没有可确认的最终文字回复，请在电脑或小程序查看。')
+              completion = finalText || '已生成文件。'
               if (accepted) finish(undefined, completion)
             }
           }
@@ -245,24 +412,23 @@ export class DshClawbotHost implements ClawbotHost {
         // Native prompt checks its signal only before admission. Deliberately
         // detach this signal from the external observer once dispatch starts.
         // No cancel, preset selection, ownerInput proof or fallback retry exists.
-        const submit = () => {
-          if (settled || signal.aborted) return
-          const gateway = this.gateway()
-          const live = this.ctx.get('sessions')?.get(input.sessionId)
-          if (live && !checkSubject(live)) return
-          const liveAgent = this.ctx.get('agents')?.get(input.sessionId)
-          if (liveAgent && (liveAgent.status === 'running' || liveAgent.inbox?.hasPending
-            || liveAgent.inbox?.nextTurn?.length || liveAgent.inbox?.nextStep?.length)) {
-            stop('busy', '此会话正在运行或有排队消息，请先在电脑或小程序处理。')
-            return
-          }
-          // The installed native prompt has no generation precondition. This
-          // immediate check plus event identity checks fail closed for observed
-          // resets; they cannot provide CAS inside the native async dispatcher.
-          this.assertAccess?.()
-          dispatched = true
-          return Promise.resolve(gateway.invoke({ namespace: 'session', method: 'prompt', args: { request: {
-          sessionId: input.sessionId, requestId: input.requestId, mode: 'queue', content: [{ type: 'text', text: input.text }],
+        const gateway = this.gateway()
+        if (this.archived().has(input.sessionId)) { stop('not-found', '此会话已归档，本条消息未发送。'); return }
+        const live = this.ctx.get('sessions')?.get(input.sessionId)
+        if (live && !checkSubject(live)) return
+        const liveAgent = this.ctx.get('agents')?.get(input.sessionId)
+        if (liveAgent && (liveAgent.status === 'running' || liveAgent.inbox?.hasPending
+          || liveAgent.inbox?.nextTurn?.length || liveAgent.inbox?.nextStep?.length)) {
+          stop('busy', '此会话正在运行或有排队消息，请先在电脑或小程序处理。')
+          return
+        }
+        // The installed native prompt has no generation precondition. This
+        // immediate check plus event identity checks fail closed for observed
+        // resets; they cannot provide CAS inside the native async dispatcher.
+        input.checkAdmission?.(); this.assertAccess?.()
+        dispatched = true
+        void Promise.resolve(gateway.invoke({ namespace: 'session', method: 'prompt', args: { request: {
+          sessionId: input.sessionId, requestId: input.requestId, mode: 'queue', content: prepared.content,
         } }, signal: new AbortController().signal })).then((receipt: unknown) => {
           if (settled) return
           if (!row(receipt) || receipt.accepted !== true) return stop('delivery-unknown', '无法确认电脑是否接收本次消息，请在电脑或小程序核对，勿重复发送。')
@@ -273,18 +439,10 @@ export class DshClawbotHost implements ClawbotHost {
           const code = row(error) ? error.code : undefined
           if (code === 'session/agent-busy' || code === 'session/writer-held') {
             stop('busy', '原生会话当前被占用或不能接收此消息，请在电脑或小程序核对；没有自动重发。')
+          } else if (code === 'session/attachment-invalid') {
+            finish(fail('attachment-rejected', '当前模型或原生会话不支持此附件，本条消息未发送。请在电脑或小程序检查附件和所选模型。', 'not-submitted'))
           } else stop('delivery-unknown', '本次发送未获得可确认的接收结果，请在电脑或小程序核对，勿重复发送。')
-          })
-        }
-        if (onQuestion) {
-          questions = new DshQuestionBridge(this.ctx, agent => !settled && completion === undefined && dispatched
-            && matchedTurn !== undefined && currentTurn === matchedTurn && !foreignInput && agent.id === input.sessionId
-            && this.ctx.get('agents')?.get(input.sessionId) === agent && agent.session === observedSession
-            && agent.session?.header?.createdAt === generation && this.ctx.get('sessions')?.get(input.sessionId) === agent.session,
-          onQuestion, () => { if (!settled && matchedTurn !== undefined) notify('question') }, this.assertAccess)
-          questions.start()
-        }
-        void submit()
+        })
       } catch { stop('delivery-unknown', dispatched
         ? '本次发送结果不明，请在电脑或小程序核对，勿重复发送。'
         : '未能建立本次回复观察，请稍后在电脑或小程序核对。') }

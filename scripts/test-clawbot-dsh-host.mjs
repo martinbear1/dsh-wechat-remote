@@ -24,6 +24,7 @@ function fixture() {
     rows: [{ sessionId: 's1', cwd: 'fixture-workspace', projections: { values: { title: 'Target' } } }],
     archived: [], observersDisposed: 0, prompt: async () => ({ accepted: true }),
     emit(name, ...args) { for (const listener of [...listeners.get(name) ?? []]) listener(...args) },
+    askNative(request, next) { return [...listeners.get('user-questions/request') ?? []][0](request, next) },
     event(type, data, id = 's1') { const s = sessions.get(id); h.emit('session/event', s, { seq: s.seq++, type, data }) },
     turn(turn = 3, requestId = 'r1') {
       h.event('turn/start', { turn })
@@ -248,6 +249,26 @@ test('a live native Agent may keep its retired preset revision', async () => {
   const promise = h.host.run(input(), signal()); await h.started
   h.turn(); h.assistant(); h.end()
   assert.deepEqual(await promise, { text: 'the answer' })
+})
+
+test('local input in the same session immediately delegates a claimed private question without cancelling it', async () => {
+  const h = fixture(), agent = { id: 's1', status: 'idle', session: h.sessions.get('s1') }
+  h.agents.set('s1', agent)
+  const questions = [], run = h.host.run(input(), signal(), () => {}, q => questions.push(q))
+  const rejected = assert.rejects(run, failure('ambiguous-turn'))
+  await h.started; h.turn()
+  let nextCalls = 0
+  const fallback = deferred(), nativeLife = new AbortController()
+  const native = h.askNative({ agent, questions: [{ id: 'q', question: 'Pick?' }], signal: nativeLife.signal },
+    () => { nextCalls++; return fallback.promise })
+  assert.equal(questions.length, 1); assert.equal(nextCalls, 0)
+  h.event('user/message', { source: { kind: 'user', rpcId: 'desktop-input' }, content: [{ type: 'text', text: 'local work' }] })
+  assert.equal(nextCalls, 1); assert.equal(questions[0].signal.aborted, true)
+  assert.equal(nativeLife.signal.aborted, false)
+  await rejected; await assert.rejects(questions[0].answer({ answers: [{ id: 'q', selected: [], custom: 'late' }] }), /已结束/)
+  const result = { answers: [{ id: 'q', selected: [], custom: 'native owner' }] }
+  fallback.resolve(result); assert.equal(await native, result); assert.equal(h.calls().length, 1)
+  assert.equal(h.listenerCount(), 0)
 })
 
 test('preexisting running/queued Agent is busy and sends nothing', async () => {

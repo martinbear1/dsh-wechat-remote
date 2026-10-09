@@ -1,10 +1,11 @@
-import { ClawbotError, type ClawbotAttention, type ClawbotHost, type ClawbotSession } from './contracts.js'
+import { ClawbotError, type ClawbotAttention, type ClawbotHost, type ClawbotQuestion, type ClawbotSession } from './contracts.js'
 import { assertColdSessionPresetAvailable } from '../dsh-host-contract.js'
+import { DshQuestionBridge } from './dsh-questions.js'
 
 type Row = Record<string, any>
 export interface DshClawbotContext {
   get(name: string): any
-  on(name: any, listener: (...args: any[]) => void, options?: { global: boolean }): () => void
+  on(name: any, listener: (...args: any[]) => any, options?: { global?: boolean; prepend?: boolean }): () => void
 }
 export type DshClawbotSubmission = 'not-submitted' | 'unknown' | 'accepted'
 /** A receipt for observing a run, never authority to replay its prompt. */
@@ -31,7 +32,8 @@ const MAX_OBSERVATION_MS = 15 * 60 * 1000
  * user/message, assistant/message, turn/end are the correlation boundaries.
  * dsh-session/lib/index.js:1400-1473: seq is the next append offset and
  * session/event observers run synchronously after the event enters the log.
- * This adapter owns no Agent/preset/tool; it never opens the phone mux/$events.
+ * This adapter owns no Agent/preset/tool or phone mux. Its scoped plain-question
+ * answerer claims only this run, then answers or delegates to the native UI.
  */
 export class DshClawbotHost implements ClawbotHost {
   private readonly running = new Set<string>()
@@ -112,7 +114,7 @@ export class DshClawbotHost implements ClawbotHost {
   }
 
   async run(input: { sessionId: string; requestId: string; text: string; expectedGeneration: number }, signal: AbortSignal,
-    onAttention?: (kind: ClawbotAttention) => void): Promise<{ text: string }> {
+    onAttention?: (kind: ClawbotAttention) => void, onQuestion?: (question: ClawbotQuestion) => void): Promise<{ text: string }> {
     if (!id(input.sessionId) || !id(input.requestId) || typeof input.text !== 'string' || !input.text.trim()
       || !Number.isSafeInteger(input.expectedGeneration)
       || Buffer.byteLength(input.text) > MAX_TEXT_BYTES) throw fail('invalid-input', '消息或会话标识无效。')
@@ -137,16 +139,18 @@ export class DshClawbotHost implements ClawbotHost {
       }
       await this.checkPreset(input.sessionId, signal)
       signal.throwIfAborted()
-      return await this.observeAndSubmit(input, generation, cursor, signal, onAttention)
+      return await this.observeAndSubmit(input, generation, cursor, signal, onAttention, onQuestion)
     } finally { this.running.delete(input.sessionId) }
   }
 
   private observeAndSubmit(input: { sessionId: string; requestId: string; text: string }, generation: number,
-    cursor: number, signal: AbortSignal, onAttention?: (kind: ClawbotAttention) => void): Promise<{ text: string }> {
+    cursor: number, signal: AbortSignal, onAttention?: (kind: ClawbotAttention) => void,
+    onQuestion?: (question: ClawbotQuestion) => void): Promise<{ text: string }> {
     return new Promise((resolve, reject) => {
       let settled = false, dispatched = false, accepted = false, currentTurn: number | undefined
       let matchedTurn: number | undefined, foreignInput = false, finalText: string | undefined, completion: string | undefined
       let observedSession: Row | undefined, eventCount = 0
+      let questions: DshQuestionBridge | undefined
       const attention = new Set<ClawbotAttention>()
       const offs: (() => void)[] = []
       const submission = (): DshClawbotSubmission => accepted ? 'accepted' : dispatched ? 'unknown' : 'not-submitted'
@@ -154,6 +158,7 @@ export class DshClawbotHost implements ClawbotHost {
         if (settled) return
         settled = true
         clearTimeout(timer)
+        questions?.close()
         signal.removeEventListener('abort', abort)
         for (const off of offs.splice(0)) { try { off() } catch { /* no observer may remain */ } }
         if (error) reject(error); else resolve({ text: text! })
@@ -212,7 +217,8 @@ export class DshClawbotHost implements ClawbotHost {
           } else if (matchedTurn !== undefined && currentTurn === matchedTurn) {
             if (event.type === 'approval/asked') return notify('approval')
             if (event.type === 'tool/call' && data.name === 'ask_user_question') {
-              return notify('question')
+              if (!questions?.ready) notify('question')
+              return
             }
             if (event.type === 'assistant/message' && data.turn === matchedTurn) {
               const content = data.message?.content
@@ -239,15 +245,23 @@ export class DshClawbotHost implements ClawbotHost {
         // Native prompt checks its signal only before admission. Deliberately
         // detach this signal from the external observer once dispatch starts.
         // No cancel, preset selection, ownerInput proof or fallback retry exists.
-        const gateway = this.gateway()
-        const live = this.ctx.get('sessions')?.get(input.sessionId)
-        if (live && !checkSubject(live)) return
-        // The installed native prompt has no generation precondition. This
-        // immediate check plus event identity checks fail closed for observed
-        // resets; they cannot provide CAS inside the native async dispatcher.
-        this.assertAccess?.()
-        dispatched = true
-        void Promise.resolve(gateway.invoke({ namespace: 'session', method: 'prompt', args: { request: {
+        const submit = () => {
+          if (settled || signal.aborted) return
+          const gateway = this.gateway()
+          const live = this.ctx.get('sessions')?.get(input.sessionId)
+          if (live && !checkSubject(live)) return
+          const liveAgent = this.ctx.get('agents')?.get(input.sessionId)
+          if (liveAgent && (liveAgent.status === 'running' || liveAgent.inbox?.hasPending
+            || liveAgent.inbox?.nextTurn?.length || liveAgent.inbox?.nextStep?.length)) {
+            stop('busy', '此会话正在运行或有排队消息，请先在电脑或小程序处理。')
+            return
+          }
+          // The installed native prompt has no generation precondition. This
+          // immediate check plus event identity checks fail closed for observed
+          // resets; they cannot provide CAS inside the native async dispatcher.
+          this.assertAccess?.()
+          dispatched = true
+          return Promise.resolve(gateway.invoke({ namespace: 'session', method: 'prompt', args: { request: {
           sessionId: input.sessionId, requestId: input.requestId, mode: 'queue', content: [{ type: 'text', text: input.text }],
         } }, signal: new AbortController().signal })).then((receipt: unknown) => {
           if (settled) return
@@ -260,7 +274,17 @@ export class DshClawbotHost implements ClawbotHost {
           if (code === 'session/agent-busy' || code === 'session/writer-held') {
             stop('busy', '原生会话当前被占用或不能接收此消息，请在电脑或小程序核对；没有自动重发。')
           } else stop('delivery-unknown', '本次发送未获得可确认的接收结果，请在电脑或小程序核对，勿重复发送。')
-        })
+          })
+        }
+        if (onQuestion) {
+          questions = new DshQuestionBridge(this.ctx, agent => !settled && completion === undefined && dispatched
+            && matchedTurn !== undefined && currentTurn === matchedTurn && !foreignInput && agent.id === input.sessionId
+            && this.ctx.get('agents')?.get(input.sessionId) === agent && agent.session === observedSession
+            && agent.session?.header?.createdAt === generation && this.ctx.get('sessions')?.get(input.sessionId) === agent.session,
+          onQuestion, () => { if (!settled && matchedTurn !== undefined) notify('question') }, this.assertAccess)
+          questions.start()
+        }
+        void submit()
       } catch { stop('delivery-unknown', dispatched
         ? '本次发送结果不明，请在电脑或小程序核对，勿重复发送。'
         : '未能建立本次回复观察，请稍后在电脑或小程序核对。') }

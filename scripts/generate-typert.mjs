@@ -40,6 +40,8 @@ try {
     'clawbot/ilink.ts',
     'clawbot/ilink-types.ts',
     'clawbot/dsh-host.ts',
+    'clawbot/dsh-questions.ts',
+    'clawbot/question-text.ts',
     'collaboration.ts',
     'gate-runtime.ts',
     'pairing-management.ts',

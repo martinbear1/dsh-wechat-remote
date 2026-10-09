@@ -18,6 +18,8 @@ export interface Receipt {
   output?: string
   parts?: string[]
   sentParts?: number
+  /** Question notice outbox only: sealed with the original task, including after restart. */
+  parentId?: string
 }
 export interface ClawbotData {
   version: 1
@@ -49,6 +51,7 @@ export function validateClawbotData(data: ClawbotData): void {
     || data.receipts.some(r => !r || typeof r.id !== 'string' || !/^[a-f0-9]{64}$/.test(r.id) || typeof r.userId !== 'string'
       || typeof r.contextToken !== 'string' || typeof r.input !== 'string' || r.input.length > 8000 || !validTarget(r.target)
       || !Number.isSafeInteger(r.createdAt) || !Number.isSafeInteger(r.revision)
+      || r.parentId !== undefined && (typeof r.parentId !== 'string' || !/^[a-f0-9]{64}$/.test(r.parentId) || r.parentId === r.id)
       || !['pending', 'running', 'ready', 'sending', 'done', 'uncertain'].includes(r.state)
       || r.output !== undefined && (typeof r.output !== 'string' || r.output.length > 14000)
       || r.parts !== undefined && (!Array.isArray(r.parts) || !r.parts.length || r.parts.length > 100

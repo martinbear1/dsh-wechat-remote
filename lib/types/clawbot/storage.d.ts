@@ -12,6 +12,8 @@ export interface Receipt {
     output?: string;
     parts?: string[];
     sentParts?: number;
+    /** Question notice outbox only: sealed with the original task, including after restart. */
+    parentId?: string;
 }
 export interface ClawbotData {
     version: 1;

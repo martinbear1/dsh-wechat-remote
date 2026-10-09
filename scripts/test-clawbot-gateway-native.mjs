@@ -60,6 +60,8 @@ try {
   const { TYPERT } = await load('@deepseek-ai/dsh-api-session-controller/typert')
   const { default: Typert } = await load('@deepseek-ai/dsh-typert-registry')
   const { TypertGatewayService } = await load('@deepseek-ai/dsh-api-gateway')
+  const { HostConnectionService } = await load('@deepseek-ai/dsh-client-connection')
+  const remoteEvents = await load('@deepseek-ai/dsh-api-remotes')
   const { default: Loader } = await load('@deepseek-ai/cordis-plugin-loader')
   const { default: AgentPresets } = await load('@deepseek-ai/dsh-agent-preset-registry')
   const { default: UserQuestionService } = await load('@deepseek-ai/dsh-user-questions')
@@ -117,7 +119,7 @@ try {
   const safeFailures = []
   const hostCtx = { get(name) {
     if (name !== 'typertGateway') return ctx.get(name)
-    return { async invoke(request) {
+    return { wireStream: gateway.wireStream, async invoke(request) {
       if (request.method === 'prompt') nativePrompts++
       try { return await gateway.invoke(request) }
       catch (error) { safeFailures.push({ method: request.method, code: error?.code, name: error?.name, message: error?.message }); throw error }
@@ -206,6 +208,166 @@ try {
   console.log(JSON.stringify({ scenario: 'native approval audit pair, deferred decision, same-turn final', approvalNotices, approvalResult,
     nativePrompts, modelCalls, networkCalls }, null, 2))
   stopApprover(); stopTool()
+  // Only the synthetic Desktop uses Remote Events. The plugin's scoped
+  // answerer must never register a global client or touch pending deliveries.
+  new HostConnectionService(ctx, [], {})
+  ctx.provide('profileContext', { name: 'native-question-fixture', home: work, dir: work, installAnchor: anchor })
+  await ctx.plugin(remoteEvents)
+  const desktopLife = new AbortController()
+  const empty = { async *[Symbol.asyncIterator]() {} }
+  const desktopEvents = (await gateway.wireStream.open('$events', { args: {} }, empty, undefined, desktopLife.signal))[Symbol.asyncIterator]()
+  const desktopReady = (await desktopEvents.next()).value
+  assert.equal(desktopReady.type, 'ready')
+  const nextDesktop = async type => {
+    for (;;) {
+      const frame = await desktopEvents.next()
+      assert.equal(frame.done, false)
+      if (frame.value.type === type) return frame.value
+    }
+  }
+  const respondDesktopOutcome = async (frame, outcome) => {
+    const response = await ctx.connection.createSharedFetchHandler('/api').fetch(new Request('http://dsh.local/api/$events/result', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ type: 'client-request',
+        rpcId: 'native-desktop-' + frame.eventId, method: '$events/result', payload: { args: {
+          clientId: desktopReady.clientId, eventId: frame.eventId, outcome,
+        } } }),
+    }))
+    const reply = await response.json(); assert.equal(reply.result.ok, true)
+  }
+  const respondDesktop = (frame, value) => respondDesktopOutcome(frame, { kind: 'result', value })
+  approvalScenario = false; questionScenario = true
+  for (const winner of ['clawbot', 'handoff']) {
+    questionModelCalls = 0
+    const questionReady = Promise.withResolvers(), privateNotices = [], beforePrivate = agent.session.seq
+    const privateRun = host.run({ sessionId: agent.id, requestId: 'clawbot-' + (winner === 'clawbot' ? 'e' : 'f').repeat(64),
+      text: 'native ' + winner + ' question test', expectedGeneration: target.generation }, AbortSignal.timeout(10000),
+      kind => privateNotices.push(kind), question => questionReady.resolve(question))
+    const question = await questionReady.promise
+    assert.deepEqual(privateNotices, [], 'no duplicate generic handoff notice')
+    const humanAnswer = { answers: [{ id: 'confirm', selected: ['Continue'] }] }
+    if (winner === 'clawbot') {
+      await question.answer(humanAnswer)
+    } else {
+      question.handoff()
+      const desktopFrame = await nextDesktop('waterfall')
+      assert.equal(desktopFrame.event, 'user-questions/request')
+      await respondDesktop(desktopFrame, humanAnswer)
+      await new Promise(setImmediate)
+      assert.equal(question.signal.aborted, true)
+      await assert.rejects(question.answer(humanAnswer), /已结束/)
+    }
+    assert.deepEqual(await privateRun, { text: 'synthetic answer continued' })
+    await agent.whenIdle()
+    const privateEvents = agent.session.snapshotEvents().filter(event => event.seq >= beforePrivate)
+    assert.equal(privateEvents.filter(event => event.type === 'user/message' && event.data.source.kind === 'user').length, 1)
+    assert.equal(privateEvents.filter(event => event.type === 'turn/end').length, 1)
+    assert.equal(questionModelCalls, 2)
+    assert.equal(networkCalls, 0)
+    console.log(JSON.stringify({ scenario: `native scoped question, ${winner}, same-turn final`, nativePrompts, modelCalls,
+      networkCalls, userMessageCount: 1, turnEnds: 1 }, null, 2))
+  }
+  // Begin a real native question before ClawBot starts. Its sole Desktop
+  // next must still reach NO_PROVIDER while the owned question is claimed.
+  const otherAgent = await loop.create('other-native-question-agent', model, { cwd: work })
+  const foreignAsk = ctx.userQuestions.ask({ agent: otherAgent, questions: [{ id: 'other', question: 'Foreign question' }],
+    signal: AbortSignal.timeout(5000) })
+  const foreignFailure = assert.rejects(foreignAsk, error => error.code === 'NO_PROVIDER')
+  const foreignFrame = await nextDesktop('waterfall')
+  assert.equal(foreignFrame.agentId, otherAgent.id)
+  questionModelCalls = 0
+  const ownedQuestion = Promise.withResolvers()
+  const foreignRun = host.run({ sessionId: agent.id, requestId: 'clawbot-' + 'g'.repeat(64), text: 'foreign isolation test',
+    expectedGeneration: target.generation }, AbortSignal.timeout(10000), () => {}, q => ownedQuestion.resolve(q))
+  const owned = await ownedQuestion.promise
+  assert.equal(owned.signal.aborted, false)
+  await respondDesktopOutcome(foreignFrame, { kind: 'next' })
+  await foreignFailure
+  await owned.answer({ answers: [{ id: 'confirm', selected: ['Continue'] }] })
+  assert.deepEqual(await foreignRun, { text: 'synthetic answer continued' }); await agent.whenIdle()
+  assert.equal(nativePrompts, 6); assert.equal(modelCalls, 11); assert.equal(networkCalls, 0)
+  console.log(JSON.stringify({ scenario: 'preexisting foreign Desktop question completes next without a ClawBot delivery',
+    nativePrompts, modelCalls, networkCalls }, null, 2))
+  // Approval is not claimed: the real native Desktop remains its owner,
+  // while an ordinary owned private question keeps its independent lifetime.
+  questionModelCalls = 0
+  const beforeApprovalQuestion = Promise.withResolvers(), nativeApprovalNotices = []
+  const approvalIsolationRun = host.run({ sessionId: agent.id, requestId: 'clawbot-' + 'h'.repeat(64), text: 'approval isolation test',
+    expectedGeneration: target.generation }, AbortSignal.timeout(10000), kind => nativeApprovalNotices.push(kind), q => beforeApprovalQuestion.resolve(q))
+  const approvalOwned = await beforeApprovalQuestion.promise
+  const approvalPending = ctx.approval.request({ agent, toolName: 'synthetic_native_external_approval', signal: AbortSignal.timeout(5000) })
+  const nativeApprovalFrame = await nextDesktop('waterfall')
+  assert.equal(nativeApprovalFrame.event, 'approval/request'); assert.equal(approvalOwned.signal.aborted, false)
+  await respondDesktop(nativeApprovalFrame, 'allowed-once'); assert.equal(await approvalPending, 'allowed-once')
+  await approvalOwned.answer({ answers: [{ id: 'confirm', selected: ['Continue'] }] })
+  assert.deepEqual(await approvalIsolationRun, { text: 'synthetic answer continued' }); await agent.whenIdle()
+  assert(nativeApprovalNotices.includes('approval'))
+  assert.equal(nativePrompts, 7); assert.equal(modelCalls, 13); assert.equal(networkCalls, 0)
+  console.log(JSON.stringify({ scenario: 'native approval stays in Desktop without changing the claimed ordinary question',
+    nativePrompts, modelCalls, networkCalls }, null, 2))
+  // Full local channel path: fake Tencent updates -> actual runtime parser ->
+  // actual host answerer -> installed native ask() -> same-turn final reply.
+  // No private method invocation, real account, network or live profile.
+  const sourceModule = async name => {
+    const built = await build({ entryPoints: [fileURLToPath(new URL(`../src/clawbot/${name}.ts`, import.meta.url))],
+      bundle: true, write: false, platform: 'node', format: 'esm', target: 'node22',
+      banner: { js: `import { createRequire } from 'node:module'; const require = createRequire(${JSON.stringify(import.meta.url)});` } })
+    return import('data:text/javascript;base64,' + Buffer.from(built.outputFiles[0].contents).toString('base64'))
+  }
+  const { ClawbotRuntime } = await sourceModule('runtime')
+  const { emptyClawbotData } = await sourceModule('storage')
+  const auth = { token: 'synthetic-token', baseUrl: 'https://ilinkai.weixin.qq.com', accountId: 'fixture@im.bot', userId: 'fixture@im.wechat' }
+  const memory = { data: { ...emptyClawbotData(), credentials: auth, target },
+    read() { return structuredClone(this.data) }, write(value) { this.data = structuredClone(value) }, close() {} }
+  let pollReply
+  const sent = [], fakeClient = {
+    getUpdates(_auth, _cursor, signal) {
+      return new Promise((resolve, reject) => {
+        const abort = () => { pollReply = undefined; reject(signal.reason) }
+        pollReply = value => { pollReply = undefined; signal.removeEventListener('abort', abort); resolve(value) }
+        if (signal.aborted) abort(); else signal.addEventListener('abort', abort, { once: true })
+      })
+    },
+    async sendText(_auth, request) { sent.push(request.text) },
+  }
+  const until = async predicate => {
+    for (let i = 0; i < 300; i++) { if (predicate()) return; await new Promise(setImmediate) }
+    assert.fail('synthetic channel did not reach expected state')
+  }
+  let incomingCount = 0
+  const receive = async text => {
+    await until(() => pollReply)
+    pollReply({ cursor: 'fixture-' + ++incomingCount, messages: [{ id: String(incomingCount), text,
+      userId: auth.userId, contextToken: 'synthetic-context' }] })
+    await new Promise(setImmediate)
+  }
+  questionModelCalls = 0
+  const promptsBeforeRuntime = nativePrompts, beforeRuntime = agent.session.seq
+  const runtime = new ClawbotRuntime(memory, host, fakeClient)
+  try {
+    await runtime.control({ action: 'enabled', enabled: true, expectedRevision: runtime.snapshot().revision }, AbortSignal.timeout(5000))
+    await receive('synthetic runtime question')
+    await until(() => sent.some(text => /\/回答 Q[A-F0-9]{10}/.test(text)))
+    const code = sent.find(text => /\/回答 Q[A-F0-9]{10}/.test(text)).match(/\/回答 (Q[A-F0-9]{10})/)[1]
+    assert.equal(nativePrompts, promptsBeforeRuntime + 1); assert.equal(questionModelCalls, 1)
+    await receive('1')
+    assert.equal(questionModelCalls, 1, 'ordinary text is not a structured native answer')
+    assert.equal(nativePrompts, promptsBeforeRuntime + 1)
+    await receive(`/回答 ${code} 1`)
+    await until(() => sent.some(text => text.includes('回答已提交'))
+      && sent.filter(text => text.includes('synthetic answer continued')).length === 2)
+    await until(() => memory.data.receipts.every(receipt => receipt.state === 'done' || receipt.state === 'uncertain'))
+    await agent.whenIdle()
+    const runtimeEvents = agent.session.snapshotEvents().filter(event => event.seq >= beforeRuntime)
+    const userInputs = runtimeEvents.filter(event => event.type === 'user/message' && event.data.source.kind === 'user')
+    assert.equal(userInputs.length, 2, 'only the original request and separately queued ordinary text are prompts')
+    assert.equal(nativePrompts, promptsBeforeRuntime + 2, 'the /回答 command creates no prompt')
+    assert.equal(runtimeEvents.filter(event => event.type === 'tool/call').length, 1)
+    assert.equal(runtimeEvents.filter(event => event.type === 'turn/end').length, 2)
+    assert.equal(networkCalls, 0)
+    console.log(JSON.stringify({ scenario: 'runtime /回答 -> native ask -> final; ordinary text queues separately',
+      nativePrompts, modelCalls, networkCalls, nativeInputs: userInputs.length }, null, 2))
+  } finally { await runtime.dispose() }
+  desktopLife.abort(); await desktopEvents.return?.()
   ctx.baseUrl = pathToFileURL(path.join(work, 'dsh/')).href
   await ctx.plugin(Loader)
   await ctx.plugin(AgentPresets, { default: 'standard' })
@@ -219,7 +381,7 @@ try {
   assert.equal(coldFailure?.code, 'clawbot-host/preset-unavailable')
   assert.equal(coldFailure?.submission, 'not-submitted')
   assert.equal(safeFailures.length, 0)
-  assert.equal(nativePrompts, 3); assert.equal(modelCalls, 5); assert.equal(networkCalls, 0)
+  assert.equal(nativePrompts, 9); assert.equal(modelCalls, 16); assert.equal(networkCalls, 0)
   assert.equal(coldResult.sessionCreated, false); assert.equal(coldResult.agentCreated, false)
   await unregister()
   }

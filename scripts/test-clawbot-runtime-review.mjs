@@ -1344,3 +1344,255 @@ test('safety: a second same-profile owner is rejected and cannot remove the firs
     assert.throws(() => new FileClawbotStorage(fixture.directory), /另一个实例/)
   } finally { fixture.close() }
 })
+
+async function questionFixture(patch = {}) {
+  const storage = memory(seed()), sent = [], runs = [], answers = [], handoffs = [], native = deferred(), gate = featureGate()
+  let onQuestion, count = 0
+  const runtime = new ClawbotRuntime(storage, host(async (input, abort, _attention, publish) => {
+    runs.push(input); onQuestion = publish
+    if (runs.length > 1) return { text: 'ordinary chat reply' }
+    abort.addEventListener('abort', () => native.resolve({ text: 'stopped observation' }), { once: true })
+    return native.promise
+  }), client({ async sendText(_auth, message) { sent.push(message.text) }, ...patch.client }), Date.now, gate)
+  const send = async (text, id = `q-in-${++count}`, userId = auth.userId) => {
+    runtime.ingest([{ ...incoming(id, text), userId }], `cursor-${count}`); runtime.work(); await setImmediate()
+  }
+  await enabled(runtime, true); await send('begin original task')
+  const ask = async (questions = [{ id: 'choice', question: 'Which?', options: [{ label: 'A' }, { label: 'B' }] }], reply = async () => {}) => {
+    const cancel = new AbortController(), start = sent.length, id = `native-${++count}`
+    let settled = false
+    onQuestion({ id, questions, signal: cancel.signal,
+      async answer(value) { assert.equal(settled, false); settled = true; answers.push(value); await reply(value); cancel.abort() },
+      handoff() { if (settled || cancel.signal.aborted) return; settled = true; handoffs.push(id); cancel.abort() } })
+    await setImmediate()
+    const codes = [...new Set(sent.slice(start).join('\n').match(/Q[A-F0-9]{10}/g) || [])]
+    return { cancel, codes }
+  }
+  return { runtime, storage, sent, runs, answers, handoffs, native, gate, ask, send,
+    async close() { native.resolve({ text: 'final result' }); await setImmediate(); await runtime.dispose() } }
+}
+
+test('private answer bypasses the waiting task without another prompt, and duplicate messages or codes never answer twice', async () => {
+  const f = await questionFixture()
+  try {
+    const { codes } = await f.ask(); assert.equal(codes.length, 1)
+    await f.send(`/回答 ${codes[0]} 2`, 'same-answer')
+    assert.deepEqual(f.answers, [{ answers: [{ id: 'choice', selected: ['B'] }] }]); assert.equal(f.runs.length, 1)
+    await f.send(`/回答 ${codes[0]} 1`, 'same-answer'); await f.send(`/回答 ${codes[0]} 1`)
+    assert.equal(f.answers.length, 1); assert.match(f.sent.join('\n'), /已失效或已处理/)
+    f.native.resolve({ text: 'same native turn continued' }); await setImmediate()
+    assert.equal(f.sent.filter(text => text.includes('same native turn continued')).length, 1)
+  } finally { await f.close() }
+})
+
+test('native question batches preserve single, multi and free-text values and only submit when the whole batch is answered', async () => {
+  const f = await questionFixture()
+  try {
+    const { codes } = await f.ask([
+      { id: 'single', question: 'Pick', options: [{ label: 'A' }, { label: 'B' }] },
+      { id: 'multi', question: 'Pick several', multiSelect: true, options: [{ label: 'X' }, { label: 'Y' }] },
+      { id: 'free', question: 'Explain' },
+    ])
+    assert.equal(codes.length, 3)
+    await f.send(`/回答 ${codes[0]} 1,2`); assert.equal(f.answers.length, 0)
+    await f.send(`/回答 ${codes[0]} 2`); await f.send(`/回答 ${codes[0]} 1`)
+    await f.send(`/回答 ${codes[1]} 1,2`); assert.equal(f.answers.length, 0)
+    await f.send(`/回答 ${codes[2]} 文字 保留数字 1\n第二行`)
+    assert.deepEqual(f.answers, [{ answers: [
+      { id: 'single', selected: ['B'] }, { id: 'multi', selected: ['X', 'Y'] },
+      { id: 'free', selected: [], custom: '保留数字 1\n第二行' },
+    ] }])
+    assert.equal(f.runs.length, 1)
+    const later = await f.ask(); await f.send(`/回答 ${later.codes[0]} 1`)
+    assert.equal(f.answers.length, 2, 'a later native question is not suppressed by the once-per-kind notice')
+  } finally { await f.close() }
+})
+
+test('ordinary chat never becomes a question answer, and unknown answer syntax never becomes a new prompt', async () => {
+  const f = await questionFixture()
+  try {
+    await f.ask(); await f.send('好'); await f.send('1'); await f.send('/回答 Q0000000000 1'); await f.send('/回答 bad')
+    assert.equal(f.answers.length, 0); assert.equal(f.runs.length, 1)
+    f.native.resolve({ text: 'answered elsewhere' }); await setImmediate()
+    assert.deepEqual(f.runs.map(r => r.text), ['begin original task', '好', '1'])
+    assert.equal(f.answers.length, 0)
+  } finally { await f.close() }
+})
+
+test('oversized combined UTF-8 answers are rejected before consuming the question capability', async () => {
+  const f = await questionFixture()
+  try {
+    const { codes } = await f.ask([{ id: 'first', question: 'First?' }, { id: 'second', question: 'Second?' }])
+    await f.send(`/回答 ${codes[0]} 文字 ${'字'.repeat(6000)}`)
+    await f.send(`/回答 ${codes[1]} 文字 ${'字'.repeat(6000)}`)
+    assert.equal(f.answers.length, 0); assert.match(f.sent.at(-1), /本题尚未记录/)
+    await f.send(`/回答 ${codes[1]} 文字 简短回答`)
+    assert.equal(f.answers.length, 1); assert.equal(f.answers[0].answers[1].custom, '简短回答')
+  } finally { await f.close() }
+})
+
+test('switching target never retargets a question; only the bound sender can answer the captured original task', async () => {
+  const f = await questionFixture()
+  try {
+    const { codes } = await f.ask()
+    await f.runtime.control({ action: 'route', sessionId: sessions[1].id, expectedRevision: f.runtime.snapshot().revision }, signal())
+    await f.send(`/回答 ${codes[0]} 1`, 'foreign', 'another@im.wechat'); assert.equal(f.answers.length, 0)
+    await f.send(`/回答 ${codes[0]} 2`)
+    assert.equal(f.answers.length, 1); assert.equal(f.runs[0].sessionId, sessions[0].id)
+    assert.match(f.sent.at(-1), /【A】/); assert.equal(f.storage.data.target.id, sessions[1].id)
+  } finally { await f.close() }
+})
+
+test('Desktop completion, native cancellation and original observation end invalidate question codes', async () => {
+  for (const end of ['desktop', 'observation']) {
+    const f = await questionFixture()
+    try {
+      const { codes, cancel } = await f.ask()
+      if (end === 'desktop') cancel.abort()
+      else { f.native.resolve({ text: 'done' }); await setImmediate() }
+      await f.send(`/回答 ${codes[0]} 1`)
+      assert.equal(f.answers.length, 0); assert.match(f.sent.at(-1), /已失效或已处理/)
+    } finally { await f.close() }
+  }
+})
+
+test('uncertain native answer retires the code before awaiting and never retries after a new message', async () => {
+  const f = await questionFixture(), response = deferred()
+  try {
+    const { codes } = await f.ask(undefined, () => response.promise)
+    await f.send(`/回答 ${codes[0]} 1`); assert.equal(f.answers.length, 1)
+    await f.send(`/回答 ${codes[0]} 2`)
+    response.reject(Error('unknown native result')); await setImmediate()
+    assert.equal(f.answers.length, 1); assert.match(f.sent.join('\n'), /未能确认这次回答/)
+  } finally { response.resolve(); await f.close() }
+})
+
+test('revocation or disconnect during asynchronous command authorization cannot revive a question answer', async () => {
+  for (const action of ['revoke', 'disconnect']) {
+    const f = await questionFixture(), authority = deferred()
+    try {
+      const { codes } = await f.ask()
+      f.gate.authorize = () => authority.promise
+      await f.send(`/回答 ${codes[0]} 1`)
+      if (action === 'revoke') f.gate.allowed = false
+      else {
+        await enabled(f.runtime, false)
+        await f.runtime.control({ action: 'disconnect', expectedRevision: f.runtime.snapshot().revision, abandonPending: true }, signal())
+      }
+      authority.resolve(); await setImmediate()
+      assert.equal(f.answers.length, 0); assert.equal(f.runtime.snapshot().enabled, false)
+    } finally { authority.resolve(); await f.close() }
+  }
+})
+
+test('restart discards partial answers and seals unsent question notices without reconstructing a native answerer', async () => {
+  const f = await questionFixture()
+  let snapshot, code
+  try {
+    const first = await f.ask([{ id: 'one', question: 'One?' }, { id: 'two', question: 'Two?' }])
+    code = first.codes[1]; await f.send(`/回答 ${first.codes[0]} 文字 first`)
+    await enabled(f.runtime, false)
+    // Simulate an unsent durable question notice at crash. No capability is stored.
+    const notice = f.storage.data.receipts.find(r => r.parentId)
+    Object.assign(notice, { state: 'ready', output: 'stale question notice', parts: undefined, sentParts: undefined })
+    snapshot = structuredClone(f.storage.data)
+  } finally { await f.close() }
+  const sent = [], storage = memory(snapshot), runtime = new ClawbotRuntime(storage, host(() => assert.fail('no replay')), client({ async sendText(_a, m) { sent.push(m.text) } }))
+  try {
+    runtime.ingest([incoming('after-restart', `/回答 ${code} 文字 second`)], 'restart')
+    await enabled(runtime, true); await setImmediate()
+    assert.equal(f.answers.length, 0); assert.match(sent.join('\n'), /已失效或已处理/)
+    assert.ok(!sent.some(text => text.includes('stale question notice')))
+  } finally { await runtime.dispose() }
+})
+
+test('native review intents and oversized question batches fall back to the native UI without private answer codes', async () => {
+  for (const questions of [[{ id: 'plan', question: 'Approve?', intent: { kind: 'plan-review', approve: 'yes' }, options: [{ label: 'yes' }], detail: 'plan' }],
+    Array.from({ length: 9 }, (_, id) => ({ id: String(id), question: 'Too many?' }))]) {
+    const f = await questionFixture()
+    try { const asked = await f.ask(questions); assert.equal(asked.codes.length, 0); assert.match(f.sent.join('\n'), /小程序或电脑/); assert.equal(f.answers.length, 0) }
+    finally { await f.close() }
+  }
+})
+
+test('completed question retires remaining notice fragments without replaying an already-handed-off send', async () => {
+  const first = deferred(), sent = []
+  const f = await questionFixture({ client: { async sendText(_a, message) { sent.push(message.text); if (sent.length === 1) await first.promise } } })
+  try {
+    const { cancel } = await f.ask([{ id: 'long', question: '问'.repeat(1500) }])
+    assert.equal(sent.length, 1); cancel.abort(); first.resolve(); await setImmediate()
+    assert.equal(sent.length, 1)
+    assert.equal(f.storage.data.receipts.find(r => r.parentId).state, 'uncertain')
+    assert.equal(f.answers.length, 0)
+  } finally { first.resolve(); await f.close() }
+})
+
+test('answer acknowledgement persistence failure cannot make a native write replayable after restart', async () => {
+  const f = await questionFixture()
+  let snapshot, command
+  try {
+    const { codes } = await f.ask(undefined, async () => { f.storage.fail = true })
+    command = `/回答 ${codes[0]} 1`
+    await f.send(command)
+    assert.equal(f.answers.length, 1); assert.match(f.runtime.snapshot().message, /保存失败/)
+    snapshot = structuredClone(f.storage.data)
+  } finally { f.storage.fail = false; await f.close() }
+  const storage = memory(snapshot), sent = [], runtime = new ClawbotRuntime(storage, host(() => assert.fail('no replay')), client({ async sendText(_a, m) { sent.push(m.text) } }))
+  try {
+    await setImmediate(); runtime.ingest([incoming('new-answer-after-crash', command)], 'new')
+    runtime.work(); await setImmediate()
+    assert.equal(f.answers.length, 1); assert.match(sent.join('\n'), /已失效或已处理/)
+  } finally { await runtime.dispose() }
+})
+
+test('explicit native handoff discards a partial batch and never replays its task or private answers', async () => {
+  const f = await questionFixture()
+  try {
+    const { codes } = await f.ask([{ id: 'one', question: 'One?' }, { id: 'two', question: 'Two?' }])
+    await f.send(`/回答 ${codes[0]} 文字 first`)
+    await f.send(`/回答 ${codes[0]} 转原会话`)
+    assert.equal(f.handoffs.length, 1); assert.equal(f.answers.length, 0)
+    assert.match(f.sent.at(-1), /需重新填写/)
+    await f.send(`/回答 ${codes[1]} 文字 second`)
+    assert.match(f.sent.at(-1), /已失效或已处理/)
+    assert.equal(f.answers.length, 0); assert.equal(f.runs.length, 1)
+  } finally { await f.close() }
+})
+
+test('pause, lost access and disposal return private questions without cancelling the native task', async () => {
+  for (const end of ['pause', 'revoke', 'dispose', 'revoke-disk-failure']) {
+    const f = await questionFixture()
+    try {
+      const { codes } = await f.ask()
+      if (end === 'pause') await enabled(f.runtime, false)
+      else if (end === 'dispose') await f.runtime.dispose()
+      else {
+        f.gate.allowed = false; f.storage.fail = end === 'revoke-disk-failure'
+        assert.throws(() => f.runtime.currentAccess())
+      }
+      assert.equal(f.handoffs.length, 1); assert.equal(f.answers.length, 0); assert.equal(f.runs.length, 1)
+      if (end === 'pause') {
+        await enabled(f.runtime, true); await f.send(`/回答 ${codes[0]} 1`)
+        assert.equal(f.answers.length, 0); assert.match(f.sent.at(-1), /已失效或已处理/)
+      }
+    } finally { f.storage.fail = false; await f.close() }
+  }
+})
+
+test('failed private question delivery returns the original question immediately', async () => {
+  const f = await questionFixture({ client: { async sendText() { throw Error('synthetic send failure') } } })
+  try {
+    await f.ask(); assert.equal(f.handoffs.length, 1); assert.equal(f.answers.length, 0); assert.equal(f.runs.length, 1)
+    assert.equal(f.storage.data.receipts.find(r => r.parentId).state, 'uncertain')
+  } finally { await f.close() }
+})
+
+test('terminal receive failure returns private questions rather than holding them while disabled', async () => {
+  for (const code of ['clawbot-auth-expired', 'clawbot-capacity']) {
+    const poll = deferred(), f = await questionFixture({ client: { getUpdates() { return poll.promise } } })
+    try {
+      await f.ask(); poll.reject(Object.assign(Error('synthetic terminal receive failure'), { code })); await setImmediate()
+      assert.equal(f.runtime.snapshot().enabled, false); assert.equal(f.handoffs.length, 1); assert.equal(f.answers.length, 0)
+    } finally { poll.resolve({ messages: [], cursor: '' }); await f.close() }
+  }
+})

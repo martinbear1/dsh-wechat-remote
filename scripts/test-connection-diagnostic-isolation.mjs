@@ -140,12 +140,15 @@ test('actual client registration keeps diagnostic reset separate from assistant/
     } } },
     slots: { inject(_name, fn) { fn() }, register(spec) { if (spec.name === 'settings.section') injected = spec.inject(); return () => {} } },
   }
-  apply(ctx); assert.equal(calls.length, 0); assert.equal(handlers.size, 2)
+  apply(ctx); assert.equal(calls.length, 0); assert.equal(handlers.size, 3)
   let resets = 0, disposals = 0
   const originalReset = injected.assistants.reset, originalDispose = injected.assistants.dispose
   injected.assistants.reset = () => { resets++; originalReset() }
   injected.assistants.dispose = () => { disposals++; originalDispose() }
   injected.diagnostics.subscribe(() => { throw Error('injected diagnostic observer failure') })
+  injected.resourceConnection.subscribe(() => { throw Error('injected resource observer failure') })
+  const resourceResets = []
+  injected.resourceConnection.subscribe(() => resourceResets.push(injected.resourceConnection.getSnapshot()))
   try {
     await injected.diagnostics.diagnose(); const before = injected.store.getSnapshot()
     // Exercise both host emitter orders, not merely the currently registered order.
@@ -154,7 +157,9 @@ test('actual client registration keeps diagnostic reset separate from assistant/
       await injected.diagnostics.diagnose()
     }
     assert.equal(resets, 2)
-    effects.get('wechat connection diagnostics')(); assert.equal(handlers.size, 1)
+    assert.deepEqual(resourceResets, [1, 2], 'resource generation is independent of emitter order and broken observers')
+    effects.get('wechat connection diagnostics')(); assert.equal(handlers.size, 2)
+    effects.get('wechat resources client lifecycle')(); assert.equal(handlers.size, 1)
     for (const handler of handlers.keys()) handler(); assert.equal(resets, 3)
     effects.get('wechat assistant lifecycle')(); assert.equal(disposals, 1); assert.equal(handlers.size, 0)
     assert.doesNotThrow(() => effects.get('wechat shared page')())

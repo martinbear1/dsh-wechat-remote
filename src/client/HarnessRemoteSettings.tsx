@@ -14,6 +14,9 @@ import { ClawbotPanel, type ClawbotCall } from './ClawbotPanel.js'
 import type { FeatureCall } from './feature-client.js'
 import { ConnectionDiagnostics } from './ConnectionDiagnostics.js'
 import type { ConnectionDiagnosticStore } from './connection-diagnostic-store.js'
+import { MyResourcesPanel } from './MyResourcesPanel.js'
+import type { MyResourcesCall } from './my-resources-store.js'
+const absentResourceConnection = { subscribe: (_listener: () => void) => () => {}, getSnapshot: () => 0 }
 export type { HarnessRemoteHostDescription } from './pairing-client.js'
 
 export interface HarnessRemoteSettingsProps {
@@ -24,6 +27,8 @@ export interface HarnessRemoteSettingsProps {
   assistants?: AssistantStore
   clawbotCall?: ClawbotCall
   featureCall?: FeatureCall
+  resourcesCall?: MyResourcesCall
+  resourceConnection?: { subscribe: (listener: () => void) => () => void; getSnapshot: () => number }
 }
 
 function StatusDot({ ok, busy = false }: { ok: boolean; busy?: boolean }): JSX.Element {
@@ -66,7 +71,10 @@ export function HarnessRemoteSettings({
   assistants,
   clawbotCall,
   featureCall,
+  resourcesCall,
+  resourceConnection = absentResourceConnection,
 }: HarnessRemoteSettingsProps): JSX.Element {
+  const resourceGeneration = useSyncExternalStore(resourceConnection.subscribe, resourceConnection.getSnapshot, resourceConnection.getSnapshot)
   const { loadState, qrState, status, runtime, host, localOrigin, qr, error } = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
   const { refresh: loadStatus, generateQr } = store
   const titleId = useId()
@@ -212,6 +220,7 @@ export function HarnessRemoteSettings({
       </section>
       {assistants ? <AssistantPresetsPanel store={assistants} featureCall={featureCall} /> : null}
       {clawbotCall ? <ClawbotPanel call={clawbotCall} nodeName={agentName} hostName={hostName} /> : null}
+      {resourcesCall ? <MyResourcesPanel key={resourceGeneration} call={resourcesCall} nodeName={agentName} hostName={hostName} /> : null}
       {diagnostics ? <ConnectionDiagnostics store={diagnostics} /> : null}
     </section>
   )

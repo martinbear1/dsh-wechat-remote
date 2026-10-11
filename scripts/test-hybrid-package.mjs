@@ -29,6 +29,17 @@ try {
   execFileSync('tar', ['-xf', artifact, '-C', stage], { windowsHide: true, timeout: 30000 })
   const outer = path.join(stage, 'package'), native = path.join(outer, 'native')
   const outerMeta = read(path.join(outer, 'package.json')), nativeMeta = read(path.join(native, 'package.json'))
+  const selfResources = createRequire(path.join(outer, 'package.json'))
+  for (const [entry, file] of [['resource-library', 'resource-library-component.js'], ['private-resource-prompt', 'private-resources/native.js']]) {
+    assert.equal(outerMeta.exports[`./${entry}`], `./native/lib/${file}`)
+    assert.equal(nativeMeta.exports[`./${entry}`].default, `./lib/${file}`)
+    assert.equal(selfResources.resolve(`dsh-wechat-remote/${entry}`), path.join(native, 'lib', file))
+  }
+  assert(fs.readFileSync(path.join(outer, 'cordis.patch.yml'), 'utf8').includes("name: 'dsh-wechat-remote/resource-library'"))
+  for (const language of ['en', 'zh']) {
+    const file = selfResources.resolve(`dsh-wechat-remote/resource-library/locale/${language}.json`)
+    assert(file.startsWith(native + path.sep)); assert.equal(typeof read(file).meta.title, 'string')
+  }
   assert.equal(outerMeta.exports['./clawbot'], './native/lib/clawbot-component.js')
   assert.equal(nativeMeta.exports['./clawbot'].default, './lib/clawbot-component.js')
   assert.equal(createRequire(path.join(outer, 'package.json')).resolve('dsh-wechat-remote/clawbot'), path.join(native, 'lib/clawbot-component.js'))

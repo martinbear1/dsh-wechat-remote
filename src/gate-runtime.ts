@@ -628,6 +628,16 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
   // Every door and optional relay fails independently; none may terminate DSH.
   // 独立的 Host-only Typert 服务。它不占用 DSH 的全局 directoryPicker，
   // 因而 WebUI 继续使用官方 auto/native 目录选择器。
+  // On-demand delivery is independent of the relay WebSocket/public allowance.
+  // Credentials stay host-side; this service is not a Remote or a model tool.
+  ctx.provide('wechatResourceSource', {
+    current: () => {
+      if (!publicRelayGateway) throw new Error('Node unavailable')
+      const { agent } = publicRelayGateway
+      return { identity: agent.identity, origin: agent.config.relayOrigin,
+        objectOrigins: agent.config.objectOrigins, fetchImpl: agent.fetchImpl }
+    },
+  })
   mountChild('features', WechatFeaturesService, {
     preferenceFile: path.join(path.dirname(defaultGateStatePath(ctx)), 'wechat-feature-preferences-v1.json'),
     source: {

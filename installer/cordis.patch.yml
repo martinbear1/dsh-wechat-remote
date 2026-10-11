@@ -14,3 +14,5 @@
       name: 'dsh-wechat-remote/assistant-project'
     - id: harness-assistant-customizer
       name: 'dsh-wechat-remote/assistant-customizer'
+    - id: harness-resource-library
+      name: 'dsh-wechat-remote/resource-library'

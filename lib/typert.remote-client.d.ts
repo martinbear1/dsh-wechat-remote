@@ -13,21 +13,22 @@ import type { HistoryImportResult } from '@harness-remote/dsh-wechat-remote/hist
 import type { WechatHostDescribeRequest, WechatHostDescribeResult } from '@harness-remote/dsh-wechat-remote/host-info'
 import type { AssistantDraftRequest, AssistantInstallRequest, AssistantVersionRequest, AutomationApproveRequest, AutomationPauseRequest, AutomationPreviewRequest, AutomationStatusRequest, AutomationTaskRequest, CoverPreviewRequest, HumanResult, ModeApprovalRequest, ModeVersionRequest } from '@harness-remote/dsh-wechat-remote/human-tools'
 import type { HumanAckWireRequest, HumanActionRequest } from '@harness-remote/dsh-wechat-remote/human-tools/protocol'
-import type { ResourceResult } from '@harness-remote/dsh-wechat-remote/resources'
+import type { ResourceRequest, ResourceResult } from '@harness-remote/dsh-wechat-remote/resource-library/protocol'
+import type { ResourceResult as ResourceResult$remote2 } from '@harness-remote/dsh-wechat-remote/resources'
 
 declare module '@deepseek-ai/dsh-typert-protocol' {
   interface TypertRemoteNamespace$6167656e74496e70757473 {
-    capabilities: (request: { scope: string; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
-    upload: (request: { scope: string; name: string; data?: string; descriptorJson?: string; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
+    capabilities: (request: { scope: string; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult$remote2>>
+    upload: (request: { scope: string; name: string; data?: string; descriptorJson?: string; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult$remote2>>
   }
   interface TypertRemoteNamespace$6167656e745265736f7572636573 {
-    capabilities: (request: { scope: string; purpose?: 'sessionArchive'; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
-    chunk: (request: { scope: string; transferId: string; offset: number; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
-    list: (request: { scope: string; directoryId?: string; cursor?: number; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
-    prepare: (request: { scope: string; id: string; delivery: 'chunks' | 'object'; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
-    prepareArchive: (request: { scope: string; delivery: 'chunks' | 'object'; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
-    release: (request: { scope: string; transferId: string; }) => Promise<RemoteResult<ResourceResult>>
-    resolve: (request: { scope: string; reference: string; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
+    capabilities: (request: { scope: string; purpose?: 'sessionArchive'; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult$remote2>>
+    chunk: (request: { scope: string; transferId: string; offset: number; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult$remote2>>
+    list: (request: { scope: string; directoryId?: string; cursor?: number; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult$remote2>>
+    prepare: (request: { scope: string; id: string; delivery: 'chunks' | 'object'; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult$remote2>>
+    prepareArchive: (request: { scope: string; delivery: 'chunks' | 'object'; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult$remote2>>
+    release: (request: { scope: string; transferId: string; }) => Promise<RemoteResult<ResourceResult$remote2>>
+    resolve: (request: { scope: string; reference: string; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult$remote2>>
   }
   interface TypertRemoteNamespace$68756d616e546f6f6c73 {
     ack: (request: HumanAckWireRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
@@ -82,16 +83,19 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
   interface TypertRemoteNamespace$776563686174496d706f7274 {
     control: (request: { action: string; inputJson?: string; }, signal?: AbortSignal) => Promise<RemoteResult<HistoryImportResult>>
   }
+  interface TypertRemoteNamespace$7765636861745265736f7572636573 {
+    control: (request: ResourceRequest, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
+  }
   interface TypertRemoteMap {
-    'agentInputs/capabilities': (request: { scope: string; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
-    'agentInputs/upload': (request: { scope: string; name: string; data?: string; descriptorJson?: string; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
-    'agentResources/capabilities': (request: { scope: string; purpose?: 'sessionArchive'; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
-    'agentResources/chunk': (request: { scope: string; transferId: string; offset: number; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
-    'agentResources/list': (request: { scope: string; directoryId?: string; cursor?: number; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
-    'agentResources/prepare': (request: { scope: string; id: string; delivery: 'chunks' | 'object'; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
-    'agentResources/prepareArchive': (request: { scope: string; delivery: 'chunks' | 'object'; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
-    'agentResources/release': (request: { scope: string; transferId: string; }) => Promise<RemoteResult<ResourceResult>>
-    'agentResources/resolve': (request: { scope: string; reference: string; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
+    'agentInputs/capabilities': (request: { scope: string; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult$remote2>>
+    'agentInputs/upload': (request: { scope: string; name: string; data?: string; descriptorJson?: string; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult$remote2>>
+    'agentResources/capabilities': (request: { scope: string; purpose?: 'sessionArchive'; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult$remote2>>
+    'agentResources/chunk': (request: { scope: string; transferId: string; offset: number; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult$remote2>>
+    'agentResources/list': (request: { scope: string; directoryId?: string; cursor?: number; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult$remote2>>
+    'agentResources/prepare': (request: { scope: string; id: string; delivery: 'chunks' | 'object'; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult$remote2>>
+    'agentResources/prepareArchive': (request: { scope: string; delivery: 'chunks' | 'object'; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult$remote2>>
+    'agentResources/release': (request: { scope: string; transferId: string; }) => Promise<RemoteResult<ResourceResult$remote2>>
+    'agentResources/resolve': (request: { scope: string; reference: string; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult$remote2>>
     'humanTools/ack': (request: HumanAckWireRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     'humanTools/assistantCatalog': (request: {}, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     'humanTools/assistantDraft': (request: AssistantDraftRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
@@ -129,6 +133,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'wechatHistory/window': (request: WechatHistoryWindowRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatHistoryWindowResult>>
     'wechatHost/describe': (request: WechatHostDescribeRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatHostDescribeResult>>
     'wechatImport/control': (request: { action: string; inputJson?: string; }, signal?: AbortSignal) => Promise<RemoteResult<HistoryImportResult>>
+    'wechatResources/control': (request: ResourceRequest, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
   }
   interface TypertRemoteNamespaceMap {
     'agentInputs': TypertRemoteNamespace$6167656e74496e70757473
@@ -141,6 +146,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'wechatHistory': TypertRemoteNamespace$776563686174486973746f7279
     'wechatHost': TypertRemoteNamespace$776563686174486f7374
     'wechatImport': TypertRemoteNamespace$776563686174496d706f7274
+    'wechatResources': TypertRemoteNamespace$7765636861745265736f7572636573
   }
 }
 

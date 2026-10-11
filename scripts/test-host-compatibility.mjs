@@ -10,7 +10,14 @@ import { TurnActivityCompatibility } from '../lib/turn-activity.js'
 import { nativeInstallSessions, quiesceNativeHost } from '../lib/install-control.js'
 
 test('final generated manifest exposes identical strict schemas to old and new loaders', () => {
-  assert.equal(TYPERT.invocations.filter(i => !['humanTools', 'wechatClawbot', 'wechatFeatures', 'wechatImport'].includes(i.namespace)).length, 17)
+  assert.equal(TYPERT.invocations.filter(i => !['humanTools', 'wechatClawbot', 'wechatFeatures', 'wechatImport', 'wechatResources'].includes(i.namespace)).length, 17)
+  const resources = TYPERT.invocations.filter(i => i.namespace === 'wechatResources')
+  assert.deepEqual(resources.map(i => i.method), ['control'])
+  const resourceRequest = resources[0].parameters[0].codec.schema
+  assert(resourceRequest.safeParse({ op: 'status' }).success)
+  assert(resourceRequest.safeParse({ op: 'install', resourceId: 'demo', version: '1.0.0' }).success)
+  assert(!resourceRequest.safeParse({ op: 'setEnabled', resourceId: 'demo', version: '1.0.0', enabled: 'true' }).success)
+  assert(!resourceRequest.safeParse({ op: 'grant' }).success)
   const importer = TYPERT.invocations.filter(i => i.namespace === 'wechatImport')
   assert.deepEqual(importer.map(i => i.method), ['control'])
   assert(importer[0].parameters[0].codec.schema.safeParse({ action: 'capabilities', inputJson: '{}' }).success)

@@ -1,12 +1,16 @@
 {
   "name": "@harness-remote/dsh-wechat-remote",
-  "version": "1.7.14-rc.44",
+  "version": "1.7.14-rc.45",
   "description": "Agent远程管理助手：支持 Windows、macOS 与 Linux 上的 DeepSeek Harness，提供微信配对、安全局域网直连及端到端加密公网连接",
   "private": true,
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
+    "./resource-library": { "types": "./lib/resource-library-component.d.ts", "default": "./lib/resource-library-component.js" },
+    "./resource-library/protocol": { "types": "./lib/private-resources/protocol.d.ts", "default": "./lib/private-resources/protocol.js" },
+    "./resource-library/locale/*.json": "./lib/private-resources/locales/*.json",
+    "./private-resource-prompt": { "types": "./lib/private-resources/native.d.ts", "default": "./lib/private-resources/native.js" },
     "./history-import": { "types": "./lib/history-import/service.d.ts", "default": "./lib/history-import/service.js" },
     "./features": { "types": "./lib/feature-access.d.ts", "default": "./lib/feature-access.js" },
     "./clawbot": { "types": "./lib/clawbot-component.d.ts", "default": "./lib/clawbot-component.js" },
@@ -113,11 +117,12 @@
     }
   },
   "scripts": {
+    "test:private-resources": "node --test scripts/test-private-resources-library.mjs scripts/test-private-resources-native.mjs scripts/test-private-resources-source.mjs scripts/test-my-resources-client.mjs scripts/test-private-resources-delivery-contract.mjs scripts/test-private-resources-lifecycle.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "bundle": "tsc -p tsconfig.json && node scripts/clean-client-types.mjs && tsc -p tsconfig.client.json && node scripts/build-client.mjs && node scripts/generate-typert.mjs",
     "verify": "node scripts/verify.mjs && node scripts/check-public-tree.mjs && npm run verify:pack",
     "verify:pack": "node --test scripts/test-packed-plugin.mjs && node scripts/verify-packed-plugin.mjs",
-    "test": "npm run test:features && npm run test:clawbot && npm run test:private-updates && npm run test:human-tools && npm run test:notifications && npm run test:lifecycle && npm run test:client && npm run test:attachment && npm run test:directory && npm run test:host-platform && npm run test:history && npm run test:gate-ports && npm run test:dsh-runtime && npm run test:dsh-protocol-compat && npm run test:dsh-realtime-compat && npm run test:dsh-compatibility-api && npm run test:public-relay && npm run test:updates && npm run test:native-update && npm run test:history-import",
+    "test": "npm run test:features && npm run test:clawbot && npm run test:private-updates && npm run test:human-tools && npm run test:notifications && npm run test:lifecycle && npm run test:client && npm run test:attachment && npm run test:directory && npm run test:host-platform && npm run test:history && npm run test:gate-ports && npm run test:dsh-runtime && npm run test:dsh-protocol-compat && npm run test:dsh-realtime-compat && npm run test:dsh-compatibility-api && npm run test:public-relay && npm run test:updates && npm run test:native-update && npm run test:history-import && npm run test:private-resources",
     "test:history-import": "node --test scripts/test-history-import-source.mjs scripts/test-history-import-control.mjs scripts/test-history-import-worker.mjs scripts/test-history-import-search.mjs scripts/test-history-import-native.mjs",
     "test:features": "node --test scripts/test-feature-access.mjs",
     "test:clawbot": "node --test scripts/test-clawbot-ilink.mjs scripts/test-clawbot-media.mjs scripts/test-clawbot-runtime-review.mjs scripts/test-clawbot-dsh-host.mjs scripts/test-clawbot-panel.mjs",
@@ -246,6 +251,9 @@
     "typescript": "^5.8.3"
   },
   "files": [
+    "lib/resource-library-component.js",
+    "lib/resource-library-component.d.ts",
+    "lib/private-resources",
     "lib/history-import",
     "lib/clawbot-component.js",
     "lib/clawbot-component.d.ts",

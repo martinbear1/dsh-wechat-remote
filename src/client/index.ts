@@ -70,6 +70,21 @@ export function apply(ctx: HarnessRemoteClientContext): void {
 
   const store = new RemotePageStore(describeHost, callManagement)
   let connectionGeneration = 0
+  let resourceGeneration = 0
+  const resourceListeners = new Set<() => void>()
+  const resourceConnection = {
+    subscribe: (listener: () => void) => { resourceListeners.add(listener); return () => { resourceListeners.delete(listener) } },
+    getSnapshot: () => resourceGeneration,
+  }
+  const resourcesCall: import('./my-resources-store.js').MyResourcesCall = async request => {
+    const generation = resourceGeneration
+    try {
+      const response = await ctx.connection.rpc.call('/api', 'wechatResources/control', { args: { request } })
+      if (generation !== resourceGeneration) return { ok: false, error: { code: 'resources-closed', message: '当前节点已变化。' } }
+      if (!response.ok) return { ok: false, error: { code: 'resources-unavailable', message: '请核对我的资源组件状态。' } }
+      return response.value as import('./my-resources-store.js').MyResourcesResult
+    } catch { return { ok: false, error: { code: 'resources-network', message: '资源暂不可用。' } } }
+  }
   const featureCall: import('./feature-client.js').FeatureCall = async request => {
     const generation = connectionGeneration
     const response = await ctx.connection.rpc.call('/api', 'wechatFeatures/control', { args: { request } })
@@ -112,6 +127,13 @@ export function apply(ctx: HarnessRemoteClientContext): void {
     const remove = ctx.on('connection/reset', () => { connectionGeneration++; assistantNavigation?.reset(); assistants.reset() })
     return () => { connectionGeneration++; remove(); assistants.dispose() }
   }, 'wechat assistant lifecycle')
+  ctx.effect(() => {
+    const remove = ctx.on('connection/reset', () => {
+      resourceGeneration++
+      for (const listener of resourceListeners) { try { listener() } catch { /* An auxiliary view cannot interrupt connection reset. */ } }
+    })
+    return () => { resourceGeneration++; remove(); resourceListeners.clear() }
+  }, 'wechat resources client lifecycle')
   ctx.effect(() => () => store.dispose(), 'wechat shared page')
   const diagnostics = new ConnectionDiagnosticStore(describeHost, callManagement)
   ctx.effect(() => {
@@ -119,7 +141,7 @@ export function apply(ctx: HarnessRemoteClientContext): void {
     return () => { remove(); diagnostics.dispose() }
   }, 'wechat connection diagnostics')
   const openPlugin = () => openPluginPage(name => ctx.get(name))
-  const injected = () => ({ describeHost, callManagement, store, assistants, clawbotCall, featureCall, diagnostics })
+  const injected = () => ({ describeHost, callManagement, store, assistants, clawbotCall, featureCall, diagnostics, resourcesCall, resourceConnection })
   ctx.slots.inject('settings.section', () =>
     ctx.slots.register(
       {

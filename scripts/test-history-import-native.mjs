@@ -76,6 +76,19 @@ test('display title limits do not discard the original title or timestamp metada
   assert.deepEqual(origin.metadata, r.conversation.metadata)
   assert(events.find(e => e.type === 'session/title').data.title.length <= 160)
 })
+
+test('an explicit new-session title changes only presentation, preserving source and original message bytes', () => {
+  const r = request({ title: '  我的角色续聊  ' }), original = structuredClone(r.conversation)
+  const events = pure.buildNativeImportSeed(r), origin = events[0].data
+  assert.equal(origin.title, '我的角色续聊'); assert.equal(origin.originalTitle, original.title)
+  assert.equal(events.find(e => e.type === 'session/title').data.title, '我的角色续聊')
+  assert.deepEqual(r.conversation, original)
+  const body = events.find(e => e.type === 'assistant/message').data.message.content
+  assert.equal(body.at(-1).text, original.messages[1].text)
+  for (const title of ['', ' ', 'a'.repeat(161), '换\n行', '控制\u0085', null]) {
+    assert.throws(() => pure.buildNativeImportSeed(request({ title })), /invalid-title/)
+  }
+})
 test('empty user tail and multiple assistants have closed monotone turn/step boundaries', () => {
   const items = conversation().messages
   const seed = pure.buildNativeImportSeed(request({ conversation: conversation([...items, { ...items[1], id: 'a2', parentId: 'a1' },
@@ -249,6 +262,9 @@ test('installed native factory, cold reader, actual continuation, isolation and 
     assert.equal(createCalls, 1)
     await assert.rejects(adapter.commitNativeImport(wrapped, request(), AbortSignal.abort()), rejectedBeforeCreate('aborted'))
     assert.equal(createCalls, 1)
+    let finalAdmission = 0
+    await assert.rejects(adapter.commitNativeImport(wrapped, request(), undefined, () => { finalAdmission++; throw Error('revoked during preflight') }), rejectedBeforeCreate('authorization-changed'))
+    assert.equal(finalAdmission, 1); assert.equal(createCalls, 1, 'revocation at final admission must never call native create')
     const missingModel = { get: name => name === 'agentDefaultModel' ? { currentSelection: () => ({}) } : wrapped.get(name) }
     await assert.rejects(adapter.commitNativeImport(missingModel, request()), rejectedBeforeCreate('model-unavailable'))
     assert.equal(createCalls, 1)

@@ -1,18 +1,23 @@
 import { type HistorySource } from './source.js';
 import { ImportReceipts } from './receipts.js';
 import { type NativeImportRequest, type NativeImportIdentity, type NativeImportInspection } from './native.js';
+import type { FeatureAuthorization, FeatureGrant } from '../feature-access.js';
 type Row = Record<string, any>;
 export interface ImportPorts {
     capabilities(): Promise<{
         supported: boolean;
         reason?: string;
+        enabled?: boolean;
+        access?: FeatureGrant;
     }>;
+    authorize(signal: AbortSignal): Promise<FeatureAuthorization>;
+    owner(signal: AbortSignal): Promise<string | undefined>;
     parse(data: Buffer, signal: AbortSignal): Promise<{
         source: HistorySource;
         bytes: number;
     }>;
     share(url: unknown, signal: AbortSignal): Promise<Buffer>;
-    commit(request: NativeImportRequest, signal: AbortSignal): Promise<unknown>;
+    commit(request: NativeImportRequest, signal: AbortSignal, beforeCreate: () => void): Promise<unknown>;
     inspect(request: NativeImportIdentity, signal: AbortSignal): Promise<NativeImportInspection>;
     receipts: ImportReceipts;
     now?: () => number;

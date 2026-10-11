@@ -14,6 +14,8 @@ export interface ImportReceipt {
   branchId: string
   state: ImportState
   createdAt: number
+  ownerKey?: string
+  title?: string
   message?: string
 }
 export function operationIdentifier(value: unknown): string {
@@ -35,7 +37,10 @@ export class ImportReceipts {
         || !['pending', 'succeeded', 'uncertain', 'failed'].includes(value.state)
         || typeof value.workspaceId !== 'string' || !value.workspaceId || value.workspaceId.length > 256
         || typeof value.conversationId !== 'string' || typeof value.branchId !== 'string'
-        || !/^[a-f0-9]{64}$/.test(value.sourceHash) || !Number.isFinite(value.createdAt)) throw new Error('receipt-unavailable')
+        || !/^[a-f0-9]{64}$/.test(value.sourceHash) || !Number.isFinite(value.createdAt)
+        || value.ownerKey !== undefined && (typeof value.ownerKey !== 'string' || !value.ownerKey || value.ownerKey.length > 1024)
+        || value.title !== undefined && (typeof value.title !== 'string' || !value.title.trim() || value.title.length > 160
+          || /[\u0000-\u001f\u007f-\u009f]/.test(value.title))) throw new Error('receipt-unavailable')
       return value
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined

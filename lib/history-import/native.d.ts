@@ -9,6 +9,7 @@ export interface NativeImportRequest {
     sourceHash: string;
     branchId?: string;
     presetId?: string;
+    title?: string;
     conversation: HistoryConversation;
 }
 export type NativeImportIdentity = Pick<NativeImportRequest, 'sessionId' | 'workspaceId' | 'sourceHash' | 'branchId'>;
@@ -37,7 +38,7 @@ export declare function nativeCapabilities(ctx: ImportHost): Promise<{
  * No original web system prompt is assumed or elevated into host authority. */
 export declare function buildNativeImportSeed(request: NativeImportRequest, now?: number): Native[];
 export declare function inspectNativeImport(ctx: ImportHost, request: NativeImportIdentity, signal?: AbortSignal): Promise<NativeImportInspection>;
-export declare function commitNativeImport(ctx: ImportHost, request: NativeImportRequest, signal?: AbortSignal): Promise<{
+export declare function commitNativeImport(ctx: ImportHost, request: NativeImportRequest, signal?: AbortSignal, beforeCreate?: () => void): Promise<{
     sessionId: string;
     workspaceId: string;
     title: string;

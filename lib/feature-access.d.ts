@@ -1,6 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis';
 import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol';
-export type AccountFeature = 'group_assistant' | 'clawbot';
+export type AccountFeature = 'group_assistant' | 'clawbot' | 'history_import';
 export interface FeatureGrant {
     allowed: boolean;
     reason: string;
@@ -17,7 +17,12 @@ export interface FeatureLease {
 }
 export type FeatureStatus = FeatureLease & {
     groupEnabled: boolean;
+    historyImportEnabled: boolean;
 };
+export interface FeatureAuthorization {
+    readonly owner: string;
+    assertCurrent(): void;
+}
 export type FeatureControlResult = {
     ok: true;
     value: FeatureStatus;
@@ -53,6 +58,9 @@ export declare class FeatureAccess {
     private closed;
     private listeners;
     private requested?;
+    private historyRequested?;
+    private historyIntent;
+    private historyEpoch;
     constructor(source: {
         nodeId(): string;
         read(signal: AbortSignal): Promise<unknown>;
@@ -63,11 +71,16 @@ export declare class FeatureAccess {
     private renewWhileEnabled;
     private live;
     groupEnabled(): boolean;
+    historyImportEnabled(): boolean;
     grant(feature: AccountFeature, requireEnabled?: boolean): FeatureGrant;
     refresh(force?: boolean): Promise<void>;
     assertCurrent(feature: AccountFeature, requireEnabled?: boolean): void;
     assert(feature: AccountFeature, requireEnabled?: boolean): Promise<void>;
     setGroupEnabled(enabled: boolean, signal?: AbortSignal): Promise<void>;
+    private savePreferences;
+    setHistoryImportEnabled(enabled: boolean, signal?: AbortSignal): Promise<void>;
+    authorizeHistoryImport(signal?: AbortSignal): Promise<FeatureAuthorization>;
+    currentOwner(signal?: AbortSignal): Promise<string | undefined>;
     snapshot(): FeatureStatus;
     close(): void;
 }
@@ -83,7 +96,7 @@ export declare class WechatFeaturesService extends TypertRemoteService {
         preferenceFile: string;
     });
     control(request: {
-        action: 'status' | 'group.enabled';
+        action: 'status' | 'group.enabled' | 'historyImport.enabled';
         enabled?: boolean;
     }, signal: AbortSignal): Promise<FeatureControlResult>;
 }

@@ -10,6 +10,8 @@ export interface ImportReceipt {
     branchId: string;
     state: ImportState;
     createdAt: number;
+    ownerKey?: string;
+    title?: string;
     message?: string;
 }
 export declare function operationIdentifier(value: unknown): string;

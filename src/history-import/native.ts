@@ -12,6 +12,7 @@ export interface NativeImportRequest {
   sourceHash: string
   branchId?: string
   presetId?: string
+  title?: string
   conversation: HistoryConversation
 }
 export type NativeImportIdentity = Pick<NativeImportRequest, 'sessionId' | 'workspaceId' | 'sourceHash' | 'branchId'>
@@ -102,7 +103,9 @@ export function buildNativeImportSeed(request: NativeImportRequest, now = Date.n
   identity(request)
   const conversation = request.conversation
   if (!conversation || !Array.isArray(conversation.messages) || !conversation.messages.length || conversation.messages.length > MAX_MESSAGES) fail('message-limit')
-  const events: Native[] = [], title = conversation.title.trim().slice(0, 160) || 'DeepSeek 网页会话'
+  if (request.title !== undefined && (typeof request.title !== 'string' || !request.title.trim() || request.title.trim().length > 160
+    || /[\u0000-\u001f\u007f-\u009f]/.test(request.title))) fail('invalid-title')
+  const events: Native[] = [], title = request.title?.trim() ?? (conversation.title.trim().slice(0, 160) || 'DeepSeek 网页会话')
   const append = (type: string, data: Native, time: number, surface = false, ignorable = false) => {
     events.push({ type, seq: events.length, time, data, ...(surface ? { surfaceOp: 'append' } : {}), ...(ignorable ? { ignorable: true } : {}) })
   }
@@ -205,11 +208,15 @@ async function prepareNativeImport(ctx: ImportHost, request: NativeImportRequest
   if (native.workspaceRegistry.get(request.workspaceId) !== workspace) fail('workspace-changed')
   return { native, modules, workspace, seed, selection, presets, preset, meta }
 }
-export async function commitNativeImport(ctx: ImportHost, request: NativeImportRequest, signal?: AbortSignal): Promise<{ sessionId: string; workspaceId: string; title: string; messageCount: number }> {
+export async function commitNativeImport(ctx: ImportHost, request: NativeImportRequest, signal?: AbortSignal, beforeCreate?: () => void): Promise<{ sessionId: string; workspaceId: string; title: string; messageCount: number }> {
   const prepared = await prepareNativeImport(ctx, request, signal).catch((error: unknown) => {
     throw new NativeImportPreflightError(error instanceof NativeImportError ? error.code : signal?.aborted ? 'aborted' : 'preflight-failed')
   })
   const { native, modules, workspace, seed, selection, presets, preset, meta } = prepared
+  // The caller may fence authority changes while native preflight awaited IO.
+  // This synchronous boundary is the LAST admission check. After create starts
+  // the import owns its native write; revocation must not interrupt that write.
+  try { beforeCreate?.() } catch { throw new NativeImportPreflightError('authorization-changed') }
   let handle: Native | undefined
   try {
     const created: Native = await native.agents.create({ sessionId: request.sessionId, seed, meta,

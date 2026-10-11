@@ -5,6 +5,7 @@ import { ImportReceipts } from './receipts.js'
 import { nativeCapabilities, commitNativeImport, inspectNativeImport } from './native.js'
 import { parseImportSource } from './parse.js'
 import { readPublicShare } from './share.js'
+import { FeatureAccessError, featureMessage, hostFeatureAccess } from '../feature-access.js'
 
 export interface HistoryImportResult {
   readonly ok: boolean
@@ -19,9 +20,18 @@ export class WechatImportService extends TypertRemoteService {
   constructor(host: Context, config: { receiptDirectory: string }) {
     super(host, 'wechatImport')
     this.controller = new HistoryImportController({
-      capabilities: () => nativeCapabilities(host),
+      capabilities: async () => {
+        const native = await nativeCapabilities(host)
+        try {
+          const access = hostFeatureAccess(host)
+          try { await access.refresh() } catch { /* show unavailable without denying read-only capability discovery */ }
+          return { ...native, enabled: access.historyImportEnabled(), access: access.grant('history_import', false) }
+        } catch { return { ...native, enabled: false, access: { allowed: false, reason: 'unavailable', validUntil: null, message: featureMessage('unavailable') } } }
+      },
+      authorize: signal => hostFeatureAccess(host).authorizeHistoryImport(signal),
+      owner: async signal => { try { return await hostFeatureAccess(host).currentOwner(signal) } catch { signal.throwIfAborted(); return undefined } },
       parse: parseImportSource, share: readPublicShare,
-      commit: (request, signal) => commitNativeImport(host, request, signal),
+      commit: (request, signal, beforeCreate) => commitNativeImport(host, request, signal, beforeCreate),
       inspect: (request, signal) => inspectNativeImport(host, request, signal),
       receipts: new ImportReceipts(config.receiptDirectory),
     })
@@ -33,6 +43,6 @@ export class WechatImportService extends TypertRemoteService {
       if (typeof request.action !== 'string' || request.action.length > 32 || (request.inputJson?.length ?? 0) > 270000) throw new Error('invalid-request')
       const result = await this.controller.control(request.action, JSON.parse(request.inputJson || '{}'), signal)
       return { ok: true, valueJson: JSON.stringify(result) }
-    } catch (error) { return { ok: false, error: importError(error) } }
+    } catch (error) { return { ok: false, error: error instanceof FeatureAccessError ? { code: error.code, message: error.message } : importError(error) } }
   }
 }

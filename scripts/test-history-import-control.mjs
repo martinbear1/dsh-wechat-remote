@@ -29,6 +29,8 @@ async function fixture(t, overrides = {}) {
   const receipts = new ImportReceipts(path.join(dir, 'receipts'))
   const ports = {
     capabilities: async () => ({ supported: true }),
+    authorize: async () => ({ owner: 'fixture-owner', assertCurrent() {} }),
+    owner: async () => 'fixture-owner',
     parse: async data => { const source = await parseHistorySource(data); return { source, bytes: Buffer.byteLength(JSON.stringify(source)) } },
     share: async () => sourceBytes(), receipts,
     commit: async () => { commits++ },
@@ -242,4 +244,123 @@ test('verified pre-create rejection is failed, but collision or a forged error r
     assert.equal((await f.receipts.read(operationId)).state, expected)
     if (expected === 'failed') assert.equal((await f.call('status', { operationId })).state, 'failed')
   }
+})
+
+test('every source/upload/preview/create entry is denied without access, while capabilities and recovery remain read-only', async t => {
+  let checks = 0
+  const f = await fixture(t, { authorize: async () => { checks++; throw Error('feature-denied') } })
+  for (const action of ['share.preview', 'upload.start', 'upload.chunk', 'upload.finish', 'source.list', 'preview', 'commit']) {
+    await assert.rejects(f.call(action, {}), /feature-denied/)
+  }
+  assert.equal(checks, 7); assert.equal(f.commits(), 0); assert.equal(f.controller.sources.size, 0); assert.equal(f.controller.uploads.size, 0)
+  assert.equal((await f.call('capabilities')).supported, true)
+  assert.equal((await f.call('status', { operationId: randomUUID() })).state, 'not-found')
+  assert.equal((await f.call('release')).released, true); assert.equal(checks, 7)
+})
+
+test('authority changes during share/parse never publish source data to the new owner', async t => {
+  for (const phase of ['share', 'parse']) {
+    let enabled = true
+    const f = await fixture(t, { authorize: async () => ({ owner: 'first', assertCurrent() { if (!enabled) throw Error('feature-denied') } }) })
+    if (phase === 'share') f.ports.share = async () => { enabled = false; return sourceBytes() }
+    else { const parse = f.ports.parse; f.ports.parse = async (...args) => { const value = await parse(...args); enabled = false; return value } }
+    await assert.rejects(f.call('share.preview', {}), /feature-denied/)
+    assert.equal(f.controller.sources.size, 0); assert.equal(f.commits(), 0)
+  }
+})
+
+test('account changes cannot reuse previous source/upload/preview or expose owned receipt details', async t => {
+  let owner = 'first'
+  const f = await fixture(t, { authorize: async () => ({ owner, assertCurrent() {} }), owner: async () => owner })
+  const source = await f.call('share.preview', {}), preview = await f.call('preview', { sourceId: source.sourceId, conversationId: source.entries[0].id })
+  const data = sourceBytes(), upload = await f.call('upload.start', { name: 'chat.json', size: data.length })
+  const operationId = randomUUID()
+  await f.call('commit', { previewId: preview.previewId, operationId, workspaceId: 'private-workspace' }); await f.wait()
+  owner = 'second'
+  for (const [action, args] of [
+    ['source.list', { sourceId: source.sourceId }], ['preview', { sourceId: source.sourceId, conversationId: source.entries[0].id }],
+    ['upload.chunk', { uploadId: upload.uploadId }], ['upload.finish', { uploadId: upload.uploadId }],
+    ['commit', { previewId: preview.previewId, operationId: randomUUID(), workspaceId: 'w' }], ['release', { sourceId: source.sourceId }],
+  ]) await assert.rejects(f.call(action, args), /owner-changed|operation-conflict/)
+  const status = await f.call('status', { operationId })
+  assert.equal(status.state, 'uncertain'); assert.equal(status.sessionId, undefined); assert.equal(status.workspaceId, undefined)
+  assert.equal(f.commits(), 1)
+  owner = 'first'; f.ports.authorize = async () => { throw Error('revoked') }
+  assert.equal((await f.call('status', { operationId })).state, 'succeeded', 'same owner may recover after opt-in/entitlement is revoked')
+  assert.equal((await f.call('release', { sourceId: source.sourceId, uploadId: upload.uploadId })).released, true)
+  f.ports.inspect = async identity => { owner = 'second'; return { ...identity, state: 'succeeded' } }
+  const late = await f.call('status', { operationId })
+  assert.equal(late.state, 'uncertain'); assert.equal(late.sessionId, undefined, 'ownership must still match after asynchronous cold verification')
+})
+
+test('claim wait and native preflight are fenced, but revocation after accepted native create does not interrupt it', async t => {
+  for (const phase of ['claim', 'native-before-create', 'native-accepted']) {
+    let allowed = true, writes = 0
+    const f = await fixture(t, { authorize: async () => ({ owner: 'fixture-owner', assertCurrent() { if (!allowed) throw Error('revoked') } }) })
+    if (phase === 'claim') {
+      const claim = f.receipts.claim.bind(f.receipts)
+      f.receipts.claim = async (...args) => { const value = await claim(...args); allowed = false; return value }
+    }
+    f.ports.commit = async (_request, signal, beforeCreate) => {
+      if (phase === 'native-before-create') allowed = false
+      try { beforeCreate() } catch { throw new NativeImportPreflightError('authorization-changed') }
+      writes++
+      if (phase === 'native-accepted') allowed = false
+      await Promise.resolve(); signal.throwIfAborted()
+    }
+    const preview = await f.preview(), operationId = randomUUID()
+    await f.call('commit', { previewId: preview.previewId, operationId, workspaceId: 'w' }); await f.wait()
+    assert.equal(writes, phase === 'native-accepted' ? 1 : 0)
+    assert.equal((await f.receipts.read(operationId)).state, phase === 'native-accepted' ? 'succeeded' : 'failed')
+    assert.equal((await f.call('status', { operationId })).state, phase === 'native-accepted' ? 'succeeded' : 'failed')
+  }
+})
+
+test('old receipts without verifiable ownership stay uncertain and never disclose native identity or resume writing', async t => {
+  const f = await fixture(t), operationId = randomUUID()
+  await f.receipts.claim({ schema: 1, operationId, sessionId: 'session-dsimport-' + operationId, workspaceId: 'legacy-private',
+    sourceHash: '1'.repeat(64), conversationId: 'old', branchId: 'old', state: 'succeeded', createdAt: Date.now() })
+  const status = await f.call('status', { operationId })
+  assert.equal(status.state, 'uncertain'); assert.equal(status.sessionId, undefined); assert.equal(status.workspaceId, undefined)
+  assert.equal(f.inspections(), 0); assert.equal(f.commits(), 0)
+})
+
+test('generic share titles get readable display defaults without changing source titles or content', async t => {
+  for (const [title, body, expected] of [
+    ['Shared Conversation', '  测试角色\n\n  在雨中的初次见面  ', '测试角色 在雨中的初次见面'],
+    ['共享会话', '🐬'.repeat(40), '🐬'.repeat(32)],
+    ['  真正的中文标题  ', '不用于标题的正文', '真正的中文标题'],
+    ['Shared Conversation', '', 'DeepSeek 网页会话'],
+  ]) {
+    const original = JSON.parse(sourceBytes()); original.title = title; original.messages[0].fragments[0].content = body
+    let imported
+    const f = await fixture(t, { share: async () => Buffer.from(JSON.stringify(original)), commit: async request => { imported = request } })
+    const catalog = await f.call('share.preview', {})
+    assert.equal(catalog.entries[0].title, expected)
+    const searched = await f.call('source.list', { sourceId: catalog.sourceId, query: expected.slice(0, 8) })
+    assert.equal(searched.total, 1)
+    const preview = await f.call('preview', { sourceId: catalog.sourceId, conversationId: catalog.entries[0].id })
+    assert.equal(preview.title, expected)
+    const operationId = randomUUID()
+    await f.call('commit', { previewId: preview.previewId, operationId, workspaceId: 'w' }); await f.wait()
+    assert.equal(imported.title, expected); assert.equal(imported.conversation.title, title)
+    assert.equal(imported.conversation.messages[0].text, body)
+    assert.equal((await f.receipts.read(operationId)).title, expected)
+  }
+})
+
+test('optional title is validated before claim and never changes an already claimed import', async t => {
+  let writes = 0, imported
+  const f = await fixture(t, { commit: async request => { writes++; imported = request } })
+  const preview = await f.preview(), operationId = randomUUID()
+  const args = { previewId: preview.previewId, operationId, workspaceId: 'w' }
+  for (const title of ['', '  ', 'a'.repeat(161), '名称\n换行', '名称\u0000', '名称\u007f', 12, null]) {
+    await assert.rejects(f.call('commit', { ...args, title }), /invalid-title/)
+    assert.equal(await f.receipts.read(operationId), undefined); assert.equal(writes, 0)
+  }
+  await f.call('commit', { ...args, title: '  我的续聊会话  ' }); await f.wait()
+  assert.equal(imported.title, '我的续聊会话'); assert.equal(imported.conversation.title, '合成网页会话')
+  assert.equal((await f.receipts.read(operationId)).title, '我的续聊会话')
+  assert.equal((await f.call('commit', { ...args, title: '重放不得更名' })).state, 'succeeded')
+  assert.equal(writes, 1); assert.equal((await f.receipts.read(operationId)).title, '我的续聊会话')
 })

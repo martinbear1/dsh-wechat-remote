@@ -9,10 +9,18 @@ import { TypertGatewayService } from '@deepseek-ai/dsh-api-gateway'
 import { WechatFeaturesService } from '../lib/feature-access.js'
 import { TYPERT } from '../lib/typert.host.js'
 import { invokeLegacyRpc, parseLegacyClientRequest } from '../lib/dsh-protocol-compat.js'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 
 const lease = (nodeId = 'test-node', patch = {}) => ({ schemaVersion: 1, nodeId, accountInstance: 'account-1', checkedAt: 1000, expiresAt: 61000,
   features: { group_assistant: { allowed: true, reason: 'allowed', validUntil: 120000 }, clawbot: { allowed: true, reason: 'allowed', validUntil: 120000 } }, ...patch })
 const deferred = () => { let resolve; const promise = new Promise(r => resolve = r); return { promise, resolve } }
+const importLease = (nodeId = 'test-node', patch = {}) => {
+  const value = lease(nodeId, patch)
+  value.features = { ...value.features, history_import: { allowed: true, reason: 'allowed', validUntil: 120000 } }
+  return value
+}
 
 test('one lease is singleflight, monotonic bounded, node/account bound and local group opt-in is separate', async t => {
   let clock = 0, nodeId = 'test-node', calls = 0, data = lease(), pending = deferred()
@@ -113,4 +121,77 @@ test('native Typert and authenticated compatibility controls use node authority,
   const attempted=await control({action:'group.enabled',enabled:true,allowed:true,features:{group_assistant:{allowed:true}}})
   assert.equal(attempted.ok,false); assert.equal(attempted.error.code,'feature-access-denied')
   assert.equal((await control({action:'group.enabled',enabled:false})).value.groupEnabled,false)
+  const imported = await control({ action: 'historyImport.enabled', enabled: true, allowed: true })
+  assert.equal(imported.ok, false); assert.equal(imported.error.code, 'feature-access-denied')
+  assert.equal((await control({ action: 'status' })).value.historyImportEnabled, false)
+})
+
+test('old cloud grants keep group/ClawBot working while missing/malformed import grant alone fails closed', async t => {
+  for (const patch of [undefined, { allowed: true, reason: 'allowed', validUntil: 1001 }, { allowed: 'true' }]) {
+    const value = lease(); if (patch) value.features.history_import = patch
+    const access = new FeatureAccess({ nodeId: () => 'test-node', read: async () => value }); t.after(() => access.close())
+    await access.refresh(); await access.setGroupEnabled(true)
+    assert.equal(access.groupEnabled(), true); assert.equal(access.grant('clawbot').allowed, true)
+    assert.equal(access.historyImportEnabled(), false); assert.equal(access.snapshot().features.history_import.allowed, false)
+    await assert.rejects(access.setHistoryImportEnabled(true), FeatureAccessError)
+  }
+})
+
+test('import opt-in is independent, persisted with legacy group fields and owns no renewal timer', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'history-import-preference-')), file = path.join(dir, 'preferences.json')
+  const accesses = []; t.after(() => { accesses.forEach(a => a.close()); fs.rmSync(dir, { recursive: true, force: true }) })
+  // Legacy opt-in is read without losing the established group setting.
+  fs.writeFileSync(file, JSON.stringify({ schemaVersion: 1, enabled: true, nodeId: 'test-node', accountInstance: 'account-1' }))
+  const source = { nodeId: () => 'test-node', read: async () => importLease() }
+  const access = new FeatureAccess(source, file); accesses.push(access)
+  await access.refresh(); assert.equal(access.groupEnabled(), true); assert.equal(access.historyImportEnabled(), false)
+  await access.setGroupEnabled(false); await access.setHistoryImportEnabled(true)
+  assert.equal(access.historyImportEnabled(), true); assert.equal(access.groupEnabled(), false); assert.equal(access.renewal?._destroyed ?? true, true)
+  await access.setGroupEnabled(true)
+  const saved = JSON.parse(fs.readFileSync(file, 'utf8'))
+  assert.equal(saved.schemaVersion, 1); assert.equal(saved.enabled, true); assert.equal(saved.accountInstance, 'account-1')
+  assert.equal(saved.historyImport.enabled, true)
+  const reopened = new FeatureAccess(source, file); accesses.push(reopened)
+  await reopened.refresh(); assert.equal(reopened.groupEnabled(), true); assert.equal(reopened.historyImportEnabled(), true)
+  await reopened.setHistoryImportEnabled(false); assert.equal(reopened.groupEnabled(), true)
+  const updated = JSON.parse(fs.readFileSync(file, 'utf8')); assert.equal(updated.enabled, true); assert.equal(updated.historyImport.enabled, false)
+})
+
+test('import default is off and enable/disable races never enable a replaced account or override later intent', async t => {
+  let clock = 0, nodeId = 'test-node', value = importLease(), pending
+  const access = new FeatureAccess({ nodeId: () => nodeId, read: async () => pending ? pending.promise : value }, undefined, () => clock)
+  t.after(() => access.close()); await access.refresh()
+  assert.equal(access.historyImportEnabled(), false)
+  await access.setHistoryImportEnabled(true)
+  const permit = await access.authorizeHistoryImport(); permit.assertCurrent()
+  await access.setHistoryImportEnabled(false); assert.throws(() => permit.assertCurrent(), FeatureAccessError)
+  access.invalidate(); pending = deferred()
+  const enabling = access.setHistoryImportEnabled(true); await access.setHistoryImportEnabled(false)
+  pending.resolve(value); await assert.rejects(enabling, FeatureAccessError)
+  assert.equal(access.historyImportEnabled(), false)
+  pending = undefined; await access.setHistoryImportEnabled(true)
+  const earlier = await access.authorizeHistoryImport()
+  value = importLease('test-node', { accountInstance: 'new-owner' }); await access.refresh(true)
+  assert.equal(access.historyImportEnabled(), false); assert.throws(() => earlier.assertCurrent(), FeatureAccessError)
+  await access.setHistoryImportEnabled(true); const owner = await access.currentOwner()
+  assert(owner.includes('new-owner'))
+  nodeId = 'new-node'; value = importLease(nodeId, { accountInstance: 'new-owner' }); await access.refresh(true)
+  assert.equal(access.historyImportEnabled(), false)
+  assert.notEqual(await access.currentOwner(), owner)
+  await access.setHistoryImportEnabled(true); const expiring = await access.authorizeHistoryImport()
+  clock = 60001; assert.throws(() => expiring.assertCurrent(), FeatureAccessError)
+})
+
+test('revocation fences waiting import authority without group coupling; owner recovery ignores revoked feature', async t => {
+  let value = importLease()
+  const access = new FeatureAccess({ nodeId: () => 'test-node', read: async () => value }); t.after(() => access.close())
+  await access.setHistoryImportEnabled(true)
+  const permit = await access.authorizeHistoryImport(), owner = permit.owner
+  await access.setGroupEnabled(true); permit.assertCurrent()
+  await access.setGroupEnabled(false); permit.assertCurrent()
+  value = importLease(); value.features.history_import = { allowed: false, reason: 'feature_not_entitled', validUntil: null }
+  await access.refresh(true); assert.throws(() => permit.assertCurrent(), FeatureAccessError)
+  assert.equal(access.historyImportEnabled(), false); assert.equal(await access.currentOwner(), owner)
+  assert.equal(access.grant('clawbot').allowed, true)
+  await assert.rejects(access.authorizeHistoryImport(), FeatureAccessError)
 })

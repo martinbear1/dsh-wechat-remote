@@ -457,7 +457,7 @@ export class ClawbotRuntime {
         await this.authorize()
         signal.throwIfAborted()
         if (!this.canReceive()) return
-        this.state = 'connecting'
+        // Keep the last confirmed state while the normal long-poll waits.
         const updates = await this.client.getUpdates(this.data.credentials!, this.data.cursor, signal)
         signal.throwIfAborted()
         // A normal long-poll may span the short authority lease. Revalidate

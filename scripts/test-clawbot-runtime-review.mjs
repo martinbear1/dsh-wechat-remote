@@ -1388,6 +1388,16 @@ test('an immediate slash response does not wait for the next provider poll to be
   } finally { await runtime.dispose() }
 })
 
+test('first blocked update read remains connecting until an actual response', async () => {
+  const runtime = new ClawbotRuntime(memory(seed()), host(() => assert.fail('must not dispatch')), client())
+  try {
+    await enabled(runtime, true); await setImmediate()
+    assert.equal(runtime.snapshot().enabled, true)
+    assert.equal(runtime.snapshot().state, 'connecting')
+    assert.equal(runtime.snapshot().pending, 0)
+  } finally { await runtime.dispose() }
+})
+
 test('native HTTP adapter accepts omitted status codes through idle, dispatch, reply and duplicate receipt', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   const gate = ownerGate(), storage = memory(seed({ cursor: 'initial', accessBinding: gate.owner }))
@@ -1415,6 +1425,7 @@ test('native HTTP adapter accepts omitted status codes through idle, dispatch, r
     assert.equal(runs.length, 0); assert.equal(sent.length, 0)
     t.mock.timers.tick(500); await setImmediate()
     assert.deepEqual(cursors, ['initial', 'idle', 'incoming', 'repeat'])
+    assert.equal(runtime.snapshot().state, 'ready', 'waiting for the next message is not reconnecting')
     assert.equal(runs.length, 1); assert.equal(runs[0].sessionId, sessions[0].id)
     assert.equal(runs[0].expectedGeneration, sessions[0].generation)
     assert.equal(runs[0].text, 'synthetic hello')
@@ -1443,11 +1454,12 @@ test('native HTTP failures preserve cursor and binding, show safe distinct diagn
     [() => Response.redirect('https://example.invalid', 302), /地址校验未通过/],
   ]) {
     const storage = memory(seed({ cursor: 'keep', receipts: [receipt('kept', 'uncertain')] }))
+    const recovery = deferred()
     let reads = 0
     const http = new ILinkClient({ fetch: async (url) => {
       assert.ok(new URL(url).pathname.endsWith('/getupdates'), 'no send or login is allowed')
       if (++reads === 1) return makeResponse()
-      return Response.json({ msgs: [], get_updates_buf: 'recovered' })
+      return recovery.promise
     } })
     const runtime = new ClawbotRuntime(storage, host(() => assert.fail('must not dispatch')), http)
     try {
@@ -1459,7 +1471,10 @@ test('native HTTP failures preserve cursor and binding, show safe distinct diagn
       assert.deepEqual(storage.data.credentials, auth); assert.deepEqual(storage.data.target, sessions[0])
       t.mock.timers.tick(1999); await setImmediate(); assert.equal(reads, 1)
       t.mock.timers.tick(1); await setImmediate()
-      assert.equal(reads, 2); assert.equal(runtime.snapshot().state, 'ready')
+      assert.equal(reads, 2); assert.equal(runtime.snapshot().state, 'error', 'a retry alone is not a successful connection')
+      assert.match(runtime.snapshot().message, expected)
+      recovery.resolve(Response.json({ msgs: [], get_updates_buf: 'recovered' })); await setImmediate()
+      assert.equal(runtime.snapshot().state, 'ready')
       assert.equal(runtime.snapshot().message, ''); assert.equal(storage.data.cursor, 'recovered')
     } finally { await runtime.dispose() }
   }

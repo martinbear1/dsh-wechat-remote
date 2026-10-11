@@ -45,6 +45,13 @@ const scenes = [
   ['unpaired', {}], ['waiting', { pairing }], ['scanned', { pairing: { ...pairing, status: 'scaned' } }],
   ['verify', { pairing: { ...pairing, status: 'need_verifycode' } }],
   ['paused', { paired: true, target }], ['receiving', { paired: true, enabled: true, state: 'ready', target }],
+  ['connecting', { paired: true, enabled: true, state: 'connecting', target }],
+  ['history', { paired: true, enabled: true, state: 'ready', target, uncertain: 1,
+    message: '有上次中断的处理或发送，未自动重试，请在原会话核对。' }],
+  ['error-with-history', { paired: true, enabled: true, state: 'error', target, uncertain: 1,
+    message: '有回复发送结果不确定，未自动重发；完整结果仍在原 DSH 会话。' }],
+  ['warning-with-history', { paired: true, enabled: true, state: 'error', target, uncertain: 1,
+    message: '此次确认的是另一个微信账号。未替换原绑定；如需换号，请先明确移除本地绑定。' }],
   ['expired', { paired: true, bindingState: 'expired', target }],
   ['locked', { access: { allowed: false, reason: 'feature_not_entitled', validUntil: null, message: '此账号暂未开通此功能。' } }],
 ]
@@ -61,7 +68,7 @@ try {
     await page.addScriptTag({ content: js })
     await page.waitForFunction(() => window.requests.length > 0 && !document.body.textContent.includes('读取中'))
     const panel = page.getByRole('region', { name: '微信 ClawBot 私聊接线' })
-    assert.equal(await panel.getByRole('switch', { name: '启用私聊接入' }).count(), 1)
+    assert.equal(await panel.getByRole('switch', { name: '启用当前节点的 ClawBot 私聊接线' }).count(), 1)
     const metrics = await panel.evaluate(element => {
       const input = element.querySelector('input[role="switch"]'), track = input.nextElementSibling
       const state = getComputedStyle(track), knob = getComputedStyle(track, '::after')
@@ -69,7 +76,9 @@ try {
         clientWidth: element.clientWidth, scrollWidth: element.scrollWidth, switchWidth: track.getBoundingClientRect().width,
         switchHeight: track.getBoundingClientRect().height, switchRadius: state.borderRadius,
         knobWidth: knob.width, knobHeight: knob.height, knobTransform: knob.transform,
-        checked: input.checked, disabled: input.disabled }
+        checked: input.checked, disabled: input.disabled,
+        toggleInHeader: input.closest('div').parentElement.querySelector('h3') !== null,
+        toggleBeforeBinding: input.getBoundingClientRect().bottom < element.querySelector('[aria-label="节点绑定"]').getBoundingClientRect().top }
     })
     assert(metrics.documentWidth <= metrics.viewport, scene + ': no page overflow')
     assert(metrics.scrollWidth <= metrics.clientWidth, scene + ': no panel overflow')
@@ -80,7 +89,11 @@ try {
     assert.equal(metrics.checked, value.enabled === true)
     assert.equal(metrics.knobTransform, value.enabled === true ? 'matrix(1, 0, 0, 1, 18, 0)' : 'none')
     assert.equal(metrics.disabled, ['locked', 'legacy-unpaired'].includes(scene))
-    const toggle = panel.getByRole('switch', { name: '启用私聊接入' })
+    assert.equal(metrics.toggleInHeader, true); assert.equal(metrics.toggleBeforeBinding, true)
+    assert.equal(await panel.getByText('连接中', { exact: true }).count(), 0)
+    assert.equal(await panel.getByText('接收中', { exact: true }).count(), 0)
+    assert.equal(await panel.getByText('启用私聊接入', { exact: true }).count(), 0)
+    const toggle = panel.getByRole('switch', { name: '启用当前节点的 ClawBot 私聊接线' })
     if (metrics.disabled) {
       assert.equal(await toggle.evaluate(input => { input.focus(); return input === document.activeElement }), false)
     } else {
@@ -88,12 +101,36 @@ try {
       assert.equal(await toggle.evaluate(input => getComputedStyle(input.nextElementSibling).outlineWidth), '2px')
       await toggle.evaluate(input => input.blur())
     }
-    if (['paused', 'receiving', 'expired'].includes(scene)) {
-      const summary = panel.locator('summary')
-      await summary.focus(); await page.keyboard.press('Enter')
-      assert.equal(await panel.locator('details').evaluate(element => element.open), true, 'keyboard opens pairing management')
+    if (value.paired) {
+      const management = panel.getByRole('button', { name: '绑定管理', exact: true })
+      assert.equal(await management.evaluate(element => element.closest('[aria-label="节点绑定"]') !== null), true)
+      assert.equal(await management.getAttribute('aria-expanded'), 'false')
+      assert.equal(await panel.getByRole('button', { name: '移除绑定' }).count(), 0)
+      await management.focus(); await page.keyboard.press('Enter')
+      assert.equal(await management.getAttribute('aria-expanded'), 'true', 'keyboard opens inline pairing management')
+      assert.equal(await panel.getByRole('button', { name: '移除绑定' }).isVisible(), true)
+      if (scene === 'receiving') await page.screenshot({ path: path.join(out, `management-open-${width}-${dark ? 'dark' : 'light'}.png`) })
       await page.keyboard.press('Enter')
-      assert.equal(await panel.locator('details').evaluate(element => element.open), false)
+      assert.equal(await management.getAttribute('aria-expanded'), 'false')
+      await management.evaluate(element => element.blur())
+    }
+    if (value.uncertain) {
+      const history = panel.locator('details'), summary = history.locator('summary')
+      assert.equal(await history.evaluate(element => element.open), false)
+      assert.equal(await summary.innerText(), '消息记录（1）')
+      assert.equal(await history.locator('p').isVisible(), false)
+      if (['history', 'error-with-history'].includes(scene)) {
+        assert.equal(await panel.getByText(value.message, { exact: true }).count(), 0)
+        assert.equal(await panel.getByText('连接异常，请刷新后重试。', { exact: true }).count(), scene === 'error-with-history' ? 1 : 0)
+      } else {
+        assert.equal(await panel.getByText(value.message, { exact: true }).isVisible(), true)
+      }
+      await summary.focus(); await page.keyboard.press('Enter')
+      assert.equal(await history.locator('p').isVisible(), true)
+      assert((await history.innerText()).includes('当时的 DSH 会话和微信记录；不影响新消息'))
+      await page.screenshot({ path: path.join(out, `${scene}-open-${width}-${dark ? 'dark' : 'light'}.png`) })
+      await page.keyboard.press('Enter')
+      assert.equal(await history.evaluate(element => element.open), false)
       await summary.evaluate(element => element.blur())
     }
     assert.equal(await page.getByRole('img', { name: '微信 ClawBot 节点绑定码' }).count(), scene === 'waiting' ? 1 : 0)
@@ -105,4 +142,4 @@ try {
   }
 } finally { await browser.close() }
 await fs.writeFile(path.join(out, 'results.json'), JSON.stringify({ scope: 'isolated actual React and CSS; no live DSH or pairing', results }, null, 2))
-console.log(JSON.stringify({ scenes: results.length, output: out, checks: 'actual React/CSS, 320/820 light/dark, enable-before-setup and legacy states, no overflow, one accessible rounded switch' }))
+console.log(JSON.stringify({ scenes: results.length, output: out, checks: 'actual React/CSS, 320/820 light/dark, sole header switch, inline binding management, compact connected UI, collapsed neutral history, keyboard expansion, enable-before-setup and legacy states, no overflow' }))

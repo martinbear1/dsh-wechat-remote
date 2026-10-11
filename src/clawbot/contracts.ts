@@ -3,7 +3,12 @@ export interface ClawbotSession { id: string; title: string; generation?: number
 export type ClawbotAttention = 'approval' | 'question'
 export interface ClawbotAttachment { kind: 'image' | 'file' | 'voice' | 'video'; name: string; data: Uint8Array }
 /** In-memory native deliverables only; no host paths are retained by the channel. */
-export interface ClawbotResult { text: string; attachments?: ClawbotAttachment[] }
+export interface ClawbotResult {
+  text: string
+  attachments?: ClawbotAttachment[]
+  /** Channel delivery notices are separate from the native assistant's text. */
+  notices?: string[]
+}
 export interface ClawbotInput {
   sessionId: string; expectedGeneration: number; requestId: string; text: string
   attachments?: ClawbotAttachment[]

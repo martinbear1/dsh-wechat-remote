@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { ClawbotError, type ClawbotAttachment, type ClawbotAttention, type ClawbotHost, type ClawbotInput, type ClawbotResult, type ClawbotSession } from './contracts.js'
 import { assertColdSessionPresetAvailable } from '../dsh-host-contract.js'
+import { REPLY_TEXT_MAX_BYTES } from './reply-text.js'
 
 type Row = Record<string, any>
 export interface DshClawbotContext {
@@ -20,7 +21,6 @@ const id = (value: unknown): value is string => typeof value === 'string' && val
   && value.length <= 256 && !/[\u0000-\u001f]/.test(value)
 const fail = (code: string, message: string, submission: DshClawbotSubmission = 'not-submitted') =>
   new DshClawbotHostError(code, message, submission)
-const MAX_TEXT_BYTES = 256 * 1024
 const MAX_MEDIA_BYTES = 10 * 1024 * 1024
 const MAX_INPUT_BYTES = 30 * 1024 * 1024
 const MAX_OBSERVATION_MS = 15 * 60 * 1000
@@ -38,17 +38,8 @@ const nativeImage = (value: unknown, name: string): boolean => row(value) && val
 const nativeFile = (value: unknown): value is Row => row(value) && /^sha256:[a-f0-9]{64}$/.test(value.attachmentId)
   && typeof value.name === 'string' && !!value.name && !/[\\/\u0000-\u001f]/.test(value.name)
   && Number.isSafeInteger(value.bytes) && value.bytes > 0 && value.bytes <= MAX_MEDIA_BYTES
-type PreparedInput = { content: Row[]; expected: Row[]; session?: Row }
-type ObservedResult = { text: string; session: Row; files: string[]; images: Row[]; omitted: boolean }
-function matchesInput(value: unknown, expected: Row[]): boolean {
-  return Array.isArray(value) && value.length === expected.length && value.every((part, index) => {
-    const wanted = expected[index]
-    if (!row(part) || part.type !== wanted.type) return false
-    if (part.type === 'text') return part.text === wanted.text
-    if (part.type === 'image') return !part.offloaded && nativeImage(part.attachment, wanted.name)
-    return nativeFile(part.attachment) && ['attachmentId', 'name', 'bytes'].every(key => part.attachment[key] === wanted.attachment[key])
-  })
-}
+type PreparedInput = { content: Row[]; session?: Row }
+type ObservedResult = { text: string; session: Row; files: string[]; images: Row[]; omitted: boolean; notices: string[] }
 
 /**
  * Native contracts inspected in installed DSH 0.2.0-rc.1:
@@ -144,7 +135,7 @@ export class DshClawbotHost implements ClawbotHost {
     onAttention?: (kind: ClawbotAttention) => void): Promise<ClawbotResult> {
     if (!id(input.sessionId) || !id(input.requestId) || typeof input.text !== 'string'
       || !Number.isSafeInteger(input.expectedGeneration)
-      || Buffer.byteLength(input.text) > MAX_TEXT_BYTES || input.attachments !== undefined && !Array.isArray(input.attachments)
+      || Buffer.byteLength(input.text) > REPLY_TEXT_MAX_BYTES || input.attachments !== undefined && !Array.isArray(input.attachments)
       || (input.attachments?.length ?? 0) > 6 || !input.text.trim() && !input.attachments?.length)
       throw fail('invalid-input', '消息或会话标识无效。')
     let total = Buffer.byteLength(input.text)
@@ -171,15 +162,10 @@ export class DshClawbotHost implements ClawbotHost {
       if (generation !== input.expectedGeneration) throw fail('session-changed', '所选会话已重置，本条旧消息没有发送；请重新选择会话。')
       signal.throwIfAborted()
       if (this.archived().has(input.sessionId)) throw fail('not-found', '此会话已归档，请重新选择。')
-      const agent = agents.get(input.sessionId)
-      if (agent && (agent.status === 'running' || agent.inbox?.hasPending
-        || agent.inbox?.nextTurn?.length || agent.inbox?.nextStep?.length)) {
-        throw fail('busy', '此会话正在运行或有排队消息，请先在电脑或小程序处理。')
-      }
       await this.checkPreset(input.sessionId, signal)
       signal.throwIfAborted()
       const prepared = input.attachments?.length ? await this.prepareInput(input, generation, signal)
-        : { content: [{ type: 'text', text: input.text }], expected: [{ type: 'text', text: input.text }] }
+        : { content: [{ type: 'text', text: input.text }] }
       const result = await this.observeAndSubmit(input, generation, cursor, prepared, signal, onAttention)
       return await this.readOutputs(input.sessionId, generation, result, signal, input.checkAdmission)
     } finally { this.running.delete(input.sessionId) }
@@ -252,12 +238,12 @@ export class DshClawbotHost implements ClawbotHost {
     }
     // Missing, moved or oversized files do not turn a completed DSH task into
     // an error or cause replay. The final text remains usable on every host.
-    const text = result.text + (omitted ? '\n\n部分文件未能回传微信，请在电脑或小程序查看。' : '')
-    return { text, ...(attachments.length ? { attachments } : {}) }
+    const notices = [...result.notices, ...(omitted ? ['部分文件未能回传微信，请在电脑或小程序查看。'] : [])]
+    return { text: result.text, ...(attachments.length ? { attachments } : {}), ...(notices.length ? { notices } : {}) }
   }
 
   private async prepareInput(input: ClawbotInput, generation: number, signal: AbortSignal): Promise<PreparedInput> {
-    const content: Row[] = input.text.trim() ? [{ type: 'text', text: input.text }] : [], expected = [...content]
+    const content: Row[] = input.text.trim() ? [{ type: 'text', text: input.text }] : []
     let session: Row | undefined, agent: Row | undefined
     const check = () => {
       signal.throwIfAborted(); input.checkAdmission?.(); this.assertAccess?.()
@@ -267,15 +253,12 @@ export class DshClawbotHost implements ClawbotHost {
         || session && session !== live || agent && agent !== current || current?.session && current.session !== live)
         throw fail('session-changed', '准备附件时会话已变化，本条消息未发送。')
       session ??= live; agent ??= current
-      if (current && (current.status === 'running' || current.inbox?.hasPending || current.inbox?.nextTurn?.length || current.inbox?.nextStep?.length))
-        throw fail('busy', '此会话正在运行或有排队消息，附件未发送，请先在电脑或小程序处理。')
     }
     check()
     for (const part of input.attachments ?? []) {
       check()
       if (part.kind === 'image') {
         content.push({ type: 'image', mediaType: imageType(part.data), data: Buffer.from(part.data).toString('base64'), name: part.name })
-        expected.push({ type: 'image', name: part.name })
       } else {
         const uploads = this.ctx.get('fileUploads')
         if (typeof uploads?.uploadStream !== 'function') throw fail('unavailable', '此节点尚不支持原生文件附件，请更新电脑端后重试。')
@@ -287,7 +270,7 @@ export class DshClawbotHost implements ClawbotHost {
         if (!id(saved?.receiptId) || !nativeFile(saved?.file) || saved.file.bytes !== part.data.byteLength
           || saved.file.attachmentId !== 'sha256:' + createHash('sha256').update(part.data).digest('hex'))
           throw fail('attachment-unavailable', '无法确认原生附件保存结果，本条消息未发送。')
-        content.push({ type: 'file', receiptId: saved.receiptId }); expected.push({ type: 'file', attachment: { ...saved.file } })
+        content.push({ type: 'file', receiptId: saved.receiptId })
       }
     }
     const current = await this.metadata(input.sessionId, signal)
@@ -295,17 +278,18 @@ export class DshClawbotHost implements ClawbotHost {
     check()
     // Native uploads own their durable objects and staged receipts. Never delete
     // shared attachment files or edit the host's receipt table on a failed send.
-    return { content, expected, session }
+    return { content, session }
   }
 
   private observeAndSubmit(input: ClawbotInput, generation: number,
     cursor: number, prepared: PreparedInput, signal: AbortSignal, onAttention?: (kind: ClawbotAttention) => void): Promise<ObservedResult> {
     return new Promise((resolve, reject) => {
       let settled = false, dispatched = false, accepted = false, currentTurn: number | undefined
-      let matchedTurn: number | undefined, foreignInput = false, finalText: string | undefined, completion: string | undefined
+      let matchedTurn: number | undefined, finalText: string | undefined, completion: string | undefined
       let observedSession: Row | undefined = prepared.session, eventCount = 0
       const files = new Set<string>()
-      let images: Row[] = [], omitted = false
+      let images: Row[] = [], omitted = false, finalInterrupted = false
+      const notices: string[] = []
       const attention = new Set<ClawbotAttention>()
       const offs: (() => void)[] = []
       const submission = (): DshClawbotSubmission => accepted ? 'accepted' : dispatched ? 'unknown' : 'not-submitted'
@@ -315,7 +299,7 @@ export class DshClawbotHost implements ClawbotHost {
         clearTimeout(timer)
         signal.removeEventListener('abort', abort)
         for (const off of offs.splice(0)) { try { off() } catch { /* no observer may remain */ } }
-        if (error) reject(error); else resolve({ text: text!, session: observedSession!, files: [...files], images, omitted })
+        if (error) reject(error); else resolve({ text: text!, session: observedSession!, files: [...files], images, omitted, notices })
       }
       const stop = (code: string, message: string) => finish(fail(code, message, submission()))
       const notify = (kind: ClawbotAttention) => {
@@ -355,18 +339,16 @@ export class DshClawbotHost implements ClawbotHost {
           if (event.type === 'turn/start') {
             if (matchedTurn !== undefined) return stop('ambiguous-turn', '本次轮次边界发生变化，未转发无法确认归属的回复。')
             currentTurn = Number.isSafeInteger(data.turn) ? data.turn : undefined
-            foreignInput = false; finalText = undefined
-          } else if (event.type === 'user/message' && data.source?.kind !== 'runtime-context') {
-            if (data.source?.kind === 'user' && data.source.rpcId === input.requestId) {
-              if (matchedTurn !== undefined || currentTurn === undefined || foreignInput
-                || !matchesInput(data.content, prepared.expected)) {
-                return stop('ambiguous-turn', '本次输入与其他输入混合或已变化，未转发无法确认归属的回复。')
-              }
-              matchedTurn = currentTurn
-            } else {
-              foreignInput = true
-              if (matchedTurn !== undefined) return stop('ambiguous-turn', '此轮次加入了其他输入，请在电脑或小程序查看完整回复。')
-            }
+            finalText = undefined
+          } else if (event.type === 'user/message') {
+            // The host's committed request receipt, not a second comparison of
+            // normalized prompt content, identifies our turn. Native context,
+            // skill/subagent messages and the owner's same-session follow-ups
+            // are ordinary inputs to that turn, not a reason to hide its reply.
+            if (data.source?.kind !== 'user' || data.source.rpcId !== input.requestId) return
+            if (matchedTurn !== undefined || currentTurn === undefined)
+              return stop('ambiguous-turn', '无法确认本次消息的轮次，请在原会话查看。')
+            matchedTurn = currentTurn
           } else if (matchedTurn !== undefined && currentTurn === matchedTurn) {
             if (event.type === 'deliverables/presented' && data.turn === matchedTurn && id(data.callId) && Array.isArray(data.files)) {
               for (const file of data.files) {
@@ -383,11 +365,11 @@ export class DshClawbotHost implements ClawbotHost {
             }
             if (event.type === 'assistant/message' && data.turn === matchedTurn) {
               const content = data.message?.content
-              finalText = undefined; images = []
-              if (data.interrupted || !Array.isArray(content) || content.some((part: Row) => part?.type === 'tool-call')) return
+              finalText = undefined; images = []; finalInterrupted = data.interrupted === true
+              if (!Array.isArray(content)) return
               const texts = content.filter((part: Row) => part?.type === 'text' && typeof part.text === 'string').map((part: Row) => part.text)
-              const text = texts.join('\n').trim()
-              if (Buffer.byteLength(text) > MAX_TEXT_BYTES) return stop('output-unavailable', '回复过长，请在电脑或小程序查看。')
+              const text = texts.join('')
+              if (Buffer.byteLength(text) > REPLY_TEXT_MAX_BYTES) return stop('output-unavailable', '回复超过本地传输上限，请在原会话查看。')
               if (text) finalText = text
               for (const part of content) if (part?.type === 'image') {
                 const ref = part.attachment
@@ -396,9 +378,18 @@ export class DshClawbotHost implements ClawbotHost {
                 images.push({ ...ref, name: typeof ref.name === 'string' && ref.name.trim() ? ref.name : `image-${images.length + 1}.${suffix}` })
               }
             } else if (event.type === 'turn/end' && data.turn === matchedTurn) {
-              if (data.reason?.kind !== 'completed') return stop('interrupted', '本次任务未正常完成，请在电脑或小程序核对状态；没有自动重发。')
+              const interrupted = data.reason?.kind !== 'completed' || finalInterrupted
+              if (interrupted) {
+                const message = data.reason?.kind === 'max-tokens' ? '本轮回复达到长度上限。'
+                  : ['aborted', 'cancelled'].includes(data.reason?.kind) || finalInterrupted ? '本轮已停止。'
+                  : '本轮未正常完成，请在原会话查看状态。'
+                if (!finalText && !files.size && !images.length) return stop('interrupted', message)
+                // DSH displays durable partial text/images too, with a separate
+                // stop marker. Preserve that content instead of replacing it.
+                notices.push(message)
+              }
               if (!finalText && !files.size && !images.length) return stop('output-unavailable', '本次任务已结束，但没有可确认的最终文字回复，请在电脑或小程序查看。')
-              completion = finalText || '已生成文件。'
+              completion = finalText || ''
               if (accepted) finish(undefined, completion)
             }
           }
@@ -416,12 +407,9 @@ export class DshClawbotHost implements ClawbotHost {
         if (this.archived().has(input.sessionId)) { stop('not-found', '此会话已归档，本条消息未发送。'); return }
         const live = this.ctx.get('sessions')?.get(input.sessionId)
         if (live && !checkSubject(live)) return
-        const liveAgent = this.ctx.get('agents')?.get(input.sessionId)
-        if (liveAgent && (liveAgent.status === 'running' || liveAgent.inbox?.hasPending
-          || liveAgent.inbox?.nextTurn?.length || liveAgent.inbox?.nextStep?.length)) {
-          stop('busy', '此会话正在运行或有排队消息，请先在电脑或小程序处理。')
-          return
-        }
+        // Queue through the host even while an earlier turn is running. The
+        // native inbox owns scheduling; only our committed rpcId starts reply
+        // collection, so an earlier or unrelated turn is never forwarded.
         // The installed native prompt has no generation precondition. This
         // immediate check plus event identity checks fail closed for observed
         // resets; they cannot provide CAS inside the native async dispatcher.

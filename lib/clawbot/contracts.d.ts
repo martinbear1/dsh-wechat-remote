@@ -16,6 +16,8 @@ export interface ClawbotAttachment {
 export interface ClawbotResult {
     text: string;
     attachments?: ClawbotAttachment[];
+    /** Channel delivery notices are separate from the native assistant's text. */
+    notices?: string[];
 }
 export interface ClawbotInput {
     sessionId: string;

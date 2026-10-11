@@ -2,6 +2,7 @@ import { type ClawbotHost, type ClawbotRequest, type ClawbotStatus } from './con
 import { ILinkClient } from './ilink.js';
 import type { ILinkMessage } from './ilink-types.js';
 import type { ClawbotData, ClawbotStorage } from './storage.js';
+export { splitText } from './reply-text.js';
 type AccessBinding = NonNullable<ClawbotData['accessBinding']>;
 export interface ClawbotAccess {
     authorize(): Promise<void>;
@@ -75,6 +76,3 @@ export declare class ClawbotRuntime {
     private drain;
     dispose(): Promise<void>;
 }
-/** Conservative local text chunk size, counted as UTF-8 without splitting emoji. */
-export declare function splitText(text: string): string[];
-export {};

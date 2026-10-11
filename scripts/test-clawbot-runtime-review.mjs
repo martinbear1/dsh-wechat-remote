@@ -15,7 +15,8 @@ async function sourceModule(name) {
     banner: { js: `import { createRequire } from 'node:module'; const require = createRequire(${JSON.stringify(import.meta.url)});` } })
   return import(`data:text/javascript;base64,${Buffer.from(compiled.outputFiles[0].contents).toString('base64')}`)
 }
-const { ClawbotRuntime } = await sourceModule('runtime')
+const { ClawbotRuntime, splitText } = await sourceModule('runtime')
+const { REPLY_TEXT_MAX_BYTES, REPLY_TOTAL_TEXT_MAX_BYTES, REPLY_MAX_TEXT_PARTS } = await sourceModule('reply-text')
 const { FileClawbotStorage, emptyClawbotData } = await sourceModule('storage')
 const { ILinkClient } = await sourceModule('ilink')
 const auth = { token: 'synthetic-token', baseUrl: 'https://ilinkai.weixin.qq.com', accountId: 'test@im.bot', userId: 'test@im.wechat' }
@@ -1792,7 +1793,8 @@ test('pause/revoke/disconnect while preparing output prevents late media send an
       assert.equal(runs, 1); assert.equal(sent, 0)
       if (action !== 'disconnect') {
         assert.equal(storage.data.receipts[0].state, 'ready'); assert.match(storage.data.receipts[0].output, /原任务完成/)
-        assert.match(storage.data.receipts[0].output, /部分附件/); assert.equal(storage.data.receipts[0].parts, undefined)
+        assert.equal(storage.data.receipts[0].output, '原任务完成')
+        assert.deepEqual(storage.data.receipts[0].parts, ['原任务完成', '部分附件未能回传，请在原会话查看。'])
       } else assert.ok(storage.data.receipts.every(r => ['done', 'uncertain'].includes(r.state)))
     } finally { pending.resolve(); await runtime.dispose() }
   }
@@ -1826,9 +1828,9 @@ test('oversized/failed output preparation retains text, does not submit another 
     }), client({ async prepareMedia() { uploads++; throw Error('provider secret path token') }, async sendText(_a, p) { sent.push(p.text) } }))
     try {
       runtime.ingest([incoming('failed-' + count, 'create')], 'out'); await enabled(runtime, true); await setImmediate()
-      assert.equal(runs, 1); assert.equal(uploads, count === 1 ? 1 : 0)
-      assert.equal(sent.length, 1); assert.match(sent[0], /文本成果/); assert.match(sent[0], /部分附件/)
-      assert.doesNotMatch(sent[0], /secret|token/)
+      assert.equal(runs, 1); assert.equal(uploads, Math.min(count, 6))
+      assert.deepEqual(sent, ['文本成果', '部分附件未能回传，请在原会话查看。'])
+      assert.doesNotMatch(sent.join(''), /secret|token/)
     } finally { await runtime.dispose() }
   }
 })
@@ -1842,4 +1844,123 @@ test('outbox rejects malformed or cross-account prepared media and never loses i
     assert.throws(() => new ClawbotRuntime(storage, host(), client()), /记录格式/)
     assert.deepEqual(storage.data.receipts, original.receipts)
   }
+})
+
+test('text chunking is lossless across whitespace, Unicode and surrogate-pair boundaries with no placeholders', () => {
+  assert.deepEqual(splitText(''), [])
+  for (const text of [' \r\n\t ', ' '.repeat(5401), 'x'.repeat(1799) + '😀尾部',
+    ' \n# 原文\n' + '😀中文'.repeat(7000) + ' '.repeat(4000) + '\n\t末尾  ']) {
+    const parts = splitText(text)
+    assert.equal(parts.join(''), text)
+    assert.ok(parts.every(part => part.length > 0 && Buffer.byteLength(part) <= 1800))
+    assert.ok(parts.every(part => !/^[\uDC00-\uDFFF]|[\uD800-\uDBFF]$/.test(part)), 'do not split UTF-16 surrogate pairs')
+  }
+})
+
+test('the full 256 KiB native reply is sent unchanged, without title or truncation', async () => {
+  const text = '😀'.repeat(REPLY_TEXT_MAX_BYTES / 4), storage = memory(), sent = []
+  let runs = 0
+  const runtime = new ClawbotRuntime(storage, host(async () => { runs++; return { text } }), client({
+    async sendText(_auth, message) { sent.push(message.text) },
+  }))
+  try {
+    runtime.ingest([incoming('full-reply', 'long response')], 'full'); await enabled(runtime, true); await setImmediate()
+    assert.equal(runs, 1); assert.ok(sent.length > 100)
+    assert.equal(sent.join(''), text); assert.equal(storage.data.receipts[0].state, 'done')
+    assert.ok(sent.every(part => part.length && Buffer.byteLength(part) <= 1800))
+  } finally { await runtime.dispose() }
+})
+
+test('real HTTP text construction preserves long whitespace-only chunks and still rejects an empty string', async () => {
+  const text = '\n  start ' + ' '.repeat(5600) + '\t\r\n end  ', calls = []
+  const transport = new ILinkClient({ fetch: async (_url, options) => {
+    calls.push(JSON.parse(options.body).msg.item_list[0].text_item.text)
+    return Response.json({})
+  } })
+  let index = 0
+  for (const part of splitText(text)) await transport.sendText(auth, {
+    userId: auth.userId, contextToken: 'captured-context', clientId: 'whitespace-' + index++, text: part,
+  })
+  assert.ok(calls.some(part => part.trim() === ''))
+  assert.equal(calls.join(''), text)
+  await assert.rejects(transport.sendText(auth, { userId: auth.userId, contextToken: 'captured-context', clientId: 'empty', text: '' }), { code: 'clawbot-invalid-input' })
+})
+
+test('storage persists complete long replies and enforces matching local text and part budgets', () => {
+  const fixture = temporaryStore(), text = 'x'.repeat(REPLY_TEXT_MAX_BYTES)
+  const data = seed({ receipts: [receipt('large-reply', 'ready', { input: '', output: text, parts: splitText(text), sentParts: 0 })] })
+  try {
+    fixture.storage.write(data)
+    const restored = fixture.storage.read().receipts[0]
+    assert.equal(restored.output, text); assert.equal(restored.parts.join(''), text); assert.ok(restored.parts.length > 100)
+    for (const patch of [
+      { output: text + 'x' },
+      { parts: Array(REPLY_MAX_TEXT_PARTS + 7).fill('x') },
+      { parts: splitText('x'.repeat(REPLY_TOTAL_TEXT_MAX_BYTES + 1)) },
+    ]) {
+      assert.throws(() => fixture.storage.write(seed({ receipts: [receipt('oversized', 'ready', { output: '', sentParts: 0, ...patch })] })), { code: 'clawbot-storage-invalid' })
+      assert.equal(fixture.storage.read().receipts[0].output, text)
+    }
+  } finally { fixture.close() }
+})
+
+test('image-only and genuinely empty native results never manufacture text or leave undrainable receipts', async () => {
+  for (const images of [0, 1]) {
+    const storage = memory(), sent = []
+    const runtime = new ClawbotRuntime(storage, host(async () => ({ text: '', attachments: images
+      ? [{ kind: 'image', name: 'original.png', data: Buffer.from('img') }] : [] })), client({
+      async prepareMedia(_auth, part) { return preparedFixture(part.kind, part.name) },
+      async sendText() { assert.fail('no success placeholder or empty text request') },
+      async sendMedia(_auth, part) { sent.push(part.media.name) },
+    }))
+    try {
+      runtime.ingest([incoming('image-only-' + images, 'create image')], 'images'); await enabled(runtime, true); await setImmediate()
+      assert.equal(sent.length, images); assert.equal(storage.data.receipts[0].state, 'done')
+      assert.equal(storage.data.receipts[0].contextToken, '')
+    } finally { await runtime.dispose() }
+  }
+})
+
+test('a failed second image does not discard the third; all channel notices remain separate from native text', async () => {
+  const text = '  原文\n\n不改写。\t ', storage = memory(), uploads = [], sent = []
+  const runtime = new ClawbotRuntime(storage, host(async () => ({ text, notices: ['部分文件无法读取，请在原会话查看。'],
+    attachments: [1, 2, 3].map(index => ({ kind: 'image', name: `image-${index}.png`, data: Buffer.from('img') })) })), client({
+    async prepareMedia(_auth, part) {
+      uploads.push(part.name)
+      if (part.name === 'image-2.png') throw Error('secret-provider-data')
+      return preparedFixture(part.kind, part.name)
+    },
+    async sendText(_auth, message) { sent.push(message.text) },
+    async sendMedia(_auth, message) { sent.push(message.media.name) },
+  }))
+  try {
+    runtime.ingest([incoming('failed-middle', 'create')], 'middle'); await enabled(runtime, true); await setImmediate()
+    assert.deepEqual(uploads, ['image-1.png', 'image-2.png', 'image-3.png'])
+    assert.deepEqual(sent, [text, 'image-1.png', 'image-3.png', '部分文件无法读取，请在原会话查看。', '部分附件未能回传，请在原会话查看。'])
+    assert.equal(storage.data.receipts[0].state, 'done')
+  } finally { await runtime.dispose() }
+})
+
+test('unknown slash text follows the ordinary serial input lane unchanged while explicit channel commands stay local', async () => {
+  const f = await nativeAttentionFixture()
+  try {
+    const unknown = '  /compact 请保留这个参数\n  '
+    await f.send(unknown)
+    assert.equal(f.runs.length, 1, 'unknown slash input must not jump the native task queue')
+    assert.equal(f.sent.length, 0)
+    await f.send('/状态'); assert.match(f.sent.at(-1), /接入会话/)
+    f.native.resolve({ text: 'first done' }); await setImmediate()
+    assert.deepEqual(f.runs.map(run => run.text), ['begin original task', unknown])
+    assert.equal(f.sent.at(-1), 'ordinary chat reply')
+  } finally { await f.close() }
+})
+
+test('unknown slash text during native question waiting remains unsubmitted rather than becoming a delayed answer', async () => {
+  const f = await nativeAttentionFixture()
+  try {
+    await f.attention('question'); await f.send('/custom possible answer')
+    assert.equal(f.runs.length, 1); assert.match(f.sent.at(-1), /本条消息未发送/)
+    f.native.resolve({ text: 'native final' }); await setImmediate()
+    assert.equal(f.runs.length, 1)
+  } finally { await f.close() }
 })

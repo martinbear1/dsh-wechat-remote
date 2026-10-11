@@ -6,6 +6,7 @@ import type { ILinkCredentials, ILinkMedia, ILinkPreparedMedia } from './ilink-t
 import { validateMedia, validatePreparedMedia, MEDIA_MAX_ITEMS } from './ilink-media.js'
 import type { ClawbotSession } from './contracts.js'
 import { ClawbotError } from './contracts.js'
+import { REPLY_TEXT_MAX_BYTES, REPLY_MAX_TEXT_PARTS, REPLY_TOTAL_TEXT_MAX_BYTES, TEXT_PART_MAX_BYTES } from './reply-text.js'
 
 export interface Receipt {
   id: string
@@ -56,10 +57,11 @@ export function validateClawbotData(data: ClawbotData): void {
       || !Number.isSafeInteger(r.createdAt) || !Number.isSafeInteger(r.revision)
       || r.parentId !== undefined && (typeof r.parentId !== 'string' || !/^[a-f0-9]{64}$/.test(r.parentId) || r.parentId === r.id)
       || !['pending', 'running', 'ready', 'sending', 'done', 'uncertain'].includes(r.state)
-      || r.output !== undefined && (typeof r.output !== 'string' || r.output.length > 14000)
-      || r.parts !== undefined && (!Array.isArray(r.parts) || !r.parts.length || r.parts.length > 100
-        || r.parts.some(p => typeof p === 'string' ? !p || Buffer.byteLength(p) > 1800
+      || r.output !== undefined && (typeof r.output !== 'string' || Buffer.byteLength(r.output) > REPLY_TEXT_MAX_BYTES)
+      || r.parts !== undefined && (!Array.isArray(r.parts) || !r.parts.length || r.parts.length > REPLY_MAX_TEXT_PARTS + MEDIA_MAX_ITEMS
+        || r.parts.some(p => typeof p === 'string' ? !p || Buffer.byteLength(p) > TEXT_PART_MAX_BYTES
           : !validatePreparedMedia(p) || p.userId !== r.userId || p.accountId !== data.credentials?.accountId)
+        || r.parts.reduce((bytes, p) => bytes + (typeof p === 'string' ? Buffer.byteLength(p) : 0), 0) > REPLY_TOTAL_TEXT_MAX_BYTES
         || r.parts.filter(p => typeof p !== 'string').length > MEDIA_MAX_ITEMS
         || !Number.isSafeInteger(r.sentParts) || r.sentParts! < 0 || r.sentParts! >= r.parts.length)
       || !['done', 'uncertain'].includes(r.state) && r.parts === undefined && r.sentParts !== undefined && r.sentParts !== 0

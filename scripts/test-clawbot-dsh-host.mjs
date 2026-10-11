@@ -123,22 +123,21 @@ test('cold attachment stages through native resolver, then observes that same na
   assert.deepEqual(await promise, { text: 'the answer' }); assert.deepEqual(h.nativeCalls.map(c => c.method), ['list', 'prompt'])
 })
 
-for (const corruption of ['extra', 'name', 'digest', 'order', 'inline']) test(`media correlation rejects ${corruption} content despite a matching request id`, async () => {
+for (const change of ['extra', 'name', 'digest', 'order', 'inline']) test(`native prompt normalization or queued edit (${change}) keeps its committed request correlation`, async () => {
   const h = fixture(), data = Buffer.from('file'), saved = fileRef('one.txt', data)
   h.services.fileUploads = { async uploadStream() { return { receiptId: 'receipt', file: saved } } }
   const promise = h.host.run({ ...input(), attachments: [{ kind: 'image', name: 'one.png', data: png }, { kind: 'file', name: 'one.txt', data }] }, signal())
-  const rejected = assert.rejects(promise, failure('ambiguous-turn'))
   await h.started
   const content = [{ type: 'text', text: 'my request' }, { type: 'image', attachment: imageRef('one.png') }, { type: 'file', attachment: { ...saved } }]
-  if (corruption === 'extra') content.push({ type: 'text', text: 'private extra' })
-  if (corruption === 'name') content[1].attachment.name = 'other.png'
-  if (corruption === 'digest') content[2].attachment.attachmentId = 'sha256:' + 'b'.repeat(64)
-  if (corruption === 'order') content.reverse()
-  if (corruption === 'inline') content[1] = { type: 'image', name: 'one.png', data: png.toString('base64'), mediaType: 'image/png' }
-  mediaTurn(h, content); await rejected; assert.equal(h.listenerCount(), 0)
+  if (change === 'extra') content.push({ type: 'text', text: 'native context' })
+  if (change === 'name') content[1].attachment.name = 'other.png'
+  if (change === 'digest') content[2].attachment.attachmentId = 'sha256:' + 'b'.repeat(64)
+  if (change === 'order') content.reverse()
+  if (change === 'inline') content[1] = { type: 'image', name: 'one.png', data: png.toString('base64'), mediaType: 'image/png' }
+  mediaTurn(h, content); assert.deepEqual(await promise, { text: 'the answer' }); assert.equal(h.listenerCount(), 0)
 })
 
-for (const change of ['pause', 'access', 'archive', 'reset', 'replace', 'busy', 'abort']) test(`attachment preparation revalidates ${change} before sending, without deleting native files`, async () => {
+for (const change of ['pause', 'access', 'archive', 'reset', 'replace', 'abort']) test(`attachment preparation revalidates ${change} before sending, without deleting native files`, async () => {
   const h = fixture(), prepared = deferred(), release = deferred(), controller = new AbortController(), data = Buffer.from('file'), saved = fileRef('one.txt', data)
   let allowed = true, access = true, writes = 0
   h.host = new DshClawbotHost(h.ctx, () => { if (!access) throw Error('access revoked') })
@@ -153,7 +152,6 @@ for (const change of ['pause', 'access', 'archive', 'reset', 'replace', 'busy', 
   if (change === 'archive') h.archived.push('s1')
   if (change === 'reset') h.sessions.get('s1').header.createdAt++
   if (change === 'replace') h.sessions.set('s1', { ...h.sessions.get('s1') })
-  if (change === 'busy') h.agents.set('s1', { status: 'running' })
   if (change === 'abort') controller.abort()
   release.resolve(); await rejected
   assert.equal(writes, 1); assert.equal(h.calls().length, 0); assert.equal(h.listenerCount(), 0)
@@ -262,7 +260,7 @@ test('native presented artifact-only completion works without inventing a second
   const h = fixture(), data = Buffer.from('empty final text but real artifact')
   resourceFixture(h, new Map([['result.txt', { name: 'result.txt', data }]]))
   const promise = h.host.run(input(), signal()); await h.started; h.turn(); presented(h, ['result.txt']); h.end()
-  assert.deepEqual(await promise, { text: '已生成文件。', attachments: [{ kind: 'file', name: 'result.txt', data }] })
+  assert.deepEqual(await promise, { text: '', attachments: [{ kind: 'file', name: 'result.txt', data }] })
   assert.equal(h.calls().length, 1)
 })
 
@@ -282,16 +280,17 @@ for (const problem of ['missing-service', 'missing-file', 'oversize', 'corrupt-c
   if (problem === 'missing-service') delete h.services.agentResources
   const promise = h.host.run(input(), controller.signal); await h.started; h.turn(); presented(h, ['result.txt']); h.assistant('Final answer'); h.end()
   const result = await promise
-  assert(result.text.startsWith('Final answer')); assert(result.text.includes('文件未能回传'))
+  assert.equal(result.text, 'Final answer'); assert(result.notices[0].includes('文件未能回传'))
   assert.equal(result.attachments, undefined); assert.equal(resources.transfers.size, 0)
   assert.equal(h.calls().length, 1); assert.equal(h.listenerCount(), 0)
 })
 
-test('failed native turn never exports previously presented files', async () => {
+test('stopped native turn preserves already presented user-visible files with a separate notice', async () => {
   const h = fixture(), resources = resourceFixture(h, new Map([['one.txt', { name: 'one.txt', data: Buffer.from('secret') }]]))
-  const promise = h.host.run(input(), signal()), rejected = assert.rejects(promise, failure('interrupted'))
+  const promise = h.host.run(input(), signal())
   await h.started; h.turn(); presented(h, ['one.txt']); h.assistant('partial'); h.end(3, 'cancelled')
-  await rejected; assert.equal(resources.calls.length, 0)
+  assert.deepEqual(await promise, { text: 'partial', attachments: [{ kind: 'file', name: 'one.txt', data: Buffer.from('secret') }], notices: ['本轮已停止。'] })
+  assert.equal(resources.transfers.size, 0)
 })
 
 test('final native durable image is verified by its stored digest; tool images never leak', async () => {
@@ -311,7 +310,7 @@ test('pause does not interrupt original task observation but prevents any new ou
   const promise = h.host.run({ ...input(), checkAdmission() { assert.equal(admission, true) } }, signal())
   await h.started; admission = false; h.turn(); presented(h, ['one.txt']); h.assistant(); h.end()
   const result = await promise
-  assert(result.text.startsWith('the answer')); assert(result.text.includes('文件未能回传'))
+  assert.equal(result.text, 'the answer'); assert(result.notices[0].includes('文件未能回传'))
   assert.equal(result.attachments, undefined); assert.equal(media.calls.length, 0)
   assert.equal(h.calls().length, 1); assert.equal(h.listenerCount(), 0)
 })
@@ -406,13 +405,39 @@ test('unmatched turns never become the requested reply', async () => {
   assert.deepEqual(await promise, { text: 'mine' })
 })
 
-for (const before of [true, false]) test(`foreign input ${before ? 'before' : 'after'} target in same turn fails closed`, async () => {
-  const h = fixture(), promise = h.host.run(input(), signal()), rejected = assert.rejects(promise, failure('ambiguous-turn'))
+for (const before of [true, false]) test(`owner follow-up ${before ? 'before' : 'after'} target in the connected turn does not suppress its answer`, async () => {
+  const h = fixture(), promise = h.host.run(input(), signal())
   await h.started
   if (before) h.turn(3, 'foreign'); else h.turn()
   h.event('user/message', { id: 'second', source: { kind: 'user', rpcId: before ? 'r1' : 'foreign' }, content: [{ type: 'text', text: 'my request' }] })
-  h.assistant('mixed private reply'); h.end()
-  await rejected; assert.equal(h.listenerCount(), 0); assert.equal(h.calls().length, 1)
+  h.assistant('answer to the connected turn'); h.end()
+  assert.deepEqual(await promise, { text: 'answer to the connected turn' })
+  assert.equal(h.listenerCount(), 0); assert.equal(h.calls().length, 1)
+})
+
+for (const kind of ['runtime-context', 'time-context', 'agent-instructions', 'model-selection',
+  'skill-catalog', 'user-approval', 'subagent-settled', 'future-native-context']) {
+  test(`native ${kind} inputs before and after the request do not replace the answer`, async () => {
+    const h = fixture(), promise = h.host.run(input(), signal()); await h.started
+    h.event('turn/start', { turn: 3 })
+    h.event('user/message', { source: { kind }, content: [{ type: 'text', text: 'internal context before' }] })
+    h.event('user/message', { source: { kind: 'user', rpcId: 'r1' }, content: [{ type: 'text', text: 'edited in native queue' }] })
+    h.event('user/message', { source: { kind }, content: [{ type: 'text', text: 'internal context after' }] })
+    h.assistant('native answer'); h.end()
+    assert.deepEqual(await promise, { text: 'native answer' }); assert.equal(h.calls().length, 1)
+  })
+}
+
+test('request id from another session or non-user source cannot capture a reply', async () => {
+  const h = fixture(), promise = h.host.run(input(), signal()); await h.started
+  h.event('turn/start', { turn: 3 }, 'other')
+  h.event('user/message', { source: { kind: 'user', rpcId: 'r1' } }, 'other')
+  h.event('assistant/message', { turn: 3, message: { content: [{ type: 'text', text: 'other session' }] } }, 'other')
+  h.event('turn/start', { turn: 3 })
+  h.event('user/message', { source: { kind: 'time-context', rpcId: 'r1' } })
+  h.assistant('not our turn'); h.end()
+  h.turn(4); h.assistant('ours', 4); h.end(4)
+  assert.deepEqual(await promise, { text: 'ours' })
 })
 
 for (const [type, data, code] of [
@@ -440,16 +465,16 @@ test('native questions and approval remain pending until owner answers; same tur
   assert.deepEqual(h.nativeCalls.map(c => c.method), ['list', 'prompt']); assert.equal(h.listenerCount(), 0)
 })
 
-test('unrelated interaction is not forwarded and handoff does not weaken foreign input fence', async () => {
+test('unrelated session interaction is not forwarded while connected-session follow-up remains native', async () => {
   const h = fixture(), notices = [], promise = h.host.run(input(), signal(), kind => notices.push(kind))
-  const rejected = assert.rejects(promise, failure('ambiguous-turn'))
   await h.started; h.turn()
   h.event('approval/asked', { id: 'other', toolName: 'shell' }, 'other')
   assert.deepEqual(notices, [])
   h.event('tool/call', { name: 'ask_user_question', turn: 3 })
   h.event('user/message', { source: { kind: 'user', rpcId: 'other-input' }, content: [{ type: 'text', text: 'another task' }] })
-  h.assistant('must not forward mixed task'); h.end()
-  await rejected; assert.equal(h.listenerCount(), 0); assert.equal(h.calls().length, 1)
+  h.assistant('answer after native follow-up'); h.end()
+  assert.deepEqual(await promise, { text: 'answer after native follow-up' })
+  assert.equal(h.listenerCount(), 0); assert.equal(h.calls().length, 1)
 })
 
 test('waiting for a native answer stays bounded and timeout never cancels or resubmits the task', async t => {
@@ -494,26 +519,30 @@ test('a live native Agent may keep its retired preset revision', async () => {
   assert.deepEqual(await promise, { text: 'the answer' })
 })
 
-test('preexisting running/queued Agent is busy and sends nothing', async () => {
+test('preexisting running/queued Agent accepts native queue without forwarding an earlier turn', async () => {
   for (const state of [{ status: 'running' }, { inbox: { nextTurn: [{}], nextStep: [] } }]) {
     const h = fixture(); h.agents.set('s1', state)
-    await assert.rejects(h.host.run(input(), signal()), failure('busy', 'not-submitted'))
-    assert.equal(h.calls().length, 0); assert.equal(h.listenerCount(), 0)
+    const promise = h.host.run(input(), signal()); await h.started
+    assert.equal(h.calls()[0].args.request.mode, 'queue')
+    h.assistant('previous turn'); h.end()
+    h.turn(4); h.assistant('queued reply', 4); h.end(4)
+    assert.deepEqual(await promise, { text: 'queued reply' }); assert.equal(h.calls().length, 1); assert.equal(h.listenerCount(), 0)
   }
 })
 
-test('native work starting during the awaited preset check cannot receive a late ClawBot prompt', async () => {
+test('native work starting during preset resolution still admits ClawBot through the native queue', async () => {
   for (const busy of [{ status: 'running' }, { status: 'idle', inbox: { hasPending: true } },
     { status: 'idle', inbox: { nextTurn: [{}] } }, { status: 'idle', inbox: { nextStep: [{}] } }]) {
     const h = fixture(), checking = deferred(), checked = deferred()
     h.metadata.get('s1').header.agentPreset = 'standard'
     h.metadata.get('s1').projections = { values: { agentPreset: 'standard' } }
     h.services.agentPresets = { resolve() { checking.resolve(); return checked.promise } }
-    const run = h.host.run(input(), signal()), rejected = assert.rejects(run, failure('busy', 'not-submitted'))
+    const run = h.host.run(input(), signal())
     await checking.promise
     h.agents.set('s1', busy); checked.resolve({})
-    await rejected
-    assert.equal(h.calls().length, 0); assert.equal(h.listenerCount(), 0)
+    await h.started; h.turn(); h.assistant(); h.end()
+    assert.deepEqual(await run, { text: 'the answer' })
+    assert.equal(h.calls().length, 1); assert.equal(h.listenerCount(), 0)
   }
 })
 
@@ -548,14 +577,41 @@ test('changed session generation prevents disclosure', async () => {
   assert.equal(h.listenerCount(), 0)
 })
 
-for (const kind of ['cancelled', 'blocked', 'error', 'max-tokens']) test(`${kind} is not successful completion`, async () => {
-  const h = fixture(), promise = h.host.run(input(), signal()), rejected = assert.rejects(promise, failure('interrupted'))
-  await h.started; h.turn(); h.assistant('partial text'); h.end(3, kind); await rejected
+for (const kind of ['aborted', 'cancelled', 'blocked', 'error', 'max-tokens']) test(`${kind} preserves visible partial reply without claiming success`, async () => {
+  const h = fixture(), promise = h.host.run(input(), signal())
+  await h.started; h.turn()
+  h.event('assistant/message', { turn: 3, interrupted: kind === 'aborted', message: { content: [{ type: 'text', text: 'partial text' }] } })
+  h.end(3, kind)
+  const result = await promise
+  assert.equal(result.text, 'partial text'); assert.equal(result.notices.length, 1)
+  assert.match(result.notices[0], kind === 'max-tokens' ? /长度上限/ : /停止|未正常完成/)
+  assert.equal(h.calls().length, 1)
 })
 
-test('tool-call and reasoning-only messages are never returned as a final answer', async () => {
+for (const kind of ['aborted', 'blocked', 'error', 'max-tokens']) test(`${kind} without content returns an honest stop notice, not invented text`, async () => {
+  const h = fixture(), promise = h.host.run(input(), signal()), rejected = assert.rejects(promise, failure('interrupted'))
+  await h.started; h.turn(); h.end(3, kind); await rejected
+})
+
+test('reasoning and tool fields are excluded without dropping accompanying public text', async () => {
+  const h = fixture(), promise = h.host.run(input(), signal())
+  await h.started; h.turn(); h.assistant('public text', 3, [{ type: 'tool-call', name: 'done' }, { type: 'reasoning', text: 'private reasoning' }]); h.end()
+  assert.deepEqual(await promise, { text: 'public text' })
+})
+
+test('final assistant text keeps whitespace, markdown and adjacent text fragments unchanged', async () => {
+  const h = fixture(), promise = h.host.run(input(), signal())
+  await h.started; h.turn()
+  h.assistant('old intermediate text')
+  h.event('assistant/message', { turn: 3, message: { content: [
+    { type: 'reasoning', text: 'private' }, { type: 'text', text: '  **你好**\n' }, { type: 'text', text: '\n🌈 done  ' },
+  ] } }); h.end()
+  assert.deepEqual(await promise, { text: '  **你好**\n\n🌈 done  ' })
+})
+
+test('tool-call and reasoning-only messages do not invent an assistant answer', async () => {
   const h = fixture(), promise = h.host.run(input(), signal()), rejected = assert.rejects(promise, failure('output-unavailable'))
-  await h.started; h.turn(); h.assistant('not final', 3, [{ type: 'tool-call', name: 'done' }]); h.end(); await rejected
+  await h.started; h.turn(); h.event('assistant/message', { turn: 3, message: { content: [{ type: 'tool-call', name: 'done' }, { type: 'reasoning', text: 'private' }] } }); h.end(); await rejected
 })
 
 test('invalid, missing, archived and subagent selections never dispatch', async () => {
@@ -601,6 +657,7 @@ test('installed native prompt schema, SessionController and AgentLoop preserve r
       const { AgentLoop } = await load('@deepseek-ai/dsh-agent-loop')
       const { ToolRuntime } = await load('@deepseek-ai/dsh-tools')
       const { SystemPrompt } = await load('@deepseek-ai/dsh-system-prompt')
+      const timeContext = await load('@deepseek-ai/dsh-time-context')
       const { default: Projections } = await load('@deepseek-ai/dsh-session-projection')
       const { SessionController } = await load('@deepseek-ai/dsh-api-session-controller')
       const { TYPERT } = await load('@deepseek-ai/dsh-api-session-controller/typert')
@@ -615,11 +672,17 @@ test('installed native prompt schema, SessionController and AgentLoop preserve r
       new ToolRuntime(ctx, { mode: 'native' }); new Typert(ctx)
       const model = { provider: 'fixture', model: 'no-network' }
       let modelCalls = 0, nativePrompts = 0
+      const oldTurnStarted = deferred(), releaseOldTurn = deferred()
       ctx.provide('llm', { listProviders: () => [{ id: 'fixture' }], resolveCallConfig: async v => v,
         resolveModelInfo: async () => ({ inputModalities: ['text'] }),
         async prepareCall(config) { return { config, stream: request => this.stream(request) } },
-        async *stream() { modelCalls++; yield { type: 'reasoning-delta', index: 0, text: 'private reasoning' }
-          yield { type: 'text-delta', index: 1, text: 'native final reply' }; yield { type: 'finish', reason: 'stop' } } })
+        async *stream() {
+          const call = ++modelCalls
+          if (call === 2) { oldTurnStarted.resolve(); await releaseOldTurn.promise }
+          yield { type: 'reasoning-delta', index: 0, text: 'private reasoning' }
+          yield { type: 'text-delta', index: 1, text: call === 2 ? 'previous desktop reply' : 'native final reply' }
+          yield { type: 'finish', reason: { kind: call === 4 ? 'max-tokens' : 'stop' } }
+        } })
       ctx.provide('agentDefaultModel', { currentSelection: () => model })
       ctx.provide('attachments', { admitPromptContent: async v => structuredClone(v) })
       ctx.provide('fileUploads', { registerAgentResolver: () => () => {}, resolve: () => { throw Error('no files') },
@@ -634,6 +697,7 @@ test('installed native prompt schema, SessionController and AgentLoop preserve r
       const controller = new SessionController(ctx)
       agent = await loop.create('clawbot-native-fixture', model, { cwd: work })
       ctx.systemPrompt.context({ name: 'fixture-context', order: 1, text: () => 'Native runtime context, not user input.' })
+      timeContext.apply(ctx, { timeZone: 'UTC', refreshIntervalMs: 60000 })
       ctx.provide('typertGateway', { invoke({ namespace, method, args, signal }) {
         assert.equal(namespace, 'session')
         if (method === 'list') return controller.list(args._request, signal)
@@ -643,6 +707,7 @@ test('installed native prompt schema, SessionController and AgentLoop preserve r
       const host = new DshClawbotHost(ctx), beforeTools = JSON.stringify(ctx.tools.schemas(agent))
       const target = await host.describeSession(agent.id, AbortSignal.timeout(5000))
       const result = await host.run({ sessionId: agent.id, requestId: 'clawbot-native-request', text: 'fixture request', expectedGeneration: target.generation }, AbortSignal.timeout(5000))
+        .catch(error => { throw new Error(`native initial reply: ${error.code}; model calls: ${modelCalls}`) })
       await agent.whenIdle()
       assert.deepEqual(result, { text: 'native final reply' })
       assert.equal(nativePrompts, 1); assert.equal(modelCalls, 1)
@@ -650,8 +715,42 @@ test('installed native prompt schema, SessionController and AgentLoop preserve r
       const events = agent.session.snapshotEvents()
       assert.equal(events.find(e => e.type === 'user/message' && e.data.source.kind === 'user').data.source.rpcId, 'clawbot-native-request')
       assert(events.some(e => e.type === 'user/message' && e.data.source.kind === 'runtime-context'))
+      assert(events.some(e => e.type === 'user/message' && e.data.source.kind === 'time-context'))
       assert.equal(events.at(-1).type, 'turn/end')
       assert.equal(events.at(-1).data.reason.kind, 'completed')
+
+      // An active desktop turn and an owner-edited native queue item must not
+      // cause a reply substitution or forward the desktop turn's earlier text.
+      await controller.prompt({ sessionId: agent.id, requestId: 'desktop-request', mode: 'queue',
+        content: [{ type: 'text', text: 'desktop input' }] }, AbortSignal.timeout(5000))
+      await oldTurnStarted.promise
+      const queuedResult = host.run({ sessionId: agent.id, requestId: 'queued-clawbot-request', text: 'before edit',
+        expectedGeneration: target.generation }, AbortSignal.timeout(5000))
+        .catch(error => { throw new Error(`native queued reply: ${error.code}; model calls: ${modelCalls}`) })
+      try {
+        let queued
+        for (let attempt = 0; attempt < 100 && !queued; attempt++) {
+          await new Promise(setImmediate)
+          queued = agent.inbox.nextTurn.find(item => item.source?.rpcId === 'queued-clawbot-request')
+        }
+        assert(queued, 'ClawBot request entered native next-turn queue')
+        await controller.updateQueue({ sessionId: agent.id, itemId: queued.id,
+          action: { kind: 'edit', content: [{ type: 'text', text: 'edited in native UI' }] } })
+      } finally {
+        releaseOldTurn.resolve()
+      }
+      assert.deepEqual(await queuedResult, { text: 'native final reply' })
+      await agent.whenIdle()
+      const edited = agent.session.snapshotEvents().find(event => event.type === 'user/message'
+        && event.data.source.rpcId === 'queued-clawbot-request')
+      assert.equal(edited.data.content[0].text, 'edited in native UI')
+      assert.equal(nativePrompts, 2); assert.equal(modelCalls, 3)
+      const limitedResult = await host.run({ sessionId: agent.id, requestId: 'limited-reply', text: 'length fixture',
+        expectedGeneration: target.generation }, AbortSignal.timeout(5000))
+      await agent.whenIdle()
+      assert.deepEqual(limitedResult, { text: 'native final reply', notices: ['本轮回复达到长度上限。'] })
+      assert.equal(agent.session.snapshotEvents().at(-1).data.reason.kind, 'max-tokens')
+      assert.equal(nativePrompts, 3); assert.equal(modelCalls, 4)
     } finally {
       await ctx?.fiber.dispose(); fs.closeSync(fd)
       assert.equal(path.dirname(path.resolve(work)), path.resolve(os.tmpdir()))

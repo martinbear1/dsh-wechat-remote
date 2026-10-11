@@ -36,6 +36,7 @@ try {
     'clawbot/service.ts',
     'clawbot/contracts.ts',
     'clawbot/runtime.ts',
+    'clawbot/reply-text.ts',
     'clawbot/storage.ts',
     'clawbot/ilink.ts',
     'clawbot/ilink-types.ts',

@@ -6,22 +6,23 @@ import type { ILinkMessage, ILinkQrResult, ILinkPreparedMedia } from './ilink-ty
 import { MEDIA_MAX_BYTES, MEDIA_MAX_ITEMS } from './ilink-media.js'
 import type { ClawbotData, ClawbotStorage, Receipt } from './storage.js'
 import { validateClawbotData } from './storage.js'
+import { REPLY_TEXT_MAX_BYTES, REPLY_MAX_NOTICES, REPLY_NOTICE_MAX_BYTES, splitText } from './reply-text.js'
+export { splitText } from './reply-text.js'
 
 const RETENTION = 7 * 86400_000 // Local deduplication window, not a Tencent guarantee.
 const MAX_RECEIPTS = 1000
 const MAX_INPUT = 8000
-const MAX_OUTPUT = 12000
 const LOGIN_LIFETIME = 5 * 60_000 // Local attempt limit, not a Tencent expiry guarantee.
 const LOGIN_RETRY_MESSAGE = '暂时无法读取微信绑定状态，正在重试。'
 const RESTART_MESSAGE = 'ClawBot 本地记录出现异常，接入已停止。请核对记录后重启组件。'
 const activeLoginStatus = (status: string) => ['wait', 'scaned', 'scaned_but_redirect', 'need_verifycode'].includes(status)
 const terminal = (r: Receipt) => r.state === 'done' || r.state === 'uncertain'
-const isCommand = (r: Receipt) => !r.media?.length && r.input.trim().startsWith('/')
+const isCommand = (r: Receipt) => !r.media?.length && /^\/(?:帮助|help|状态|会话|回答|切换)(?:\s|$)/.test(r.input.trim())
 const attentionId = (id: string, kind: ClawbotAttention) => createHash('sha256').update(`attention\0${id}\0${kind}`).digest('hex')
-const nativeOnlyMessage = (title: string) => `【${title}】\n本次任务的问答或审批请在小程序或电脑的原生卡片中处理。本条消息未发送到会话，也不会稍后补发；待原任务结束后，需要时再发送新消息。`
+const nativeOnlyMessage = '请在小程序或电脑处理当前问答或审批。本条消息未发送，也不会稍后补发。'
 const sameTarget = (a: Receipt, b: Receipt) => a.userId === b.userId && !!a.target && !!b.target
   && a.target.id === b.target.id && a.target.generation === b.target.generation
-function holdInput(r: Receipt, output = nativeOnlyMessage(r.target?.title || 'ClawBot')): void {
+function holdInput(r: Receipt, output = nativeOnlyMessage): void {
   r.state = 'ready'; r.input = ''; r.output = output
 }
 function holdPending(data: ClawbotData, parent: Receipt, output?: string): void {
@@ -55,7 +56,6 @@ function pollErrorMessage(code: string | undefined): string {
     default: return 'ClawBot 接入处理异常，正在重试；请核对插件状态。'
   }
 }
-
 /** Independently owned channel. No phone connection, relay account, model tool,
  * native preset mutation, or host process lifecycle is used here. */
 export class ClawbotRuntime {
@@ -90,7 +90,7 @@ export class ClawbotRuntime {
       // ambiguous follow-up is still queued. Do not infer new task
       // intent from an old answer-shaped message just because the run ended.
       for (const r of d.receipts) if (parents.has(r.id)) holdPending(d, r,
-        `【${r.target?.title || 'ClawBot'}】\n本条升级前待发消息未发送到会话，也不会自动补发。请在小程序或电脑核对原会话后，按需重新发送。`)
+        '本条升级前待发消息未发送到会话，也不会自动补发。请在小程序或电脑核对原会话后，按需重新发送。')
       for (const r of d.receipts) if (r.parentId !== undefined) {
         if (r.state === 'ready' || r.state === 'sending') {
           r.state = r.state === 'sending' ? 'uncertain' : 'done'
@@ -515,7 +515,7 @@ export class ClawbotRuntime {
     const text = r.input.trim()
     if (!isCommand(r)) return null
     if (text === '/帮助' || text === '/help') return '/会话：列出可接入的会话\n/切换 编号：切换接入会话\n/状态：查看当前接入\n普通文字直接发送到接入会话；问答和审批请在小程序或电脑处理。'
-    if (/^\/回答(?:\s|$)/.test(text)) return '问答和审批请在小程序或电脑的原生卡片中处理，微信私聊不代为作答。本条消息未发送到会话。'
+    if (/^\/回答(?:\s|$)/.test(text)) return '请在小程序或电脑的原生卡片回答问题。本条消息未发送到会话。'
     if (text === '/状态') return `接入会话：${this.data.target?.title || '尚未选择'}。私聊接入${this.data.enabled ? '已启用' : '已暂停'}。`
     if (text === '/会话') {
       const sessions = await this.host.listSessions(this.lifetime.signal)
@@ -539,7 +539,7 @@ export class ClawbotRuntime {
       this.commandQueue = operation.catch(() => {}); await operation
       return `已接到「${found[0].title}」。现在发送的文字将进入此会话；先前已接收的消息仍属于原会话。`
     }
-    return '未知 ClawBot 指令。发送 /帮助 查看；首版不把斜杠指令转给 DSH 执行。'
+    return '请发送 /帮助 查看指令用法。'
   }
   private shortId(id: string): string { return createHash('sha256').update(id).digest('hex').slice(0, 8) }
   /** Notices reuse the same durable outbox and delivery fences as final replies.
@@ -555,7 +555,7 @@ export class ClawbotRuntime {
     const action = kind === 'approval' ? '确认审批' : '回答问题'
     this.commit(d => { holdPending(d, r); d.receipts.push({ id, userId: r.userId, contextToken: r.contextToken, input: '',
       target: r.target, revision: r.revision, createdAt: this.now(), state: 'ready',
-      output: `【${r.target?.title || 'ClawBot'}】\n请打开小程序或电脑中的此会话${action}。任务未取消；保持私聊接入开启，会继续等待本次结果（最多 15 分钟）。` }) })
+      output: `请在小程序或电脑${action}，当前任务未取消。` }) })
     this.deliver()
   }
   private async process(commands: boolean): Promise<void> {
@@ -566,8 +566,9 @@ export class ClawbotRuntime {
       if (this.closed || this.broken || !this.data.enabled) return
       if (this.data.receipts.find(item => item.id === r.id)?.state === 'pending') {
         this.update(r.id, { state: 'running' })
-        let output: string
+        let output = ''
         const mediaParts: ILinkPreparedMedia[] = []
+        const notices: string[] = []
         try {
           const command = await this.command(r)
           if (this.broken) return
@@ -604,7 +605,14 @@ export class ClawbotRuntime {
             const result = await this.host.run({ sessionId: r.target.id, expectedGeneration: r.target.generation!, requestId: `clawbot-${r.id}`, text: r.input,
               ...(attachments.length ? { attachments } : {}), checkAdmission }, this.lifetime.signal,
               kind => this.attention(r, kind))
-            output = `【${r.target.title}】\n${result.text || '本轮已结束，没有可发送的文字回复。'}`
+            if (typeof result.text !== 'string' || Buffer.byteLength(result.text) > REPLY_TEXT_MAX_BYTES)
+              fail('clawbot-output-too-large', '回复超过本地传输上限，请在原会话查看。')
+            output = result.text
+            if (result.notices?.length) {
+              if (result.notices.length <= REPLY_MAX_NOTICES - 1 && result.notices.every(notice =>
+                typeof notice === 'string' && notice.length > 0 && Buffer.byteLength(notice) <= REPLY_NOTICE_MAX_BYTES)) notices.push(...result.notices)
+              else notices.push('部分内容未能回传，请在原会话查看。')
+            }
             if (result.attachments?.length) {
               // Read-only native deliverables arrive as one bounded snapshot.
               // Upload is separate from sending: no live host paths, bytes or
@@ -615,35 +623,42 @@ export class ClawbotRuntime {
                 if (!sendingCredentials || this.data.credentials?.token !== sendingCredentials.token)
                   fail('clawbot-media-unavailable', '微信绑定已变化，未继续准备附件。')
               }
-              try {
-                if (result.attachments.length > MEDIA_MAX_ITEMS || result.attachments.reduce((n, part) => n + part.data.byteLength, 0) > 30 * 1024 * 1024
-                  || typeof this.client.prepareMedia !== 'function') throw Error('unsupported output')
-                for (const part of result.attachments) {
+              let omitted = result.attachments.length > MEDIA_MAX_ITEMS, totalOutputBytes = 0
+              for (const part of result.attachments.slice(0, MEDIA_MAX_ITEMS)) {
+                try {
+                  // These bounded in-memory/output limits are local policy. A
+                  // failed file must not suppress later independent images.
+                  if (mediaParts.length >= MEDIA_MAX_ITEMS || !(part.data instanceof Uint8Array) || !part.data.byteLength
+                    || part.data.byteLength > MEDIA_MAX_BYTES || totalOutputBytes + part.data.byteLength > 30 * 1024 * 1024
+                    || typeof this.client.prepareMedia !== 'function') throw Error('unsupported output')
                   await this.authorize(); checkOutput()
                   const prepared = await this.client.prepareMedia(sendingCredentials!, { userId: r.userId, ...part }, this.lifetime.signal, checkOutput)
-                  checkOutput(); mediaParts.push(prepared)
+                  checkOutput(); mediaParts.push(prepared); totalOutputBytes += part.data.byteLength
+                } catch {
+                  omitted = true
+                  // Preserve the completed text when paused/revoked, but never
+                  // perform another upload after its authority was withdrawn.
+                  try { checkOutput() } catch { break }
                 }
-              } catch {
-                // A missing/changed file must not discard the completed reply
-                // or cause another Agent run. Already prepared files stay ordered.
-                output += '\n部分附件未能准备发送，请在原会话查看；不会自动重新执行任务。'
               }
+              if (omitted) notices.push('部分附件未能回传，请在原会话查看。')
             }
           }
         } catch (error) {
           if (this.closed || this.broken) return
           // Do not leak host paths, tool arguments or arbitrary exception data.
-          output = `【${r.target?.title || 'ClawBot'}】\n${error instanceof ClawbotError ? error.message : '未能确认本轮完整回复。请到原会话查看是否需要审批、仍在运行或已失败；不会自动重复提交。'}`
+          output = error instanceof ClawbotError ? error.message : '未能确认本轮回复，请在原会话查看；不会自动重复提交。'
         } finally { this.nativeAttention.delete(r.id) }
         if (this.closed || this.broken) return
         // Explicit disconnect may seal the old account's in-flight receipt. A late
         // host result must not revive it and send through a different bot.
         if (this.data.receipts.find(item => item.id === r.id)?.state !== 'running') continue
-        const bounded = output.length > MAX_OUTPUT ? output.slice(0, MAX_OUTPUT) + '\n（回复较长，完整内容请在原会话查看）' : output
+        const parts = [...splitText(output), ...mediaParts, ...notices.flatMap(splitText)]
         this.commit(d => {
           sealUnsentAttention(d, r.id)
-          Object.assign(d.receipts.find(item => item.id === r.id)!, { state: 'ready', output: bounded, input: '',
-            ...(mediaParts.length ? { parts: [...splitText(bounded), ...mediaParts], sentParts: 0 } : {}) })
+          Object.assign(d.receipts.find(item => item.id === r.id)!, parts.length
+            ? { state: 'ready', output, input: '', parts, sentParts: 0 }
+            : { state: 'done', output: undefined, input: '', parts: undefined, sentParts: undefined, contextToken: '' })
         })
         this.deliver()
       }
@@ -660,6 +675,7 @@ export class ClawbotRuntime {
       if (!current) return
       const r = current
       const parts = current.parts || splitText(current.output || '')
+      if (!parts.length) { this.update(r.id, { state: 'done', output: undefined, input: '', contextToken: '' }); continue }
       for (let index = current.sentParts || 0; index < parts.length; index++) {
         try { await this.authorize() } catch { return }
         if (this.closed || this.broken || !this.data.enabled) return
@@ -702,12 +718,4 @@ export class ClawbotRuntime {
     await Promise.allSettled([this.worker, this.commandWorker, this.deliveryWorker, this.pollTask, this.commandQueue, loginTask])
     this.storage.close()
   }
-}
-
-/** Conservative local text chunk size, counted as UTF-8 without splitting emoji. */
-export function splitText(text: string): string[] {
-  const parts: string[] = []; let part = '', bytes = 0
-  for (const char of text) { const size = Buffer.byteLength(char); if (bytes + size > 1800) { parts.push(part); part = ''; bytes = 0 }; part += char; bytes += size }
-  if (part) parts.push(part)
-  return parts.length ? parts : ['（无文字回复）']
 }

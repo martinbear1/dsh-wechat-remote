@@ -37,13 +37,57 @@ test('one lease is singleflight, monotonic bounded, node/account bound and local
   assert.equal(access.groupEnabled(), false, 'never copy old account/node opt-in')
 })
 
-test('network failure invalidates a previously allowed lease immediately; statuses never trust client allowed', async t => {
-  let fail = false
-  const access = new FeatureAccess({ nodeId: () => 'test-node', read: async () => { if (fail) throw Error('secret response'); return lease() } })
-  t.after(() => access.close()); await access.refresh(); await access.setGroupEnabled(true)
-  fail = true; await assert.rejects(access.refresh(true), /暂时无法核对/)
-  assert.equal(access.snapshot().features.clawbot.allowed, false); assert.equal(access.groupEnabled(), false)
-  await access.setGroupEnabled(false); assert.equal(access.groupEnabled(), false)
+test('temporary background failure preserves only the same unexpired lease and import permit, without extending deadlines or retrying', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let clock = 0, reads = 0, failure, value = importLease()
+  const access = new FeatureAccess({ nodeId: () => 'test-node', read: async () => { reads++; if (failure) throw failure; return value } }, undefined, () => clock)
+  t.after(() => access.close()); await access.setGroupEnabled(true); await access.setHistoryImportEnabled(true)
+  const permit = await access.authorizeHistoryImport(), original = access.snapshot(), expiry = access.expiry
+  const epoch = access.historyEpoch, generation = access.generation
+  clock = 45000; failure = Error('synthetic network failure')
+  t.mock.timers.tick(45000)
+  await assert.rejects(access.refresh(true), /暂时无法核对/)
+  assert.equal(reads, 2, 'join the one existing background refresh')
+  assert.deepEqual(access.snapshot(), original); assert.equal(access.expiry, expiry)
+  assert.equal(access.historyEpoch, epoch); assert.equal(access.generation, generation)
+  permit.assertCurrent(); await access.assert('group_assistant'); await access.assert('clawbot')
+  await permit.revalidate(new AbortController().signal)
+  assert.equal(reads, 2, 'ordinary consumers reuse authority without awaiting or retrying background I/O')
+  for (const observation of [Object.assign(Error('synthetic service unavailable'), { statusCode: 503 }),
+    Object.assign(Error('rate limit'), { statusCode: 429 }), Object.assign(Error('proxy route unavailable'), { statusCode: 404 }),
+    SyntaxError('malformed response'), { ...importLease(), expiresAt: 0 }]) {
+    failure = observation instanceof Error ? observation : undefined
+    value = failure ? importLease() : observation
+    await assert.rejects(access.refresh(true), FeatureAccessError); permit.assertCurrent()
+    assert.deepEqual(access.snapshot(), original); assert.equal(access.expiry, expiry)
+    assert.equal(access.historyEpoch, epoch); assert.equal(access.generation, generation)
+  }
+  clock = 60001; t.mock.timers.tick(15001)
+  assert.equal(reads, 7, 'a failed renewal starts no new retry timer')
+  assert.equal(access.groupEnabled(), false); assert.equal(access.historyImportEnabled(), false)
+  assert.equal(access.grant('clawbot').allowed, false); assert.throws(() => permit.assertCurrent(), FeatureAccessError)
+  failure = undefined; value = importLease(); await permit.revalidate(new AbortController().signal)
+  permit.assertCurrent(); assert.equal(reads, 8, 'natural expiry still allows a later explicit same-owner recheck')
+})
+
+test('explicit authentication denial, validated revocation, invalidation and owner changes never retain the old lease or import permit', async t => {
+  for (const change of ['401', '403', 'denied', 'account', 'node', 'invalidate']) {
+    let nodeId = 'test-node', value = importLease(), failure
+    const access = new FeatureAccess({ nodeId: () => nodeId, read: async () => { if (failure) throw failure; return value } })
+    t.after(() => access.close()); await access.setGroupEnabled(true); await access.setHistoryImportEnabled(true)
+    const permit = await access.authorizeHistoryImport()
+    if (/^\d+$/.test(change)) failure = Object.assign(Error('denied'), { statusCode: Number(change) })
+    if (change === 'denied') value.features.history_import = { allowed: false, reason: 'feature_account_blocked', validUntil: null }
+    if (change === 'account') value.accountInstance = 'other-owner'
+    if (change === 'node') { nodeId = 'other-node'; failure = Error('offline') }
+    if (change === 'invalidate') { access.invalidate(); failure = Error('offline') }
+    if (failure) await assert.rejects(access.refresh(true), FeatureAccessError, change)
+    else await access.refresh(true)
+    assert.equal(access.historyImportEnabled(), false, change)
+    assert.throws(() => permit.assertCurrent(), FeatureAccessError, change)
+    failure = undefined; value = importLease(nodeId); await access.refresh()
+    await assert.rejects(permit.revalidate(new AbortController().signal), FeatureAccessError, change)
+  }
 })
 
 test('same-node invalidation aborts and fences an old authority read without clearing its replacement flight', async t => {
@@ -98,6 +142,13 @@ test('feature HTTP uses exact node GET proof, empty body, no redirect and bounde
       return new Response(JSON.stringify(lease()))
     } })
   assert.equal((await agent.readFeatures(new AbortController().signal)).nodeId, 'test-node')
+  for (const status of [401, 403, 404, 429, 500, 503]) {
+    agent.fetchImpl = async () => new Response('private response must not escape', { status })
+    await assert.rejects(agent.readFeatures(new AbortController().signal), error => error.statusCode === status
+      && error.message === 'Feature source unavailable' && !JSON.stringify(error).includes('private response'))
+  }
+  agent.fetchImpl = async () => ({ ok: false, status: 403, body: { async cancel() { throw Error('cleanup failed') } } })
+  await assert.rejects(agent.readFeatures(new AbortController().signal), { statusCode: 403, message: 'Feature source unavailable' })
   agent.fetchImpl = async () => new Response('x'.repeat(17000)); await assert.rejects(agent.readFeatures(new AbortController().signal))
   agent.fetchImpl = async () => { agent.identity = { ...identity }; return new Response(JSON.stringify(lease())) }
   await assert.rejects(agent.readFeatures(new AbortController().signal), /identity changed/)

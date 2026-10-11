@@ -108,7 +108,7 @@ export class FeatureAccess {
     // lease before starting a fresh read; its timer must not abort the new one.
     if (this.lease && this.monotonic() >= this.until) this.clearLease()
     if (!this.flight) {
-      const start = this.monotonic(), generation = this.generation, abort = new AbortController()
+      const start = this.monotonic(), generation = this.generation, abort = new AbortController(), previous = this.live()
       this.readAbort = abort
       const flight = Promise.resolve().then(async () => {
         try {
@@ -124,7 +124,16 @@ export class FeatureAccess {
           clearTimeout(this.expiry); this.expiry = setTimeout(() => this.clearLease(), Math.max(1, until - this.monotonic())); this.expiry.unref?.()
           this.renewWhileEnabled()
           this.emit()
-        } catch { if (generation === this.generation) this.invalidate(); throw new FeatureAccessError('unavailable') }
+        } catch (error) {
+          const status = (error as { statusCode?: number } | undefined)?.statusCode
+          // A failed background observation cannot revoke an unexpired lease.
+          // Keep its ORIGINAL deadline/intent only. A validated new lease above,
+          // explicit auth denial, identity invalidation or expiry remain final;
+          // rate limits/proxy/protocol failures are not evidence of revocation.
+          const denied = status === 401 || status === 403
+          if (generation === this.generation && !(!denied && !abort.signal.aborted && previous && this.live() === previous)) this.invalidate()
+          throw new FeatureAccessError('unavailable')
+        }
       })
       this.flight = flight
       void flight.finally(() => { if (this.flight === flight) { this.flight = undefined; this.readAbort = undefined } }).catch(() => {})

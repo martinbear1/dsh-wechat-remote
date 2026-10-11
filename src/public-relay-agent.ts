@@ -254,7 +254,10 @@ export class PublicRelayAgent {
     if (origin.protocol !== 'https:' || origin.username || origin.password) throw new Error('Feature source unavailable')
     const response = await this.fetchImpl(origin.origin + pathname, { method: 'GET', redirect: 'error', signal,
       headers: createAgentHttpProof(identity, 'GET', pathname) })
-    if (!response.ok || !response.body) { await response.body?.cancel(); throw new Error('Feature source unavailable') }
+    if (!response.ok || !response.body) {
+      await response.body?.cancel().catch(() => {})
+      throw Object.assign(new Error('Feature source unavailable'), { statusCode: response.status })
+    }
     const reader = response.body.getReader(), parts: Uint8Array[] = []; let bytes = 0
     try { while (true) {
       signal.throwIfAborted(); const { done, value } = await reader.read(); if (done) break

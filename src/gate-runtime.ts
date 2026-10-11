@@ -43,6 +43,7 @@ import WechatAttachmentService, {
 } from './attachment-service.js'
 import { AgentResourcesService } from './agent-resources.js'
 import { AgentInputsService } from './agent-inputs.js'
+import { WechatImportService } from './history-import/service.js'
 import { HumanToolsService } from './human-tools/service.js'
 import { WechatFeaturesService } from './feature-access.js'
 import { PrivateInputNative } from './human-workflow/private-input-native.js'
@@ -635,6 +636,9 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
     },
   })
   mountChild('directory', WechatDirectoryService, { maxEntries: 1000 })
+  mountChild('history-import', WechatImportService, {
+    receiptDirectory: path.join(path.dirname(defaultGateStatePath(ctx)), 'history-import-receipts'),
+  })
   // 电脑名不在 DSH 原生 host.describe 契约里；以微信端隔离的只读 Remote
   // 提供，避免为了一个客户端字段污染 DSH/WebUI 的 Host API。
   mountChild('host-info', WechatHostInfoService, {

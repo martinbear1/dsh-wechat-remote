@@ -9,6 +9,7 @@ import type { ClawbotControlResult } from '@harness-remote/dsh-wechat-remote/cla
 import type { WechatDirectoryCreateRequest, WechatDirectoryCreateResult, WechatDirectoryListRequest, WechatDirectoryListResult, WechatDirectoryRootsRequest, WechatDirectoryRootsResult } from '@harness-remote/dsh-wechat-remote/directory'
 import type { FeatureControlResult } from '@harness-remote/dsh-wechat-remote/features'
 import type { WechatHistoryWindowRequest, WechatHistoryWindowResult } from '@harness-remote/dsh-wechat-remote/history'
+import type { HistoryImportResult } from '@harness-remote/dsh-wechat-remote/history-import'
 import type { WechatHostDescribeRequest, WechatHostDescribeResult } from '@harness-remote/dsh-wechat-remote/host-info'
 import type { AssistantDraftRequest, AssistantInstallRequest, AssistantVersionRequest, AutomationApproveRequest, AutomationPauseRequest, AutomationPreviewRequest, AutomationStatusRequest, AutomationTaskRequest, CoverPreviewRequest, HumanResult, ModeApprovalRequest, ModeVersionRequest } from '@harness-remote/dsh-wechat-remote/human-tools'
 import type { HumanAckWireRequest, HumanActionRequest } from '@harness-remote/dsh-wechat-remote/human-tools/protocol'
@@ -78,6 +79,9 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
   interface TypertRemoteNamespace$776563686174486f7374 {
     describe: (request: WechatHostDescribeRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatHostDescribeResult>>
   }
+  interface TypertRemoteNamespace$776563686174496d706f7274 {
+    control: (request: { action: string; inputJson?: string; }, signal?: AbortSignal) => Promise<RemoteResult<HistoryImportResult>>
+  }
   interface TypertRemoteMap {
     'agentInputs/capabilities': (request: { scope: string; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
     'agentInputs/upload': (request: { scope: string; name: string; data?: string; descriptorJson?: string; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
@@ -124,6 +128,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'wechatHistory/page': (request: WechatHistoryWindowRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatHistoryWindowResult>>
     'wechatHistory/window': (request: WechatHistoryWindowRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatHistoryWindowResult>>
     'wechatHost/describe': (request: WechatHostDescribeRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatHostDescribeResult>>
+    'wechatImport/control': (request: { action: string; inputJson?: string; }, signal?: AbortSignal) => Promise<RemoteResult<HistoryImportResult>>
   }
   interface TypertRemoteNamespaceMap {
     'agentInputs': TypertRemoteNamespace$6167656e74496e70757473
@@ -135,6 +140,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'wechatFeatures': TypertRemoteNamespace$7765636861744665617475726573
     'wechatHistory': TypertRemoteNamespace$776563686174486973746f7279
     'wechatHost': TypertRemoteNamespace$776563686174486f7374
+    'wechatImport': TypertRemoteNamespace$776563686174496d706f7274
   }
 }
 

@@ -1,12 +1,13 @@
 {
   "name": "@harness-remote/dsh-wechat-remote",
-  "version": "1.7.14-rc.36",
+  "version": "1.7.14-rc.37",
   "description": "Agent远程管理助手：支持 Windows、macOS 与 Linux 上的 DeepSeek Harness，提供微信配对、安全局域网直连及端到端加密公网连接",
   "private": true,
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
+    "./history-import": { "types": "./lib/history-import/service.d.ts", "default": "./lib/history-import/service.js" },
     "./features": { "types": "./lib/feature-access.d.ts", "default": "./lib/feature-access.js" },
     "./clawbot": { "types": "./lib/clawbot-component.d.ts", "default": "./lib/clawbot-component.js" },
     "./clawbot/protocol": { "types": "./lib/clawbot/contracts.d.ts", "default": "./lib/clawbot/contracts.js" },
@@ -116,7 +117,8 @@
     "bundle": "tsc -p tsconfig.json && node scripts/clean-client-types.mjs && tsc -p tsconfig.client.json && node scripts/build-client.mjs && node scripts/generate-typert.mjs",
     "verify": "node scripts/verify.mjs && node scripts/check-public-tree.mjs && npm run verify:pack",
     "verify:pack": "node --test scripts/test-packed-plugin.mjs && node scripts/verify-packed-plugin.mjs",
-    "test": "npm run test:features && npm run test:clawbot && npm run test:private-updates && npm run test:human-tools && npm run test:notifications && npm run test:lifecycle && npm run test:client && npm run test:attachment && npm run test:directory && npm run test:host-platform && npm run test:history && npm run test:gate-ports && npm run test:dsh-runtime && npm run test:dsh-protocol-compat && npm run test:dsh-realtime-compat && npm run test:dsh-compatibility-api && npm run test:public-relay && npm run test:updates && npm run test:native-update",
+    "test": "npm run test:features && npm run test:clawbot && npm run test:private-updates && npm run test:human-tools && npm run test:notifications && npm run test:lifecycle && npm run test:client && npm run test:attachment && npm run test:directory && npm run test:host-platform && npm run test:history && npm run test:gate-ports && npm run test:dsh-runtime && npm run test:dsh-protocol-compat && npm run test:dsh-realtime-compat && npm run test:dsh-compatibility-api && npm run test:public-relay && npm run test:updates && npm run test:native-update && npm run test:history-import",
+    "test:history-import": "node --test scripts/test-history-import-source.mjs scripts/test-history-import-control.mjs scripts/test-history-import-worker.mjs scripts/test-history-import-native.mjs",
     "test:features": "node --test scripts/test-feature-access.mjs",
     "test:clawbot": "node --test scripts/test-clawbot-ilink.mjs scripts/test-clawbot-media.mjs scripts/test-clawbot-runtime-review.mjs scripts/test-clawbot-dsh-host.mjs scripts/test-clawbot-panel.mjs",
     "test:clawbot:native": "node scripts/test-clawbot-native-boundary.mjs",
@@ -170,6 +172,8 @@
     "zod"
   ],
   "peerDependencies": {
+    "@deepseek-ai/dsh-session": ">=0.1.1-rc.2",
+    "@deepseek-ai/dsh-session-format-catalog": ">=0.1.1-rc.2",
     "@deepseek-ai/dsh-scope": ">=0.1.1-rc.2",
     "@deepseek-ai/dsh-llm": ">=0.1.1-rc.2",
     "@deepseek-ai/cordis": ">=4.0.1",
@@ -183,6 +187,8 @@
     "react": "^18.2.0"
   },
   "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-session": { "optional": true },
+    "@deepseek-ai/dsh-session-format-catalog": { "optional": true },
     "@deepseek-ai/dsh-scope": { "optional": true },
     "@deepseek-ai/dsh-llm": { "optional": true },
     "@deepseek-ai/cordis": {
@@ -238,6 +244,7 @@
     "typescript": "^5.8.3"
   },
   "files": [
+    "lib/history-import",
     "lib/clawbot-component.js",
     "lib/clawbot-component.d.ts",
     "lib/clawbot",

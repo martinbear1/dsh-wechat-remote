@@ -1,0 +1,65 @@
+Private resource demo base correction — 2026-10-12
+
+Root cause
+The original demo-creative-companion 1.0.0 and 1.1.0 documents declared
+basePreset=agent. In the user's installed DSH 0.2.0-rc.1, the shipped standard
+preset ID is standard. The agent row is a host service, not a preset. Native
+resolve(agent) throws agent-preset/not-found before codec loading, and the
+library reports its generic base/version failure. Download persistence was
+successful but activation was not. The earlier simplified fixture used standard
+and therefore did not test the exact delivered packages. This was an authoring
+and acceptance gap, not an installation or account error by the user.
+
+Correction
+Publish new immutable demo revisions 1.0.1 and 1.1.1 with basePreset=standard.
+Use exactly the tests/fixtures/private-resources JSON bytes for delivery and
+regression. Preserve the original invalid 1.0.0 fixture byte-for-byte so its
+failure remains reproducible; .gitattributes disables EOL conversion for these
+hashed delivery files. No agent-to-standard silent alias, plugin runtime change,
+new plugin package, cloud deployment, old release overwrite or entitlement
+expansion. Runtime remains plugin RC46, resource service RC24, mini RC44.
+
+Validation
+- Installed Desktop outer/core versions both read as 1.7.14-rc.46.
+- 66 private-resource tests passed, zero skipped/failed, HARNESS_DSH_ASAR set to
+  the actual installed public app.asar. No user's profile/session is used by tests.
+- Exact invalid 1.0.0 SHA256 89e2715fcc07774747c5f3d80ed3607ebd9a5bc0cd5ae3f1071368feaef5332b
+  reproduces unavailable and absence from the native roster.
+- Corrected 1.0.1/1.1.1 bytes traverse the actual resource service, intercepted
+  cloud/OSS boundary, original shipped persona, native registry and renderer.
+  Hot registration lists both healthy versions; the held old scope retains its
+  original prompt after the update; optional connection-provider loss does not
+  withdraw local resources. Thirteen synthetic HTTP requests, zero external
+  requests or model calls in the isolated provider fixture.
+- The complete shipped standard declaration is independently parsed and passed
+  through the actual NativeResourceRegistry transformation. Every original tool,
+  group and expression is compared unchanged, except the intentional persona
+  prefix replacement and added data variable. This structure check uses a
+  recording registry; the runtime fixture mounts the real persona, not all host
+  tools. Do not describe it as a complete production-host/model execution test.
+- The same native codec resolution path was also checked in Electron Node mode
+  against the real ASAR anchor: standard decoded successfully (19 top-level rows).
+
+Live delivery (authorized original demo recipient only)
+- Backed up the independent resource database before publishing and after checks.
+- Published/granted only to JCZ-W6DU-WCL4 using the existing service account and
+  unchanged private OSS resource-delivery/v1/sha256/ namespace. No other account
+  was authorized; old versions and grants were preserved, no objects deleted.
+- Signed OSS downloads match the exact fixture hashes; anonymous access is 403.
+- Current Desktop identity was read in place by the installed RC46 product
+  ResourceDeliveryClient: both new catalog entries and downloads validated in
+  memory, including hashes and basePreset=standard. No identity/private key was
+  logged or copied; no live resource installation or profile write was performed.
+- All service PIDs unchanged and active: resources 259591, relay 253830,
+  notifications 253831, human-tasks 253900. Resource /ready succeeds. No nginx
+  reload, cloud restart, small-program upload or GitHub push was needed.
+
+User acceptance and recovery
+In My Resources refresh, install 1.1.1 (1.0.1 is retained to test update flow).
+The old unavailable 1.0.0 can be stopped using its existing Stop button; no need
+to retry it. UI installation/native picker acceptance remains for the user.
+To withdraw new downloads if a further issue emerges, revoke only the exact
+demo resource versions and original recipient using the existing admin CLI after
+authorization. Do not restore the entire resource DB over later transactions,
+delete OSS data or reset the user's local resource library. Existing versions,
+credentials, sessions and primary services remain untouched.

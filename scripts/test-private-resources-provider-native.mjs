@@ -67,6 +67,56 @@ if (!childStage) {
   const { default: AgentPresets } = await load('@deepseek-ai/dsh-agent-preset-registry')
   const componentPath = require.resolve('dsh-wechat-remote/resource-library')
   const { WechatResourcesService } = await import(pathToFileURL(path.join(path.dirname(componentPath), 'private-resources/service.js')).href)
+  const { NativeResourceRegistry } = await import(pathToFileURL(path.join(path.dirname(componentPath), 'private-resources/native.js')).href)
+  const { parseResourcePreset } = await import(pathToFileURL(path.join(path.dirname(componentPath), 'private-resources/contract.js')).href)
+  const { nativeAssistantCodec, parseNativeAssistantBase } = await import(pathToFileURL(path.join(path.dirname(componentPath), 'assistant-presets/native-adapter.js')).href)
+  const fromBytes = bytes => {
+    const value = parseResourcePreset(bytes)
+    return { value, bytes, release: { resourceId: value.resourceId, version: value.version, kind: 'preset', name: value.name, description: value.description,
+      sha256: createHash('sha256').update(bytes).digest('hex'), bytes: bytes.length } }
+  }
+  // These are the actual delivery files, not independently reconstructed test
+  // prompts. An incorrect base ID in a released JSON must fail this regression.
+  const v1 = fromBytes(fs.readFileSync(path.join(repo, 'tests/fixtures/private-resources/demo-creative-companion-1.0.1.json')))
+  const v2 = fromBytes(fs.readFileSync(path.join(repo, 'tests/fixtures/private-resources/demo-creative-companion-1.1.1.json')))
+  const nativeCodec = await nativeAssistantCodec(anchor)
+  const standardSource = fs.readFileSync(require.resolve('@deepseek-ai/dsh-web-app/presets/standard.patch.yml'), 'utf8')
+  const nativeStandardDefinition = nativeCodec.load(standardSource)[0].insert[0].config
+  assert.equal(nativeStandardDefinition.id, 'standard')
+  assert.equal(v1.value.basePreset, nativeStandardDefinition.id)
+  assert.equal(v2.value.basePreset, nativeStandardDefinition.id)
+  const fullDocument = { agentPreset: nativeStandardDefinition.id, content: JSON.stringify(nativeStandardDefinition.plugins) }
+  const fullStandard = parseNativeAssistantBase(nativeCodec, fullDocument, nativeStandardDefinition.id)
+  const beforeStandard = structuredClone(fullStandard)
+  // Preserve the complete shipped declaration, including groups and !!js
+  // expressions. This recorder checks transformation, not full host boot: the
+  // runtime below mounts the original persona, without executing native tools.
+  for (const resource of [v1, v2]) {
+    let captured, disposed = false
+    const recordedRegistry = {
+      list: async () => [{ id: nativeStandardDefinition.id }],
+      resolve: async id => {
+        assert(id === nativeStandardDefinition.id || id === captured?.id)
+        return { id }
+      },
+      readDocument: async id => { assert.equal(id, nativeStandardDefinition.id); return fullDocument },
+      register: async definition => { captured = definition; return async () => { disposed = true } },
+    }
+    const recorder = new NativeResourceRegistry({ get: name => name === 'agentPresets' ? recordedRegistry : name === 'profileContext' ? { installAnchor: anchor } : undefined })
+    try {
+      await recorder.register(resource.value)
+      assert.equal(captured.plugins.length, fullStandard.length + 1)
+      for (let index = 0; index < fullStandard.length; index++) {
+        const original = fullStandard[index]
+        assert.deepEqual(captured.plugins[index], original.name === '@deepseek-ai/dsh-persona'
+          ? { ...original, config: { ...original.config, prefix: '{{harness_private_resource_prompt}}' } }
+          : original, `complete native standard declaration is preserved: ${original.id}`)
+      }
+      assert.deepEqual(captured.plugins.at(-1), { id: 'harness-private-resource-data', name: 'dsh-wechat-remote/private-resource-prompt', config: { text: resource.value.systemPrompt } })
+      assert.deepEqual(fullStandard, beforeStandard)
+    } finally { await recorder.close() }
+    assert.equal(disposed, true)
+  }
   const root = new Context(); root.baseUrl = pathToFileURL(path.join(work, 'dsh/')).href
   const leases = [], gates = []
   let resourceFiber, disposeStandard
@@ -82,22 +132,23 @@ if (!childStage) {
     const home = path.join(work, 'synthetic-home')
     root.provide('profileContext', { name: 'fixture', home, dir: path.join(home, 'profile'), installAnchor: anchor })
     root.provide('typertGateway', {})
-    disposeStandard = await root.agentPresets.register({ id: 'standard', name: 'Standard', plugins: [
-      { id: 'persona', name: '@deepseek-ai/dsh-persona', config: { prefix: 'Stock role.', suffix: 'Native suffix.', complete: false, includeRuntimeContext: true } },
-    ] })
+    const nativePersona = fullStandard.find(row => row.name === '@deepseek-ai/dsh-persona')
+    assert(nativePersona)
+    root.systemPrompt.variable('cwd', () => '/synthetic-workspace')
+    disposeStandard = await root.agentPresets.register({ id: nativeStandardDefinition.id, name: 'Standard', plugins: [structuredClone(nativePersona)] })
+    await assert.rejects(root.agentPresets.resolve('agent'), error => error.code === 'agent-preset/not-found',
+      'agent is a host service entry ID, not a shipped native preset ID')
+    assert.equal((await root.agentPresets.resolve('standard')).broken, undefined)
+    const nativeSuffix = nativePersona.config.suffix.replace('{{cwd}}', '/synthetic-workspace')
     const globalPrompt = renderPrompt(await root.systemPrompt.assemble())
     const pair = generateKeyPairSync('ed25519')
     const identity = { nodeId: 'synthetic-resource-node', publicKeyPem: pair.publicKey.export({ type: 'spki', format: 'pem' }).toString(),
       privateKeyPem: pair.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString() }
     const origin = 'https://relay.example.test', objectOrigin = 'https://objects.example.test'
-    const make = (version, prompt) => {
-      const value = { schemaVersion: 1, kind: 'preset', resourceId: 'native-delivery', version, name: 'Native delivery', description: 'Isolated provider fixture', basePreset: 'standard', systemPrompt: prompt }
-      const bytes = Buffer.from(JSON.stringify(value))
-      return { value, bytes, release: { resourceId: value.resourceId, version, kind: 'preset', name: value.name, description: value.description,
-        sha256: createHash('sha256').update(bytes).digest('hex'), bytes: bytes.length } }
-    }
-    const v1 = make('1.0.0', '  Literal {{user}} role one.\r\n  '), v2 = make('1.1.0', 'Literal {{user}} role two.')
-    const releases = new Map([['1.0.0', v1], ['1.1.0', v2]])
+    const unsupported = fromBytes(fs.readFileSync(path.join(repo, 'tests/fixtures/private-resources/demo-creative-companion-1.0.0-invalid.json')))
+    assert.equal(unsupported.release.sha256, '89e2715fcc07774747c5f3d80ed3607ebd9a5bc0cd5ae3f1071368feaef5332b',
+      'invalid fixture preserves the exact original released bytes, including whitespace')
+    const releases = new Map([v1, v2, unsupported].map(resource => [resource.value.version, resource]))
     let available = [v1.release], currentCalls = 0
     const requests = []
     const connection = { identity, origin, objectOrigins: [objectOrigin], fetchImpl: async (address, options) => {
@@ -163,20 +214,28 @@ if (!childStage) {
     const firstCatalog = await control({ op: 'refresh' })
     assert.equal(firstCatalog.items.length, 1); assert.equal(firstCatalog.items[0].state, 'available')
     assert.equal(requests.length, 1, 'one explicit refresh performs exactly one catalog HTTP request')
-    const installedOne = (await control({ op: 'install', resourceId: v1.release.resourceId, version: '1.0.0' })).items[0]
+    const installedOne = (await control({ op: 'install', resourceId: v1.release.resourceId, version: v1.value.version })).items[0]
     assert.equal(installedOne.state, 'installed', installedOne.message)
     assert.equal((await root.agentPresets.resolve(installedOne.presetId)).broken, undefined)
     const oldScope = await root.agentPresets.acquireScope(installedOne.presetId); leases.push(oldScope)
-    assert.equal(renderPrompt(await root.systemPrompt.assemble({ scope: oldScope.key })), [globalPrompt, v1.value.systemPrompt, 'Native suffix.'].filter(Boolean).join('\n\n'))
+    assert.equal(renderPrompt(await root.systemPrompt.assemble({ scope: oldScope.key })), [globalPrompt, v1.value.systemPrompt, nativeSuffix].filter(Boolean).join('\n\n'))
     available = [v1.release, v2.release]
     await control({ op: 'refresh' })
-    const updated = await control({ op: 'install', resourceId: v2.release.resourceId, version: '1.1.0' })
-    const installedTwo = updated.items.find(item => item.version === '1.1.0')
+    const updated = await control({ op: 'install', resourceId: v2.release.resourceId, version: v2.value.version })
+    const installedTwo = updated.items.find(item => item.version === v2.value.version)
     assert.equal(installedTwo.state, 'installed', installedTwo.message)
     assert.notEqual(installedTwo.presetId, installedOne.presetId)
     const newScope = await root.agentPresets.acquireScope(installedTwo.presetId); leases.push(newScope)
-    assert.equal(renderPrompt(await root.systemPrompt.assemble({ scope: newScope.key })), [globalPrompt, v2.value.systemPrompt, 'Native suffix.'].filter(Boolean).join('\n\n'))
-    assert.equal(renderPrompt(await root.systemPrompt.assemble({ scope: oldScope.key })), [globalPrompt, v1.value.systemPrompt, 'Native suffix.'].filter(Boolean).join('\n\n'))
+    assert.equal(renderPrompt(await root.systemPrompt.assemble({ scope: newScope.key })), [globalPrompt, v2.value.systemPrompt, nativeSuffix].filter(Boolean).join('\n\n'))
+    assert.equal(renderPrompt(await root.systemPrompt.assemble({ scope: oldScope.key })), [globalPrompt, v1.value.systemPrompt, nativeSuffix].filter(Boolean).join('\n\n'))
+    assert.equal((await root.agentPresets.list()).filter(item => [installedOne.presetId, installedTwo.presetId].includes(item.id) && item.broken === undefined).length, 2)
+    available = [v1.release, v2.release, unsupported.release]
+    await control({ op: 'refresh' })
+    const invalid = (await control({ op: 'install', resourceId: unsupported.value.resourceId, version: unsupported.value.version })).items.find(item => item.version === unsupported.value.version)
+    assert.equal(invalid.state, 'unavailable')
+    assert.match(invalid.message, /基础模式/)
+    await assert.rejects(root.agentPresets.resolve(invalid.presetId), error => error.code === 'agent-preset/not-found')
+    available = [v1.release, v2.release]
     const deliveredRequests = requests.length
     await bounded(firstGate.dispose(), 'sibling gate disposal must not block on the resource library')
     assert.equal(ownedServiceFiber.state, 2)
@@ -188,7 +247,7 @@ if (!childStage) {
     assert.equal((await root.agentPresets.resolve(installedOne.presetId)).broken, undefined)
     assert.equal((await root.agentPresets.resolve(installedTwo.presetId)).broken, undefined)
     await startGate('gateFixtureTwo')
-    assert.equal((await control({ op: 'refresh' })).items.length, 2)
+    assert.equal((await control({ op: 'refresh' })).items.filter(item => item.state === 'installed').length, 2)
     assert.equal(requests.length, deliveredRequests + 1, 'a resumed sibling provider works without recreating local resources')
     assert([...root.registry.get(WechatResourcesService).fibers].includes(ownedServiceFiber))
     await resourceFiber.dispose()
@@ -196,7 +255,9 @@ if (!childStage) {
     console.log(JSON.stringify({ passed: true, nativeVersion: JSON.parse(fs.readFileSync(anchor, 'utf8')).version,
       checks: ['old direct ctx property access fails without sibling inject', 'optional ctx.get resolves only on explicit resource operations',
         'actual service refresh reaches synthetic HTTP catalog', 'actual service install/update hot-registers both immutable native versions',
-        'literal prompt preserves content in native renderer', 'provider loss preserves resource service and local native definitions',
+        'actual delivery JSON matches shipped standard preset ID and full declaration shape',
+        'actual native persona renders delivered prompts unchanged; full native tool execution is outside this fixture',
+        'unsupported agent base saves unavailable and never enters the native roster', 'provider loss preserves resource service and local native definitions',
         'provider recovery allows refresh without recreating the library', 'resource owner disposal unregisters only owned versions'],
       interceptedRequests: requests.length, externalNetworkRequests: 0, liveProfileTouched: false, modelCalls: 0 }))
   } finally {

@@ -198,6 +198,14 @@ export async function parseHistorySource(input: Buffer | string | unknown): Prom
   return fail('unsupported-source')
 }
 
+/** Count one selected path, independent of export mapping order. Each user
+ * message starts a turn; a leading assistant-only group is retained as a turn.
+ * Unknown roles have no trustworthy count and must never be guessed from size. */
+export function countHistoryTurns(messages: readonly HistoryMessage[]): number | undefined {
+  if (messages.some(m => m.role === 'unknown' || m.warnings.includes('message-role-conflict'))) return undefined
+  return messages.reduce((count, m) => count + (m.role === 'user' || m.parentId === null ? 1 : 0), 0)
+}
+
 /** Preserve the branch graph in the catalog; require an explicit leaf whenever alternatives exist. */
 export function selectHistoryBranch(conversation: HistoryConversation, leafId?: string): HistoryConversation {
   if (!conversation.leafIds.length) return fail('empty-conversation')
@@ -214,5 +222,9 @@ export function selectHistoryBranch(conversation: HistoryConversation, leafId?: 
     current = byId.get(current.parentId)
     if (!current) return fail('missing-parent')
   }
-  return { ...conversation, messages: path.reverse(), leafIds: [selected] }
+  // Graph-wide warnings include all alternatives. Only the selected path's
+  // losses belong in its preview; another branch's missing file is irrelevant.
+  const messageWarnings = new Set(conversation.messages.flatMap(m => m.warnings))
+  const warnings = [...new Set([...conversation.warnings.filter(w => w !== 'branch-selection-required' && !messageWarnings.has(w)), ...path.flatMap(m => m.warnings)])]
+  return { ...conversation, messages: path.reverse(), leafIds: [selected], warnings }
 }

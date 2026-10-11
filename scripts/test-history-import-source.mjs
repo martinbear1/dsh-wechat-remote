@@ -7,7 +7,7 @@ import { build } from 'esbuild'
 
 const compiled = await build({ entryPoints: [fileURLToPath(new URL('../src/history-import/source.ts', import.meta.url))], bundle: true,
   platform: 'node', format: 'esm', write: false })
-const { parseHistorySource, selectHistoryBranch } = await import('data:text/javascript;base64,' + Buffer.from(compiled.outputFiles[0].text).toString('base64'))
+const { parseHistorySource, selectHistoryBranch, countHistoryTurns } = await import('data:text/javascript;base64,' + Buffer.from(compiled.outputFiles[0].text).toString('base64'))
 const fragment = (type, content) => ({ type, ...(content === undefined ? {} : { content }) })
 const share = messages => ({ code: 0, data: { biz_code: 0, biz_data: { title: '合成故事', model_type: 'expert', messages } } })
 const sm = (id, parent, role, fragments) => ({ message_id: id, parent_id: parent, role, fragments, model: '', inserted_at: 1780000000 })
@@ -83,6 +83,19 @@ test('export catalog retains independent conversation identity, root handling an
   const c = selectHistoryBranch(source.conversations[0])
   assert.deepEqual(c.messages.map(m => [m.id, m.parentId, m.role]), [['u', null, 'user'], ['a', 'u', 'assistant']])
   assert.equal(c.messages[1].model, 'deepseek-chat'); assert.equal(source.conversations[0].messages.length, 2)
+  assert.equal(countHistoryTurns(source.conversations[0].messages), 1)
+  assert.equal(countHistoryTurns(c.messages), 1)
+})
+
+test('turn count preserves assistant-leading and incomplete turns without guessing unknown roles', async () => {
+  const input = share([sm(1, null, 'ASSISTANT', [fragment('RESPONSE', '先前回答')]),
+    sm(2, 1, 'ASSISTANT', [fragment('RESPONSE', '同组补充')]), sm(3, 2, 'USER', [fragment('REQUEST', '待回复')])])
+  const c = (await parseHistorySource(input)).conversations[0]
+  assert.equal(countHistoryTurns(c.messages), 2)
+  assert.equal(countHistoryTurns([...c.messages].reverse()), 2)
+  assert.equal(countHistoryTurns([]), 0)
+  assert.equal(countHistoryTurns([{ role: 'unknown', parentId: null, warnings: [] }]), undefined)
+  assert.equal(countHistoryTurns([{ role: 'user', parentId: null, warnings: ['message-role-conflict'] }]), undefined)
 })
 
 test('multiple alternative branches are preserved and require explicit selection', async () => {

@@ -22,6 +22,20 @@ const conversation = (messages = [
   { id: 'a1', parentId: 'u1', role: 'assistant', text: 'Blue is waiting beside the river.', reasoning: 'Public visible reasoning.', fragments: [], metadata: {}, warnings: [] },
 ]) => ({ id: 'source-conversation', title: 'Synthetic history', messages, leafIds: [messages.at(-1).id], warnings: [] })
 const request = (extra = {}) => ({ sessionId: `session-dsimport-${randomUUID()}`, workspaceId: 'fixture-workspace', sourceHash: 'a'.repeat(64), conversation: conversation(), ...extra })
+const searchConversation = () => {
+  const value = conversation()
+  value.messages[1].fragments = [
+    { type: 'THINK', content: 'First reasoning.\n', data: {} },
+    { type: 'TOOL_SEARCH', content: 'Searching original sources', data: { id: 1, status: 'FINISHED', queries: [{ query: 'Blue river' }], results: [
+      { url: 'https://example.org/river', title: 'The river', snippet: 'Blue waits by the river.', cite_index: null },
+      { url: 'https://example.org/bridge', title: 'The bridge', snippet: 'A bridge crosses the river.', cite_index: null },
+    ] } },
+    { type: 'THINK', content: 'Second reasoning after search.  ', data: {} },
+    { type: 'TOOL_OPEN', data: { id: 2, status: 'FINISHED', result: { url: 'https://example.org/river', title: 'The river', snippet: 'Blue waits by the river.' }, reference: { id: 1, type: 'TOOL_SEARCH' } } },
+    { type: 'RESPONSE', content: 'Blue is there[reference:0].\n\n', data: { references: [{ id: 2, type: 'TOOL_OPEN' }] } },
+  ]
+  return value
+}
 const longConversation = () => conversation(Array.from({ length: 2000 }, (_, index) => ({
   id: `message-${index}`, parentId: index ? `message-${index - 1}` : null, role: index % 2 ? 'assistant' : 'user',
   text: `原始角色扮演第 ${index} 条正文。\n保留空格  与 emoji 🐬。`, reasoning: '',
@@ -46,6 +60,8 @@ test('archived search and file metadata do not forge host tools/attachments', ()
   assert(message.content.every(block => ['text', 'reasoning'].includes(block.type)))
   assert(message.content.some(block => block.text.includes('Public fact')))
   assert(message.content.some(block => block.text.includes('源文件未包含')))
+  assert(message.content.every(block => !block.text.includes('"results":')))
+  assert.equal(seed.some(event => event.type === 'tool/call' || event.type === 'tool/result'), false)
   assert(seed.some(e => e.type.endsWith('/record') && e.ignorable === true))
 })
 test('unknown roles and caller-selected existing IDs never pass seed admission', () => {
@@ -54,18 +70,60 @@ test('unknown roles and caller-selected existing IDs never pass seed admission',
   assert.throws(() => pure.buildNativeImportSeed(request({ sessionId: 'existing-user-session' })), /invalid-identity/)
 })
 test('interleaved public reasoning, search and response retain source order and exact fragment bytes', () => {
-  const r = request(), fragments = [
-    { type: 'THINK', content: 'First reasoning.\n', data: {} },
-    { type: 'TOOL_SEARCH', data: { query: 'original query', results: [{ snippet: 'Original search fact' }] } },
-    { type: 'THINK', content: 'Second reasoning after search.  ', data: {} },
-    { type: 'RESPONSE', content: 'Original response.\n\n', data: {} },
-  ]
-  r.conversation.messages[1].fragments = fragments
-  const events = pure.buildNativeImportSeed(r), blocks = events.find(e => e.type === 'assistant/message').data.message.content
-  assert.deepEqual(blocks.map(b => b.type), ['reasoning', 'text', 'reasoning', 'text'])
-  assert.equal(blocks[0].text, fragments[0].content); assert.match(blocks[1].text, /Original search fact/)
-  assert.equal(blocks[2].text, fragments[2].content); assert.equal(blocks[3].text, fragments[3].content)
+  const r = request({ conversation: searchConversation() }), fragments = r.conversation.messages[1].fragments
+  const events = pure.buildNativeImportSeed(r), visible = events.filter(e => ['assistant/message', 'tool/result'].includes(e.type))
+  assert.deepEqual(visible.map(e => e.data.message.role), ['assistant', 'tool', 'assistant', 'tool', 'assistant'])
+  const first = visible[0].data.message.content, middle = visible[2].data.message.content, last = visible[4].data.message.content
+  assert.deepEqual(first.map(b => b.type), ['reasoning', 'tool-call'])
+  assert.equal(first[0].text, fragments[0].content)
+  assert.equal(middle[0].text, fragments[2].content)
+  assert.match(last.at(-1).text, /https:\/\/example\.org\/river/)
+  assert.match(visible[1].data.message.content[0].text, /未重新检索/)
+  assert.deepEqual(JSON.parse(first[1].arguments), { queries: ['Blue river'] })
+  assert.equal(events.filter(e => e.type === 'tool/call').length, 2)
+  assert.deepEqual(JSON.parse(middle[1].arguments), { url: 'https://example.org/river' })
+  assert.equal(visible[3].data.meta, undefined, 'TOOL_OPEN has no HTTP status and must use generic native presentation')
+  assert.match(visible[3].data.message.content[0].text, /历史摘录，非完整正文/)
+  assert.equal(visible[1].data.meta.sources.length, fragments[1].data.results.length)
+  assert.equal(visible[1].data.meta.truncated, false)
+  assert.match(visible[1].data.meta.answer, /原始检索是否截断未知/)
   assert.deepEqual(events.find(e => e.type.endsWith('/record') && e.data.index === 1).data.fragments, fragments)
+})
+
+test('incomplete, unverified and partly unsafe searches never invent a native tool execution', () => {
+  for (const change of [part => { delete part.data.queries }, part => { delete part.data.status },
+    part => { part.data.status = 'RUNNING' }, part => { part.data.queries = [{ query: '' }] },
+    part => { part.data.results.push({ url: 'javascript:alert(1)', title: 'Unsafe' }) }]) {
+    const r = request({ conversation: searchConversation() }); change(r.conversation.messages[1].fragments[1])
+    const events = pure.buildNativeImportSeed(r)
+    assert.equal(events.some(e => e.type === 'tool/call' && e.data.name === 'web_search'), false)
+    assert.equal(events.some(e => e.type === 'request/header'), false)
+    assert.deepEqual(events.find(e => e.type.endsWith('/record') && e.data.index === 1).data.fragments, r.conversation.messages[1].fragments)
+  }
+  for (const change of [part => { delete part.data.status }, part => { part.data.result = null },
+    part => { part.data.result.url = 'javascript:alert(1)' }]) {
+    const r = request({ conversation: searchConversation() }); change(r.conversation.messages[1].fragments[3])
+    assert.equal(pure.buildNativeImportSeed(r).some(e => e.type === 'tool/call' && e.data.name === 'web_fetch'), false)
+  }
+})
+
+test('web UI tips are archived, not impersonated as assistant response content', () => {
+  const r = request(), tip = { type: 'TIP', content: 'Source website UI advice', data: { style: 'UNKNOWN' } }
+  r.conversation.messages[1].fragments = [tip, { type: 'RESPONSE', content: 'Actual response.', data: {} }]
+  const events = pure.buildNativeImportSeed(r)
+  assert.deepEqual(events.find(event => event.type === 'assistant/message').data.message.content, [{ type: 'text', text: 'Actual response.' }])
+  assert.deepEqual(events.find(event => event.type.endsWith('/record') && event.data.index === 1).data.fragments[0], tip)
+})
+
+test('native seed byte limit accepts exactly 24 MiB and rejects one extra byte without truncating', () => {
+  const r = request(); r.conversation = conversation([{ ...r.conversation.messages[0], text: 'a' }])
+  const limit = 24 * 1024 * 1024, base = pure.buildNativeImportSeed(r, 1000)
+  const length = limit - Buffer.byteLength(JSON.stringify(base)) + 1
+  r.conversation.messages[0].text = 'a'.repeat(length)
+  assert.equal(Buffer.byteLength(JSON.stringify(pure.buildNativeImportSeed(r, 1000))), limit)
+  r.conversation.messages[0].text += 'a'
+  assert.throws(() => pure.buildNativeImportSeed(r, 1000), /conversation-too-large/)
+  assert.equal(r.conversation.messages[0].text.length, length + 1)
 })
 test('display title limits do not discard the original title or timestamp metadata', () => {
   const r = request(), title = '  原始长标题'.repeat(80)
@@ -129,7 +187,7 @@ test('installed native factory, cold reader, actual continuation, isolation and 
     return
   }
   const work = process.env.HARNESS_NATIVE_IMPORT_CHILD_WORK
-  let ctx, createCalls = 0, modelCalls = 0, networkCalls = 0
+  let ctx, createCalls = 0, modelCalls = 0, networkCalls = 0, toolExecutions = 0
   const originalFetch = globalThis.fetch
   globalThis.fetch = async () => { networkCalls++; throw Error('No network permitted in native import test') }
   try {
@@ -157,6 +215,7 @@ test('installed native factory, cold reader, actual continuation, isolation and 
     const { ToolRuntime } = await load('dsh-tools'), { default: Persistence } = await load('dsh-session-persistence-jsonl')
     const { sessionFormatCatalog: catalog } = await load('dsh-session-format-catalog'), { createUserMessage } = await load('dsh-llm')
     const { PluginPackages, createRuntimeResolution } = await load('dsh-app-boot')
+    const { presentSearchResult, presentFetchResult } = await load('dsh-tool-web')
     // Match a profile-installed plugin: no host packages in its ancestor
     // node_modules. Resolution must come from the official host, not a test
     // alias, custom resolver, symlink, bundled copy, or import beside dsh.
@@ -203,11 +262,14 @@ test('installed native factory, cold reader, actual continuation, isolation and 
     }
     new SystemPrompt(ctx, { personaPrefix: 'Synthetic native host system prompt.' })
     new SessionStore(ctx); new Projections(ctx); new Agents(ctx); new ToolRuntime(ctx, { mode: 'native' })
+    const execute = ctx.tools.execute.bind(ctx.tools)
+    ctx.tools.execute = (...args) => { toolExecutions++; return execute(...args) }
     new Persistence(ctx, { root: path.join(work, 'synthetic-sessions') })
     const model = { provider: 'fixture', model: 'never-network' }
-    let observedRequest
+    let observedRequest, inHistory = false
     ctx.provide('llm', { listProviders: () => [{ id: 'fixture' }], resolveCallConfig: async value => value,
-      resolveModelInfo: async () => ({ inputModalities: ['text'] }), async prepareCall(config) { return { config, stream: request => this.stream(request) } },
+      resolveModelInfo: async () => ({ inputModalities: ['text'] }), async prepareCall(config) { return { config,
+        ...(inHistory ? { systemPromptUpdate: 'in-history' } : {}), stream: request => this.stream(request) } },
       async *stream(request) { modelCalls++; observedRequest = request; yield { type: 'text-delta', index: 0, text: 'Blue remembers the river.' }; yield { type: 'finish', reason: 'stop' } } })
     ctx.provide('agentDefaultModel', { currentSelection: () => model })
     const workspace = { id: 'fixture-workspace', title: 'Fixture', path: work, sessionIds: [], async attachSession(id) { if (!this.sessionIds.includes(id)) this.sessionIds.push(id) } }
@@ -260,6 +322,11 @@ test('installed native factory, cold reader, actual continuation, isolation and 
     }
     await assert.rejects(adapter.commitNativeImport(wrapped, request({ workspaceId: 'missing' })), rejectedBeforeCreate('workspace-unavailable'))
     assert.equal(createCalls, 1)
+    const oversized = request(), oversizedBody = 'x'.repeat(13 * 1024 * 1024)
+    oversized.conversation.messages[0].text = oversizedBody
+    oversized.conversation.messages[0].fragments = [{ type: 'REQUEST', content: oversizedBody, data: {} }]
+    await assert.rejects(adapter.commitNativeImport(wrapped, oversized), rejectedBeforeCreate('conversation-too-large'))
+    assert.equal(createCalls, 1, 'expanded seed limit is checked before any native write')
     await assert.rejects(adapter.commitNativeImport(wrapped, request(), AbortSignal.abort()), rejectedBeforeCreate('aborted'))
     assert.equal(createCalls, 1)
     let finalAdmission = 0
@@ -355,15 +422,84 @@ test('installed native factory, cold reader, actual continuation, isolation and 
     assert(systemEvents.length >= 2); assert.notEqual(systemEvents.at(-1).surfaceOp, 'append')
     assert(JSON.stringify(observedRequest).includes('Blue is waiting beside the river.'))
     assert(JSON.stringify(observedRequest).includes('Synthetic native host system prompt.'))
+    assert.deepEqual(observedRequest.messages.filter(message => message.role !== 'system').map(message => ({ role: message.role, content: message.content })), [
+      { role: 'user', content: [{ type: 'text', text: r.conversation.messages[0].text }] },
+      { role: 'assistant', content: [{ type: 'reasoning', text: r.conversation.messages[1].reasoning }, { type: 'text', text: r.conversation.messages[1].text }] },
+      { role: 'user', content: [{ type: 'text', text: 'Where is Blue?' }] },
+    ])
     await resumed.dispose()
     assert.equal((await adapter.inspectNativeImport(ctx, r)).state, 'succeeded', 'later native appends retain verified import receipt')
     const cold = await ctx.sessionPersistence.open(r.sessionId, 'read'); try { await cold.read() } finally { await cold.close() }
+    // Reproduce the real DeepSeek route capability, not just the fallback
+    // route above. Its system prompt is legitimately appended in history.
+    // Runtime initialization is separate from the imported user/assistant
+    // messages and must never replace them or relabel them as a new user dump.
+    inHistory = true
+    ctx.systemPrompt.context({ name: 'fixture-runtime', order: 10, text: 'Synthetic runtime permissions remain native.' })
+    const searchRequest = request({ conversation: searchConversation() })
+    const searchSeed = adapter.buildNativeImportSeed(searchRequest)
+    validate({ ...header, id: searchRequest.sessionId }, searchSeed)
+    const searchReceipt = await adapter.commitNativeImport(ctx, searchRequest)
+    assert.equal(searchReceipt.messageCount, 2); assert.equal(modelCalls, 1); assert.equal(toolExecutions, 0)
+    const searchReader = await ctx.sessionPersistence.open(searchRequest.sessionId, 'read')
+    let durableSearch
+    try { durableSearch = (await searchReader.read()).events; validate(searchReader.header, durableSearch) }
+    finally { await searchReader.close() }
+    const searchCall = durableSearch.find(event => event.type === 'tool/call'), searchResult = durableSearch.find(event => event.type === 'tool/result')
+    // The actual built-in presenter recognizes this persisted meta, without a
+    // plugin renderer or registration. Historical web_fetch has no fabricated
+    // HTTP status, so it uses native generic tool-result presentation.
+    const card = presentSearchResult(JSON.parse(searchCall.data.arguments), {
+      content: searchResult.data.message.content, isError: false, meta: searchResult.data.meta,
+    })
+    assert.equal(card.card, 'web'); assert.equal(card.kind, 'search'); assert.equal(card.title, 'Blue river')
+    assert.deepEqual(card.sources, searchRequest.conversation.messages[1].fragments[1].data.results.map(({ url, title, snippet }) => ({ url, title, snippet })))
+    assert.match(card.answer, /网页历史检索/)
+    const fetchCall = durableSearch.find(event => event.type === 'tool/call' && event.data.name === 'web_fetch')
+    const fetchResult = durableSearch.find(event => event.type === 'tool/result' && event.data.message.toolCallId === fetchCall.data.callId)
+    assert.equal(presentFetchResult(JSON.parse(fetchCall.data.arguments), { content: fetchResult.data.message.content, isError: false }), undefined)
+    assert.equal(fetchResult.data.meta, undefined)
+    const importedSurface = durableSearch.filter(event => ['user/message', 'assistant/message', 'tool/result'].includes(event.type))
+      .map(event => event.type === 'user/message' ? event.data : event.data.message)
+    const normalMessages = messages => messages.filter(message => message.role !== 'system' && message.source.kind !== 'runtime-context')
+    const historyResume = await ctx.agents.resume({ resumeSessionId: searchRequest.sessionId, agentOptions: model })
+    historyResume.agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Continue our original story.' }] }))
+    await historyResume.agent.whenIdle(); await ctx.sessions.flush(historyResume.agent.session)
+    assert.equal(modelCalls, 2); assert.equal(toolExecutions, 0)
+    assert.deepEqual(normalMessages(observedRequest.messages).slice(0, importedSurface.length), importedSurface)
+    assert.equal(normalMessages(observedRequest.messages).at(-1).content[0].text, 'Continue our original story.')
+    assert.equal(observedRequest.messages.filter(message => message.source.kind === 'runtime-context').length, 1)
+    const firstContinuationEvents = historyResume.agent.session.snapshotEvents()
+    assert.equal(firstContinuationEvents.filter(event => event.type === 'system/message').at(-1).surfaceOp, 'append')
+    assert.equal(firstContinuationEvents.find(event => event.type === 'request/header').data.reason, 'initial')
+    assert.equal(firstContinuationEvents.find(event => event.type === 'request/context').data.systemPromptUpdate, 'in-history')
+    validate(historyResume.agent.session.header, firstContinuationEvents)
+    const firstRequestMessages = structuredClone(normalMessages(observedRequest.messages))
+    await historyResume.dispose()
+    const twiceReader = await ctx.sessionPersistence.open(searchRequest.sessionId, 'read')
+    try { validate(twiceReader.header, (await twiceReader.read()).events) } finally { await twiceReader.close() }
+    const secondResume = await ctx.agents.resume({ resumeSessionId: searchRequest.sessionId, agentOptions: model })
+    secondResume.agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'And what happened next?' }] }))
+    await secondResume.agent.whenIdle(); await ctx.sessions.flush(secondResume.agent.session)
+    assert.equal(modelCalls, 3); assert.equal(toolExecutions, 0)
+    const secondMessages = normalMessages(observedRequest.messages)
+    assert.deepEqual(secondMessages.slice(0, firstRequestMessages.length), firstRequestMessages)
+    assert.equal(secondMessages.at(-2).role, 'assistant'); assert.equal(secondMessages.at(-2).content[0].text, 'Blue remembers the river.')
+    assert.equal(secondMessages.at(-1).role, 'user'); assert.equal(secondMessages.at(-1).content[0].text, 'And what happened next?')
+    const twiceEvents = secondResume.agent.session.snapshotEvents()
+    validate(secondResume.agent.session.header, twiceEvents)
+    assert.equal(twiceEvents.filter(event => event.type === 'request/header').at(-1).data.reason, 'resume')
+    assert.equal(twiceEvents.filter(event => event.type === 'user/message' && event.data.source.kind === 'runtime-context').length, 1)
+    assert.equal(twiceEvents.filter(event => event.type === 'system/message').length, 2, 'unchanged runtime owner does not append another system prompt')
+    await secondResume.dispose()
+    assert.equal((await adapter.inspectNativeImport(ctx, searchRequest)).state, 'succeeded')
     assert.deepEqual(unrelated.agent.session.snapshotEvents(), unrelatedEvents)
     assert.equal(networkCalls, 0); await unrelated.dispose()
     console.log(JSON.stringify({ installedNativeImport: true, nativeVersion: JSON.parse(fs.readFileSync(anchor)).version,
-      modelCalls, networkCalls, importedMessages: receipt.messageCount, officialProfileModuleResolution: true,
+      modelCalls, networkCalls, toolExecutions, importedMessages: receipt.messageCount, officialProfileModuleResolution: true,
       scopedWritesOnly: true, cancellationBeforeAttach: true, simultaneousCollisionSafe: true,
-      coldReadAfterContinue: true, emptySystemHeadReplaced: true, existingSessionUntouched: true }))
+      coldReadAfterContinue: true, coldReadAfterSecondContinue: true, nativeSearchCard: true,
+      exactHistoryInBothRequests: true, inHistorySystemAppend: true, emptySystemHeadReplaced: true, existingSessionUntouched: true }))
   } finally {
     await ctx?.fiber.dispose(); globalThis.fetch = originalFetch
   }

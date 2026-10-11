@@ -49,5 +49,9 @@ export declare class HistorySourceError extends Error {
 }
 /** Pure source normalization. No networking, credentials, model calls, filesystem writes or host mutation. */
 export declare function parseHistorySource(input: Buffer | string | unknown): Promise<HistorySource>;
+/** Count one selected path, independent of export mapping order. Each user
+ * message starts a turn; a leading assistant-only group is retained as a turn.
+ * Unknown roles have no trustworthy count and must never be guessed from size. */
+export declare function countHistoryTurns(messages: readonly HistoryMessage[]): number | undefined;
 /** Preserve the branch graph in the catalog; require an explicit leaf whenever alternatives exist. */
 export declare function selectHistoryBranch(conversation: HistoryConversation, leafId?: string): HistoryConversation;

@@ -73,10 +73,10 @@ test('share reader cancels oversize and already aborted reads', async () => {
   }))))
   assert.equal(cancelled, true)
 })
-test('one preview represents one selected conversation and includes bounded snippets/limitations', async t => {
+test('one preview represents one selected conversation with real turns and no generic disclaimer', async t => {
   const f = await fixture(t), preview = await f.preview()
   assert.equal(preview.summary.messages, 2); assert.equal(preview.summary.publicReasoning, 1)
-  assert(preview.warnings.some(s => s.includes('系统提示词')))
+  assert.equal(preview.summary.turnCount, 1); assert.deepEqual(preview.warnings, [])
   assert.equal(preview.snippets[0].text, '我是测试角色'); assert.equal(f.commits(), 0)
 })
 test('exports are catalogued, paginated and searched without creating any conversation', async t => {
@@ -87,6 +87,7 @@ test('exports are catalogued, paginated and searched without creating any conver
   const f = await fixture(t, { share: async () => Buffer.from(JSON.stringify(conversations)) })
   const a = await f.call('share.preview', {})
   assert.equal(a.total, 65); assert.equal(a.entries.length, 40); assert.equal(a.nextCursor, 40)
+  assert.equal(a.entries[0].turnCount, 1)
   const b = await f.call('source.list', { sourceId: a.sourceId, cursor: 40 })
   assert.equal(b.entries.length, 25); assert.equal(b.nextCursor, null)
   const c = await f.call('source.list', { sourceId: a.sourceId, query: '测试64' })
@@ -99,10 +100,37 @@ test('multiple branches require explicit choice; no implicit flattening or batch
   const data = JSON.parse(sourceBytes()); data.messages.push({ message_id: 3, parent_id: 1, role: 'ASSISTANT', fragments: [{ type: 'RESPONSE', content: '另一分支' }] })
   const f = await fixture(t, { share: async () => Buffer.from(JSON.stringify(data)) })
   const source = await f.call('share.preview', {}), args = { sourceId: source.sourceId, conversationId: source.entries[0].id }
+  assert.equal(source.entries[0].turnCount, undefined)
   const branch = await f.call('preview', args)
   assert.equal(branch.selectionRequired, true); assert.equal(branch.previewId, undefined); assert.equal(branch.branches.length, 2)
+  assert(branch.branches.every(b => b.turnCount === 1 && b.label.includes('1 轮')))
   const selected = await f.call('preview', { ...args, branchId: '3' })
   assert.equal(selected.summary.messages, 2); assert.equal(selected.snippets[1].text, '另一分支')
+  assert.equal(selected.summary.turnCount, 1)
+})
+
+test('partial and split assistant messages count source turns, never half the messages', async t => {
+  const data = JSON.parse(sourceBytes())
+  data.messages.push({ message_id: 3, parent_id: 2, role: 'ASSISTANT', fragments: [{ type: 'RESPONSE', content: '同轮补充' }] },
+    { message_id: 4, parent_id: 3, role: 'USER', fragments: [{ type: 'REQUEST', content: '未回答的一轮' }] },
+    { message_id: 5, parent_id: 4, role: 'USER', fragments: [{ type: 'REQUEST', content: '又一轮' }] })
+  const f = await fixture(t, { share: async () => Buffer.from(JSON.stringify(data)) })
+  const catalog = await f.call('share.preview', {})
+  assert.equal(catalog.entries[0].messages, 5); assert.equal(catalog.entries[0].turnCount, 3)
+  const preview = await f.call('preview', { sourceId: catalog.sourceId, conversationId: catalog.entries[0].id })
+  assert.equal(preview.summary.turnCount, 3)
+})
+
+test('only actual selected-path data losses are short visible warnings', async t => {
+  const data = JSON.parse(sourceBytes())
+  data.messages.push({ message_id: 3, parent_id: 1, role: 'USER', fragments: [{ type: 'FILE', files: [{ file_name: 'missing.png', file_size: 10 }] }] },
+    { message_id: 4, parent_id: 3, role: 'ASSISTANT', fragments: [{ type: 'TOOL_OPEN' }] })
+  const f = await fixture(t, { share: async () => Buffer.from(JSON.stringify(data)) })
+  const catalog = await f.call('share.preview', {}), args = { sourceId: catalog.sourceId, conversationId: catalog.entries[0].id }
+  assert.deepEqual((await f.call('preview', { ...args, branchId: '2' })).warnings, [])
+  const loss = await f.call('preview', { ...args, branchId: '4' })
+  assert.equal(loss.summary.attachments, 1)
+  assert.deepEqual([...loss.warnings].sort(), ['附件仅含原记录，文件内容未包含在内。', '部分检索记录未包含网页正文。'].sort())
 })
 test('upload is bounded sequential chunks, permits identical chunk retransmission but rejects conflicting data', async t => {
   const f = await fixture(t), data = sourceBytes(), up = await f.call('upload.start', { name: 'chat.json', size: data.length })

@@ -148,6 +148,7 @@ try {
     'history-import/controller.ts',
     'history-import/receipts.ts',
     'history-import/native.ts',
+    'history-import/search.ts',
     'history-import/source.ts',
     'history-import/source-zip.ts',
     'history-import/share.ts',

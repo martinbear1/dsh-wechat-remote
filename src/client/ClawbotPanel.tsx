@@ -113,8 +113,9 @@ export function ClawbotPanel({ call, nodeName, hostName }: { call: ClawbotCall; 
   const expired = status?.bindingState === 'expired'
   const paired = Boolean(status?.paired && !expired)
   const allowed = featureLeaseAllows(status?.access, status?.access, now)
-  const canEnable = Boolean(allowed && paired && status?.target && !loginActive)
-  const label = !status ? '读取中' : !allowed ? status.access?.message || '暂时无法核对使用资格' : loginActive ? '绑定完成后可开启' : expired ? '请重新绑定' : !paired ? '绑定后可开启' : !status?.target ? '选择会话后可开启' : !status.enabled ? '已暂停'
+  const canEnable = Boolean(allowed && (status?.supportsEnableBeforeSetup || paired && status?.target && !loginActive))
+  const label = !status ? '读取中' : !allowed ? status.access?.message || '暂时无法核对使用资格'
+    : loginActive ? '等待完成绑定' : expired ? '请重新绑定' : !paired ? '请绑定微信' : !status.target ? '请选择接入会话' : !status.enabled ? '已暂停'
     : status.state === 'ready' ? '接收中' : status.state === 'error' ? '连接异常' : '连接中'
   const pairingState = !status ? '读取中' : loginActive
     ? login?.status === 'wait' ? '等待扫码' : login?.status === 'need_verifycode' ? '等待确认码' : '等待微信确认'

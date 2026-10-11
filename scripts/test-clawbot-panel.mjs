@@ -382,7 +382,7 @@ test('paired without a target cannot start receiving, and no successful pairing 
   await h.resolve(1, status({ paired: true, revision: 2, state: 'disabled' }))
   assert(h.find(n => n.type === 'input' && n.props.role === 'switch').props.disabled)
   assert(!h.calls.some(c => c.request.action === 'enabled'))
-  assert(h.text().includes('选择会话后可开启'))
+  assert(h.text().includes('请选择接入会话'))
   h.unmount()
 })
 
@@ -398,6 +398,21 @@ test('remote route changes update selection without discarding an unsubmitted lo
   await h.resolve(3, status({ revision: 4, target: { id: 's3', title: 'C' } }))
   assert(h.button('接到此会话').props.disabled)
   h.unmount()
+})
+
+test('node capability permits enabling before binding or target selection, without any automatic setup writes', async () => {
+  for (const extra of [{}, { paired: true }, { pairing: pairing() }, { paired: true, bindingState: 'expired' }]) {
+    const initial = status({ supportsEnableBeforeSetup: true, ...extra }), h = await mounted(initial)
+    const toggle = h.find(n => n.type === 'input' && n.props.role === 'switch')
+    assert(!toggle.props.disabled)
+    toggle.props.onChange({ target: { checked: true } }); await h.flush()
+    assert.deepEqual(h.calls[1].request, { action: 'enabled', enabled: true, expectedRevision: 1 })
+    await h.resolve(1, { ...initial, revision: 2, enabled: true })
+    assert(h.find(n => n.type === 'input' && n.props.role === 'switch').props.checked)
+    assert.equal(h.calls.length, 2, 'enabling alone neither binds nor routes')
+    assert(!h.text().includes('接收中'))
+    h.unmount()
+  }
 })
 
 test('loading the latest session list does not disable and close the focused selector', async () => {
@@ -535,7 +550,7 @@ test('active replacement status takes precedence over both a valid or an expired
     const badge = h.find(n => n.props?.['data-state'] === 'pending')
     assert.equal(h.text(badge), expected)
     assert(!h.text(badge).includes('已绑定此节点')); assert(!h.text(badge).includes('绑定已失效'))
-    assert(h.text().includes('绑定完成后可开启')); assert(!h.text().includes('请重新绑定'))
+    assert(h.text().includes('等待完成绑定')); assert(!h.text().includes('请重新绑定'))
     h.unmount()
   }
 })

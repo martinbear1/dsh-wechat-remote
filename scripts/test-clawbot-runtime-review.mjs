@@ -523,17 +523,21 @@ test('changing account cannot silently discard pending work; explicit disconnect
   } finally { run.resolve({ text: 'cleanup' }); await runtime.dispose() }
 })
 
-test('unpaired enable is rejected and legacy enabled-unpaired state can pair directly', async () => {
-  let qrCalls = 0
+test('enabled is a durable node choice before setup; initial binding preserves it but waits for a target', async () => {
+  let qrCalls = 0, polls = 0
   const storage = memory(emptyClawbotData())
   const runtime = new ClawbotRuntime(storage, host(), client({
     async getQr() { qrCalls++; return { qrcode: 'qr', url: 'https://liteapp.weixin.qq.com/q/test-only' } },
     async pollQr() { return { status: 'confirmed', credentials: auth } },
+    getUpdates(...args) { polls++; return blockedPoll(...args) },
   }))
   try {
-    await assert.rejects(enabled(runtime, true), { code: 'clawbot-unpaired' })
-    assert.equal(storage.data.enabled, false)
-    const start = await runtime.control({ action: 'login.start', expectedRevision: 0 }, signal())
+    const opened = await enabled(runtime, true)
+    assert.equal(opened.supportsEnableBeforeSetup, true)
+    assert.equal(opened.state, 'unpaired')
+    assert.equal(storage.data.enabled, true)
+    assert.equal(qrCalls, 0, 'enabling never requests a QR automatically')
+    const start = await runtime.control({ action: 'login.start', expectedRevision: opened.revision }, signal())
     const reused = await runtime.control({ action: 'login.start' }, signal())
     assert.equal(start.pairing.id, reused.pairing.id)
     assert.equal(start.revision, reused.revision)
@@ -541,8 +545,10 @@ test('unpaired enable is rejected and legacy enabled-unpaired state can pair dir
     const finish = await runtime.control({ action: 'login.poll', loginId: start.pairing.id }, signal())
     assert.equal(finish.paired, true)
     assert.equal(finish.bindingState, 'paired')
-    assert.equal(finish.enabled, false, 'confirmation is not permission to start receiving')
-    await assert.rejects(enabled(runtime, true), { code: 'clawbot-target-required' })
+    assert.equal(finish.enabled, true, 'confirmation preserves the earlier explicit enable')
+    await setImmediate(); assert.equal(polls, 0, 'a bound node without a target does not receive')
+    await runtime.control({ action: 'route', sessionId: sessions[0].id, expectedRevision: finish.revision }, signal())
+    await setImmediate(); assert.equal(polls, 1, 'the second setup step resumes the same explicit choice')
     assert.equal(finish.revision > start.revision, true)
   } finally { await runtime.dispose() }
   const legacy = memory({ ...emptyClawbotData(), enabled: true })
@@ -551,10 +557,146 @@ test('unpaired enable is rejected and legacy enabled-unpaired state can pair dir
   }))
   try {
     const result = await repaired.control({ action: 'login.start' }, signal())
-    assert.equal(result.enabled, false)
+    assert.equal(result.enabled, true)
     assert.equal(result.pairing.status, 'wait')
-    assert.equal(legacy.data.enabled, false)
+    assert.equal(legacy.data.enabled, true)
   } finally { await repaired.dispose() }
+})
+
+test('first setup works in either order and a pause during binding is never undone by its completion', async () => {
+  for (const order of ['bind-first', 'route-first']) for (const pause of [false, true]) {
+    let polls = 0, runs = 0, sends = 0
+    const storage = memory(emptyClawbotData()), runtime = new ClawbotRuntime(storage,
+      host(async () => { runs++; return { text: 'reply' } }), client({
+        async getQr() { return { qrcode: 'qr', url: 'https://example.invalid/qr' } },
+        async pollQr() { return { status: 'confirmed', credentials: auth } },
+        getUpdates(...args) { polls++; return polls === 1
+          ? Promise.resolve({ cursor: 'cursor', messages: [incoming('first', 'hello')] }) : blockedPoll(...args) },
+        async sendText() { sends++ },
+      }))
+    const route = () => runtime.control({ action: 'route', sessionId: sessions[0].id, expectedRevision: runtime.snapshot().revision }, signal())
+    try {
+      await enabled(runtime, true)
+      if (order === 'route-first') await route()
+      const start = await runtime.control({ action: 'login.start', expectedRevision: runtime.snapshot().revision }, signal())
+      if (pause) await enabled(runtime, false)
+      await setImmediate(); assert.equal(polls, 0); assert.equal(runs, 0); assert.equal(sends, 0)
+      await runtime.control({ action: 'login.poll', loginId: start.pairing.id }, signal())
+      if (order === 'bind-first') {
+        await setImmediate(); assert.equal(polls, 0); assert.equal(runs, 0); assert.equal(sends, 0)
+        await route()
+      }
+      await setImmediate()
+      assert.equal(runtime.snapshot().enabled, !pause)
+      assert.equal(runs, pause ? 0 : 1); assert.equal(sends, pause ? 0 : 1)
+      if (pause) { assert.equal(polls, 0); await enabled(runtime, true); await setImmediate() }
+      assert.equal(runs, 1); assert.equal(sends, 1)
+      await enabled(runtime, true); await setImmediate()
+      assert.equal(runs, 1); assert.equal(sends, 1, 'the same configured intent never replays a completed receipt')
+    } finally { await runtime.dispose() }
+  }
+})
+
+test('incomplete enabled setup survives restart without accessing messages, host or login provider', async () => {
+  for (const patch of [{}, { target: sessions[0] }, { credentials: auth }, { credentials: auth, target: sessions[0], authExpired: true }]) {
+    const gate = ownerGate(), storage = memory({ ...emptyClawbotData(), ...patch })
+    const inactiveClient = client({ getQr() { assert.fail('no automatic binding') }, getUpdates() { assert.fail('no receive before setup') }, sendText() { assert.fail('no send before setup') } })
+    let runtime = new ClawbotRuntime(storage, host(() => assert.fail('no native run')), inactiveClient, Date.now, gate)
+    try {
+      await enabled(runtime, true); await setImmediate()
+      assert.equal(storage.data.enabled, true); assert.deepEqual(storage.data.accessBinding, patch.credentials ? gate.owner : undefined)
+      await runtime.dispose()
+      runtime = new ClawbotRuntime(storage, host(() => assert.fail('no native run')), inactiveClient, Date.now, gate)
+      await setImmediate(); assert.equal(runtime.snapshot().enabled, true)
+      assert.deepEqual(storage.data.credentials, patch.credentials || null)
+      assert.deepEqual(storage.data.target, patch.target || null)
+    } finally { await runtime.dispose() }
+  }
+})
+
+test('an unbound node can change account before explicit pairing; a stale former-owner QR can never install credentials', async () => {
+  for (const pendingQr of [false, true]) {
+    const gate = ownerGate(), storage = memory(emptyClawbotData()), confirmation = deferred()
+    let polls = 0, qrCalls = 0
+    const replacementAuth = { ...auth, userId: 'new-owner-user', accountId: 'new-owner-bot' }
+    const runtime = new ClawbotRuntime(storage, host(() => assert.fail('no native dispatch before target selection')), client({
+      async getQr() { return { qrcode: 'qr-' + ++qrCalls, url: 'https://example.invalid/qr' } },
+      async pollQr(qr) { return pendingQr && qr === 'qr-1' ? confirmation.promise : { status: 'confirmed', credentials: replacementAuth } },
+      getUpdates() { polls++; assert.fail('no receive before target selection') },
+      sendText() { assert.fail('no old-account delivery') },
+    }), Date.now, gate)
+    try {
+      await enabled(runtime, true)
+      assert.equal(storage.data.accessBinding, undefined, 'the unbound enable is not credential ownership')
+      let formerReply
+      if (pendingQr) {
+        const first = await runtime.control({ action: 'login.start' }, signal())
+        formerReply = runtime.control({ action: 'login.poll', loginId: first.pairing.id }, signal())
+        await setImmediate()
+      }
+      gate.owner = { nodeId: 'node-one', accountInstance: 'new-account' }
+      if (pendingQr) {
+        confirmation.resolve({ status: 'confirmed', credentials: auth })
+        await assert.rejects(formerReply, /账号绑定已变化/)
+        assert.equal(storage.data.credentials, null)
+        assert.equal(storage.data.enabled, false, 'a stale active attempt is stopped, not adopted')
+        await enabled(runtime, true)
+      }
+      const current = await runtime.control({ action: 'login.start' }, signal())
+      await runtime.control({ action: 'login.poll', loginId: current.pairing.id }, signal())
+      assert.deepEqual(storage.data.accessBinding, gate.owner)
+      assert.deepEqual(storage.data.credentials, replacementAuth)
+      assert.equal(storage.data.enabled, true); assert.equal(polls, 0)
+      assert.equal(storage.data.receipts.length, 0)
+    } finally { confirmation.resolve({ status: 'expired' }); await runtime.dispose() }
+  }
+})
+
+test('cancelled, expired or failed first binding leaves enabled setup dormant without implicitly retrying', async () => {
+  for (const outcome of ['cancel', 'expired', 'failed']) {
+    let now = 1000, qrCalls = 0
+    const runtime = new ClawbotRuntime(memory(emptyClawbotData()), host(() => assert.fail('no native task')),
+      client({ async getQr() { qrCalls++; return { qrcode: 'qr', url: 'https://example.invalid/qr' } },
+        async pollQr() { return { status: 'verify_code_blocked' } }, getUpdates() { assert.fail('no receiving without binding') },
+        sendText() { assert.fail('no sending without binding') } }), () => now)
+    try {
+      await enabled(runtime, true)
+      await runtime.control({ action: 'route', sessionId: sessions[0].id, expectedRevision: runtime.snapshot().revision }, signal())
+      const start = await runtime.control({ action: 'login.start' }, signal())
+      if (outcome === 'cancel') await runtime.control({ action: 'login.cancel', loginId: start.pairing.id }, signal())
+      else if (outcome === 'expired') now = start.pairing.expiresAt
+      else await runtime.control({ action: 'login.poll', loginId: start.pairing.id }, signal())
+      assert.equal(runtime.snapshot().enabled, true); assert.equal(runtime.snapshot().paired, false)
+      assert.equal(runtime.snapshot().state, 'unpaired')
+      await setImmediate(); assert.equal(qrCalls, 1)
+    } finally { await runtime.dispose() }
+  }
+})
+
+test('explicit enable during an existing binding attempt waits for its end and never accepts another WeChat identity', async () => {
+  for (const outcome of ['cancel', 'confirmed', 'different-user']) {
+    let polls = 0
+    const storage = memory(), runtime = new ClawbotRuntime(storage, host(), client({
+      async getQr() { return { qrcode: 'qr', url: 'https://example.invalid/qr' } },
+      async pollQr() { return { status: 'confirmed', credentials: { ...auth, token: 'replacement-token',
+        userId: outcome === 'different-user' ? 'other-user' : auth.userId } } },
+      getUpdates(...args) { polls++; return blockedPoll(...args) },
+    }))
+    try {
+      const start = await runtime.control({ action: 'login.start' }, signal())
+      await enabled(runtime, true); await setImmediate()
+      assert.equal(polls, 0); assert.equal(storage.data.enabled, true)
+      if (outcome === 'cancel') await runtime.control({ action: 'login.cancel', loginId: start.pairing.id }, signal())
+      else {
+        const confirmation = runtime.control({ action: 'login.poll', loginId: start.pairing.id }, signal())
+        if (outcome === 'different-user') await assert.rejects(confirmation, { code: 'clawbot-different-user' })
+        else await confirmation
+      }
+      await setImmediate(); assert.equal(polls, 1)
+      assert.equal(storage.data.credentials.userId, auth.userId)
+      assert.equal(storage.data.credentials.token, outcome === 'confirmed' ? 'replacement-token' : auth.token)
+    } finally { await runtime.dispose() }
+  }
 })
 
 test('shared pairing expiry, terminal regeneration and precise cancellation advance revision', async () => {
@@ -626,7 +768,10 @@ test('expired credentials stay distinguishable across restarts and are not offer
   }))
   try {
     assert.equal(restarted.snapshot().bindingState, 'expired')
-    await assert.rejects(enabled(restarted, true), { code: 'clawbot-auth-expired' })
+    const pending = await enabled(restarted, true)
+    assert.equal(pending.enabled, true); assert.equal(pending.bindingState, 'expired')
+    await assert.rejects(restarted.control({ action: 'login.start' }, signal()), { code: 'clawbot-busy' })
+    await enabled(restarted, false) // Replacing an existing identity still requires an explicit pause.
     const start = await restarted.control({ action: 'login.start' }, signal())
     assert.deepEqual(providedTokens, [])
     const recovered = await restarted.control({ action: 'login.poll', loginId: start.pairing.id }, signal())

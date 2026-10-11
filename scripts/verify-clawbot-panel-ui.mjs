@@ -32,13 +32,16 @@ createRoot(document.querySelector('#root')).render(<ClawbotPanel call={call} nod
 })
 const js = bundle.outputFiles.find(f => f.path.endsWith('.js')).text
 const css = bundle.outputFiles.find(f => f.path.endsWith('.css')).text
-const base = { supported: true, revision: 1, enabled: false, state: 'disabled', paired: false,
+const base = { supported: true, supportsEnableBeforeSetup: true, revision: 1, enabled: false, state: 'disabled', paired: false,
   target: null, message: '', pending: 0, uncertain: 0,
   access: { allowed: true, reason: 'allowed', validUntil: Date.now() + 86400000, checkedAt: Date.now(), expiresAt: Date.now() + 60000, message: '' } }
 const target = { id: 'fixture-session', title: '整理本周资料与下一步安排' }
 const pairing = { id: 'fixture-login', url: 'https://example.invalid/visual-only', status: 'wait', expiresAt: Date.now() + 300_000,
   qrDataUrl: await QRCode.toDataURL('https://example.invalid/visual-only', { width: 240, margin: 2 }) }
 const scenes = [
+  ['enabled-unpaired', { enabled: true, state: 'unpaired' }],
+  ['enabled-no-target', { enabled: true, paired: true }],
+  ['legacy-unpaired', { supportsEnableBeforeSetup: false }],
   ['unpaired', {}], ['waiting', { pairing }], ['scanned', { pairing: { ...pairing, status: 'scaned' } }],
   ['verify', { pairing: { ...pairing, status: 'need_verifycode' } }],
   ['paused', { paired: true, target }], ['receiving', { paired: true, enabled: true, state: 'ready', target }],
@@ -74,9 +77,9 @@ try {
     assert.equal(metrics.switchWidth, 42); assert.equal(metrics.switchHeight, 24)
     assert.equal(metrics.knobWidth, '18px'); assert.equal(metrics.knobHeight, '18px')
     assert.equal(metrics.switchRadius, '999px')
-    assert.equal(metrics.checked, scene === 'receiving')
-    assert.equal(metrics.knobTransform, scene === 'receiving' ? 'matrix(1, 0, 0, 1, 18, 0)' : 'none')
-    assert.equal(metrics.disabled, !['paused', 'receiving'].includes(scene))
+    assert.equal(metrics.checked, value.enabled === true)
+    assert.equal(metrics.knobTransform, value.enabled === true ? 'matrix(1, 0, 0, 1, 18, 0)' : 'none')
+    assert.equal(metrics.disabled, ['locked', 'legacy-unpaired'].includes(scene))
     const toggle = panel.getByRole('switch', { name: '启用私聊接入' })
     if (metrics.disabled) {
       assert.equal(await toggle.evaluate(input => { input.focus(); return input === document.activeElement }), false)
@@ -102,4 +105,4 @@ try {
   }
 } finally { await browser.close() }
 await fs.writeFile(path.join(out, 'results.json'), JSON.stringify({ scope: 'isolated actual React and CSS; no live DSH or pairing', results }, null, 2))
-console.log(JSON.stringify({ scenes: results.length, output: out, checks: 'actual React/CSS, 320/820 light/dark, seven lifecycle scenes, no overflow, one accessible rounded switch' }))
+console.log(JSON.stringify({ scenes: results.length, output: out, checks: 'actual React/CSS, 320/820 light/dark, enable-before-setup and legacy states, no overflow, one accessible rounded switch' }))

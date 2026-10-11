@@ -1,21 +1,21 @@
 {
-  "version": "1.7.14-rc.41",
+  "version": "1.7.14-rc.42",
   "catalog": {
     "schemaVersion": 1,
-    "revision": "installer-1.7.14-rc.41",
-    "issuedAt": 1791736145678,
-    "expiresAt": 1794155345678,
+    "revision": "installer-1.7.14-rc.42",
+    "issuedAt": 1791741477291,
+    "expiresAt": 1794160677291,
     "releases": [
       {
-        "version": "1.7.14-rc.41",
+        "version": "1.7.14-rc.42",
         "channel": "preview",
         "dsh": [],
         "platforms": [],
         "architectures": [],
         "asset": {
-          "url": "https://github.com/martinbear1/dsh-wechat-remote/releases/download/v1.7.14-rc.41/harness-remote-dsh-wechat-remote-1.7.14-rc.41.tgz",
-          "sha256": "351e2c59b8223089ed46c6b83337f260e4f42e9809dfdc9fee16282509535152",
-          "bytes": 7199500
+          "url": "https://github.com/martinbear1/dsh-wechat-remote/releases/download/v1.7.14-rc.42/harness-remote-dsh-wechat-remote-1.7.14-rc.42.tgz",
+          "sha256": "9b4097921cb42be4387d29206f77678355d6f56112670b6e0a2ec0981befabe5",
+          "bytes": 7199840
         }
       }
     ],

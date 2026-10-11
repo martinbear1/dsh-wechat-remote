@@ -75,8 +75,7 @@ import { mountCompanionUpdates } from './companion-updates.js'
 import { PluginUpdateService, acceptsUpdateRequest } from './update-service.js'
 import { NativeUpdateService } from './native-update-service.js'
 import { PLUGIN_VERSION } from './plugin-version.js'
-import { classifyConnectionFailure, runConnectionDiagnostics } from './connection-diagnostics.js'
-import { failureDescription, type SafePairingAttempt } from './connection-diagnostic-contract.js'
+import { runConnectionDiagnostics } from './connection-diagnostics.js'
 
 interface RateBucket {
   windowStart: number
@@ -88,7 +87,6 @@ interface PairEntry {
   qrDataUrl: string
   publicMode: boolean
   expiresAt: number
-  lastPairingAttempt: SafePairingAttempt
 }
 
 type MutableDoor = {
@@ -144,8 +142,6 @@ export function mountWechatGate(ctx: Context): () => void {
   const RATE_MAX_PER_IP = 120
   let publicRelayGateway: PublicRelayGateway | null = null
   let publicRelayStatus: AgentStatus = { enabled: false, state: 'disabled' }
-  let qrKind: 'none' | 'pairing' | 'recovery' = 'none'
-  let lastPairingAttempt: SafePairingAttempt | undefined
   let agentDescriptor: AgentDescriptor
   try {
     agentDescriptor = loadAgentDescriptor(ctx)
@@ -342,10 +338,7 @@ export function mountWechatGate(ctx: Context): () => void {
 
   async function makePairEntry(): Promise<PairEntry> {
     const gateway = publicRelayGateway
-    if (!gateway) {
-      lastPairingAttempt = { at: new Date().toISOString(), outcome: 'failed', failure: { code: 'unknown' } }
-      throw new Error('公网配对服务尚未就绪')
-    }
+    if (!gateway) throw new Error('公网配对服务尚未就绪')
     // A LAN address is an untrusted locator, never an authorization grant.
     // New devices must claim the cloud's single-use ticket; already paired
     // clients match node identity/public key before accepting this address.
@@ -366,27 +359,14 @@ export function mountWechatGate(ctx: Context): () => void {
         publicMode = true
         expiresAt = Number(publicPayload.expiresAt) || expiresAt
       }
-      if (!publicMode) throw Object.assign(new Error('Invalid pairing response'), { code: 'invalid-response' })
-      lastPairingAttempt = { at: new Date().toISOString(), outcome: 'ticket-issued' }
     } catch (error: unknown) {
-      const failure = classifyConnectionFailure(error)
-      lastPairingAttempt = { at: new Date().toISOString(),
-        outcome: failure.code === 'invalid-response' ? 'invalid-response' : 'failed', failure }
       console.warn(
         '[wechat-gate] public pairing ticket unavailable; serving identity-pinned route locator:',
-        failure.code, failure.systemCode || '', failure.httpStatus || '',
+        messageOf(error),
       )
     }
-    const attempt = lastPairingAttempt
     const qrDataUrl = await QRCode.toDataURL(payload, { width: 420, margin: 2 })
-    if (lastPairingAttempt === attempt) qrKind = publicMode ? 'pairing' : 'recovery'
-    return { payload, qrDataUrl, publicMode, expiresAt, lastPairingAttempt: attempt }
-  }
-
-  function pairingAttemptSnapshot(): SafePairingAttempt | undefined {
-    const background = publicRelayStatus.lastPairingAttempt
-    return !lastPairingAttempt || (background && Date.parse(background.at) > Date.parse(lastPairingAttempt.at))
-      ? background : lastPairingAttempt
+    return { payload, qrDataUrl, publicMode, expiresAt }
   }
 
   // ── LOCAL door (127.0.0.1:3093): pairing surface + status ──
@@ -422,9 +402,8 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
 <p>${agentDescriptor.agentName} · ${agentDescriptor.hostName}</p>
 <p>打开微信小程序，进入「添加节点」扫描二维码</p>
 <img src="${entry.qrDataUrl}" alt="pairing QR">
-<p>${entry.publicMode ? `配对码约 ${validMinutes} 分钟内有效` : '这是恢复码，不能用于首次添加节点'}</p>
-<p>${entry.publicMode ? '自动选择更快连接；远程内容端到端加密' : '仅供已配对的同一节点恢复连接。请在微信连接设置中检查连接，再重新生成配对码。'}</p>
-${entry.lastPairingAttempt.failure ? `<p>${failureDescription(entry.lastPairingAttempt.failure.code)}</p>` : ''}
+<p>二维码生成后约 ${validMinutes} 分钟内有效</p>
+<p>${entry.publicMode ? '自动选择更快连接；远程内容端到端加密' : '当前仅供已配对手机更新同一网络连接；新手机配对需要电脑连接公网服务'}</p>
 <p>已使用或已过期时，请重新生成二维码。刷新后旧二维码失效。</p>
 <button type="button" onclick="location.reload()">重新生成二维码</button>
 </body></html>`
@@ -440,7 +419,6 @@ ${entry.lastPairingAttempt.failure ? `<p>${failureDescription(entry.lastPairingA
       qrDataUrl: entry.qrDataUrl,
       mode: entry.publicMode ? 'public-relay' : 'secure-lan-route',
       payload: entry.payload, expiresAt: entry.expiresAt,
-      qrKind: entry.publicMode ? 'pairing' : 'recovery', lastPairingAttempt: entry.lastPairingAttempt,
     }
   }
 
@@ -465,7 +443,6 @@ ${entry.lastPairingAttempt.failure ? `<p>${failureDescription(entry.lastPairingA
     return {
       gate: gateRuntimeSnapshot(),
       plugin: { runningVersion: PLUGIN_VERSION, installedVersion: installedPluginVersion() },
-      pairing: { qrKind, lastPairingAttempt: pairingAttemptSnapshot() },
       companionUpdate: companionUpdates.status(),
       lan: { ip: lanIPv4(), port: PUBLIC_PORT },
       // Status never releases a QR ticket; only the explicit pair-code operation
@@ -887,8 +864,7 @@ ${entry.lastPairingAttempt.failure ? `<p>${failureDescription(entry.lastPairingA
           signal,
           context: { pluginVersion: PLUGIN_VERSION, dshVersion: hostRuntimeVersion(ctx),
             platform: process.platform, profileKind: desktopHost ? 'desktop' : 'web',
-            relayEnabled: publicRelayStatus.enabled === true, relayState: publicRelayStatus.state,
-            qrKind, lastPairingAttempt: pairingAttemptSnapshot() },
+            relayEnabled: publicRelayStatus.enabled === true, relayState: publicRelayStatus.state },
         }),
         companionDecision: (id, action) => companionUpdates.decide(id, action),
         ...(desktopHost ? { updateCheck: nativeUpdater.check, updateStart: nativeUpdater.start, updateStatus: nativeUpdater.status } : {}),

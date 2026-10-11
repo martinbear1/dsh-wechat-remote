@@ -8,14 +8,13 @@ import {
   CONNECTION_DIAGNOSTIC_TIMEOUT_MS, CONNECTION_DIAGNOSTIC_MAX_BYTES,
 } from '../lib/connection-diagnostics.js'
 import {
-  formatConnectionDiagnosticReport, sanitizeConnectionReport, sanitizePairingAttempt,
+  formatConnectionDiagnosticReport, sanitizeConnectionReport,
   failureDescription, failureAdvice,
 } from '../lib/connection-diagnostic-contract.js'
 
 const relayOrigin = 'https://diagnostic.example.invalid'
-const at = '2026-10-11T00:00:00.000Z'
 const context = { pluginVersion: '1.7.14-rc.33', dshVersion: '0.2.0-rc.2', platform: 'win32',
-  profileKind: 'desktop', relayEnabled: true, relayState: 'online', qrKind: 'recovery' }
+  profileKind: 'desktop', relayEnabled: true, relayState: 'online' }
 const healthResponse = (value = { ok: true, version: '2026-08-27.2' }, init = {}) =>
   new Response(JSON.stringify(value), { headers: { 'content-type': 'application/json' }, ...init })
 const run = (fetch, extra = {}) => runConnectionDiagnostics({ relayOrigin, context, fetch, ...extra })
@@ -23,8 +22,7 @@ const health = report => report.checks.find(check => check.id === 'relay-health'
 
 test('same injected fetch checks only fixed GET health with no business credentials or mutation', async () => {
   const secret = 'DO_NOT_LEAK_SECRET'
-  const original = JSON.parse(JSON.stringify({ ...context, nodeId: secret, pairingTicket: secret, privateKey: secret,
-    lastPairingAttempt: { at, outcome: 'failed', failure: { code: 'tls-validation', systemCode: 'CERT_HAS_EXPIRED', message: secret } } }))
+  const original = JSON.parse(JSON.stringify({ ...context, nodeId: secret, pairingTicket: secret, privateKey: secret }))
   const saved = JSON.stringify(original)
   const calls = []
   const report = await run(async (...args) => { calls.push(args); return healthResponse() }, { context: original })
@@ -48,6 +46,7 @@ test('same injected fetch checks only fixed GET health with no business credenti
     const text = readFileSync(new URL(`../src/${source}`, import.meta.url), 'utf8')
     assert.doesNotMatch(text, /from ['"](?:node:fs|\.\/public-relay-agent|\.\/gate-runtime|\.\/node-storage)/)
     assert.doesNotMatch(text, /\/v1\/(?:agents|pairing|ws)\//)
+    assert.doesNotMatch(text, /lastPairingAttempt|SafePairingAttempt|sanitizePairingAttempt|qrKind/)
   }
 })
 
@@ -252,16 +251,18 @@ test('real loopback fetch fault and recovery use injected transport without touc
 test('report projection is bounded, drops secrets and invalid metadata, and snapshots context', async () => {
   const secret = 'TOKEN-secret-C:\\Users\\private-https://proxy:pass@local'
   const input = { ...context, pluginVersion: secret, dshVersion: secret, platform: secret, profileKind: secret,
-    qrKind: secret, relayState: secret, lastPairingAttempt: { at, outcome: 'failed', failure: { code: 'dns', systemCode: secret, message: secret }, qr: secret },
+    relayState: secret,
     token: secret, headers: { Authorization: secret } }
   let resolve, called
   const started = new Promise(done => { called = done })
   const pending = run(() => { called(); return new Promise(done => { resolve = done }) }, { context: input })
   await started
-  input.lastPairingAttempt.failure.code = 'server-error'
+  input.relayState = 'online'
   resolve(healthResponse())
   const report = await pending
-  assert.equal(report.lastPairingAttempt.failure.code, 'dns')
+  assert.equal(report.relayState, 'unknown', 'report retains the initial snapshot, not later business updates')
+  assert.deepEqual(Object.keys(report).sort(), ['schema', 'source', 'startedAt', 'pluginRunningVersion',
+    'platform', 'profileKind', 'relayEnabled', 'relayState', 'checks'].sort())
   const forged = { ...report, secret, checks: report.checks.map(check => ({ ...check, message: secret, url: secret })) }
   const rendered = formatConnectionDiagnosticReport(forged)
   assert.equal(rendered.includes(secret), false)
@@ -273,8 +274,6 @@ test('report projection is bounded, drops secrets and invalid metadata, and snap
   assert.equal(sanitizeConnectionReport({ ...report, checks: [] }), null)
   assert.equal(sanitizeConnectionReport({ ...report, checks: new Proxy([], { get() { throw Error('secret') } }) }), null)
   assert.equal(sanitizeConnectionReport({ ...report, startedAt: secret }), null)
-  assert.equal(sanitizePairingAttempt({ at: secret, outcome: 'failed' }), undefined)
-  assert.deepEqual(sanitizePairingAttempt({ at, outcome: 'ticket-issued', failure: { code: 'dns', message: secret } }), { at, outcome: 'ticket-issued' })
   assert.equal(failureDescription(secret), failureDescription('unknown'))
   assert.equal(failureAdvice(secret), failureAdvice('unknown'))
 })

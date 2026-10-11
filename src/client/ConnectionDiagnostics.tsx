@@ -1,39 +1,28 @@
 /** Read-only operator diagnostics. Reports stay in this host's memory. */
 import { useEffect, useState, useSyncExternalStore } from 'react'
 import styles from './HarnessRemoteSettings.module.css'
-import { diagnosticCheckLabel, failureAdvice, failureDescription, formatConnectionDiagnosticReport, type SafePairingAttempt } from '../connection-diagnostic-contract.js'
-import type { PageSnapshot, RemotePageStore } from './remote-page-store.js'
-
-export function latestPairingAttempt(snapshot: PageSnapshot): SafePairingAttempt | undefined {
-  const attempts = [snapshot.qr?.lastPairingAttempt, snapshot.status?.pairing?.lastPairingAttempt]
-    .filter((attempt): attempt is SafePairingAttempt => Boolean(attempt))
-  return attempts.sort((a, b) => Date.parse(b.at) - Date.parse(a.at))[0]
-}
-
-export function recoveryReminder(snapshot: PageSnapshot): string | null {
-  if (snapshot.qr?.mode !== 'secure-lan-route') return null
-  if (snapshot.status?.publicRelay.state === 'online') return '当前公网连接已在线，请重新生成首次配对码。'
-  const attempt = latestPairingAttempt(snapshot)
-  const report = snapshot.diagnosticReport
-  // A previously green probe must not look like recovery from a newer failed
-  // ticket request. It checked a different point in time and a different path.
-  if (report && (!attempt || Date.parse(report.startedAt) >= Date.parse(attempt.at))
-    && report.checks.some(check => check.id === 'relay-health' && check.status === 'pass'))
-    return '基础网络检查已通过。首次添加仍需点击“重新生成”，获取首次配对码。'
-  return null
-}
+import { diagnosticCheckLabel, failureAdvice, failureDescription, formatConnectionDiagnosticReport } from '../connection-diagnostic-contract.js'
+import type { RemotePageStore } from './remote-page-store.js'
 
 const statusLabel = { pass: '通过', fail: '失败', 'not-tested': '未检测', cancelled: '已取消' }
 
 export function ConnectionDiagnostics({ store }: { store: RemotePageStore }): JSX.Element {
-  const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
+  const [expanded, setExpanded] = useState(false)
+  return <details className={styles.updateDetails} onToggle={event => setExpanded(event.currentTarget.open)}>
+    <summary>连接帮助</summary>
+    {expanded ? <DiagnosticContent store={store} /> : null}
+  </details>
+}
+
+/** Not mounted until the user expands help. Opening help never starts a check. */
+function DiagnosticContent({ store }: { store: RemotePageStore }): JSX.Element {
+  const snapshot = useSyncExternalStore(store.subscribeDiagnostics, store.getSnapshot, store.getSnapshot)
   const { diagnosticState, diagnosticReport } = snapshot
   const [preview, setPreview] = useState(false)
   const [copied, setCopied] = useState<'idle' | 'copied' | 'failed'>('idle')
   useEffect(() => () => store.cancelDiagnostic(true), [store])
   useEffect(() => { setPreview(false); setCopied('idle') }, [diagnosticReport])
   const running = diagnosticState === 'running'
-  const attempt = latestPairingAttempt(snapshot)
   const text = diagnosticReport ? formatConnectionDiagnosticReport(diagnosticReport) : ''
   const copyReport = async () => {
     if (!preview || !diagnosticReport || !text) return
@@ -44,7 +33,7 @@ export function ConnectionDiagnostics({ store }: { store: RemotePageStore }): JS
       if (store.getSnapshot().diagnosticReport === diagnosticReport) setCopied('failed')
     }
   }
-  return <section className={styles.updateCard} aria-label="连接诊断">
+  return <section aria-label="连接诊断">
     <div className={styles.updateRow}>
       <h3 className={styles.updateHeading}>连接诊断</h3>
       <div className={styles.updateActions}>
@@ -52,11 +41,7 @@ export function ConnectionDiagnostics({ store }: { store: RemotePageStore }): JS
         {running ? <button type="button" className={styles.secondaryButton} onClick={() => store.cancelDiagnostic()}>取消</button> : null}
       </div>
     </div>
-    <p className={styles.helpText}>只检查连接，不改配对或配置。会访问中继健康接口，对方可见出口 IP；报告不自动上传。</p>
-    {attempt ? <p className={styles.helpText}>
-      最近一次配对码申请（{new Date(attempt.at).toLocaleString()}）：{attempt.outcome === 'ticket-issued' ? '已取得首次配对票据' : failureDescription(attempt.failure?.code ?? 'unknown')}。
-      {attempt.outcome !== 'ticket-issued' ? failureAdvice(attempt.failure?.code ?? 'unknown') : null}
-    </p> : <p className={styles.helpText}>尚无可用的配对码申请记录。</p>}
+    <p className={styles.helpText}>检查结果仅供参考，不影响配对或连接，也不改配置。会访问中继健康接口，对方可见出口 IP；报告不自动上传。</p>
     <div role="status" aria-live="polite">
       {diagnosticState === 'cancelled' ? <p>已取消本次检查。</p> : null}
       {diagnosticState === 'unsupported' ? <p>当前 DSH 或插件不支持此诊断入口，请更新后重新打开应用。</p> : null}

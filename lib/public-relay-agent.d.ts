@@ -1,6 +1,5 @@
 import { type AgentCapability } from './agent-metadata.js';
 import type { HostPlatformDescriptor } from './host-platform.js';
-import type { SafePairingAttempt } from './connection-diagnostic-contract.js';
 export declare const DEFAULT_PUBLIC_RELAY_ORIGIN = "https://relay.xyxfood.xyz";
 export interface PublicRelayConfig {
     readonly enabled: boolean;
@@ -27,8 +26,6 @@ export interface AgentStatus {
     readonly pairingTicket?: string;
     readonly pairingExpiresAt?: number;
     readonly lastError?: string;
-    /** Safe record of a real enrollment, never a diagnostic probe. */
-    readonly lastPairingAttempt?: SafePairingAttempt;
     readonly hostId?: string;
     readonly agentInstanceId?: string;
     readonly hostName?: string;

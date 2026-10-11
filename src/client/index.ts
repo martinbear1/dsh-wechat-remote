@@ -108,7 +108,7 @@ export function apply(ctx: HarnessRemoteClientContext): void {
     scope.effect(() => () => { navigation.reset(); if (assistantNavigation === navigation) assistantNavigation = undefined }, 'wechat assistant navigation')
   })
   ctx.effect(() => {
-    const remove = ctx.on('connection/reset', () => { connectionGeneration++; store.reset(); assistantNavigation?.reset(); assistants.reset() })
+    const remove = ctx.on('connection/reset', () => { connectionGeneration++; store.cancelDiagnostic(true); assistantNavigation?.reset(); assistants.reset() })
     return () => { connectionGeneration++; remove(); assistants.dispose() }
   }, 'wechat assistant lifecycle')
   ctx.effect(() => () => store.dispose(), 'wechat shared page')

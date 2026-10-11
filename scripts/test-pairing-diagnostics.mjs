@@ -1,124 +1,32 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import path from 'node:path'
+import { readFileSync } from 'node:fs'
 import { createServer } from 'node:http'
-import vm from 'node:vm'
 import ts from 'typescript'
-import { transform } from 'esbuild'
-import { PublicRelayAgent, publicPairingPayload } from '../lib/public-relay-agent.js'
-import { classifyConnectionFailure } from '../lib/connection-diagnostics.js'
 import { createPairingHandler } from '../lib/pairing-management.js'
 import { pairingHttpHandler } from '../lib/pairing-http.js'
 
 const tick = () => new Promise(resolve => setImmediate(resolve))
-const source = readFileSync(new URL('../src/gate-runtime.ts', import.meta.url), 'utf8')
-const tree = ts.createSourceFile('gate.ts', source, ts.ScriptTarget.Latest, true)
-let pairFunction, attemptFunction
-function visit(node) {
-  if (ts.isFunctionDeclaration(node) && node.name?.text === 'makePairEntry') pairFunction = node.getText(tree)
-  if (ts.isFunctionDeclaration(node) && node.name?.text === 'pairingAttemptSnapshot') attemptFunction = node.getText(tree)
-  ts.forEachChild(node, visit)
-}
-visit(tree)
-assert(pairFunction)
-const compiledPair = (await transform(pairFunction, { loader: 'ts' })).code
-const compiledAttempt = (await transform(attemptFunction, { loader: 'ts' })).code
-test('latest real background enrollment supersedes old explicit attempt without changing QR evidence', () => {
-  const old = { at: '2026-10-11T00:00:00.000Z', outcome: 'failed', failure: { code: 'dns' } }
-  const recent = { at: '2026-10-11T00:00:01.000Z', outcome: 'ticket-issued' }
-  const sandbox = { Date, lastPairingAttempt: old, publicRelayStatus: { lastPairingAttempt: recent } }
-  vm.runInNewContext(compiledAttempt + '\nthis.current = pairingAttemptSnapshot', sandbox)
-  assert.equal(sandbox.current(), recent)
-  assert.equal(sandbox.lastPairingAttempt, old)
-  sandbox.lastPairingAttempt = recent
-  sandbox.publicRelayStatus.lastPairingAttempt = { ...old, at: '2026-10-11T00:00:02.000Z' }
-  assert.equal(sandbox.current().failure.code, 'dns')
-  sandbox.publicRelayStatus.lastPairingAttempt = old
-  assert.equal(sandbox.current(), recent)
-})
-const success = () => Response.json({ ticket: 'fixture-ticket', expiresAt: Date.now() + 600_000 })
-function fixture(t, fetchImpl) {
-  const dir = mkdtempSync(path.join(tmpdir(), 'pairing-diagnostics-'))
-  t.after(() => rmSync(dir, { recursive: true, force: true }))
-  let calls = 0
-  const agent = new PublicRelayAgent({ enabled: true, relayOrigin: 'https://relay.invalid' }, {
-    identityPath: path.join(dir, 'identity.json'), agentVersion: '1.0.0', onFrame() { assert.fail('no frames') },
-    fetchImpl: async (url, options) => {
-      assert.equal(url, 'https://relay.invalid/v1/agents/enroll')
-      assert.equal(options.method, 'POST'); calls++
-      return fetchImpl()
-    },
-  })
-  agent.connect = () => assert.fail('explicit offline enrollment must not start a transport')
-  const warnings = []
-  const sandbox = { publicRelayGateway: { agent, ensurePairingStatus: () => agent.ensurePairingTicket(60000, { refresh: true }) },
-    publicRelayStatus: agent.snapshot(), publicPairingPayload, classifyConnectionFailure,
-    lastPairingAttempt: undefined, qrKind: 'none', lanIPv4: () => '192.0.2.4', PUBLIC_PORT: 3092,
-    ROUTE_QR_REFRESH_MS: 900000, Date, QRCode: { toDataURL: async () => 'data:image/png;base64,fixture' },
-    console: { warn: (...parts) => warnings.push(parts.join(' ')) } }
-  vm.runInNewContext(compiledPair + '\nthis.runPair = makePairEntry', sandbox)
-  return { agent, sandbox, warnings, calls: () => calls, identity: () => readFileSync(path.join(dir, 'identity.json'), 'utf8') }
-}
 
-for (const [code, expected] of [['EAI_AGAIN', 'dns'], ['ECONNREFUSED', 'connection-refused'],
-  ['UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'tls-validation']]) {
-  test(`real QR fallback exposes safe ${code} cause without changing identity`, async t => {
-    const f = fixture(t, () => { throw new TypeError('secret proxy password', { cause: Object.assign(new Error('secret URL'), { code }) }) })
-    const before = f.identity(), entry = await f.sandbox.runPair()
-    assert.equal(JSON.parse(entry.payload).mode, 'secure-lan-route')
-    assert.equal(entry.lastPairingAttempt.failure.code, expected)
-    assert.equal(entry.lastPairingAttempt.failure.systemCode, code)
-    assert.equal(f.agent.snapshot().lastPairingAttempt.failure.code, expected)
-    assert.equal(f.identity(), before)
-    assert(!JSON.stringify([entry.lastPairingAttempt, f.warnings]).includes('secret'))
-    assert.equal(f.calls(), 1)
-  })
-}
-for (const status of [401, 403, 407, 429, 502]) {
-  test(`real enrollment records HTTP ${status} and no raw server message`, async t => {
-    const f = fixture(t, () => Response.json({ error: { message: 'secret proxy token', code: 'secret' } }, { status }))
-    const entry = await f.sandbox.runPair()
-    assert.equal(entry.publicMode, false)
-    assert.equal(entry.lastPairingAttempt.failure.httpStatus, status)
-    assert(!JSON.stringify([f.warnings, entry.lastPairingAttempt]).includes('secret'))
-  })
-}
-for (const [name, response] of [
-  ['missing ticket', () => Response.json({})],
-  ['wrong ticket', () => Response.json({ ticket: {}, expiresAt: Date.now() + 60000 })],
-  ['invalid expiry', () => Response.json({ ticket: 'fixture', expiresAt: 'later' })],
-  ['expired ticket', () => Response.json({ ticket: 'fixture', expiresAt: 1 })],
-  ['HTML', () => new Response('<html>secret</html>')],
-]) {
-  test(`success HTTP with ${name} is an explicit invalid response, not silent recovery`, async t => {
-    const f = fixture(t, response), result = await f.sandbox.runPair()
-    assert.equal(result.publicMode, false)
-    assert.equal(result.lastPairingAttempt.outcome, 'invalid-response')
-    assert.equal(result.lastPairingAttempt.failure.code, 'invalid-response')
-  })
-}
-test('retry after offline failure restores a new ticket without clearing identity or waiting for old recovery QR expiry', async t => {
-  let online = false
-  const f = fixture(t, () => online ? success() : Promise.reject(new Error('offline')))
-  const identity = f.identity()
-  const a = await f.sandbox.runPair(); assert.equal(a.publicMode, false)
-  online = true
-  const b = await f.sandbox.runPair(); assert.equal(b.publicMode, true)
-  assert.equal(b.lastPairingAttempt.outcome, 'ticket-issued')
-  assert.equal(b.lastPairingAttempt.failure, undefined)
-  assert.equal(f.agent.snapshot().lastPairingAttempt.outcome, 'ticket-issued')
-  assert.equal(f.identity(), identity); assert.equal(f.calls(), 2)
-})
-test('concurrent failure enrollment coalesces, then clears for later retry', async t => {
-  let reject, online = false
-  const f = fixture(t, () => online ? success() : new Promise((_, r) => { reject = r }))
-  const a = f.sandbox.runPair(), b = f.sandbox.runPair()
-  assert.equal(f.calls(), 1); reject(new Error('offline'))
-  assert((await Promise.all([a, b])).every(x => !x.publicMode))
-  online = true; assert.equal((await f.sandbox.runPair()).publicMode, true)
-  assert.equal(f.calls(), 2)
+test('diagnostics have no passive enrollment hooks and the only runner call is the explicit management operation', () => {
+  const agent = readFileSync(new URL('../src/public-relay-agent.ts', import.meta.url), 'utf8')
+  assert.doesNotMatch(agent, /diagnostic|lastPairingAttempt|qrKind/i)
+  const source = readFileSync(new URL('../src/gate-runtime.ts', import.meta.url), 'utf8')
+  const tree = ts.createSourceFile('gate.ts', source, ts.ScriptTarget.Latest, true)
+  const calls = []
+  function visit(node) {
+    if (ts.isCallExpression(node) && node.expression.getText(tree) === 'runConnectionDiagnostics') calls.push(node)
+    if (ts.isFunctionDeclaration(node) && ['makePairEntry', 'pairCodeValue', 'gateStatusValue'].includes(node.name?.text))
+      assert.doesNotMatch(node.getText(tree), /diagnostic|lastPairingAttempt|qrKind/i)
+    ts.forEachChild(node, visit)
+  }
+  visit(tree)
+  assert.equal(calls.length, 1, 'no startup, connection, failure or status-triggered probe')
+  const callback = calls[0].parent
+  assert(ts.isArrowFunction(callback))
+  assert(ts.isPropertyAssignment(callback.parent))
+  assert.equal(callback.parent.name.getText(tree), 'connectionDiagnostics')
+  assert.doesNotMatch(source, /lastPairingAttempt|qrKind/, 'no diagnostic-only bookkeeping in business lifecycle')
 })
 
 const ops = extra => ({ unavailable: () => false, status: () => ({}),
@@ -146,6 +54,37 @@ test('concurrent views share one diagnostic; aborting one does not cancel the ot
   assert.equal((await a).error.code, 'diagnostic/cancelled')
   assert.equal(probeSignal.aborted, false); assert.equal(calls, 1)
   complete({ checks: [] }); assert.equal((await b).ok, true)
+})
+
+test('pending, failed, cancelled, rate-limited and unsupported diagnostics never gate pairing or status', async () => {
+  let rejectProbe, pairs = 0
+  const business = { online: true }
+  const pairCode = async () => ({ ticket: ++pairs })
+  const handler = createPairingHandler(ops({ status: () => business, pairCode,
+    connectionDiagnostics: () => new Promise((_, reject) => { rejectProbe = reject }) }))
+  const signal = () => new AbortController().signal
+  const checkBusiness = async () => {
+    assert.equal((await handler.call('status', {}, signal())).value, business)
+    assert.equal((await handler.call('pair-code', {}, signal())).ok, true)
+  }
+  const pending = handler.call('connection-diagnostics', {}, signal())
+  await tick(); await checkBusiness()
+  rejectProbe(Error('probe failed'))
+  assert.equal((await pending).error.code, 'diagnostic/unavailable')
+  await checkBusiness()
+  assert.equal((await handler.call('connection-diagnostics', {}, signal())).error.code, 'diagnostic/busy')
+  await checkBusiness()
+  const cancelHandler = createPairingHandler(ops({ status: () => business, pairCode,
+    connectionDiagnostics: probeSignal => new Promise(resolve => probeSignal.addEventListener('abort', () => resolve({ cancelled: true }))) }))
+  const controller = new AbortController()
+  const cancelled = cancelHandler.call('connection-diagnostics', {}, controller.signal)
+  await tick(); controller.abort(); await cancelled
+  assert.equal((await cancelHandler.call('pair-code', {}, signal())).ok, true)
+  const unsupported = createPairingHandler(ops({ status: () => business, pairCode }))
+  assert.equal((await unsupported.call('connection-diagnostics', {}, signal())).error.code, 'diagnostic/unsupported')
+  assert.equal((await unsupported.call('pair-code', {}, signal())).ok, true)
+  assert.equal(pairs, 5)
+  handler.stop(); cancelHandler.stop(); unsupported.stop()
 })
 for (const action of ['cancel', 'stop']) {
   test(`last diagnostic viewer ${action} aborts probe, not existing pairing/service`, async () => {

@@ -2,12 +2,11 @@
 import { type GateRuntimeInfo, type HarnessRemoteHostDescription, type CallPairingManagement } from './pairing-client.js';
 import { WebUpdateStore } from './web-update-store.js';
 import { NativeUpdateStore } from './native-update-store.js';
-import { type ConnectionDiagnosticReport, type SafePairingAttempt } from '../connection-diagnostic-contract.js';
+import { type ConnectionDiagnosticReport } from '../connection-diagnostic-contract.js';
 export interface PairCode {
     qrDataUrl: string;
     mode: 'secure-lan-route' | 'public-relay';
     expiresAt: number;
-    lastPairingAttempt?: SafePairingAttempt;
 }
 export interface GateStatus {
     gate?: GateRuntimeInfo;
@@ -48,10 +47,6 @@ export interface GateStatus {
         agentName?: string;
         hostName?: string;
     };
-    pairing?: {
-        qrKind: 'pairing' | 'recovery' | 'none';
-        lastPairingAttempt?: SafePairingAttempt;
-    };
 }
 export interface PageSnapshot {
     loadState: 'loading' | 'ready' | 'error';
@@ -74,6 +69,7 @@ export declare class RemotePageStore {
     nativeUpdates?: NativeUpdateStore;
     private value;
     private listeners;
+    private diagnosticListeners;
     private timer?;
     private reading?;
     private pairing?;
@@ -83,14 +79,15 @@ export declare class RemotePageStore {
     private generation;
     constructor(describeHost: () => Promise<HarnessRemoteHostDescription>, callManagement: CallPairingManagement);
     getSnapshot: () => PageSnapshot;
+    subscribeDiagnostics: (listener: () => void) => (() => void);
     subscribe: (listener: () => void) => (() => void);
     private patch;
+    private patchDiagnostic;
     private client;
     refresh: () => Promise<void>;
     generateQr: () => Promise<void>;
     diagnose: () => Promise<void>;
     cancelDiagnostic: (clear?: boolean) => void;
-    reset: () => void;
     decide: (action: "approve" | "later") => Promise<void>;
     dispose: () => void;
 }

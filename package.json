@@ -1,6 +1,6 @@
 {
   "name": "@harness-remote/dsh-wechat-remote",
-  "version": "1.7.14-rc.45",
+  "version": "1.7.14-rc.46",
   "description": "Agent远程管理助手：支持 Windows、macOS 与 Linux 上的 DeepSeek Harness，提供微信配对、安全局域网直连及端到端加密公网连接",
   "private": true,
   "license": "MIT",
@@ -117,7 +117,7 @@
     }
   },
   "scripts": {
-    "test:private-resources": "node --test scripts/test-private-resources-library.mjs scripts/test-private-resources-native.mjs scripts/test-private-resources-source.mjs scripts/test-my-resources-client.mjs scripts/test-private-resources-delivery-contract.mjs scripts/test-private-resources-lifecycle.mjs",
+    "test:private-resources": "node --test scripts/test-private-resources-library.mjs scripts/test-private-resources-native.mjs scripts/test-private-resources-source.mjs scripts/test-my-resources-client.mjs scripts/test-private-resources-delivery-contract.mjs scripts/test-private-resources-lifecycle.mjs scripts/test-private-resources-provider-native.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "bundle": "tsc -p tsconfig.json && node scripts/clean-client-types.mjs && tsc -p tsconfig.client.json && node scripts/build-client.mjs && node scripts/generate-typert.mjs",
     "verify": "node scripts/verify.mjs && node scripts/check-public-tree.mjs && npm run verify:pack",

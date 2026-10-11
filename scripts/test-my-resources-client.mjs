@@ -309,6 +309,21 @@ test('panel mounts with local status only; catalog refresh and installation each
   await h.flush(); assert.equal(h.calls.length, 3); h.unmount()
 })
 
+test('an unsuccessful or pending catalog read is not displayed as an empty resource catalog', async () => {
+  const h = await mounted(state([]))
+  assert(h.text().includes('暂无资源'))
+  await h.click('刷新')
+  assert(!h.text().includes('暂无资源'))
+  await h.resolve(1, fail('resources-unavailable'))
+  assert(h.text().includes('资源服务暂未就绪'))
+  assert(!h.text().includes('暂无资源'))
+  await h.click('刷新')
+  await h.resolve(2, ok(state()))
+  assert(h.text().includes('故事伙伴'))
+  assert(!h.text().includes('资源服务暂未就绪'))
+  h.unmount()
+})
+
 test('panel keeps each installed old version manageable beside the authorized new version', async () => {
   const old = item({ version: '1.1.0', state: 'installed', enabled: true })
   const h = await mounted(state([old, item()]))

@@ -6,7 +6,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { pathToFileURL, fileURLToPath } from 'node:url'
 import { build } from 'esbuild'
-import { createHash } from 'node:crypto'
+import { createHash, generateKeyPairSync } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 
 // Optional actual installed-archive probe. Only public code is extracted; the
@@ -149,6 +149,49 @@ test('local native component loads and survives removal of optional gate/source'
     assert.deepEqual(result.value.items, [])
     assert.equal(cloudCalls, 0)
   } finally { await component.dispose(); await ctx.fiber.dispose() }
+})
+
+test('refresh resolves a sibling gate on demand without coupling local resource lifetime', async () => {
+  const ctx = fixtureHost('sibling-source')
+  const keys = generateKeyPairSync('ed25519', { publicKeyEncoding: { type: 'spki', format: 'pem' }, privateKeyEncoding: { type: 'pkcs8', format: 'pem' } })
+  const identity = { nodeId: 'synthetic-node-for-resources', publicKeyPem: keys.publicKey, privateKeyPem: keys.privateKey }
+  let calls = 0
+  const provide = owner => owner.provide('wechatResourceSource', { current: () => ({ identity, origin: 'https://delivery.invalid',
+    fetchImpl: async (url, options) => {
+      calls++
+      assert.equal(url, `https://delivery.invalid/v1/resources/agents/${identity.nodeId}/library`)
+      assert.equal(options.headers['x-hr-proof-version'], '2')
+      return Response.json({ ...catalog, nodeId: identity.nodeId })
+    },
+  }) })
+  let gate = await ctx.plugin(provide)
+  const component = await ctx.plugin(resourceComponent)
+  try {
+    await turn()
+    const service = ctx.get('wechatResources')
+    const serviceFiber = [...ctx.registry.get(WechatResourcesService).fibers][0]
+    assert.equal(calls, 0)
+    await within((async () => {
+      while ((await service.control({ op: 'status' }, signal())).value.notice) await turn()
+    })(), 'local resource startup must settle')
+    const refreshed = await service.control({ op: 'refresh' }, signal())
+    assert.equal(refreshed.ok, true, JSON.stringify(refreshed))
+    assert.equal(refreshed.value.items[0].resourceId, release.resourceId)
+    assert.equal(calls, 1)
+    await gate.dispose()
+    assert.equal(serviceFiber.state, 2)
+    assert([...ctx.registry.get(WechatResourcesService).fibers].includes(serviceFiber))
+    assert.equal((await service.control({ op: 'status' }, signal())).ok, true)
+    const offline = await service.control({ op: 'refresh' }, signal())
+    assert.equal(offline.ok, false)
+    assert.equal(offline.error.code, 'resources-unavailable')
+    assert.equal(calls, 1)
+    gate = await ctx.plugin(provide)
+    assert.equal((await service.control({ op: 'refresh' }, signal())).ok, true)
+    assert.equal(calls, 2)
+    assert.equal(serviceFiber.state, 2)
+    assert([...ctx.registry.get(WechatResourcesService).fibers].includes(serviceFiber))
+  } finally { await component.dispose(); await gate.dispose(); await ctx.fiber.dispose() }
 })
 
 test('disposing before host readiness cancels the readiness wait', async () => {

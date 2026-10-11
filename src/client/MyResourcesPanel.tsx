@@ -28,7 +28,7 @@ export function MyResourcesPanel({ call, nodeName, hostName }: { call: MyResourc
     {!data && !error ? <p role="status">正在读取本地资源…</p> : null}
     {data?.notice ? <p role="status">{data.notice}</p> : null}
     {data && !data.supported && !data.notice ? <p role="status">当前 DSH 暂不支持安装资源，请更新后重试。</p> : null}
-    {data?.supported && !data.items.length && !data.notice ? <p role="status">暂无资源，点击刷新查看已购资源。</p> : null}
+    {data?.supported && !data.items.length && !data.notice && !error && !busy ? <p role="status">暂无资源，点击刷新查看已购资源。</p> : null}
     {data?.items.map(item => {
       const key = resourceKey(item.resourceId, item.version)
       const pending = installing === key || item.state === 'installing'

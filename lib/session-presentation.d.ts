@@ -10,3 +10,5 @@ export declare function presentationProjection(key: string, raw: unknown): {
  * Retire this bridge when supported phone clients read the native catalog. */
 export declare function legacyPermissionValue(value: unknown, catalog: unknown): unknown;
 export declare function withPresentationProjections(block: unknown, permissionCatalog?: unknown): unknown;
+/** Shared by snapshot and live mobile transports; never changes native DSH. */
+export declare function mobileProjectionAllowed(key: unknown): boolean;

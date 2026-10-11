@@ -1,5 +1,6 @@
-/** Additive, provider-neutral projection vocabulary. Native DSH values remain
- * untouched for released clients. Only the adapter knows the native key names;
+/** Provider-neutral mobile projection vocabulary. Native DSH values remain
+ * untouched; the mobile copy omits the unused whole-session navigation index.
+ * Only the adapter knows the native key names;
  * consumers may ignore absent/unknown facets without a version switch. */
 type RecordValue = Record<string, unknown>
 const object = (v: unknown): RecordValue => v && typeof v === 'object' && !Array.isArray(v) ? v as RecordValue : {}
@@ -54,10 +55,18 @@ export function withPresentationProjections(block: unknown, permissionCatalog?: 
   const source = object(block)
   if (!source.values) return block
   const values = { ...object(source.values) }
+  // Mobile pages actual events, not this unbounded whole-session index. Filter
+  // only the transport copy; retain all other (including future) native state.
+  for (const key of Object.keys(values)) if (!mobileProjectionAllowed(key)) delete values[key]
   if (Object.hasOwn(values, 'permissions')) values.permissions = legacyPermissionValue(values.permissions, permissionCatalog)
   for (const [key, value] of Object.entries(values)) {
     const projected = presentationProjection(key, value)
     if (projected) values[projected.key] = projected.value
   }
   return { ...source, values }
+}
+
+/** Shared by snapshot and live mobile transports; never changes native DSH. */
+export function mobileProjectionAllowed(key: unknown): boolean {
+  return key !== 'turnOutline'
 }

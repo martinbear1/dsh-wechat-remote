@@ -3,7 +3,7 @@ import type { WebSocket } from 'ws'
 
 import { resolveTypertGateway, type LegacyClientRequest, type TypertGatewayLike } from './dsh-protocol-compat.js'
 import { resolveDshSessionAddress, isSessionReadError } from './dsh-session-address.js'
-import { presentationProjection, legacyPermissionValue } from './session-presentation.js'
+import { presentationProjection, legacyPermissionValue, mobileProjectionAllowed } from './session-presentation.js'
 import { AssistantStreamCompatibility, assistantRecordPresentation } from './assistant-stream-compat.js'
 import { resourcePresentation } from './agent-resources.js'
 import { TurnActivityCompatibility } from './turn-activity.js'
@@ -358,6 +358,7 @@ export class DshRealtimeCompatibility {
 
   private send(state: SocketState, payload: JsonRecord, rpcId?: string): void {
     if (state.socket.readyState !== 1) return
+    if (payload.type === 'session/projection' && !mobileProjectionAllowed(payload.key)) return
     if (state.socket.bufferedAmount > MAX_BUFFERED_BYTES) {
       this.remove(state)
       state.socket.close(1009, 'realtime consumer is too slow')

@@ -346,8 +346,7 @@ test('credential expiry is not presented as a healthy pairing or allowed to enab
 
 test('running binding requires confirmation then a fenced pause before starting a replacement', async () => {
   const h = await mounted(status({ paired: true, enabled: true, state: 'ready', target: { id: 's1', title: 'A' } }))
-  assert(h.text().includes('已绑定此节点')); assert(!h.text().includes('接收中'))
-  await h.click('绑定管理')
+  assert(h.text().includes('已绑定此节点')); assert(h.text().includes('接收中'))
   assert(!h.button('重新绑定').props.disabled); assert(!h.button('移除绑定').props.disabled)
   assert(!h.find(n => n.type === 'input' && n.props.role === 'switch').props.disabled)
   h.setConfirm(false); await h.click('重新绑定')
@@ -372,8 +371,7 @@ test('an ended re-pairing attempt does not block resuming the existing valid bin
     toggle.props.onChange({ target: { checked: true } }); await h.flush()
     assert.deepEqual(h.calls[1].request, { action: 'enabled', enabled: true, expectedRevision: 1 })
     await h.resolve(1, status({ revision: 2, paired: true, enabled: true, state: 'ready', target: { id: 's1', title: 'A' } }))
-    assert(h.find(n => n.type === 'input' && n.props.role === 'switch').props.checked)
-    assert(!h.text().includes('接收中')); assert(!h.text().includes('取消绑定'))
+    assert(h.text().includes('接收中')); assert(!h.text().includes('取消绑定'))
     h.unmount()
   }
 })
@@ -384,7 +382,7 @@ test('paired without a target cannot start receiving, and no successful pairing 
   await h.resolve(1, status({ paired: true, revision: 2, state: 'disabled' }))
   assert(h.find(n => n.type === 'input' && n.props.role === 'switch').props.disabled)
   assert(!h.calls.some(c => c.request.action === 'enabled'))
-  assert(h.text().includes('请选择接入会话'))
+  assert(h.text().includes('选择会话后可开启'))
   h.unmount()
 })
 
@@ -402,21 +400,6 @@ test('remote route changes update selection without discarding an unsubmitted lo
   h.unmount()
 })
 
-test('node capability permits enabling before binding or target selection, without any automatic setup writes', async () => {
-  for (const extra of [{}, { paired: true }, { pairing: pairing() }, { paired: true, bindingState: 'expired' }]) {
-    const initial = status({ supportsEnableBeforeSetup: true, ...extra }), h = await mounted(initial)
-    const toggle = h.find(n => n.type === 'input' && n.props.role === 'switch')
-    assert(!toggle.props.disabled)
-    toggle.props.onChange({ target: { checked: true } }); await h.flush()
-    assert.deepEqual(h.calls[1].request, { action: 'enabled', enabled: true, expectedRevision: 1 })
-    await h.resolve(1, { ...initial, revision: 2, enabled: true })
-    assert(h.find(n => n.type === 'input' && n.props.role === 'switch').props.checked)
-    assert.equal(h.calls.length, 2, 'enabling alone neither binds nor routes')
-    assert(!h.text().includes('接收中'))
-    h.unmount()
-  }
-})
-
 test('loading the latest session list does not disable and close the focused selector', async () => {
   const h = await mounted(status())
   h.find(n => n.type === 'select').props.onFocus(); await h.flush()
@@ -429,7 +412,6 @@ test('loading the latest session list does not disable and close the focused sel
 
 test('disconnect confirms the pending-work consequence and pauses before the revision-fenced removal', async () => {
   const h = await mounted(status({ paired: true, enabled: true, state: 'ready', pending: 2, target: { id: 's1', title: 'A' } }))
-  await h.click('绑定管理')
   h.setConfirm(false); await h.click('移除绑定')
   assert.equal(h.calls.length, 1)
   assert(h.confirms[0].includes('先暂停')); assert(h.confirms[0].includes('未完成的微信消息'))
@@ -448,7 +430,6 @@ test('pause failure or an invalid stale pause receipt never proceeds to replacem
   for (const label of ['重新绑定', '移除绑定']) {
     for (const failure of ['rejected', 'stale', 'still-enabled', 'not-status']) {
       const h = await mounted(status({ paired: true, enabled: true, state: 'ready' }))
-      await h.click('绑定管理')
       await h.click(label)
       if (failure === 'rejected') await h.reject(1, Error('pause failed'))
       else if (failure === 'not-status') await h.resolve(1, { sessions: [] })
@@ -464,7 +445,6 @@ test('pause failure or an invalid stale pause receipt never proceeds to replacem
 test('node switch during the confirmed pause prevents the old-node follow-up mutation', async () => {
   for (const label of ['重新绑定', '移除绑定']) {
     const h = await mounted(status({ paired: true, enabled: true, state: 'ready' }))
-    await h.click('绑定管理')
     await h.click(label)
     await h.replaceCall()
     assert.equal(h.calls.length, 3)
@@ -480,7 +460,6 @@ test('node switch during the confirmed pause prevents the old-node follow-up mut
 
 test('management failure after a successful pause remains paused without an automatic retry or resume', async () => {
   const h = await mounted(status({ paired: true, enabled: true, state: 'ready' }))
-  await h.click('绑定管理')
   await h.click('重新绑定')
   await h.resolve(1, status({ paired: true, revision: 2, state: 'disabled' }))
   await h.reject(2, Error('QR provider temporarily unavailable'))
@@ -503,13 +482,9 @@ test('valid pairing hides obsolete attempt notices and keeps replacement only in
     assert(!h.text().includes('取消绑定'))
     assert(!h.text().includes('重新显示绑定码'))
     assert(h.text().includes('已绑定此节点'))
-    assert.equal(h.button('绑定管理').props['aria-expanded'], false)
-    assert(!h.text().includes('重新绑定'))
-    await h.click('绑定管理')
-    const menu = h.find(n => n.props?.['aria-label'] === '绑定管理操作')
-    assert.equal(h.button('绑定管理').props['aria-expanded'], true)
+    const menu = h.find(n => n.type === 'details')
+    assert(!menu.props.open)
     assert.equal(h.nodes(menu).filter(n => n.type === 'button' && h.text(n) === '重新绑定').length, 1)
-    assert.equal(h.calls.length, 1, 'opening local management does not call the service')
     h.unmount()
   }
 })
@@ -522,7 +497,7 @@ test('waiting QR has one cancel action, a homepage-scanner instruction and one a
   assert.equal(h.nodes().filter(n => n.type === 'input' && n.props.role === 'switch').length, 1)
   assert(h.find(n => n.type === 'input' && n.props.role === 'switch').props.disabled)
   const label = h.find(n => n.type === 'label')
-  assert.equal(label.props.children[0].props['aria-label'], '启用当前节点的 ClawBot 私聊接线')
+  assert.equal(label.props.children[0].props['aria-label'], '启用私聊接入')
   assert.equal(label.props.children[1].props['aria-hidden'], true)
   h.unmount()
 })
@@ -547,9 +522,7 @@ test('routine successful pairing notices do not duplicate the current pairing an
   ]) {
     const h = await mounted(status({ paired: true, state: 'disabled', target: { id: 's1', title: 'A' }, message }))
     assert(!h.text().includes(message))
-    assert(h.text().includes('已绑定此节点'))
-    assert.equal(h.find(n => n.type === 'input' && n.props.role === 'switch').props.checked, false)
-    assert(!h.text().includes('已暂停'))
+    assert(h.text().includes('已绑定此节点')); assert(h.text().includes('已暂停'))
     h.unmount()
   }
 })
@@ -562,73 +535,7 @@ test('active replacement status takes precedence over both a valid or an expired
     const badge = h.find(n => n.props?.['data-state'] === 'pending')
     assert.equal(h.text(badge), expected)
     assert(!h.text(badge).includes('已绑定此节点')); assert(!h.text(badge).includes('绑定已失效'))
-    assert(!h.text().includes('等待完成绑定')); assert(!h.text().includes('请重新绑定'))
+    assert(h.text().includes('绑定完成后可开启')); assert(!h.text().includes('请重新绑定'))
     h.unmount()
-  }
-})
-
-test('the sole node switch shares the panel header with refresh; binding management belongs to its binding row', async () => {
-  const h = await mounted(status({ paired: true, enabled: true, state: 'connecting', target: { id: 's1', title: 'A' }, message: '' }))
-  const header = h.find(n => n.type === 'div' && h.nodes(n).some(child => child.type === 'h3')
-    && h.nodes(n).some(child => child.props?.role === 'switch') && !h.nodes(n).some(child => child.type === 'select'))
-  assert(h.nodes(header).includes(h.button('刷新')))
-  const binding = h.find(n => n.type === 'div' && n.props?.['aria-label'] === '节点绑定')
-  assert(h.nodes(binding).includes(h.button('绑定管理')))
-  assert(!h.text().includes('连接中')); assert(!h.text().includes('启用私聊接入'))
-  assert(!h.text().includes('不取消 DSH'))
-  assert.equal(h.nodes().filter(n => n.props?.role === 'switch').length, 1)
-  await h.click('绑定管理')
-  await h.replaceCall()
-  await h.resolve(1, status({ paired: true, state: 'disabled' }))
-  assert.equal(h.button('绑定管理').props['aria-expanded'], false, 'new node starts with collapsed management')
-  h.unmount()
-})
-
-test('terminal message receipts stay in collapsed neutral history, without writes or an extra connection warning', async () => {
-  for (const message of ['',
-    '有回复发送结果不确定，未自动重发；完整结果仍在原 DSH 会话。',
-    '有上次中断的处理或发送，未自动重试，请在原会话核对。',
-  ]) {
-    const h = await mounted(status({ paired: true, enabled: true, state: 'ready', target: { id: 's1', title: 'A' }, uncertain: 1, message }))
-    const history = h.find(n => n.type === 'details')
-    assert(!history.props.open)
-    assert.equal(h.text(h.find(n => n.type === 'summary')), '消息记录（1）')
-    assert(h.text(history).includes('未自动重复执行或发送'))
-    assert(h.text(history).includes('当时的 DSH 会话和微信记录；不影响新消息'))
-    assert(!h.nodes().some(n => n.props?.role === 'alert'))
-    assert(!h.nodes().some(n => n.type === 'p' && n.props?.role === 'status'))
-    assert.equal(h.calls.length, 1)
-    h.unmount()
-  }
-})
-
-test('a historical-looking notice without a terminal receipt, a new warning, and a current error stay visible', async () => {
-  for (const extra of [
-    { message: '有上次中断的处理或发送，未自动重试，请在原会话核对。' },
-    { message: '有回复发送结果不确定，未自动重发；完整结果仍在原 DSH 会话。' },
-    { uncertain: 1, message: 'new provider safety warning' },
-    { message: '', state: 'error' },
-  ]) {
-    const h = await mounted(status({ paired: true, enabled: true, state: 'ready', target: { id: 's1', title: 'A' }, ...extra }))
-    const message = extra.message || '连接异常，请刷新后重试。'
-    assert(h.nodes().some(n => n.type === 'p' && n.props?.role === 'status' && h.text(n) === message))
-    h.unmount()
-  }
-})
-
-test('a current connection error survives a later historical-send notice, while expired binding is not duplicated', async () => {
-  for (const message of ['有上次中断的处理或发送，未自动重试，请在原会话核对。',
-    '有回复发送结果不确定，未自动重发；完整结果仍在原 DSH 会话。']) {
-    for (const expired of [false, true]) {
-      const h = await mounted(status({ paired: true, enabled: true, state: 'error', uncertain: 1, message,
-        target: { id: 's1', title: 'A' }, ...(expired ? { bindingState: 'expired' } : {}) }))
-      assert(!h.text().includes(message), 'terminal detail is folded without re-exposing the old warning')
-      const history = h.find(n => n.type === 'details')
-      assert(!history.props.open); assert(h.text(history).includes('消息记录（1）'))
-      assert.equal(h.text().includes('连接异常，请刷新后重试。'), !expired,
-        'a currently errored channel is not made healthy by folding its historical message')
-      if (expired) assert(h.text().includes('绑定已失效'))
-      h.unmount()
-    }
   }
 })

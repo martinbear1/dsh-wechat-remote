@@ -46,7 +46,7 @@ export declare class ClawbotRuntime {
     private expireLogin;
     /** The node owns a requested login, even while both control pages are closed.
      * Only read its result, for this attempt's bounded lifetime; never restart a
-     * login, resend a verification code, or change the node's enabled choice here. */
+     * login, resend a verification code, or enable message receiving here. */
     private watchLogin;
     private failLoginStorage;
     private scheduleLoginWatch;
@@ -58,9 +58,6 @@ export declare class ClawbotRuntime {
     }>;
     private mutate;
     private completeLogin;
-    /** enabled is the owner's node-level choice; readiness never rewrites it.
-     * An incomplete setup may expose controls, but cannot receive, run or send. */
-    private canReceive;
     private resume;
     private delay;
     private poll;

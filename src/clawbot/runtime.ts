@@ -110,7 +110,7 @@ export class ClawbotRuntime {
     }
     // Pre-entitlement versions never captured an account owner. Do not adopt
     // their token in the background: the owner must explicitly enable once.
-    if (access?.identity && this.data.enabled && this.data.credentials && !this.data.accessBinding) {
+    if (access?.identity && this.data.enabled && !this.data.accessBinding) {
       this.commit(d => { d.enabled = false; d.revision++ })
       this.message = '升级后请核对绑定的微信，并重新启用私聊接入。原绑定和会话已保留。'
     }
@@ -151,8 +151,7 @@ export class ClawbotRuntime {
     try {
       this.access?.current()
       const owner = this.access?.identity?.()
-      if (owner && ((this.data.accessBinding && !this.sameOwner(this.data.accessBinding, owner))
-        || (this.login?.owner && activeLoginStatus(this.login.status) && !this.sameOwner(this.login.owner, owner))))
+      if (owner && ((this.data.accessBinding && !this.sameOwner(this.data.accessBinding, owner)) || (this.login?.owner && !this.sameOwner(this.login.owner, owner))))
         throw new Error('此节点的账号绑定已变化。请移除原本地微信绑定后重新绑定，不会沿用旧账号的连接。')
     } catch (error) { this.accessFailure(error) }
   }
@@ -161,9 +160,8 @@ export class ClawbotRuntime {
   }
   snapshot(): ClawbotStatus {
     this.expireLogin()
-    return { supported: true, revision: this.data.revision, enabled: this.data.enabled, supportsEnableBeforeSetup: true,
-      state: !this.data.enabled ? 'disabled' : !this.data.credentials ? 'unpaired' : this.data.authExpired ? 'error'
-        : this.login && activeLoginStatus(this.login.status) ? 'connecting' : !this.data.target ? 'disabled' : this.state,
+    return { supported: true, revision: this.data.revision, enabled: this.data.enabled,
+      state: !this.data.enabled ? 'disabled' : !this.data.credentials ? 'unpaired' : this.state,
       paired: Boolean(this.data.credentials), bindingState: !this.data.credentials ? 'unpaired' : this.data.authExpired ? 'expired' : 'paired',
       target: this.data.target && { ...this.data.target }, message: this.message,
       pending: this.data.receipts.filter(r => !terminal(r)).length,
@@ -187,12 +185,11 @@ export class ClawbotRuntime {
       this.commit(d => { d.revision++ })
       login.status = 'expired'; this.endLogin(login)
       this.message = '二维码已过期，请重新生成。'
-      this.resume()
     }
   }
   /** The node owns a requested login, even while both control pages are closed.
    * Only read its result, for this attempt's bounded lifetime; never restart a
-   * login, resend a verification code, or change the node's enabled choice here. */
+   * login, resend a verification code, or enable message receiving here. */
   private watchLogin(login: Login): void {
     const watch: LoginWatch = { login, failures: 0 }
     this.loginWatch = watch
@@ -240,7 +237,7 @@ export class ClawbotRuntime {
             if (this.message !== message || !retry) this.commit(d => { d.revision++ })
             this.message = message
             if (retry) watch.failures++
-            else { login.status = 'error'; this.endLogin(login); this.resume() }
+            else { login.status = 'error'; this.endLogin(login) }
           } catch { this.failLoginStorage(login) }
         }).finally(() => {
           watch.task = undefined
@@ -279,7 +276,6 @@ export class ClawbotRuntime {
         this.currentAccess()
         if (!found) fail('clawbot-session-missing', '此会话已不可选择，请刷新列表。')
         this.commit(d => { d.target = found!; d.revision++ })
-        this.resume()
         break
       }
       case 'enabled': {
@@ -287,7 +283,11 @@ export class ClawbotRuntime {
         if (typeof request.enabled !== 'boolean') fail('clawbot-invalid', '请指定开启或暂停')
         if (this.broken && !this.data.enabled) return this.snapshot()
         this.expireLogin()
-        const owner = request.enabled && this.data.credentials ? this.access?.identity?.() : undefined
+        if (request.enabled && this.login && activeLoginStatus(this.login.status)) fail('clawbot-login-active', '请先完成或取消微信绑定。')
+        if (request.enabled && !this.data.credentials) fail('clawbot-unpaired', '请先绑定微信。')
+        if (request.enabled && this.data.authExpired) fail('clawbot-auth-expired', '微信连接已失效，请重新绑定。')
+        if (request.enabled && !this.data.target) fail('clawbot-target-required', '请先选择一个会话。')
+        const owner = request.enabled ? this.access?.identity?.() : undefined
         this.commit(d => { d.enabled = request.enabled!; if (owner && !d.accessBinding) d.accessBinding = owner; d.revision++ })
         if (this.login && !activeLoginStatus(this.login.status)) this.login = undefined
         if (request.enabled) { this.message = ''; this.resume() }
@@ -301,6 +301,9 @@ export class ClawbotRuntime {
         // second surface must not rotate a QR that is already being scanned.
         if (this.login && activeLoginStatus(this.login.status)) return this.snapshot()
         if (this.data.enabled && this.data.credentials) fail('clawbot-busy', '请先暂停接入，再重新绑定。')
+        // Repair the old enabled-without-credentials dead end without touching a
+        // running identity or changing the user's eventual start preference.
+        if (this.data.enabled) this.commit(d => { d.enabled = false; d.revision++ })
         const abort = new AbortController()
         const owner = this.access?.identity?.()
         const combined = AbortSignal.any([signal, this.lifetime.signal, abort.signal])
@@ -349,7 +352,7 @@ export class ClawbotRuntime {
       case 'login.cancel': {
         if (this.login && (!request.loginId || this.login.id !== request.loginId)) fail('clawbot-login-stale', '绑定状态已更新，请刷新。')
         if (this.login) { this.commit(d => { d.revision++ }); this.endLogin(this.login) }
-        this.login = undefined; if (!this.broken) this.message = ''; this.resume(); break
+        this.login = undefined; if (!this.broken) this.message = ''; break
       }
       case 'disconnect': {
         this.checkRevision(request)
@@ -378,12 +381,12 @@ export class ClawbotRuntime {
     this.currentAccess()
     this.expireLogin()
     if (this.login !== login || login.abort.signal.aborted) return
+    if (this.data.enabled) fail('clawbot-busy', '请先暂停接入，再完成绑定。')
     if (result.credentials) {
       if (this.data.credentials && this.data.credentials.userId !== result.credentials.userId) {
         this.commit(d => { d.revision++ })
         this.endLogin(login); this.login = undefined
         this.message = '此次确认的是另一个微信账号。未替换原绑定；如需换号，请先明确移除本地绑定。'
-        this.resume()
         fail('clawbot-different-user', this.message)
       }
       if (this.data.credentials && this.data.credentials.accountId !== result.credentials.accountId
@@ -391,7 +394,6 @@ export class ClawbotRuntime {
         this.commit(d => { d.revision++ })
         this.endLogin(login); this.login = undefined
         this.message = '原连接仍有未完成的消息，未替换本地绑定。请先处理原消息，或确认停止这些消息后移除绑定。'
-        this.resume()
         fail('clawbot-pending', this.message)
       }
       this.commit(d => {
@@ -401,14 +403,12 @@ export class ClawbotRuntime {
         d.credentials = result.credentials!; if (login.owner) d.accessBinding = login.owner; d.authExpired = false; d.revision++
       })
       this.endLogin(login); this.login = undefined
-      this.message = ''
-      this.resume()
+      this.message = '微信已绑定。选择接入会话并启用私聊接入后即可使用。'
     } else if (result.status === 'binded_redirect' && this.data.credentials) {
       this.commit(d => { if (login.owner && !d.accessBinding) d.accessBinding = login.owner; d.revision++ })
       this.endLogin(login); this.login = undefined
       this.message = this.data.authExpired ? '原微信连接已失效，请重新绑定。'
-        : ''
-      this.resume()
+        : '微信确认本节点已有绑定。选择会话并开启接入后即可使用。'
     } else {
       // Only an actual successful provider read can clear our transient retry
       // notice. A coalesced UI snapshot never reaches this method, and unrelated
@@ -418,20 +418,11 @@ export class ClawbotRuntime {
       login.status = result.status
       if (!activeLoginStatus(result.status)) this.endLogin(login)
       this.message = message
-      this.resume()
     }
   }
-  /** enabled is the owner's node-level choice; readiness never rewrites it.
-   * An incomplete setup may expose controls, but cannot receive, run or send. */
-  private canReceive(): boolean {
-    return !this.closed && !this.broken && this.data.enabled && Boolean(this.data.credentials)
-      && !this.data.authExpired && Boolean(this.data.target)
-      && !(this.login && activeLoginStatus(this.login.status))
-  }
   private resume(): void {
-    if (!this.canReceive()) return
+    if (this.closed || this.broken || !this.data.enabled || !this.data.credentials || this.data.authExpired) return
     if (!this.pollTask) {
-      this.state = 'connecting'
       const controller = new AbortController()
       this.polling = controller
       this.pollTask = this.poll(controller.signal).catch(() => {
@@ -452,19 +443,17 @@ export class ClawbotRuntime {
   }
   private async poll(signal: AbortSignal): Promise<void> {
     let failures = 0
-    while (!signal.aborted && this.canReceive()) {
+    while (!signal.aborted && !this.closed && this.data.enabled && this.data.credentials) {
       try {
         await this.authorize()
         signal.throwIfAborted()
-        if (!this.canReceive()) return
-        // Keep the last confirmed state while the normal long-poll waits.
-        const updates = await this.client.getUpdates(this.data.credentials!, this.data.cursor, signal)
+        this.state = 'connecting'
+        const updates = await this.client.getUpdates(this.data.credentials, this.data.cursor, signal)
         signal.throwIfAborted()
         // A normal long-poll may span the short authority lease. Revalidate
         // before accepting its data; never extend stale cached permission.
         await this.authorize()
         signal.throwIfAborted()
-        if (!this.canReceive()) return
         // Durably accept the entire batch with its cursor. Never acknowledge a
         // batch before enqueueing it or after only accepting part of it.
         this.ingest(updates.messages, updates.cursor)
@@ -510,7 +499,7 @@ export class ClawbotRuntime {
     })
   }
   private work(): void {
-    if (!this.canReceive()) return
+    if (this.closed || this.broken || !this.data.enabled) return
     const failed = () => { this.broken = true; this.state = 'error'; this.message = '本地记录保存失败，接入已停止，请核对原会话后重启组件。'; this.polling?.abort() }
     if (!this.worker && this.data.receipts.some(r => r.state === 'pending' && !isCommand(r)))
       this.worker = this.process(false).catch(failed).finally(() => { this.worker = undefined; this.work() })
@@ -570,11 +559,11 @@ export class ClawbotRuntime {
     this.deliver()
   }
   private async process(commands: boolean): Promise<void> {
-    while (this.canReceive()) {
+    while (!this.closed && !this.broken && this.data.enabled && this.data.credentials) {
       const r = this.data.receipts.find(r => r.state === 'pending' && isCommand(r) === commands)
       if (!r) return
       try { await this.authorize() } catch { return }
-      if (!this.canReceive()) return
+      if (this.closed || this.broken || !this.data.enabled) return
       if (this.data.receipts.find(item => item.id === r.id)?.state === 'pending') {
         this.update(r.id, { state: 'running' })
         let output: string
@@ -590,7 +579,7 @@ export class ClawbotRuntime {
             const accountId = this.data.credentials!.accountId
             const checkAdmission = () => {
               this.currentAccess()
-              if (!this.canReceive() || this.data.credentials?.accountId !== accountId
+              if (this.closed || this.broken || !this.data.enabled || this.data.credentials?.accountId !== accountId
                 || this.data.credentials?.userId !== r.userId || this.data.receipts.find(item => item.id === r.id)?.state !== 'running')
                 fail('clawbot-not-submitted', '接入已暂停或绑定已变化，本条消息未发送到会话。')
             }
@@ -661,19 +650,19 @@ export class ClawbotRuntime {
     }
   }
   private deliver(): void {
-    if (this.deliveryWorker || !this.canReceive() || !this.data.receipts.some(r => r.state === 'ready')) return
+    if (this.deliveryWorker || this.closed || this.broken || !this.data.enabled || !this.data.receipts.some(r => r.state === 'ready')) return
     this.deliveryWorker = this.drain().catch(() => { this.broken = true; this.state = 'error'; this.message = '发送记录保存失败，已停止接入，请核对原会话。'; this.polling?.abort() })
       .finally(() => { this.deliveryWorker = undefined; this.deliver() })
   }
   private async drain(): Promise<void> {
-    while (this.canReceive()) {
+    while (!this.closed && !this.broken && this.data.enabled && this.data.credentials) {
       const current = this.data.receipts.find(item => item.state === 'ready')
       if (!current) return
       const r = current
       const parts = current.parts || splitText(current.output || '')
       for (let index = current.sentParts || 0; index < parts.length; index++) {
         try { await this.authorize() } catch { return }
-        if (!this.canReceive()) return
+        if (this.closed || this.broken || !this.data.enabled) return
         // Authorization may yield while completion retires an unsent notice or
         // disconnect seals the old binding. Never revive the captured receipt.
         const latest = this.data.receipts.find(item => item.id === r.id)

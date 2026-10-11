@@ -37,8 +37,6 @@ export interface ClawbotStatus {
     supported: true;
     revision: number;
     enabled: boolean;
-    /** The node can stay enabled while binding and target selection are pending. */
-    supportsEnableBeforeSetup?: true;
     state: 'disabled' | 'unpaired' | 'ready' | 'connecting' | 'error';
     paired: boolean;
     /** Local credential health, not a claim about other nodes' bindings. */

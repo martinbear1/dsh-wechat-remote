@@ -1,5 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis';
 import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol';
+import { type ImportPorts } from './controller.js';
 export interface HistoryImportResult {
     readonly ok: boolean;
     readonly valueJson?: string;
@@ -15,6 +16,7 @@ export declare class WechatImportService extends TypertRemoteService {
     private readonly controller;
     constructor(host: Context, config: {
         receiptDirectory: string;
+        loadObject?: ImportPorts['loadObject'];
     });
     control(request: {
         action: string;

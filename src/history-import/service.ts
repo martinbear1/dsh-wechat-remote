@@ -1,6 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
-import { HistoryImportController, importError } from './controller.js'
+import { HistoryImportController, importError, type ImportPorts } from './controller.js'
 import { ImportReceipts } from './receipts.js'
 import { nativeCapabilities, commitNativeImport, inspectNativeImport } from './native.js'
 import { parseImportSource } from './parse.js'
@@ -17,7 +17,7 @@ export interface HistoryImportResult {
  * no startup IO and no additional server/listener/cloud service. */
 export class WechatImportService extends TypertRemoteService {
   private readonly controller: HistoryImportController
-  constructor(host: Context, config: { receiptDirectory: string }) {
+  constructor(host: Context, config: { receiptDirectory: string; loadObject?: ImportPorts['loadObject'] }) {
     super(host, 'wechatImport')
     this.controller = new HistoryImportController({
       capabilities: async () => {
@@ -30,7 +30,7 @@ export class WechatImportService extends TypertRemoteService {
       },
       authorize: signal => hostFeatureAccess(host).authorizeHistoryImport(signal),
       owner: async signal => { try { return await hostFeatureAccess(host).currentOwner(signal) } catch { signal.throwIfAborted(); return undefined } },
-      parse: parseImportSource, share: readPublicShare,
+      parse: parseImportSource, share: readPublicShare, loadObject: config.loadObject,
       commit: (request, signal, beforeCreate) => commitNativeImport(host, request, signal, beforeCreate),
       inspect: (request, signal) => inspectNativeImport(host, request, signal),
       receipts: new ImportReceipts(config.receiptDirectory),

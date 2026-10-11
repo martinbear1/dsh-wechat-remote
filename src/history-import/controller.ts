@@ -4,6 +4,7 @@ import { ImportReceipts, operationIdentifier, type ImportReceipt } from './recei
 import { MAX_IMPORT_BYTES, IMPORT_CHUNK_BYTES } from './share.js'
 import { NativeImportPreflightError, type NativeImportRequest, type NativeImportIdentity, type NativeImportInspection } from './native.js'
 import type { FeatureAuthorization, FeatureGrant } from '../feature-access.js'
+import { validateInputObject, type EncryptedCloudObjectDescriptor } from '../object-crypto.js'
 
 type Row = Record<string, any>
 type Source = { value: HistorySource; bytes: number; expiresAt: number; owner: string }
@@ -15,6 +16,7 @@ export interface ImportPorts {
   owner(signal: AbortSignal): Promise<string | undefined>
   parse(data: Buffer, signal: AbortSignal): Promise<{ source: HistorySource; bytes: number }>
   share(url: unknown, signal: AbortSignal): Promise<Buffer>
+  loadObject?(descriptor: EncryptedCloudObjectDescriptor, signal: AbortSignal): Promise<Uint8Array>
   commit(request: NativeImportRequest, signal: AbortSignal, beforeCreate: () => void): Promise<unknown>
   inspect(request: NativeImportIdentity, signal: AbortSignal): Promise<NativeImportInspection>
   receipts: ImportReceipts
@@ -26,6 +28,13 @@ const own = (value: unknown): value is Row => !!value && typeof value === 'objec
 function string(value: unknown, max = 512): string {
   if (typeof value !== 'string' || !value || value.length > max) throw new Error('invalid-request')
   return value
+}
+function importObject(input: Row): EncryptedCloudObjectDescriptor {
+  const name = string(input.name, 255)
+  if (!/\.(json|zip)$/i.test(name) || /[\\/\u0000-\u001f\u007f]/.test(name)) throw new Error('invalid-request')
+  // No URL/path/account fields cross into the object loader. The name labels
+  // a source only; no file is written or attached to a native DSH session.
+  try { return validateInputObject(input.descriptor) } catch { throw new Error('invalid-request') }
 }
 function displayTitle(conversation: HistoryConversation): string {
   const clean = (value: string) => value.replace(/[\u0000-\u001f\u007f-\u009f\s]+/g, ' ').trim()
@@ -63,6 +72,7 @@ const errors: Record<string, string> = {
   'parse-timeout': '读取数据超时，请改用单个会话的分享链接。',
   'native-unavailable': '此节点的 DSH 尚不支持这项导入，请更新 DSH。',
   'owner-changed': '账号或节点已变化，请重新选择导入来源。',
+  'object-unavailable': '此节点尚不支持导入文件传输，请更新插件或改用分享链接。',
   'invalid-title': '会话名称须为 1 至 160 个字符，不能包含换行或控制字符。',
 }
 export function importError(error: unknown): { code: string; message: string } {
@@ -80,6 +90,7 @@ export class HistoryImportController {
   private readonly jobs = new Map<string, Promise<void>>()
   private readonly lifetime = new AbortController()
   private preparing = false
+  private readingBytes = 0
   private claiming = false
   private inspection: { operationId: string; value: Promise<Row> } | undefined
   private expiryTimer: ReturnType<typeof setTimeout> | undefined
@@ -101,6 +112,7 @@ export class HistoryImportController {
   private usage(): number {
     return [...this.sources.values()].reduce((sum, value) => sum + value.bytes, 0)
       + [...this.uploads.values()].reduce((sum, value) => sum + value.data.length, 0)
+      + this.readingBytes
   }
   private source(id: unknown, owner?: string): Source { const source = this.sources.get(string(id)); if (!source) throw new Error('expired'); if (owner !== undefined && source.owner !== owner) throw new Error('owner-changed'); return source }
   private catalog(id: string, input: Row = {}, owner?: string): Row {
@@ -113,21 +125,27 @@ export class HistoryImportController {
         ...(c.leafIds.length === 1 ? { turnCount: countHistoryTurns(c.messages) } : {}) })),
       nextCursor: cursor + 40 < entries.length ? cursor + 40 : null }
   }
-  private async prepare(read: () => Promise<Buffer>, signal: AbortSignal, authorization: FeatureAuthorization): Promise<Row> {
+  private async prepare(read: () => Promise<Buffer>, signal: AbortSignal, authorization: FeatureAuthorization, readingBytes = 0): Promise<Row> {
     if (this.preparing) throw new Error('busy')
-    if (this.sources.size >= 2) throw new Error('capacity')
+    if (this.sources.size >= 2 || this.usage() + readingBytes > MEMORY_BYTES) throw new Error('capacity')
     this.preparing = true
+    this.readingBytes = readingBytes
+    const recheck = async () => {
+      signal.throwIfAborted()
+      if (readingBytes) await authorization.revalidate?.(signal)
+      signal.throwIfAborted(); authorization.assertCurrent()
+    }
     try {
       authorization.assertCurrent()
-      const data = await read(); signal.throwIfAborted(); authorization.assertCurrent()
+      const data = await read(); await recheck()
       if (!data.length || data.length > MAX_IMPORT_BYTES) throw new Error('source-too-large')
-      const parsed = await this.ports.parse(data, signal); signal.throwIfAborted(); authorization.assertCurrent()
-      if (this.usage() + parsed.bytes > MEMORY_BYTES) throw new Error('capacity')
+      const parsed = await this.ports.parse(data, signal); await recheck()
+      if (this.usage() - this.readingBytes + parsed.bytes > MEMORY_BYTES) throw new Error('capacity')
       const id = randomUUID()
       this.sources.set(id, { value: parsed.source, bytes: parsed.bytes, expiresAt: this.now() + TTL, owner: authorization.owner })
       this.expireLater()
       return this.catalog(id, {}, authorization.owner)
-    } finally { this.preparing = false }
+    } finally { this.preparing = false; this.readingBytes = 0 }
   }
   private preview(input: Row, owner: string): Row {
     const source = this.source(input.sourceId, owner), conversation = source.value.conversations.find(c => c.id === string(input.conversationId))
@@ -268,8 +286,21 @@ export class HistoryImportController {
     scopeSignal.throwIfAborted(); authorization?.assertCurrent()
     let result: Row
     switch (action) {
-      case 'capabilities': result = { ...await this.ports.capabilities(), maxFileBytes: MAX_IMPORT_BYTES, chunkBytes: IMPORT_CHUNK_BYTES }; break
+      case 'capabilities': result = { ...await this.ports.capabilities(), maxFileBytes: MAX_IMPORT_BYTES, chunkBytes: IMPORT_CHUNK_BYTES,
+        fileDelivery: this.ports.loadObject ? ['chunks', 'object'] : ['chunks'] }; break
       case 'share.preview': result = await this.prepare(() => this.ports.share(input.url, scopeSignal), scopeSignal, authorization!); break
+      case 'source.object': {
+        if (!this.ports.loadObject) throw new Error('object-unavailable')
+        const descriptor = importObject(input)
+        result = await this.prepare(async () => {
+          const data = await this.ports.loadObject!(descriptor, scopeSignal)
+          if (data.byteLength !== descriptor.plainBytes) throw new Error('invalid-request')
+          return Buffer.from(data.buffer, data.byteOffset, data.byteLength)
+        // Reserve ciphertext, decrypted source and the parser worker's input
+        // copy. This is a data budget, not a promise about process RSS.
+        }, scopeSignal, authorization!, descriptor.cipherBytes + 2 * descriptor.plainBytes)
+        break
+      }
       case 'upload.start': {
         if (!Number.isSafeInteger(input.size) || input.size <= 0 || input.size > MAX_IMPORT_BYTES || !/\.(json|zip)$/i.test(string(input.name, 255))) throw new Error('invalid-request')
         if (this.uploads.size >= 2 || this.usage() + input.size > MEMORY_BYTES) throw new Error('capacity')

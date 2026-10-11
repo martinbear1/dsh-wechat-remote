@@ -11,7 +11,8 @@ import { fileURLToPath } from 'node:url'
 async function module(name) {
   const out = await build({ stdin: { contents: `export * from './${name}.ts'; ${name === 'controller' ? "export { NativeImportPreflightError } from './native.ts';" : ''}`,
     resolveDir: fileURLToPath(new URL('../src/history-import/', import.meta.url)), loader: 'ts' },
-    bundle: true, platform: 'node', format: 'esm', write: false })
+    bundle: true, platform: 'node', format: 'esm', write: false,
+    banner: { js: `import { createRequire } from 'node:module'; const require = createRequire(${JSON.stringify(import.meta.url)});` } })
   return import('data:text/javascript;base64,' + Buffer.from(out.outputFiles[0].text).toString('base64'))
 }
 const { HistoryImportController, NativeImportPreflightError } = await module('controller')
@@ -391,4 +392,62 @@ test('optional title is validated before claim and never changes an already clai
   assert.equal((await f.receipts.read(operationId)).title, '我的续聊会话')
   assert.equal((await f.call('commit', { ...args, title: '重放不得更名' })).state, 'succeeded')
   assert.equal(writes, 1); assert.equal((await f.receipts.read(operationId)).title, '我的续聊会话')
+})
+
+const objectDescriptor = (bytes = sourceBytes().length) => ({ v: 1, scheme: 'xsalsa20-poly1305-chunks-v1', contentKind: 'artifact',
+  objectId: 'object-abcdefghijklmnop', key: Buffer.alloc(32, 1).toString('base64url'), noncePrefix: Buffer.alloc(16, 2).toString('base64url'),
+  plainBytes: bytes, cipherBytes: bytes + 20 * Math.ceil(bytes / 262144), chunkBytes: 262144 })
+
+test('object import is optional, validates before loading and projects only encrypted-object fields', async t => {
+  const legacy = await fixture(t)
+  assert.deepEqual((await legacy.call('capabilities')).fileDelivery, ['chunks'])
+  await assert.rejects(legacy.call('source.object', {}), /object-unavailable/)
+  let loads = 0, seen
+  const f = await fixture(t, { loadObject: async descriptor => { loads++; seen = descriptor; return sourceBytes() } })
+  assert.deepEqual((await f.call('capabilities')).fileDelivery, ['chunks', 'object'])
+  for (const patch of [{ key: 'invalid' }, { noncePrefix: 'invalid' }, { scheme: 'plain' }, { v: 2 }, { objectId: '../private' },
+    { contentKind: 'image' }, { chunkBytes: 1024 }, { plainBytes: MAX_IMPORT_BYTES + 1 }, { cipherBytes: 1 }, { plainBytes: 1.5 }])
+    await assert.rejects(f.call('source.object', { name: 'history.zip', descriptor: { ...objectDescriptor(), ...patch } }), /invalid-request/)
+  for (const name of ['../history.zip', 'history.exe', 'history\u0000.zip'])
+    await assert.rejects(f.call('source.object', { name, descriptor: objectDescriptor() }), /invalid-request/)
+  assert.equal(loads, 0)
+  const catalog = await f.call('source.object', { name: 'history.json', descriptor: { ...objectDescriptor(), url: 'https://attacker.test/', owner: 'other', path: '/private' } })
+  assert.deepEqual(seen, objectDescriptor()); assert.equal(catalog.total, 1); assert.equal(f.commits(), 0)
+  assert.equal((await f.call('preview', { sourceId: catalog.sourceId, conversationId: catalog.entries[0].id })).summary.turnCount, 1)
+  assert.equal((await f.call('release', { sourceId: catalog.sourceId })).released, true)
+})
+
+test('object import rechecks long-read authority before parsing and again before publishing a source', async t => {
+  for (const phase of ['read', 'parse', 'valid', 'wrong-size', 'cancel']) {
+    let checks = 0, parses = 0
+    const abort = new AbortController()
+    const f = await fixture(t, {
+      authorize: async () => ({ owner: 'fixture-owner', assertCurrent() {}, revalidate: async () => {
+        checks++; if (phase === 'read' && checks === 1 || phase === 'parse' && checks === 2) throw Error('owner-changed')
+      } }),
+      loadObject: async () => { if (phase === 'cancel') abort.abort(); return phase === 'wrong-size' ? Buffer.alloc(1) : sourceBytes() },
+      parse: async data => { parses++; const source = await parseHistorySource(data); return { source, bytes: data.length } },
+    })
+    const result = f.call('source.object', { name: 'a.json', descriptor: objectDescriptor() }, abort.signal)
+    if (phase === 'valid') assert.equal((await result).total, 1)
+    else { await assert.rejects(result); assert.equal(f.controller.sources.size, 0) }
+    assert.equal(parses, ['parse', 'valid'].includes(phase) ? 1 : 0)
+    assert.equal(f.controller.readingBytes, 0); assert.equal(f.commits(), 0)
+  }
+})
+
+test('pending object download reserves source/decrypt/worker data before costly IO and releases after failure', async t => {
+  let rejectRead, loads = 0
+  const f = await fixture(t, { loadObject: async () => { loads++; return new Promise((_yes, no) => { rejectRead = no }) } })
+  const args = { name: 'large.zip', descriptor: objectDescriptor(MAX_IMPORT_BYTES) }
+  const pending = f.call('source.object', args)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(loads, 1); assert.equal(f.controller.readingBytes, 3 * MAX_IMPORT_BYTES + 1600)
+  await f.call('upload.start', { name: 'another.zip', size: MAX_IMPORT_BYTES })
+  await assert.rejects(f.call('upload.start', { name: 'third.zip', size: MAX_IMPORT_BYTES }), /capacity/)
+  await assert.rejects(f.call('source.object', args), /busy/); assert.equal(loads, 1)
+  rejectRead(Error('download-failed')); await assert.rejects(pending, /download-failed/)
+  assert.equal(f.controller.readingBytes, 0)
+  await f.call('upload.start', { name: 'third.zip', size: MAX_IMPORT_BYTES })
+  await assert.rejects(f.call('source.object', args), /capacity/); assert.equal(loads, 1)
 })

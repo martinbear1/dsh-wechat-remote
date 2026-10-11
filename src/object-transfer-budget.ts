@@ -4,6 +4,7 @@ export const OBJECT_DOWNLOAD_BUDGET_MS = 150_000
 export const OBJECT_PREPARE_BUDGET_MS = OBJECT_UPLOAD_BUDGET_MS + 30_000
 
 export function objectRpcBudget(method: string, payload?: Record<string, any>): number | undefined {
+  if (method === 'wechatImport/control' && payload?.args?.request?.action === 'source.object') return OBJECT_DOWNLOAD_BUDGET_MS + 60_000
   if (method === 'agentInputs/upload') return OBJECT_DOWNLOAD_BUDGET_MS + 30_000
   if (method === 'agentResources/prepare' || method === 'agentResources/prepareArchive') return OBJECT_PREPARE_BUDGET_MS
   if (method === 'wechatAttachment/prepareBatch') {

@@ -96,6 +96,24 @@ export function validateRemoteAttachment(value: unknown): RemoteAttachmentDescri
   }
 }
 
+/** Bounded phone-to-node file source. Validate before obtaining a metered GET
+ * ticket; only this projected descriptor may reach the object reader. */
+export function validateInputObject(value: unknown): EncryptedCloudObjectDescriptor {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Encrypted input descriptor is invalid')
+  const d = value as Record<string, any>
+  if (d.v !== 1 || d.scheme !== ATTACHMENT_SCHEME || d.contentKind !== 'artifact'
+    || typeof d.objectId !== 'string' || !/^[A-Za-z0-9_-]{20,64}$/.test(d.objectId)
+    || !Number.isSafeInteger(d.plainBytes) || d.plainBytes < 1 || d.plainBytes > MAX_ATTACHMENT_BYTES
+    || d.chunkBytes !== ATTACHMENT_CHUNK_BYTES || d.cipherBytes !== d.plainBytes + 20 * Math.ceil(d.plainBytes / ATTACHMENT_CHUNK_BYTES))
+    throw new Error('Encrypted input descriptor is invalid')
+  for (const [field, bytes] of [['key', 32], ['noncePrefix', 16]] as const) {
+    const decoded = base64url(d[field], bytes, field)
+    if (Buffer.from(decoded).toString('base64url') !== d[field]) throw new Error('Encrypted input descriptor is invalid')
+  }
+  return { v: 1, scheme: ATTACHMENT_SCHEME, contentKind: 'artifact', objectId: d.objectId,
+    key: d.key, noncePrefix: d.noncePrefix, plainBytes: d.plainBytes, cipherBytes: d.cipherBytes, chunkBytes: ATTACHMENT_CHUNK_BYTES }
+}
+
 export function encryptCloudObject(
   plaintext: Uint8Array,
   contentKind: EncryptedCloudObjectDescriptor['contentKind'],

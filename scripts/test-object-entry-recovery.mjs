@@ -26,6 +26,10 @@ test('default routes are only Shanghai native and same-bucket CNAME; retired reg
   }
 })
 test('outer file RPC budgets cover object transfer; ordinary RPC budgets remain unchanged', () => {
+  assert.equal(objectRpcBudget('wechatImport/control', { args: { request: { action: 'source.object' } } }), 210000)
+  for (const action of ['capabilities', 'share.preview', 'upload.chunk', 'commit', 'status'])
+    assert.equal(objectRpcBudget('wechatImport/control', { args: { request: { action } } }), undefined)
+  assert.equal(objectRpcBudget('wechatImport/control'), undefined)
   for (const method of ['session.prompt', 'session.list', 'agentResources/list', 'wechatHistory/page']) assert.equal(objectRpcBudget(method), undefined)
   assert(objectRpcBudget('agentInputs/upload') > OBJECT_DOWNLOAD_BUDGET_MS)
   assert(objectRpcBudget('agentResources/prepareArchive') > OBJECT_UPLOAD_BUDGET_MS)

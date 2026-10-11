@@ -22,6 +22,7 @@ export type FeatureStatus = FeatureLease & {
 export interface FeatureAuthorization {
     readonly owner: string;
     assertCurrent(): void;
+    revalidate?(signal: AbortSignal): Promise<void>;
 }
 export type FeatureControlResult = {
     ok: true;
@@ -61,6 +62,7 @@ export declare class FeatureAccess {
     private historyRequested?;
     private historyIntent;
     private historyEpoch;
+    private historyAuthority;
     constructor(source: {
         nodeId(): string;
         read(signal: AbortSignal): Promise<unknown>;
@@ -68,6 +70,7 @@ export declare class FeatureAccess {
     subscribe(listener: () => void): () => void;
     private emit;
     invalidate(): void;
+    private clearLease;
     private renewWhileEnabled;
     private live;
     groupEnabled(): boolean;

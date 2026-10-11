@@ -195,3 +195,70 @@ test('revocation fences waiting import authority without group coupling; owner r
   assert.equal(access.grant('clawbot').allowed, true)
   await assert.rejects(access.authorizeHistoryImport(), FeatureAccessError)
 })
+
+test('long import revalidates after real natural expiry without renewing in the background', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let clock = 0, reads = 0
+  const access = new FeatureAccess({ nodeId: () => 'test-node', read: async () => { reads++; return importLease() } }, undefined, () => clock)
+  t.after(() => access.close())
+  await access.setHistoryImportEnabled(true)
+  const permit = await access.authorizeHistoryImport(), owner = permit.owner
+  clock = 60001; t.mock.timers.tick(60001)
+  assert.equal(reads, 1); assert.equal(access.lease, undefined)
+  assert.throws(() => permit.assertCurrent(), FeatureAccessError)
+  await permit.revalidate(new AbortController().signal)
+  permit.assertCurrent(); assert.equal(permit.owner, owner); assert.equal(reads, 2)
+  assert.equal(access.groupEnabled(), false); assert.equal(access.renewal, undefined)
+  clock += 60001; t.mock.timers.tick(60001)
+  assert.equal(reads, 2, 'an enabled import never starts a renewal loop')
+  await permit.revalidate(new AbortController().signal); assert.equal(reads, 3)
+})
+
+test('long import never reauthorizes after explicit invalidation, off/on, revoke/restore or changed owner', async t => {
+  for (const change of ['invalidate', 'off-on', 'revoke-restore', 'account', 'node', 'close', 'cancel']) {
+    let value = importLease(), nodeId = 'test-node', clock = 0
+    const access = new FeatureAccess({ nodeId: () => nodeId, read: async () => value }, undefined, () => clock)
+    t.after(() => access.close()); await access.setHistoryImportEnabled(true)
+    const permit = await access.authorizeHistoryImport(), abort = new AbortController()
+    if (change === 'invalidate') { access.invalidate(); await access.refresh() }
+    if (change === 'off-on') { await access.setHistoryImportEnabled(false); await access.setHistoryImportEnabled(true) }
+    if (change === 'revoke-restore') {
+      value.features.history_import = { allowed: false, reason: 'feature_not_entitled', validUntil: null }
+      await access.refresh(true); value = importLease(); await access.refresh(true)
+    }
+    if (change === 'account') { value = importLease('test-node', { accountInstance: 'new-owner' }); clock = 60001 }
+    if (change === 'node') { nodeId = 'another-node'; value = importLease(nodeId) }
+    if (change === 'close') access.close()
+    if (change === 'cancel') abort.abort()
+    await assert.rejects(permit.revalidate(abort.signal), undefined, change)
+  }
+})
+
+test('expiry aborts a stale forced lease refresh; a later import recheck cannot accept its response', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let clock = 0, pending, reads = 0
+  const access = new FeatureAccess({ nodeId: () => 'test-node', read: async () => { reads++; return pending ? pending.promise : importLease() } }, undefined, () => clock)
+  t.after(() => access.close()); await access.setHistoryImportEnabled(true)
+  const permit = await access.authorizeHistoryImport()
+  clock = 59999; pending = deferred()
+  const refresh = access.refresh(true); await Promise.resolve()
+  clock = 60001; t.mock.timers.tick(60001)
+  pending.resolve(importLease()); await assert.rejects(refresh, FeatureAccessError)
+  assert.throws(() => permit.assertCurrent(), FeatureAccessError)
+  pending = undefined
+  await permit.revalidate(new AbortController().signal)
+  permit.assertCurrent(); assert.equal(reads, 3)
+})
+
+test('on-demand refresh after deadline retires a delayed old expiry timer before its new read', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  let clock = 0, pending
+  const access = new FeatureAccess({ nodeId: () => 'test-node', read: async () => pending ? pending.promise : importLease() }, undefined, () => clock)
+  t.after(() => access.close()); await access.setHistoryImportEnabled(true)
+  const permit = await access.authorizeHistoryImport()
+  clock = 60001; pending = deferred()
+  const recheck = permit.revalidate(new AbortController().signal); await Promise.resolve()
+  t.mock.timers.tick(60001)
+  pending.resolve(importLease()); await recheck
+  permit.assertCurrent()
+})

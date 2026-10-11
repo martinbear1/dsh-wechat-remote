@@ -6,6 +6,7 @@ import path from 'node:path'
 import { test as nodeTest } from 'node:test'
 import { PublicObjectClient } from '../lib/public-object-client.js'
 import { PublicRelayGateway } from '../lib/public-relay-gateway.js'
+import { encryptCloudObject } from '../lib/object-crypto.js'
 
 const relayOrigin = 'https://relay.example.test'
 const primaryOrigin = 'https://primary-oss.example.test'
@@ -68,6 +69,22 @@ test('duplicate startup shares enrollment without background probes', async t =>
   assert.equal(enrolls, 1)
   assert.equal(connects(), 1)
   assert.equal(other, 0)
+})
+
+test('artifact input validates before metered ticket and bounds GET to exact descriptor size', async t => {
+  let requests = 0, gets = 0
+  const { gateway } = gatewayFixture(t, async url => {
+    requests++
+    if (String(url).startsWith(primaryOrigin)) { gets++; throw Error('must not GET oversized object') }
+    return Response.json({ objectId, purpose: 'attachment', expectedBytes: 1024, expiresAt: Date.now() + 60000,
+      download: { expiresIn: 300, url: primaryOrigin + '/large.bin' } })
+  })
+  const { descriptor } = encryptCloudObject(Buffer.from('x'), 'artifact')
+  const value = { ...descriptor, objectId }
+  await assert.rejects(gateway.downloadInputObject({ ...value, key: 'wrong' }, new AbortController().signal))
+  assert.equal(requests, 0)
+  await assert.rejects(gateway.downloadInputObject(value, new AbortController().signal), /ticket is invalid/)
+  assert.equal(requests, 1); assert.equal(gets, 0)
 })
 test('stop before startup or during enrollment cannot reactivate object operations', async t => {
   const pending = deferred()

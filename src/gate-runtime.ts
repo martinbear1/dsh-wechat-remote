@@ -638,6 +638,11 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
   mountChild('directory', WechatDirectoryService, { maxEntries: 1000 })
   mountChild('history-import', WechatImportService, {
     receiptDirectory: path.join(path.dirname(defaultGateStatePath(ctx)), 'history-import-receipts'),
+    loadObject: async (descriptor: Record<string, any>, signal: AbortSignal) => {
+      const gateway = publicRelayGateway
+      if (!gateway) throw new Error('Public object transport is unavailable')
+      return gateway.downloadInputObject(descriptor, signal)
+    },
   })
   // 电脑名不在 DSH 原生 host.describe 契约里；以微信端隔离的只读 Remote
   // 提供，避免为了一个客户端字段污染 DSH/WebUI 的 Host API。

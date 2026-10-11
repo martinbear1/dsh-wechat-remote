@@ -27,6 +27,9 @@ export interface RemoteAttachmentDescriptor {
     readonly name?: string;
 }
 export declare function validateRemoteAttachment(value: unknown): RemoteAttachmentDescriptor;
+/** Bounded phone-to-node file source. Validate before obtaining a metered GET
+ * ticket; only this projected descriptor may reach the object reader. */
+export declare function validateInputObject(value: unknown): EncryptedCloudObjectDescriptor;
 export declare function encryptCloudObject(plaintext: Uint8Array, contentKind: EncryptedCloudObjectDescriptor['contentKind']): {
     readonly ciphertext: Uint8Array;
     readonly descriptor: Omit<EncryptedCloudObjectDescriptor, 'objectId'>;

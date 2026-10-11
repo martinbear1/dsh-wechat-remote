@@ -7,7 +7,7 @@ export type AccountFeature = 'group_assistant' | 'clawbot' | 'history_import'
 export interface FeatureGrant { allowed: boolean; reason: string; validUntil: number | null; message?: string }
 export interface FeatureLease { schemaVersion: 1; nodeId: string; accountInstance: string | null; checkedAt: number; expiresAt: number; features: Record<AccountFeature, FeatureGrant> }
 export type FeatureStatus = FeatureLease & { groupEnabled: boolean; historyImportEnabled: boolean }
-export interface FeatureAuthorization { readonly owner: string; assertCurrent(): void }
+export interface FeatureAuthorization { readonly owner: string; assertCurrent(): void; revalidate?(signal: AbortSignal): Promise<void> }
 export type FeatureControlResult = { ok: true; value: FeatureStatus } | { ok: false; error: { code: string; message: string } }
 const reasons = new Set(['allowed', 'public_access_required', 'public_quota_exhausted', 'feature_not_entitled', 'feature_disabled', 'feature_account_blocked', 'account_suspended', 'node_unbound', 'account_not_found'])
 export function featureMessage(reason: string): string {
@@ -54,6 +54,7 @@ export class FeatureAccess {
   private historyRequested?: { nodeId: string; accountInstance: string }
   private historyIntent = 0
   private historyEpoch = 0
+  private historyAuthority = ''
   constructor(private readonly source: { nodeId(): string; read(signal: AbortSignal): Promise<unknown> },
     private readonly preferenceFile?: string, private readonly monotonic = () => performance.now()) {
     if (preferenceFile && existsSync(preferenceFile)) {
@@ -70,6 +71,10 @@ export class FeatureAccess {
   subscribe(listener: () => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener) }
   private emit(): void { for (const listener of this.listeners) { try { listener() } catch { /* independent consumers */ } } }
   invalidate(): void {
+    this.historyEpoch++
+    this.clearLease()
+  }
+  private clearLease(): void {
     const had = Boolean(this.lease)
     this.generation++; this.readAbort?.abort(); this.readAbort = undefined; this.flight = undefined
     this.lease = undefined; this.until = 0; clearTimeout(this.expiry); clearTimeout(this.renewal)
@@ -99,6 +104,9 @@ export class FeatureAccess {
   async refresh(force: boolean = false): Promise<void> {
     if (this.closed) throw new FeatureAccessError('unavailable')
     if (!force && this.live()) return
+    // If expiry's callback was delayed by synchronous work, retire that old
+    // lease before starting a fresh read; its timer must not abort the new one.
+    if (this.lease && this.monotonic() >= this.until) this.clearLease()
     if (!this.flight) {
       const start = this.monotonic(), generation = this.generation, abort = new AbortController()
       this.readAbort = abort
@@ -109,10 +117,11 @@ export class FeatureAccess {
           if (this.closed || generation !== this.generation || abort.signal.aborted || this.source.nodeId() !== nodeId) throw new FeatureAccessError('unavailable')
           const until = start + Math.min(60_000, lease.expiresAt - lease.checkedAt)
           if (until <= this.monotonic()) throw new FeatureAccessError('unavailable')
-          if (this.lease?.nodeId !== lease.nodeId || this.lease?.accountInstance !== lease.accountInstance
-            || this.lease?.features.history_import.allowed !== lease.features.history_import.allowed) this.historyEpoch++
+          const historyAuthority = JSON.stringify([lease.nodeId, lease.accountInstance, lease.features.history_import.allowed])
+          if (this.historyAuthority !== historyAuthority) this.historyEpoch++
+          this.historyAuthority = historyAuthority
           this.lease = lease; this.until = until
-          clearTimeout(this.expiry); this.expiry = setTimeout(() => this.invalidate(), Math.max(1, until - this.monotonic())); this.expiry.unref?.()
+          clearTimeout(this.expiry); this.expiry = setTimeout(() => this.clearLease(), Math.max(1, until - this.monotonic())); this.expiry.unref?.()
           this.renewWhileEnabled()
           this.emit()
         } catch { if (generation === this.generation) this.invalidate(); throw new FeatureAccessError('unavailable') }
@@ -156,12 +165,27 @@ export class FeatureAccess {
     const intent = this.historyIntent
     signal?.throwIfAborted(); await this.assert('history_import'); signal?.throwIfAborted()
     if (intent !== this.historyIntent) throw new FeatureAccessError('unavailable')
-    const lease = this.live()!, generation = this.generation, epoch = this.historyEpoch
+    const lease = this.live()!, epoch = this.historyEpoch
+    let generation = this.generation
     const owner = JSON.stringify([lease.nodeId, lease.accountInstance])
-    return { owner, assertCurrent: () => {
-      if (generation !== this.generation || epoch !== this.historyEpoch || intent !== this.historyIntent
+    const assertIntent = () => {
+      if (this.closed || epoch !== this.historyEpoch || intent !== this.historyIntent) throw new FeatureAccessError('unavailable')
+    }
+    const assertCurrent = () => {
+      assertIntent()
+      if (generation !== this.generation
         || owner !== JSON.stringify([this.live()?.nodeId, this.live()?.accountInstance])) throw new FeatureAccessError('unavailable')
       this.assertCurrent('history_import')
+    }
+    return { owner, assertCurrent, revalidate: async readSignal => {
+      // A long import may outlive a lease, never its original owner or opt-in.
+      // Natural expiry can refresh on demand; explicit invalidation, observed
+      // revocation or off/on changes permanently fence this operation.
+      readSignal.throwIfAborted(); assertIntent()
+      await this.refresh()
+      readSignal.throwIfAborted(); assertIntent()
+      generation = this.generation
+      assertCurrent()
     } }
   }
   async currentOwner(signal?: AbortSignal): Promise<string | undefined> {

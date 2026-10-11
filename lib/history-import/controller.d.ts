@@ -2,6 +2,7 @@ import { type HistorySource } from './source.js';
 import { ImportReceipts } from './receipts.js';
 import { type NativeImportRequest, type NativeImportIdentity, type NativeImportInspection } from './native.js';
 import type { FeatureAuthorization, FeatureGrant } from '../feature-access.js';
+import { type EncryptedCloudObjectDescriptor } from '../object-crypto.js';
 type Row = Record<string, any>;
 export interface ImportPorts {
     capabilities(): Promise<{
@@ -17,6 +18,7 @@ export interface ImportPorts {
         bytes: number;
     }>;
     share(url: unknown, signal: AbortSignal): Promise<Buffer>;
+    loadObject?(descriptor: EncryptedCloudObjectDescriptor, signal: AbortSignal): Promise<Uint8Array>;
     commit(request: NativeImportRequest, signal: AbortSignal, beforeCreate: () => void): Promise<unknown>;
     inspect(request: NativeImportIdentity, signal: AbortSignal): Promise<NativeImportInspection>;
     receipts: ImportReceipts;
@@ -36,6 +38,7 @@ export declare class HistoryImportController {
     private readonly jobs;
     private readonly lifetime;
     private preparing;
+    private readingBytes;
     private claiming;
     private inspection;
     private expiryTimer;

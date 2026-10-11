@@ -12,6 +12,7 @@ export interface PairingOperations {
   updateCheck?(): Promise<unknown>
   updateStart?(ticket: string): unknown
   updateStatus?(): Promise<unknown>
+  connectionDiagnostics?(signal: AbortSignal): Promise<unknown>
 }
 
 /** Old Connection implementations only checked browser origin. They must keep
@@ -40,6 +41,8 @@ export function mountPairingManagement(ctx: Pick<Context, 'get' | 'effect'>, ope
 export function createPairingHandler(operations: PairingOperations) {
   let disposed = false
   let pairing: Promise<unknown> | undefined
+  let diagnostic: { controller: AbortController; promise: Promise<unknown>; readers: number } | undefined
+  let lastDiagnosticStart = 0
   const failure = (code: string, message: string) => ({ ok: false as const, error: { code, message, details: {} } })
   const handler: PairingHandler = async (endpoint, payload, signal) => {
     if (disposed || operations.unavailable()) return failure('pairing/unavailable', '连接服务暂不可用，请稍后重试')
@@ -65,6 +68,45 @@ export function createPairingHandler(operations: PairingOperations) {
       return failure('pairing/bad-request', '无效的配对请求')
     }
     if (endpoint === 'status') return { ok: true, value: operations.status() }
+    if (endpoint === 'connection-diagnostics') {
+      if (!operations.connectionDiagnostics) return failure('diagnostic/unsupported', '当前宿主不支持此诊断入口')
+      // One probe per host; cancelling one view must not cancel another view.
+      if (!diagnostic) {
+        if (Date.now() - lastDiagnosticStart < 1000) return failure('diagnostic/busy', '请稍后再检查')
+        lastDiagnosticStart = Date.now()
+        const controller = new AbortController()
+        const active = { controller, promise: Promise.resolve<unknown>(undefined), readers: 0 }
+        active.promise = Promise.resolve().then(() => {
+          controller.signal.throwIfAborted()
+          if (disposed || operations.unavailable()) throw new Error('stopped')
+          return operations.connectionDiagnostics!(controller.signal)
+        }).finally(() => { if (diagnostic === active) diagnostic = undefined })
+        diagnostic = active
+      }
+      const active = diagnostic
+      active.readers++
+      let onAbort: () => void = () => {}
+      const cancelled = new Promise<never>((_resolve, reject) => {
+        onAbort = () => reject(new Error('cancelled'))
+        signal.addEventListener('abort', onAbort, { once: true })
+        if (signal.aborted) onAbort()
+      })
+      try {
+        const value = await Promise.race([active.promise, cancelled])
+        signal.throwIfAborted()
+        if (disposed || operations.unavailable()) return failure('pairing/unavailable', '连接服务已停止')
+        return { ok: true, value }
+      } catch {
+        return failure(signal.aborted ? 'diagnostic/cancelled' : 'diagnostic/unavailable',
+          signal.aborted ? '检查已取消' : '暂时无法检查连接，请稍后重试')
+      } finally {
+        signal.removeEventListener('abort', onAbort)
+        if (--active.readers === 0 && diagnostic === active) {
+          active.controller.abort()
+          diagnostic = undefined
+        }
+      }
+    }
     if (endpoint === 'update-check' && operations.updateCheck) return { ok: true, value: await operations.updateCheck() }
     if (endpoint === 'update-status' && operations.updateStatus) return { ok: true, value: await operations.updateStatus() }
     if (endpoint !== 'pair-code') return failure('pairing/not-found', '不支持此管理操作')
@@ -85,5 +127,5 @@ export function createPairingHandler(operations: PairingOperations) {
       return failure('pairing/unavailable', '暂时无法生成配对二维码，请稍后重试')
     }
   }
-  return { call: handler, stop() { disposed = true } }
+  return { call: handler, stop() { disposed = true; diagnostic?.controller.abort(); diagnostic = undefined } }
 }

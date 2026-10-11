@@ -2,8 +2,9 @@
 import { resolvePairingClient, type GateRuntimeInfo, type HarnessRemoteHostDescription, type CallPairingManagement } from './pairing-client.js'
 import { WebUpdateStore } from './web-update-store.js'
 import { NativeUpdateStore } from './native-update-store.js'
+import { sanitizeConnectionReport, sanitizePairingAttempt, type ConnectionDiagnosticReport, type SafePairingAttempt } from '../connection-diagnostic-contract.js'
 
-export interface PairCode { qrDataUrl: string; mode: 'secure-lan-route' | 'public-relay'; expiresAt: number }
+export interface PairCode { qrDataUrl: string; mode: 'secure-lan-route' | 'public-relay'; expiresAt: number; lastPairingAttempt?: SafePairingAttempt }
 export interface GateStatus {
   gate?: GateRuntimeInfo
   plugin?: { runningVersion: string; installedVersion: string }
@@ -14,15 +15,19 @@ export interface GateStatus {
   publicRelay: { enabled: boolean; state: 'disabled' | 'enrolling' | 'connecting' | 'online' | 'offline';
     remoteAccess?: { status: 'active' | 'expired' | 'suspended' | 'not_entitled'; validUntil?: number | null } | null }
   agent?: { agentName?: string; hostName?: string }
+  pairing?: { qrKind: 'pairing' | 'recovery' | 'none'; lastPairingAttempt?: SafePairingAttempt }
 }
 export interface PageSnapshot {
   loadState: 'loading' | 'ready' | 'error'
   qrState: 'idle' | 'loading' | 'ready' | 'expired' | 'error'
   status: GateStatus | null; host: HarnessRemoteHostDescription | null; runtime: GateRuntimeInfo | null
   localOrigin: string | null; qr: PairCode | null; error: string | null; decisionError: string | null; deciding: boolean
+  diagnosticState: 'idle' | 'running' | 'ready' | 'cancelled' | 'error' | 'unsupported'
+  diagnosticReport: ConnectionDiagnosticReport | null
 }
 const initial = (): PageSnapshot => ({ loadState: 'loading', qrState: 'idle', status: null, host: null,
-  runtime: null, localOrigin: null, qr: null, error: null, decisionError: null, deciding: false })
+  runtime: null, localOrigin: null, qr: null, error: null, decisionError: null, deciding: false,
+  diagnosticState: 'idle', diagnosticReport: null })
 
 // Match native update admission in gate-runtime. Progress within the same busy
 // interval must not repeatedly fetch the catalog; missing status is not proof
@@ -38,6 +43,7 @@ export class RemotePageStore {
   private timer?: ReturnType<typeof setInterval>
   private reading?: Promise<void>
   private pairing?: Promise<void>
+  private diagnostic?: { controller: AbortController; promise: Promise<void> }
   private disposed = false
   private identity = ''
   private generation = 0
@@ -61,10 +67,11 @@ export class RemotePageStore {
     for (const listener of this.listeners) listener()
   }
   private async client() {
+    const generation = this.generation
     const client = await resolvePairingClient(this.describeHost, this.callManagement)
-    if (this.disposed) throw new Error('disposed')
+    if (this.disposed || generation !== this.generation) throw new Error('stale host')
     const identity = `${client.host.agentInstanceId ?? client.host.computerName}/${client.runtime.profileScope ?? 'web'}`
-    if (this.identity && this.identity !== identity) { this.generation++; this.value = initial(); this.updates?.dispose(); this.updates = undefined; this.nativeUpdates?.dispose(); this.nativeUpdates = undefined }
+    if (this.identity && this.identity !== identity) this.reset()
     this.identity = identity
     if (client.runtime.profileScope === 'desktop' && !this.nativeUpdates) this.nativeUpdates = new NativeUpdateStore(this.callManagement)
     if (this.updates?.origin !== client.localOrigin) {
@@ -77,10 +84,14 @@ export class RemotePageStore {
   refresh = (): Promise<void> => {
     if (this.disposed) return Promise.resolve()
     if (this.reading) return this.reading
-    this.reading = (async () => {
+    let generation = this.generation
+    const reading = (async () => {
       try {
-        const client = await this.client(), generation = this.generation
+        const client = await this.client()
+        generation = this.generation
         const status = { ...await client.status() as GateStatus }
+        if (status.pairing) status.pairing = { qrKind: status.pairing.qrKind,
+          lastPairingAttempt: sanitizePairingAttempt(status.pairing.lastPairingAttempt) }
         // Old loaded backends can serve new UI files after native installation.
         // An old completion receipt alone cannot prove current alignment.
         if (status.companionUpdate?.state === 'complete' && !status.plugin) status.companionUpdate = {
@@ -93,25 +104,79 @@ export class RemotePageStore {
         if (busy !== undefined && busy !== wasBusy) this.nativeUpdates?.invalidateCheck()
         this.patch({ status, runtime: status.gate ?? client.runtime, loadState: 'ready', error: null,
           ...(this.value.qr && this.value.qr.expiresAt <= Date.now() ? { qrState: 'expired' as const, qr: null } : {}) })
-      } catch { this.patch({ loadState: 'error', error: '连接服务暂未就绪。请确认 DSH 正在运行，然后重试。' }) }
-    })().finally(() => { this.reading = undefined })
-    return this.reading
+      } catch {
+        if (generation === this.generation) this.patch({ loadState: 'error', error: '连接服务暂未就绪。请确认 DSH 正在运行，然后重试。' })
+      }
+    })().finally(() => { if (this.reading === reading) this.reading = undefined })
+    this.reading = reading
+    return reading
   }
   generateQr = (): Promise<void> => {
     if (this.disposed) return Promise.resolve()
     if (this.pairing) return this.pairing
     this.patch({ qrState: 'loading', qr: null, error: null })
-    this.pairing = (async () => {
+    let generation = this.generation
+    const pairing = (async () => {
       try {
-        const client = await this.client(), generation = this.generation
-        const qr = await client.pairCode() as PairCode
+        const client = await this.client()
+        generation = this.generation
+        const result = await client.pairCode() as PairCode
         if (generation !== this.generation) return
-        if (!qr?.qrDataUrl?.startsWith('data:image/') || !Number.isFinite(qr.expiresAt) || qr.expiresAt <= Date.now()) throw new Error('invalid QR')
+        if (!result?.qrDataUrl?.startsWith('data:image/') || !Number.isFinite(result.expiresAt) || result.expiresAt <= Date.now()
+          || !['public-relay', 'secure-lan-route'].includes(result.mode)) throw new Error('invalid QR')
+        const qr: PairCode = { qrDataUrl: result.qrDataUrl, mode: result.mode, expiresAt: result.expiresAt,
+          lastPairingAttempt: sanitizePairingAttempt(result.lastPairingAttempt) }
         this.patch({ qr, qrState: 'ready' })
         await this.refresh()
-      } catch { this.patch({ qr: null, qrState: 'error', error: '暂时无法生成配对二维码，请稍后重试。' }) }
-    })().finally(() => { this.pairing = undefined })
-    return this.pairing
+      } catch {
+        if (generation === this.generation) this.patch({ qr: null, qrState: 'error', error: '暂时无法生成配对二维码，请稍后重试。' })
+      }
+    })().finally(() => { if (this.pairing === pairing) this.pairing = undefined })
+    this.pairing = pairing
+    return pairing
+  }
+  diagnose = (): Promise<void> => {
+    if (this.disposed) return Promise.resolve()
+    if (this.diagnostic) return this.diagnostic.promise
+    const controller = new AbortController()
+    let generation = this.generation
+    this.patch({ diagnosticState: 'running', diagnosticReport: null })
+    const diagnostic = { controller, promise: Promise.resolve() }
+    this.diagnostic = diagnostic
+    diagnostic.promise = (async () => {
+      try {
+        const client = await this.client()
+        generation = this.generation
+        if (controller.signal.aborted || this.diagnostic !== diagnostic) return
+        const value = await client.diagnose(controller.signal)
+        if (controller.signal.aborted || this.diagnostic !== diagnostic || generation !== this.generation) return
+        const report = sanitizeConnectionReport(value)
+        if (!report) throw new Error('invalid diagnostic report')
+        this.patch({ diagnosticState: 'ready', diagnosticReport: report })
+      } catch (error) {
+        if (controller.signal.aborted || this.diagnostic !== diagnostic || generation !== this.generation) return
+        const code = typeof error === 'object' && error ? (error as { code?: unknown }).code : undefined
+        this.patch({ diagnosticState: ['diagnostic-unsupported', 'pairing/not-found', 'endpoint-not-found', 'not-found', 'not_found', 'unknown-endpoint', 'unimplemented'].includes(String(code))
+          ? 'unsupported' : 'error', diagnosticReport: null })
+      }
+    })().finally(() => { if (this.diagnostic === diagnostic) this.diagnostic = undefined })
+    return diagnostic.promise
+  }
+  cancelDiagnostic = (clear = false): void => {
+    const running = this.diagnostic
+    this.diagnostic = undefined
+    running?.controller.abort()
+    this.patch({ diagnosticState: clear ? 'idle' : running ? 'cancelled' : this.value.diagnosticState,
+      diagnosticReport: clear || running ? null : this.value.diagnosticReport })
+  }
+  reset = (): void => {
+    this.generation++
+    this.cancelDiagnostic(true)
+    this.identity = ''; this.reading = undefined; this.pairing = undefined
+    this.updates?.dispose(); this.updates = undefined
+    this.nativeUpdates?.dispose(); this.nativeUpdates = undefined
+    this.value = initial()
+    this.patch({})
   }
   decide = async (action: 'approve' | 'later'): Promise<void> => {
     const offerId = this.value.status?.companionUpdate?.offerId
@@ -128,6 +193,7 @@ export class RemotePageStore {
     finally { this.patch({ deciding: false }) }
   }
   dispose = (): void => {
+    this.cancelDiagnostic(true)
     this.disposed = true; this.generation++; clearInterval(this.timer); this.timer = undefined
     this.listeners.clear(); this.value = initial(); this.updates?.dispose(); this.updates = undefined; this.nativeUpdates?.dispose(); this.nativeUpdates = undefined
   }

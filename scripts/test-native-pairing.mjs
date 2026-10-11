@@ -61,6 +61,7 @@ async function host(id, late = false) {
           pairCode: async () => { calls++; return { ticket: id } }, unavailable: () => false,
           companionDecision: (offer, action) => managementCalls.push(['decision', offer, action]),
           updateCheck: async () => ({ host: id }), updateStatus: async () => ({ host: id }),
+          connectionDiagnostics: async () => { managementCalls.push(['diagnostic']); return { host: id } },
           updateStart: ticket => { managementCalls.push(['update', ticket]); return { host: id } } })
       } catch (error) { mountError = error; throw error }
       const current = mounted
@@ -144,7 +145,7 @@ try {
   assert.equal((await forwarded.json()).result.value.ticket, 'desktop')
   assert.equal(web.calls, 1, 'Desktop shell never contacts Web')
   assert.equal(desktop.calls, 1)
-  for (const [method, payload] of [['companion-decision', { offerId: 'a'.repeat(32), action: 'later' }], ['update-check', {}], ['update-start', { ticket: 'a'.repeat(48) }], ['update-status', {}]]) {
+  for (const [method, payload] of [['companion-decision', { offerId: 'a'.repeat(32), action: 'later' }], ['update-check', {}], ['update-start', { ticket: 'a'.repeat(48) }], ['update-status', {}], ['connection-diagnostics', {}]]) {
     const url = desktop.origin + '/wechat-remote-management/' + method
     const wrong = await fetch(url, { method: 'POST', headers: { cookie: cookies[0], origin: desktop.origin, 'content-type': 'application/json' }, body: body(method, payload) })
     assert.equal(wrong.status, 401, 'another host cookie cannot control updates')
@@ -152,7 +153,8 @@ try {
     const response = await forwardWebRequest(nativeRequest, desktop.origin, cookies[1])
     assert.equal(response.status, 200); assert.equal((await response.json()).result.ok, true)
   }
-  assert.deepEqual(desktop.managementCalls.map(row => row[0]), ['decision', 'update'])
+  assert.deepEqual(desktop.managementCalls.map(row => row[0]), ['decision', 'update', 'diagnostic'])
+  assert.equal(desktop.calls, 1, 'diagnostics must not mint another pairing ticket')
   assert.deepEqual(web.managementCalls, [], 'Desktop management actions never reach Web')
   await web.reload()
   assert.equal((await post(web, cookies[0])).status, 200, 'service reload preserves browser authentication')

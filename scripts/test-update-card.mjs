@@ -114,7 +114,9 @@ test('native settings puts both endpoints inside one update block, with read-onl
       updates: current === 'web' ? passive({ check: { ...initial, canInstall: false }, progress: null, error: '', checking: false }) : undefined }
     const html = renderToStaticMarkup(createElement(module.exports.HarnessRemoteSettings, { store, describeHost: noAction, callManagement: noAction }))
     assert.equal((html.match(/aria-label="插件更新"/g) || []).length, 1)
-    assert.equal((html.match(/class="updateCard"/g) || []).length, 1, 'current and peer have no nested card borders')
+    const updateBlock = html.match(/<section[^>]*aria-label="插件更新"[^>]*>([\s\S]*?)<\/section>/)?.[0]
+    assert(updateBlock, 'the unified update block is present')
+    assert.equal((updateBlock.match(/class="updateCard"/g) || []).length, 1, 'current and peer have no nested card borders')
     assert.match(html, /当前端/)
     assert.match(html, /同一主机/)
     assert.match(html, new RegExp(`确认更新 ${peer === 'web' ? 'Web' : 'Desktop'}`))

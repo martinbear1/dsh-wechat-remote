@@ -14,6 +14,7 @@ export interface WechatGateDoorInfo {
 export interface WechatGateRuntimeInfo {
     readonly profileScope: string;
     readonly management?: 'authenticated-rpc' | 'loopback' | 'unavailable';
+    readonly diagnostics?: 'read-only-v1';
     readonly source: 'legacy-default' | 'profile-derived' | 'environment-override';
     readonly publicDoor: WechatGateDoorInfo;
     readonly localDoor: WechatGateDoorInfo;

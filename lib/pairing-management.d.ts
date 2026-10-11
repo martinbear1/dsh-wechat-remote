@@ -11,6 +11,7 @@ export interface PairingOperations {
     updateCheck?(): Promise<unknown>;
     updateStart?(ticket: string): unknown;
     updateStatus?(): Promise<unknown>;
+    connectionDiagnostics?(signal: AbortSignal): Promise<unknown>;
 }
 /** Old Connection implementations only checked browser origin. They must keep
  * the existing local door, never expose a new management channel without auth. */

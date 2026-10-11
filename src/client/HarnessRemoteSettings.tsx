@@ -12,6 +12,7 @@ import { AssistantPresetsPanel } from './AssistantPresetsPanel.tsx'
 import type { AssistantStore } from './assistant-store.js'
 import { ClawbotPanel, type ClawbotCall } from './ClawbotPanel.js'
 import type { FeatureCall } from './feature-client.js'
+import { ConnectionDiagnostics, recoveryReminder } from './ConnectionDiagnostics.js'
 export type { HarnessRemoteHostDescription } from './pairing-client.js'
 
 export interface HarnessRemoteSettingsProps {
@@ -63,7 +64,9 @@ export function HarnessRemoteSettings({
   clawbotCall,
   featureCall,
 }: HarnessRemoteSettingsProps): JSX.Element {
-  const { loadState, qrState, status, runtime, host, localOrigin, qr, error } = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
+  const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
+  const { loadState, qrState, status, runtime, host, localOrigin, qr, error } = snapshot
+  const recoveryHint = recoveryReminder(snapshot)
   const { refresh: loadStatus, generateQr } = store
   const titleId = useId()
 
@@ -115,7 +118,7 @@ export function HarnessRemoteSettings({
           {loadState === 'loading'
             ? '检测中'
             : loadState === 'ready'
-              ? '服务正常'
+              ? '本地插件服务可访问'
               : '暂不可用'}
         </span>
       </div>
@@ -169,8 +172,8 @@ export function HarnessRemoteSettings({
         <div className={styles.pairingCard}>
           <div className={styles.pairingHead}>
             <div>
-              <strong>扫描二维码</strong>
-              <p>小程序「设置 → 添加节点」</p>
+              <strong>{qr?.mode === 'secure-lan-route' ? '已有手机恢复码' : '首次配对码'}</strong>
+              <p>{qr?.mode === 'secure-lan-route' ? '不能用于首次添加节点' : '小程序「设置 → 添加节点」'}</p>
             </div>
             <button
               type="button"
@@ -183,23 +186,25 @@ export function HarnessRemoteSettings({
           </div>
           <div className={styles.qrArea}>
             {loadState === 'ready' && qrState === 'ready' && qr !== null ? (
-              <img className={styles.qr} src={qr.qrDataUrl} alt="Agent远程管理助手配对二维码" />
+              <img className={styles.qr} src={qr.qrDataUrl} alt={qr.mode === 'secure-lan-route' ? '已配对手机恢复码' : 'Agent远程管理助手首次配对二维码'} />
             ) : (
               <div className={styles.qrPlaceholder} aria-live="polite">
                 {loadState !== 'ready' ? '连接恢复后可查看二维码' : qrState === 'expired' ? '二维码已过期，请重新生成' : qrState === 'error' ? '生成失败' : '正在生成…'}
               </div>
             )}
             {qrState === 'ready' && qr !== null ? (
-              <small className={styles.qrValidity}>有效至 {new Date(qr.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · 切换页面不重新生成</small>
+              <small className={styles.qrValidity}>{qr.mode === 'public-relay' ? '票据有效至' : '页面展示至'} {new Date(qr.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · 切换页面不重新生成</small>
             ) : null}
           </div>
           <p className={styles.securityNote}>
             {qr?.mode === 'public-relay'
               ? '配对后自动选择更快的连接；远程内容端到端加密。'
-              : '当前可通过同一局域网连接。'}
+              : qr?.mode === 'secure-lan-route' ? '仅供已配对的同一节点恢复连接，不能用于首次添加。请先检查连接，再手动重新生成配对码。' : '二维码仅在你点击生成时更新。'}
           </p>
+          {recoveryHint ? <p className={styles.helpText} role="status">{recoveryHint}</p> : null}
         </div>
       )}
+      <ConnectionDiagnostics store={store} />
       <section className={styles.updateCard} aria-label="插件更新">
         <h3 className={styles.updateHeading}>插件更新</h3>
         {localOrigin && store.updates ? <PluginUpdateCard store={store.updates} embedded /> : null}

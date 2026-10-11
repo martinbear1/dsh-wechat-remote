@@ -26,6 +26,8 @@ import type { HostPlatformDescriptor } from './host-platform.js'
 import { readPrivateJson } from './secure-file.js'
 import { writeNodeState as writePrivateJsonAtomic } from './node-storage.js'
 import { createAgentHttpProof } from './agent-http-proof.js'
+import { classifyConnectionFailure } from './connection-diagnostics.js'
+import type { SafePairingAttempt } from './connection-diagnostic-contract.js'
 
 const CONFIG_PATH = path.join(adapterDshHome(), 'harness-remote-public.json')
 export const DEFAULT_PUBLIC_RELAY_ORIGIN = 'https://relay.xyxfood.xyz'
@@ -82,6 +84,8 @@ export interface AgentStatus {
   readonly pairingTicket?: string
   readonly pairingExpiresAt?: number
   readonly lastError?: string
+  /** Safe record of a real enrollment, never a diagnostic probe. */
+  readonly lastPairingAttempt?: SafePairingAttempt
   readonly hostId?: string
   readonly agentInstanceId?: string
   readonly hostName?: string
@@ -373,6 +377,7 @@ export class PublicRelayAgent {
     remoteAccess?: RemoteAccessStatus
   }> {
     if (this.enrollment) return this.enrollment
+    const revision = this.lifecycleRevision
     const pending = (async () => {
       const pathname = '/v1/agents/enroll'
       const serialized = JSON.stringify({
@@ -397,25 +402,42 @@ export class PublicRelayAgent {
       })
       if (!response.ok) {
         let code = 'agent_identity_unavailable'
-        let message = `Relay enrollment failed with HTTP ${response.status}`
+        const message = `Relay enrollment failed with HTTP ${response.status}`
         try {
           const body = await response.json() as { error?: { code?: unknown; message?: unknown } }
-          if (typeof body.error?.code === 'string') code = body.error.code
-          if (typeof body.error?.message === 'string') message = body.error.message
+          // Only this existing protocol code can trigger identity recovery.
+          // Untrusted response text must not leak into local logs or reports.
+          if (body.error?.code === 'agent_revoked') code = 'agent_revoked'
         } catch { /* retain a stable transport error */ }
         throw new RelayEnrollmentError(response.status, code, message)
       }
-      const body = await response.json() as {
+      const body = await response.json().catch(error => {
+        if (error instanceof SyntaxError) throw new RelayEnrollmentError(response.status, 'invalid-response', 'Invalid relay pairing response')
+        throw error
+      }) as {
         ticket?: string
         expiresAt?: number
         remoteAccess?: unknown
+      }
+      if (!body || typeof body.ticket !== 'string' || !body.ticket.trim()
+          || body.ticket.length > 2048 || /[\s\x00-\x1f\x7f]/.test(body.ticket)
+          || !Number.isSafeInteger(body.expiresAt) || body.expiresAt! <= Date.now()) {
+        throw new RelayEnrollmentError(response.status, 'invalid-response', 'Invalid relay pairing response')
       }
       return {
         ticket: body.ticket,
         expiresAt: body.expiresAt,
         remoteAccess: normalizeRemoteAccess(body.remoteAccess),
       }
-    })()
+    })().then(body => {
+      if (revision === this.lifecycleRevision) this.update({ lastPairingAttempt: { at: new Date().toISOString(), outcome: 'ticket-issued' } })
+      return body
+    }, error => {
+      const failure = classifyConnectionFailure(error)
+      if (revision === this.lifecycleRevision) this.update({ lastPairingAttempt: { at: new Date().toISOString(),
+        outcome: failure.code === 'invalid-response' ? 'invalid-response' : 'failed', failure } })
+      throw error
+    })
     this.enrollment = pending
     return pending.finally(() => {
       if (this.enrollment === pending) this.enrollment = null

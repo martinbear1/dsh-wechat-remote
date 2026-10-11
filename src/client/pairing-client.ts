@@ -6,6 +6,7 @@ export interface GateDoorInfo {
 export interface GateRuntimeInfo {
   profileScope?: string
   management?: 'authenticated-rpc' | 'loopback' | 'unavailable'
+  diagnostics?: 'read-only-v1'
   localDoor: GateDoorInfo
   publicDoor: GateDoorInfo
 }
@@ -17,7 +18,11 @@ export interface HarnessRemoteHostDescription {
   pluginVersion?: string
   gate?: GateRuntimeInfo
 }
-export type CallPairingManagement = (endpoint: 'status' | 'pair-code' | 'companion-decision' | 'update-check' | 'update-start' | 'update-status', payload?: { offerId: string; action: 'approve' | 'later' } | { ticket: string }) => Promise<unknown>
+export type CallPairingManagement = (endpoint: 'status' | 'pair-code' | 'companion-decision' | 'update-check' | 'update-start' | 'update-status' | 'connection-diagnostics', payload?: { offerId: string; action: 'approve' | 'later' } | { ticket: string }, signal?: AbortSignal) => Promise<unknown>
+
+export function diagnosticUnsupported(): Error {
+  return Object.assign(new Error('当前 DSH 或插件不支持此诊断入口，请更新后重新打开应用。'), { code: 'diagnostic-unsupported' })
+}
 
 export async function resolvePairingClient(
   describeHost: () => Promise<HarnessRemoteHostDescription>,
@@ -33,6 +38,10 @@ export async function resolvePairingClient(
   if (runtime.management === 'authenticated-rpc') {
     return { host, runtime, localOrigin: desktop ? null : localOrigin,
       status: () => callManagement('status'), pairCode: () => callManagement('pair-code'),
+      diagnose: async (signal: AbortSignal): Promise<unknown> => {
+        if (runtime.diagnostics !== 'read-only-v1') throw diagnosticUnsupported()
+        return callManagement('connection-diagnostics', undefined, signal)
+      },
       decide: (offerId: string, action: 'approve' | 'later') => callManagement('companion-decision', { offerId, action }) }
   }
   // COMPAT: old Web hosts still use their explicitly described local door.
@@ -46,6 +55,9 @@ export async function resolvePairingClient(
   }
   return { host, runtime, localOrigin,
     status: () => read('/gate/status'), pairCode: () => read('/pair/code'),
+    // This new operation requires the authenticated host channel. Do not add
+    // an anonymous legacy HTTP route, even when ordinary pairing is supported.
+    diagnose: async (_signal: AbortSignal): Promise<unknown> => { throw diagnosticUnsupported() },
     decide: async (offerId: string, action: 'approve' | 'later') => {
       const response = await fetchImpl(localOrigin + '/gate/companion/decision', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ offerId, action }) })
       if (!response.ok) throw new Error('更新通知已变化，请刷新后重试')

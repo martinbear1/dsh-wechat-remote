@@ -45,6 +45,8 @@ try {
     'gate-runtime.ts',
     'pairing-management.ts',
     'pairing-http.ts',
+    'connection-diagnostics.ts',
+    'connection-diagnostic-contract.ts',
     'task-notifications.ts',
     'update-policy.ts',
     'update-download.ts',

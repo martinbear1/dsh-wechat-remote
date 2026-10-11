@@ -2,10 +2,12 @@
 import { type GateRuntimeInfo, type HarnessRemoteHostDescription, type CallPairingManagement } from './pairing-client.js';
 import { WebUpdateStore } from './web-update-store.js';
 import { NativeUpdateStore } from './native-update-store.js';
+import { type ConnectionDiagnosticReport, type SafePairingAttempt } from '../connection-diagnostic-contract.js';
 export interface PairCode {
     qrDataUrl: string;
     mode: 'secure-lan-route' | 'public-relay';
     expiresAt: number;
+    lastPairingAttempt?: SafePairingAttempt;
 }
 export interface GateStatus {
     gate?: GateRuntimeInfo;
@@ -46,6 +48,10 @@ export interface GateStatus {
         agentName?: string;
         hostName?: string;
     };
+    pairing?: {
+        qrKind: 'pairing' | 'recovery' | 'none';
+        lastPairingAttempt?: SafePairingAttempt;
+    };
 }
 export interface PageSnapshot {
     loadState: 'loading' | 'ready' | 'error';
@@ -58,6 +64,8 @@ export interface PageSnapshot {
     error: string | null;
     decisionError: string | null;
     deciding: boolean;
+    diagnosticState: 'idle' | 'running' | 'ready' | 'cancelled' | 'error' | 'unsupported';
+    diagnosticReport: ConnectionDiagnosticReport | null;
 }
 export declare class RemotePageStore {
     private describeHost;
@@ -69,6 +77,7 @@ export declare class RemotePageStore {
     private timer?;
     private reading?;
     private pairing?;
+    private diagnostic?;
     private disposed;
     private identity;
     private generation;
@@ -79,6 +88,9 @@ export declare class RemotePageStore {
     private client;
     refresh: () => Promise<void>;
     generateQr: () => Promise<void>;
+    diagnose: () => Promise<void>;
+    cancelDiagnostic: (clear?: boolean) => void;
+    reset: () => void;
     decide: (action: "approve" | "later") => Promise<void>;
     dispose: () => void;
 }

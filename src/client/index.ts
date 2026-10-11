@@ -46,8 +46,8 @@ interface WechatHostDescribeResult {
  * @param ctx - client root context.
  */
 export function apply(ctx: HarnessRemoteClientContext): void {
-  const callManagement: CallPairingManagement = async (endpoint, payload): Promise<unknown> => {
-    const response = await ctx.connection.rpc.call('/wechat-remote-management', endpoint, payload ?? {})
+  const callManagement: CallPairingManagement = async (endpoint, payload, signal): Promise<unknown> => {
+    const response = await ctx.connection.rpc.call('/wechat-remote-management', endpoint, payload ?? {}, signal)
     if (!response.ok) throw Object.assign(new Error(response.error.message), { code: response.error.code })
     return response.value
   }
@@ -108,7 +108,7 @@ export function apply(ctx: HarnessRemoteClientContext): void {
     scope.effect(() => () => { navigation.reset(); if (assistantNavigation === navigation) assistantNavigation = undefined }, 'wechat assistant navigation')
   })
   ctx.effect(() => {
-    const remove = ctx.on('connection/reset', () => { connectionGeneration++; assistantNavigation?.reset(); assistants.reset() })
+    const remove = ctx.on('connection/reset', () => { connectionGeneration++; store.reset(); assistantNavigation?.reset(); assistants.reset() })
     return () => { connectionGeneration++; remove(); assistants.dispose() }
   }, 'wechat assistant lifecycle')
   ctx.effect(() => () => store.dispose(), 'wechat shared page')

@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import vm from 'node:vm'
 import { fileURLToPath } from 'node:url'
+import { Component } from 'react'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const manifest = JSON.parse(
@@ -48,6 +49,7 @@ const jsxRuntime = {
 const exports = registration.factory((id) => {
   if (id === 'react')
     return {
+      Component,
       useEffect() {},
       useRef: (value) => ({ current: value }),
       useState: (value) => [value, () => {}],

@@ -2,7 +2,6 @@
 import { resolvePairingClient, type GateRuntimeInfo, type HarnessRemoteHostDescription, type CallPairingManagement } from './pairing-client.js'
 import { WebUpdateStore } from './web-update-store.js'
 import { NativeUpdateStore } from './native-update-store.js'
-import { sanitizeConnectionReport, type ConnectionDiagnosticReport } from '../connection-diagnostic-contract.js'
 
 export interface PairCode { qrDataUrl: string; mode: 'secure-lan-route' | 'public-relay'; expiresAt: number }
 export interface GateStatus {
@@ -21,12 +20,9 @@ export interface PageSnapshot {
   qrState: 'idle' | 'loading' | 'ready' | 'expired' | 'error'
   status: GateStatus | null; host: HarnessRemoteHostDescription | null; runtime: GateRuntimeInfo | null
   localOrigin: string | null; qr: PairCode | null; error: string | null; decisionError: string | null; deciding: boolean
-  diagnosticState: 'idle' | 'running' | 'ready' | 'cancelled' | 'error' | 'unsupported'
-  diagnosticReport: ConnectionDiagnosticReport | null
 }
 const initial = (): PageSnapshot => ({ loadState: 'loading', qrState: 'idle', status: null, host: null,
-  runtime: null, localOrigin: null, qr: null, error: null, decisionError: null, deciding: false,
-  diagnosticState: 'idle', diagnosticReport: null })
+  runtime: null, localOrigin: null, qr: null, error: null, decisionError: null, deciding: false })
 
 // Match native update admission in gate-runtime. Progress within the same busy
 // interval must not repeatedly fetch the catalog; missing status is not proof
@@ -39,22 +35,14 @@ export class RemotePageStore {
   nativeUpdates?: NativeUpdateStore
   private value = initial()
   private listeners = new Set<() => void>()
-  private diagnosticListeners = new Set<() => void>()
   private timer?: ReturnType<typeof setInterval>
   private reading?: Promise<void>
   private pairing?: Promise<void>
-  private diagnostic?: { controller: AbortController; promise: Promise<void> }
   private disposed = false
   private identity = ''
   private generation = 0
   constructor(private describeHost: () => Promise<HarnessRemoteHostDescription>, private callManagement: CallPairingManagement) {}
   getSnapshot = (): PageSnapshot => this.value
-  // Diagnostics is a passive view: expanding help does not start business reads.
-  subscribeDiagnostics = (listener: () => void): (() => void) => {
-    if (this.disposed) return () => {}
-    this.diagnosticListeners.add(listener)
-    return () => { this.diagnosticListeners.delete(listener) }
-  }
   subscribe = (listener: () => void): (() => void) => {
     if (this.disposed) return () => {}
     this.listeners.add(listener)
@@ -71,21 +59,12 @@ export class RemotePageStore {
     if (this.disposed) return
     this.value = { ...this.value, ...update }
     for (const listener of this.listeners) listener()
-    for (const listener of this.diagnosticListeners) listener()
-  }
-  private patchDiagnostic(update: Pick<PageSnapshot, 'diagnosticState' | 'diagnosticReport'>) {
-    if (this.disposed) return
-    this.value = { ...this.value, ...update }
-    for (const listener of this.diagnosticListeners) listener()
   }
   private async client() {
     const client = await resolvePairingClient(this.describeHost, this.callManagement)
     if (this.disposed) throw new Error('disposed')
     const identity = `${client.host.agentInstanceId ?? client.host.computerName}/${client.runtime.profileScope ?? 'web'}`
-    if (this.identity && this.identity !== identity) {
-      this.cancelDiagnostic(true)
-      this.generation++; this.value = initial(); this.updates?.dispose(); this.updates = undefined; this.nativeUpdates?.dispose(); this.nativeUpdates = undefined
-    }
+    if (this.identity && this.identity !== identity) { this.generation++; this.value = initial(); this.updates?.dispose(); this.updates = undefined; this.nativeUpdates?.dispose(); this.nativeUpdates = undefined }
     this.identity = identity
     if (client.runtime.profileScope === 'desktop' && !this.nativeUpdates) this.nativeUpdates = new NativeUpdateStore(this.callManagement)
     if (this.updates?.origin !== client.localOrigin) {
@@ -134,40 +113,6 @@ export class RemotePageStore {
     })().finally(() => { this.pairing = undefined })
     return this.pairing
   }
-  diagnose = (): Promise<void> => {
-    if (this.disposed) return Promise.resolve()
-    if (this.diagnostic) return this.diagnostic.promise
-    const controller = new AbortController()
-    const generation = this.generation
-    this.patchDiagnostic({ diagnosticState: 'running', diagnosticReport: null })
-    const diagnostic = { controller, promise: Promise.resolve() }
-    this.diagnostic = diagnostic
-    diagnostic.promise = (async () => {
-      try {
-        const client = await resolvePairingClient(this.describeHost, this.callManagement)
-        if (controller.signal.aborted || this.diagnostic !== diagnostic || generation !== this.generation) return
-        const value = await client.diagnose(controller.signal)
-        if (controller.signal.aborted || this.diagnostic !== diagnostic || generation !== this.generation) return
-        const report = sanitizeConnectionReport(value)
-        if (!report) throw new Error('invalid diagnostic report')
-        this.patchDiagnostic({ diagnosticState: 'ready', diagnosticReport: report })
-      } catch (error) {
-        if (controller.signal.aborted || this.diagnostic !== diagnostic || generation !== this.generation) return
-        const code = typeof error === 'object' && error ? (error as { code?: unknown }).code : undefined
-        this.patchDiagnostic({ diagnosticState: ['diagnostic-unsupported', 'diagnostic/unsupported', 'pairing/not-found', 'endpoint-not-found', 'not-found', 'not_found', 'unknown-endpoint', 'unimplemented'].includes(String(code))
-          ? 'unsupported' : 'error', diagnosticReport: null })
-      }
-    })().finally(() => { if (this.diagnostic === diagnostic) this.diagnostic = undefined })
-    return diagnostic.promise
-  }
-  cancelDiagnostic = (clear = false): void => {
-    const running = this.diagnostic
-    if (!running && (clear ? this.value.diagnosticState === 'idle' && !this.value.diagnosticReport : true)) return
-    this.diagnostic = undefined
-    running?.controller.abort()
-    this.patchDiagnostic({ diagnosticState: clear ? 'idle' : running ? 'cancelled' : this.value.diagnosticState,
-      diagnosticReport: clear || running ? null : this.value.diagnosticReport })
-  }
   decide = async (action: 'approve' | 'later'): Promise<void> => {
     const offerId = this.value.status?.companionUpdate?.offerId
     if (this.disposed || this.value.deciding || !offerId) return
@@ -183,9 +128,8 @@ export class RemotePageStore {
     finally { this.patch({ deciding: false }) }
   }
   dispose = (): void => {
-    this.cancelDiagnostic(true)
     this.disposed = true; this.generation++; clearInterval(this.timer); this.timer = undefined
-    this.listeners.clear(); this.diagnosticListeners.clear(); this.value = initial(); this.updates?.dispose(); this.updates = undefined; this.nativeUpdates?.dispose(); this.nativeUpdates = undefined
+    this.listeners.clear(); this.value = initial(); this.updates?.dispose(); this.updates = undefined; this.nativeUpdates?.dispose(); this.nativeUpdates = undefined
   }
 }
 

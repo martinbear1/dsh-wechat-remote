@@ -109,10 +109,12 @@ test('native settings puts both endpoints inside one update block, with read-onl
         companionUpdate: { state: 'confirmation-required', message: `${peer} update`, offerId: 'immutable-offer',
           target: { scope: peer, fromVersion: '1.7.10', version: '1.7.12' },
           versions: { current, running: '1.7.12', installed: '1.7.12', peer, peerInstalled: '1.7.10' } } } }
-    const store = { ...passive(snapshot), decide: noAction, generateQr: noAction, diagnose: noAction, cancelDiagnostic: noAction, subscribeDiagnostics: noAction,
+    const diagnostics = { getSnapshot: () => ({ diagnosticState: 'idle', diagnosticReport: null }), subscribe: noAction, diagnose: noAction, cancel: noAction }
+    const store = { ...passive(snapshot), decide: noAction, generateQr: noAction,
       nativeUpdates: current === 'desktop' ? passive({ check: { ...initial, advice: { ...initial.advice, severity: 'none', label: '暂无可用更新' }, canInstall: false }, status: { phase: 'idle', message: '' } }) : undefined,
       updates: current === 'web' ? passive({ check: { ...initial, canInstall: false }, progress: null, error: '', checking: false }) : undefined }
-    const html = renderToStaticMarkup(createElement(module.exports.HarnessRemoteSettings, { store, describeHost: noAction, callManagement: noAction }))
+    const props = { store, diagnostics, describeHost: noAction, callManagement: noAction }
+    const html = renderToStaticMarkup(createElement(module.exports.HarnessRemoteSettings, props))
     assert.equal((html.match(/aria-label="插件更新"/g) || []).length, 1)
     const updateBlock = html.match(/<section[^>]*aria-label="插件更新"[^>]*>([\s\S]*?)<\/section>/)?.[0]
     assert(updateBlock, 'the unified update block is present')
@@ -125,10 +127,11 @@ test('native settings puts both endpoints inside one update block, with read-onl
     assert.doesNotMatch(html, /<details[^>]*\bopen[=> ]/, 'help does not default to expanded')
     assert(!html.includes('aria-label="连接诊断"'), 'closed help does not mount or observe diagnostic content')
     assert(!html.includes('检查连接'), 'diagnostic controls are hidden by default')
-    snapshot.diagnosticState = 'error'
+    const withoutDiagnostics = renderToStaticMarkup(createElement(module.exports.HarnessRemoteSettings, { ...props, diagnostics: undefined }))
+    assert(!withoutDiagnostics.includes('连接帮助'), 'the diagnostic dependency is optional for legacy/native embeddings')
     snapshot.loadState = 'error'
     snapshot.error = '普通连接请求失败'
-    const failedConnectionHtml = renderToStaticMarkup(createElement(module.exports.HarnessRemoteSettings, { store, describeHost: noAction, callManagement: noAction }))
+    const failedConnectionHtml = renderToStaticMarkup(createElement(module.exports.HarnessRemoteSettings, props))
     assert(failedConnectionHtml.includes('普通连接请求失败'))
     assert.match(failedConnectionHtml, /<summary>连接帮助<\/summary><\/details><\/section>$/)
     assert(!failedConnectionHtml.includes('检查连接'), 'normal errors never open diagnostics automatically')

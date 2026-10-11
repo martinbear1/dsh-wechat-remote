@@ -1,26 +1,33 @@
 /** Read-only operator diagnostics. Reports stay in this host's memory. */
-import { useEffect, useState, useSyncExternalStore } from 'react'
+import { Component, useEffect, useState, useSyncExternalStore, type ReactNode } from 'react'
 import styles from './HarnessRemoteSettings.module.css'
 import { diagnosticCheckLabel, failureAdvice, failureDescription, formatConnectionDiagnosticReport } from '../connection-diagnostic-contract.js'
-import type { RemotePageStore } from './remote-page-store.js'
+import type { ConnectionDiagnosticStore } from './connection-diagnostic-store.js'
 
 const statusLabel = { pass: '通过', fail: '失败', 'not-tested': '未检测', cancelled: '已取消' }
 
-export function ConnectionDiagnostics({ store }: { store: RemotePageStore }): JSX.Element {
+class DiagnosticBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
+  state = { failed: false }
+  static getDerivedStateFromError() { return { failed: true } }
+  render() {
+    return this.state.failed ? <p role="status">连接帮助暂不可用，其他功能可继续使用。</p> : this.props.children
+  }
+}
+
+export function ConnectionDiagnostics({ store }: { store: ConnectionDiagnosticStore }): JSX.Element {
   const [expanded, setExpanded] = useState(false)
   return <details className={styles.updateDetails} onToggle={event => setExpanded(event.currentTarget.open)}>
     <summary>连接帮助</summary>
-    {expanded ? <DiagnosticContent store={store} /> : null}
+    {expanded ? <DiagnosticBoundary><DiagnosticContent store={store} /></DiagnosticBoundary> : null}
   </details>
 }
 
 /** Not mounted until the user expands help. Opening help never starts a check. */
-function DiagnosticContent({ store }: { store: RemotePageStore }): JSX.Element {
-  const snapshot = useSyncExternalStore(store.subscribeDiagnostics, store.getSnapshot, store.getSnapshot)
+function DiagnosticContent({ store }: { store: ConnectionDiagnosticStore }): JSX.Element {
+  const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
   const { diagnosticState, diagnosticReport } = snapshot
   const [preview, setPreview] = useState(false)
   const [copied, setCopied] = useState<'idle' | 'copied' | 'failed'>('idle')
-  useEffect(() => () => store.cancelDiagnostic(true), [store])
   useEffect(() => { setPreview(false); setCopied('idle') }, [diagnosticReport])
   const running = diagnosticState === 'running'
   const text = diagnosticReport ? formatConnectionDiagnosticReport(diagnosticReport) : ''
@@ -38,7 +45,7 @@ function DiagnosticContent({ store }: { store: RemotePageStore }): JSX.Element {
       <h3 className={styles.updateHeading}>连接诊断</h3>
       <div className={styles.updateActions}>
         <button type="button" className={styles.secondaryButton} disabled={running} onClick={() => void store.diagnose()}>{running ? '检测中…' : '检查连接'}</button>
-        {running ? <button type="button" className={styles.secondaryButton} onClick={() => store.cancelDiagnostic()}>取消</button> : null}
+        {running ? <button type="button" className={styles.secondaryButton} onClick={() => store.cancel()}>取消</button> : null}
       </div>
     </div>
     <p className={styles.helpText}>检查结果仅供参考，不影响配对或连接，也不改配置。会访问中继健康接口，对方可见出口 IP；报告不自动上传。</p>

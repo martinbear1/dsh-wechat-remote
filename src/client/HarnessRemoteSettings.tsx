@@ -13,12 +13,14 @@ import type { AssistantStore } from './assistant-store.js'
 import { ClawbotPanel, type ClawbotCall } from './ClawbotPanel.js'
 import type { FeatureCall } from './feature-client.js'
 import { ConnectionDiagnostics } from './ConnectionDiagnostics.js'
+import type { ConnectionDiagnosticStore } from './connection-diagnostic-store.js'
 export type { HarnessRemoteHostDescription } from './pairing-client.js'
 
 export interface HarnessRemoteSettingsProps {
   describeHost: () => Promise<HarnessRemoteHostDescription>
   callManagement: CallPairingManagement
   store?: RemotePageStore
+  diagnostics?: ConnectionDiagnosticStore
   assistants?: AssistantStore
   clawbotCall?: ClawbotCall
   featureCall?: FeatureCall
@@ -60,6 +62,7 @@ export function HarnessRemoteSettings({
   describeHost,
   callManagement,
   store = pageStore(describeHost, callManagement),
+  diagnostics,
   assistants,
   clawbotCall,
   featureCall,
@@ -209,7 +212,7 @@ export function HarnessRemoteSettings({
       </section>
       {assistants ? <AssistantPresetsPanel store={assistants} featureCall={featureCall} /> : null}
       {clawbotCall ? <ClawbotPanel call={clawbotCall} nodeName={agentName} hostName={hostName} /> : null}
-      <ConnectionDiagnostics store={store} />
+      {diagnostics ? <ConnectionDiagnostics store={diagnostics} /> : null}
     </section>
   )
 }

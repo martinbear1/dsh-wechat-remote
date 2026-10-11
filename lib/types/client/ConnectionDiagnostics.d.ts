@@ -1,4 +1,4 @@
-import type { RemotePageStore } from './remote-page-store.js';
+import type { ConnectionDiagnosticStore } from './connection-diagnostic-store.js';
 export declare function ConnectionDiagnostics({ store }: {
-    store: RemotePageStore;
+    store: ConnectionDiagnosticStore;
 }): JSX.Element;

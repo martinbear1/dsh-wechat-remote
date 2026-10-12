@@ -7,6 +7,7 @@ export interface GateRuntimeInfo {
   profileScope?: string
   management?: 'authenticated-rpc' | 'loopback' | 'unavailable'
   diagnostics?: 'read-only-v1'
+  updates?: 'native-v1'
   localDoor: GateDoorInfo
   publicDoor: GateDoorInfo
 }

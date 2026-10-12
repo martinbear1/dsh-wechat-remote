@@ -111,8 +111,8 @@ test('native settings puts both endpoints inside one update block, with read-onl
           versions: { current, running: '1.7.12', installed: '1.7.12', peer, peerInstalled: '1.7.10' } } } }
     const diagnostics = { getSnapshot: () => ({ diagnosticState: 'idle', diagnosticReport: null }), subscribe: noAction, diagnose: noAction, cancel: noAction }
     const store = { ...passive(snapshot), decide: noAction, generateQr: noAction,
-      nativeUpdates: current === 'desktop' ? passive({ check: { ...initial, advice: { ...initial.advice, severity: 'none', label: '暂无可用更新' }, canInstall: false }, status: { phase: 'idle', message: '' } }) : undefined,
-      updates: current === 'web' ? passive({ check: { ...initial, canInstall: false }, progress: null, error: '', checking: false }) : undefined }
+      nativeUpdates: passive({ check: { ...initial, advice: { ...initial.advice, severity: 'none', label: '暂无可用更新' }, canInstall: false }, status: { phase: 'idle', message: '' } }),
+      updates: undefined }
     const props = { store, diagnostics, describeHost: noAction, callManagement: noAction }
     const html = renderToStaticMarkup(createElement(module.exports.HarnessRemoteSettings, props))
     assert.equal((html.match(/aria-label="插件更新"/g) || []).length, 1)
@@ -136,6 +136,18 @@ test('native settings puts both endpoints inside one update block, with read-onl
     assert.match(failedConnectionHtml, /<summary>连接帮助<\/summary><\/details><\/section>$/)
     assert(!failedConnectionHtml.includes('检查连接'), 'normal errors never open diagnostics automatically')
     snapshot.loadState = 'ready'; snapshot.error = null
+    if (current === 'web') {
+      store.nativeUpdates = passive({ check: { ...initial, canInstall: true }, status: { phase: 'idle', message: '' } })
+      const availableHtml = renderToStaticMarkup(createElement(module.exports.HarnessRemoteSettings, props))
+      assert.match(availableHtml, /更新 Web 插件/)
+      assert.doesNotMatch(availableHtml, /更新 Web 并重启|更新 Desktop 插件/)
+      assert.equal((availableHtml.match(/检查更新/g) || []).length, 1)
+      store.nativeUpdates = passive({ check: { ...initial, canInstall: false }, status: { phase: 'restart-required', targetVersion: '1.7.13', message: 'Web 需要重启' } })
+      const pendingHtml = renderToStaticMarkup(createElement(module.exports.HarnessRemoteSettings, props))
+      assert.match(pendingHtml, /已安装，待重启 Web 服务/)
+      assert.match(pendingHtml, /仅刷新网页不会生效/)
+      assert.doesNotMatch(pendingHtml, /应用 → 退出/)
+    }
     if (current === 'desktop') {
       snapshot.status.plugin.installedVersion = '1.7.13'
       snapshot.status.companionUpdate = { state: 'self-restart-required', message: '等待当前 Desktop 重启，Web 未更新。',

@@ -215,7 +215,7 @@ export function HarnessRemoteSettings({
       <section className={styles.updateCard} aria-label="插件更新">
         <h3 className={styles.updateHeading}>插件更新</h3>
         {localOrigin && store.updates ? <PluginUpdateCard store={store.updates} embedded /> : null}
-        {runtime?.profileScope === 'desktop' && store.nativeUpdates ? <NativeUpdateCard store={store.nativeUpdates} embedded /> : null}
+        {store.nativeUpdates ? <NativeUpdateCard store={store.nativeUpdates} scope={runtime?.profileScope} embedded /> : null}
         <CompanionPanel describeHost={describeHost} callManagement={callManagement} store={store} compact />
       </section>
       {assistants ? <AssistantPresetsPanel store={assistants} featureCall={featureCall} /> : null}

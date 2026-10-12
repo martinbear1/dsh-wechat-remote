@@ -1,4 +1,7 @@
 import { type Release, type UpdateAdvice } from './update-policy.js';
+declare const bundleName = "dsh-wechat-remote";
+declare const coreName = "@harness-remote/dsh-wechat-remote";
+type Owner = typeof bundleName | typeof coreName;
 type Phase = 'idle' | 'preparing' | 'installing' | 'restart-required' | 'complete' | 'failed' | 'unknown';
 export interface NativeUpdateStatus {
     phase: Phase;
@@ -6,6 +9,7 @@ export interface NativeUpdateStatus {
     jobId?: string;
     targetVersion?: string;
     previousVersion?: string;
+    bundle?: Owner;
 }
 interface Bundle {
     name: string;
@@ -32,6 +36,8 @@ interface Manager {
         };
     }>;
 }
+/** Capability discovery is read-only and does not query packages or tasks. */
+export declare function supportsNativeUpdates(manager: unknown, scope: string): manager is Manager;
 export interface NativeUpdateOptions {
     home: string;
     scope: string;
@@ -69,6 +75,8 @@ export declare class NativeUpdateService {
     check: () => Promise<unknown>;
     start: (ticket: string) => NativeUpdateStatus;
     private idle;
+    private restartMessage;
+    private installSpec;
     private run;
     dispose(): void;
 }

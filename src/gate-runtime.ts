@@ -74,9 +74,10 @@ import { loadGateState, saveGateState, type GateState } from './gate-state.js'
 import { prepareNodeStorage } from './node-storage.js'
 import { mountCompanionUpdates } from './companion-updates.js'
 import { PluginUpdateService, acceptsUpdateRequest } from './update-service.js'
-import { NativeUpdateService } from './native-update-service.js'
+import { NativeUpdateService, supportsNativeUpdates } from './native-update-service.js'
 import { PLUGIN_VERSION } from './plugin-version.js'
 import { runConnectionDiagnostics } from './connection-diagnostics.js'
+import type { LegacyGateStartup } from './update-legacy-handoff.js'
 
 interface RateBucket {
   windowStart: number
@@ -127,7 +128,7 @@ function recordOf(value: unknown): Record<string, unknown> | null {
  * timers and listening ports are created only after Cordis applies this plugin
  * and are therefore scoped to this exact plugin instance.
  */
-export function mountWechatGate(ctx: Context): () => void {
+export function mountWechatGate(ctx: Context, startup?: LegacyGateStartup): () => void {
   // Validate launcher authority before any credential writes or listeners.
   // A malformed Desktop context must disable this adapter, not borrow Web.
   hostRuntimeVersion(ctx)
@@ -198,7 +199,10 @@ export function mountWechatGate(ctx: Context): () => void {
     return {
       profileScope: doorRuntime.profileScope,
       management,
-      ...(management === 'authenticated-rpc' ? { diagnostics: 'read-only-v1' as const } : {}),
+      ...(management === 'authenticated-rpc' ? {
+        diagnostics: 'read-only-v1' as const,
+        ...(supportsNativeUpdates(ctx.get('pluginManager'), doorRuntime.profileScope) ? { updates: 'native-v1' as const } : {}),
+      } : {}),
       source: doorRuntime.source,
       publicDoor: { ...doorRuntime.publicDoor },
       localDoor: { ...doorRuntime.localDoor },
@@ -310,7 +314,7 @@ export function mountWechatGate(ctx: Context): () => void {
     return true
   }
   const updater = new PluginUpdateService(ctx, { web: UPSTREAM_PORT, gate: PUBLIC_PORT, local: LOCAL_PORT })
-  const nativeUpdater = new NativeUpdateService({ home: agentDshHome(ctx), scope: desktopHost ? 'desktop' : 'web', runningVersion: PLUGIN_VERSION,
+  const nativeUpdater = new NativeUpdateService({ home: agentDshHome(ctx), scope: selectedGatePorts.profileScope, runningVersion: PLUGIN_VERSION,
     manager: () => ctx.get('pluginManager') as any, sessions: () => ctx.get('sessionController') as any,
     release: () => updater.nativeRelease(), otherBusy: () => ['preparing', 'installing', 'verifying', 'recovering'].includes(companionUpdates.status().state) })
   ctx.effect(() => () => nativeUpdater.dispose(), 'wechat native updater')
@@ -468,7 +472,7 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
 
   // ── LAN door (0.0.0.0:3092): encrypted transport only ──
 
-  const localServer = http.createServer((req, res) => {
+  const serveLocal: http.RequestListener = (req, res) => {
     // Simple cross-origin GET responses need the same allow-origin header as
     // preflight responses. The old implementation only decorated OPTIONS,
     // so every Settings-page status request was rejected by the browser.
@@ -495,9 +499,12 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
     if (url.pathname === '/gate/status') return serveGateStatus(req, res)
     res.writeHead(404, { 'Content-Type': 'text/plain' })
     res.end('not found')
-  })
+  }
+  const localServer = http.createServer()
+  if (startup) startup.bindDoor(localServer, serveLocal, 'local', LOCAL_PORT)
+  else localServer.on('request', serveLocal)
 
-  const publicServer = http.createServer((req, res) => {
+  const servePublic: http.RequestListener = (req, res) => {
     // This port is no longer a bearer-authenticated HTTP proxy. Pairing and
     // WebUI update control stay on the loopback-only local door.
     res.writeHead(404, {
@@ -505,7 +512,10 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
       'Cache-Control': 'no-store',
     })
     res.end('not found')
-  })
+  }
+  const publicServer = http.createServer()
+  if (startup) startup.bindDoor(publicServer, servePublic, 'public', PUBLIC_PORT)
+  else publicServer.on('request', servePublic)
 
   const secureLan = new SecureLanServer({
     identity: () => publicRelayGateway?.agent.identity,
@@ -524,7 +534,7 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
     for (const client of secureLan.sockets.clients) client.terminate()
     try { publicServer.close() } catch { /* already closed or not listening */ }
   }
-  publicServer.on('upgrade', (req, socket, head) => {
+  const startLan = () => { publicServer.on('upgrade', (req, socket, head) => {
     // A remote client can reset a WebSocket while the proxy is connecting to
     // DSH. Without this listener, Node treats ECONNRESET as an unhandled Socket
     // error and terminates the entire Harness process.
@@ -547,7 +557,9 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
     }
     socket.write('HTTP/1.1 404 Not Found\r\n\r\n')
     socket.destroy()
-  })
+  }) }
+  if (startup) startup.onRelease(startLan)
+  else startLan()
 
   publicServer.on('clientError', (err, socket) => {
     console.warn(
@@ -638,13 +650,18 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
         objectOrigins: agent.config.objectOrigins, fetchImpl: agent.fetchImpl }
     },
   })
-  mountChild('features', WechatFeaturesService, {
+  const startFeatures = () => mountChild('features', WechatFeaturesService, {
     preferenceFile: path.join(path.dirname(defaultGateStatePath(ctx)), 'wechat-feature-preferences-v1.json'),
     source: {
       nodeId: () => { if (!publicRelayGateway) throw new Error('Node unavailable'); return publicRelayGateway.agent.identity.nodeId },
       read: (signal: AbortSignal) => { if (!publicRelayGateway) throw new Error('Node unavailable'); return publicRelayGateway.agent.readFeatures(signal) },
     },
   })
+  // The optional components can resume background work as soon as this
+  // provider exists. During the old updater's verification only, release it
+  // together with our transports, after the real worker's receipt.
+  if (startup) startup.onRelease(startFeatures)
+  else startFeatures()
   mountChild('directory', WechatDirectoryService, { maxEntries: 1000 })
   mountChild('history-import', WechatImportService, {
     receiptDirectory: path.join(path.dirname(defaultGateStatePath(ctx)), 'history-import-receipts'),
@@ -785,13 +802,15 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
         const privateInput = new PrivateInputNative(ctx, transport.nodeId, () => transport.assertIdentity(), Date.now, { transport })
         compatibilityApi.privateInput = privateInput
         ctx.effect(() => () => { privateInput.close(); if (compatibilityApi.privateInput === privateInput) compatibilityApi.privateInput = undefined })
-        mountChild('human-tools', HumanToolsService, { enabled: true, privateInput, workflow: {
+        const startHumanTools = () => mountChild('human-tools', HumanToolsService, { enabled: true, privateInput, workflow: {
           transport,
         } })
+        if (startup) startup.onRelease(startHumanTools)
+        else startHumanTools()
       }
       // Opt-in observer only. No native provider replacement and no update of the host configuration.
       if (process.env.HR_TASK_NOTIFICATIONS_ENABLED !== '0') {
-        try {
+        const startNotifications = () => { try {
           taskNotifications = new TaskNotifications(ctx, new NotificationRelayClient(relayConfig.relayOrigin,
             () => { if (!publicRelayGateway) throw new Error('Node unavailable'); return publicRelayGateway.agent.identity }))
           taskNotifications.start()
@@ -799,9 +818,13 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
         } catch {
           taskNotifications?.dispose(); taskNotifications = undefined
           console.warn('[wechat-gate] optional task notifications unavailable')
-        }
+        } }
+        if (startup) startup.onRelease(startNotifications)
+        else startNotifications()
       }
-      void publicRelayGateway.start().then(() => ctx.get('wechatFeatures')?.access.refresh()).catch(() => {})
+      const startRelay = () => { void publicRelayGateway?.start().then(() => ctx.get('wechatFeatures')?.access.refresh()).catch(() => {}) }
+      if (startup) startup.onRelease(startRelay)
+      else startRelay()
     }
   } catch (error: unknown) {
     publicRelayStatus = {
@@ -886,7 +909,7 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
             relayEnabled: publicRelayStatus.enabled === true, relayState: publicRelayStatus.state },
         }),
         companionDecision: (id, action) => companionUpdates.decide(id, action),
-        ...(desktopHost ? { updateCheck: nativeUpdater.check, updateStart: nativeUpdater.start, updateStatus: nativeUpdater.status } : {}),
+        updateCheck: nativeUpdater.check, updateStart: nativeUpdater.start, updateStatus: nativeUpdater.status,
         unavailable: () => disposed,
       })
       if (!mounted) return

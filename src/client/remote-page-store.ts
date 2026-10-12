@@ -66,10 +66,16 @@ export class RemotePageStore {
     const identity = `${client.host.agentInstanceId ?? client.host.computerName}/${client.runtime.profileScope ?? 'web'}`
     if (this.identity && this.identity !== identity) { this.generation++; this.value = initial(); this.updates?.dispose(); this.updates = undefined; this.nativeUpdates?.dispose(); this.nativeUpdates = undefined }
     this.identity = identity
-    if (client.runtime.profileScope === 'desktop' && !this.nativeUpdates) this.nativeUpdates = new NativeUpdateStore(this.callManagement)
-    if (this.updates?.origin !== client.localOrigin) {
+    // New Web and Desktop hosts share the authenticated native manager. Keep
+    // the old HTTP view only for an explicitly described legacy Web backend;
+    // loading new UI files must not send a new operation to an old runtime.
+    const native = client.runtime.updates === 'native-v1' || client.runtime.profileScope === 'desktop'
+    if (native && !this.nativeUpdates) this.nativeUpdates = new NativeUpdateStore(this.callManagement)
+    if (!native && this.nativeUpdates) { this.nativeUpdates.dispose(); this.nativeUpdates = undefined }
+    const legacyOrigin = native ? null : client.localOrigin
+    if (this.updates?.origin !== legacyOrigin) {
       this.updates?.dispose()
-      this.updates = client.localOrigin ? new WebUpdateStore(client.localOrigin) : undefined
+      this.updates = legacyOrigin ? new WebUpdateStore(legacyOrigin) : undefined
     }
     this.patch({ host: client.host, runtime: client.runtime, localOrigin: client.localOrigin })
     return client

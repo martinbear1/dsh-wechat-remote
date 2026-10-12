@@ -82,7 +82,7 @@ test('new client plus pre-update backend reports unsupported runtime, not networ
   const calls = []
   const b = bench(async endpoint => { calls.push(endpoint); if (endpoint === 'status') return { gate: { profileScope: 'desktop' } }; throw Error('404') })
   await b.store.refresh()
-  assert.match(b.store.getSnapshot().error, /退出并重新打开/)
+  assert.match(b.store.getSnapshot().error, /正常重启当前 DSH/)
   assert.equal(b.store.getSnapshot().check, null)
   assert.deepEqual(calls, ['update-check', 'status'])
   b.store.dispose()

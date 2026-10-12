@@ -1,31 +1,39 @@
-# 使用 DSH 官方方式安装插件
+# 安装与更新
 
-通常优先使用 `npx -y dsh-wechat-remote@latest`；Windows 推荐 `npx.cmd -y dsh-wechat-remote@latest`。下面的方法不经过我们的自动安装器，也不会自动备份或重启。
+## 新装
 
-## 使用前
+在 DSH 的 **插件 → 添加插件** 中输入：
 
-- 先结束任务并退出要安装插件的 DSH。
-- 使用原来的系统账号、数据目录和 profile（一般是 `web`）。自定义目录时保留相同的 `DSH_HOME`。
-- 确保终端能运行 `pnpm`。这是 DSH 官方插件命令的要求；我们的自动安装器则已自带安装工具。
-
-## 安装最新正式插件
-
-全局安装 DSH 的用户：
-
-```sh
-dsh plugin --profile web add https://github.com/martinbear1/dsh-wechat-remote/releases/latest/download/harness-remote-dsh-wechat-remote.tgz
+```text
+dsh-wechat-remote@latest
 ```
 
-平时通过 NPX 启动 DSH 的用户：
+Web 和 Desktop 使用相同包名。安装并启用后，打开 **设置 → 微信连接** 或本插件详情，扫码配对。
 
-```sh
-npx @deepseek-ai/dsh plugin --profile web add https://github.com/martinbear1/dsh-wechat-remote/releases/latest/download/harness-remote-dsh-wechat-remote.tgz
-```
+## 已有用户升级
 
-如果原来的启动命令指定了 DSH 版本（例如 `@deepseek-ai/dsh@0.1.5-rc.1`），这里也保留同一个版本。Windows PowerShell 可将开头的 `dsh` / `npx` 分别改为 `dsh.cmd` / `npx.cmd`。
+打开已有插件的检查更新，按页面提示安装。无需先卸载，不需要重新配对。
 
-安装完成后，按平时的方式启动 DSH。首次安装和后续更新均可使用上述 `add` 命令；已有节点正常升级不需要重新配对。此方式需要电脑能访问 GitHub 的发布附件；并不保证能绕过网络故障或包管理器自身的问题。
+以下旧版升级说明针对插件 `1.7.13`；更早的安装请按实际提示核对，不要混用不同安装方式。
 
-需要固定插件版本时，从对应 GitHub Release 选择带版本号的 `.tgz` 附件，替换命令里的下载地址即可。
+### Web 旧版提示“请回到 DSH 原生插件管理页更新”
 
-依据：[DSH 官方打包与安装指南](https://deepseek-harness.github.io/deepseek-harness/develop/basic/publish)。
+通过 DSH 插件管理器安装的 Web 插件 `1.7.13`，其旧更新按钮需要先过渡一次：
+
+1. 获取本版提供的 **`dsh-wechat-remote-版本号.tgz`** 更新包，放在运行 Web 服务的电脑上。
+2. 在该 Web 的 **插件 → 添加插件** 中填写这个文件的完整路径，安装更新。不要先卸载，也不要改装另一种包。
+3. 安装完成后关闭安装框，等当前任务结束，按原启动方式正常重启该 Web 服务。仅刷新网页或点击“立即启用”不能代替重启。
+
+同名更新会替换原来的安装，保留原有启用状态、配对和会话；不会更新同机 Desktop。进入新版后，后续使用插件内的检查更新。
+
+本地更新包请先放在固定位置；完成下一次插件内更新之前，不要移动或删除它。预览测试使用提供的候选包，不代表 npm 正式版已经更新。
+
+如提示待重启，请结束当前任务后正常重启对应 DSH。Desktop 完全退出并重新打开；Web 重启服务，仅刷新网页不会加载新的服务端插件。
+
+## 重复添加与旧安装
+
+DSH 可能对已安装的相同包名提示“已安装”，这不代表已经更新。请返回已有插件内检查更新；遇到上述 Web 旧版提示时，按一次过渡步骤处理。
+
+早期命令行安装与原生添加的安装归属不同，不要把两种入口叠加使用；否则可能出现两个插件条目。若已经出现两个条目，先保留配置、配对和会话，核对安装记录后再处理，不要直接删除数据目录。
+
+没有图形插件管理器的旧环境或需命令行修复时，参阅 [安装器说明](../installer/README.md)。本地预览包不等于正式发布；在预览版正式发布前，`@latest` 仍指向当前正式版。

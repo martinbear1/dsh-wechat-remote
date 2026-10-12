@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import vm from 'node:vm'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import { build } from 'esbuild'
 import { fileURLToPath } from 'node:url'
 import { Context, Service } from '@deepseek-ai/cordis'
+import { NativeUpdateService, supportsNativeUpdates } from '../lib/native-update-service.js'
 const load = async name => {
   const output = await build({ entryPoints: [fileURLToPath(new URL(`../src/client/${name}.ts`, import.meta.url))], bundle: true, write: false, platform: 'node', format: 'cjs' })
   const module = { exports: {} }
@@ -140,6 +144,82 @@ test('missing companion state is not completion, and old Web never gets native c
     await web.refresh(); state = 'complete'; await web.refresh()
     assert.equal(web.nativeUpdates, undefined)
   } finally { web.dispose() }
+})
+
+test('Web native capability selects one authenticated updater, with no update checks during ordinary status refresh', async () => {
+  const calls = [], webRuntime = { ...runtime, profileScope: 'web', updates: 'native-v1' }
+  const store = new RemotePageStore(async () => ({ computerName: 'fixture', agentName: 'fixture', gate: webRuntime }), async endpoint => {
+    calls.push(endpoint)
+    if (endpoint === 'status') return { gate: webRuntime, plugin: { runningVersion: '1.7.14-rc.47' } }
+    assert.equal(endpoint, 'update-check')
+    return { advice: { current: {} }, canInstall: true, ticket: 'confirmed', status: { phase: 'idle' } }
+  })
+  try {
+    await store.refresh(); await store.refresh()
+    assert(store.nativeUpdates)
+    assert.equal(store.updates, undefined, 'no simultaneous legacy updater')
+    assert.deepEqual(calls, ['status', 'status'])
+    await store.nativeUpdates.refresh()
+    assert.deepEqual(calls, ['status', 'status', 'update-check'])
+    assert.equal(store.nativeUpdates.getSnapshot().check.canInstall, true)
+    delete webRuntime.updates
+    await store.refresh()
+    assert.equal(store.nativeUpdates, undefined)
+    assert(store.updates, 'old backend keeps its original explicitly described update door')
+  } finally { store.dispose() }
+})
+
+test('actual client and service follow live manager capability; old Desktop without a declaration retains its native path', async t => {
+  for (const profileScope of ['web', 'desktop']) {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-page-update-'))
+    t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+    let manager, inventoryReads = 0
+    const calls = [], current = '1.7.13', target = '1.8.0'
+    const service = new NativeUpdateService({ home, scope: profileScope, runningVersion: current, manager: () => manager,
+      sessions: () => ({ list: async () => assert.fail('viewing must not query tasks') }),
+      release: async () => ({ channel: 'stable', advice: { component: 'plugin', targetVersion: target, revision: 'fixture', current: { pluginVersion: current } },
+        release: { version: target, npmInstaller: { version: target, url: `https://registry.npmjs.org/dsh-wechat-remote/-/dsh-wechat-remote-${target}.tgz`, bytes: 1, sha256: 'a'.repeat(64) } } }) })
+    const snapshot = () => ({ ...runtime, profileScope, ...(supportsNativeUpdates(manager, profileScope) ? { updates: 'native-v1' } : {}) })
+    const store = new RemotePageStore(async () => ({ computerName: 'fixture', agentName: 'fixture', gate: snapshot() }), async endpoint => {
+      calls.push(endpoint)
+      if (endpoint === 'status') return { gate: snapshot(), plugin: { runningVersion: current } }
+      assert.equal(endpoint, 'update-check', 'viewing never installs or approves')
+      return service.check()
+    })
+    try {
+      await store.refresh()
+      assert.equal(store.getSnapshot().loadState, 'ready', 'missing update capability does not fail the main page')
+      assert.equal(Boolean(store.nativeUpdates), profileScope === 'desktop', 'preserve old Desktop 1.7.13 without updates field')
+      assert.equal(Boolean(store.updates), profileScope === 'web')
+      assert.deepEqual(calls, ['status'])
+      if (store.nativeUpdates) {
+        await store.nativeUpdates.refresh()
+        assert.equal(store.nativeUpdates.getSnapshot().check.canInstall, false)
+        assert.match(store.nativeUpdates.getSnapshot().check.reason, /先将 DSH 更新/)
+      }
+      manager = { listBundles: async () => { inventoryReads++; return [{ name: 'dsh-wechat-remote', version: current, installed: true, enabled: true }] },
+        installBundle: async () => assert.fail('capability appearance cannot start installation') }
+      const before = calls.length
+      await store.refresh(); await store.refresh()
+      assert.equal(store.getSnapshot().loadState, 'ready')
+      assert(store.nativeUpdates)
+      assert.equal(store.updates, undefined)
+      assert.deepEqual(calls.slice(before), ['status', 'status'])
+      assert.equal(inventoryReads, 0, 'ordinary status refresh adds no inventory lookup')
+      await store.nativeUpdates.refresh()
+      assert.equal(store.nativeUpdates.getSnapshot().check.canInstall, true)
+      assert.equal(store.nativeUpdates.getSnapshot().check.reason, '')
+      manager = undefined
+      await store.refresh()
+      assert.equal(store.getSnapshot().loadState, 'ready')
+      if (profileScope === 'web') assert.equal(store.nativeUpdates, undefined)
+      else {
+        await store.nativeUpdates.refresh()
+        assert.equal(store.nativeUpdates.getSnapshot().check.canInstall, false)
+      }
+      assert.equal(fs.existsSync(path.join(home, 'harness-remote-updates')), false, 'capability discovery never writes a journal')
+    } finally { store.dispose(); service.dispose() }
+  }
 })
 
 test('host replacement disposes the old in-flight native check without transferring its reason', async () => {

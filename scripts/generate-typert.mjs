@@ -63,6 +63,8 @@ try {
     'update-worker.ts',
     'update-session-verification.ts',
     'update-service.ts',
+    'update-legacy-handoff.ts',
+    'update-legacy-recovery.ts',
     'native-update-service.ts',
     'plugin-version.ts',
     'install-runtime.ts',

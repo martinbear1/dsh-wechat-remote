@@ -1,4 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis';
+import type { LegacyGateStartup } from './update-legacy-handoff.js';
 /**
  * Mount one isolated Harness Remote runtime into the supplied Cordis fiber.
  *
@@ -6,4 +7,4 @@ import type { Context } from '@deepseek-ai/cordis';
  * timers and listening ports are created only after Cordis applies this plugin
  * and are therefore scoped to this exact plugin instance.
  */
-export declare function mountWechatGate(ctx: Context): () => void;
+export declare function mountWechatGate(ctx: Context, startup?: LegacyGateStartup): () => void;

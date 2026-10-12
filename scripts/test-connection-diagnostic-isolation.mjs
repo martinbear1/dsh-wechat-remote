@@ -31,8 +31,12 @@ async function load(name, extra = {}) {
 const { RemotePageStore } = await load('remote-page-store.ts')
 const { ConnectionDiagnosticStore } = await load('connection-diagnostic-store.ts')
 
-test('normal page source and original assistant reset remain byte-identical to RC33 after LF normalization', () => {
-  assert.equal(source('remote-page-store.ts'), baseline('remote-page-store.ts'))
+test('normal status/pairing/decision lifecycles and original assistant reset remain unchanged by diagnostics', () => {
+  // Updater selection now follows the host capability on both Web and Desktop.
+  // The ordinary business methods below it must still stay independent of diagnostics.
+  const businessMethods = text => text.slice(text.indexOf('  refresh ='))
+  assert.ok(source('remote-page-store.ts').includes('  refresh ='))
+  assert.equal(businessMethods(source('remote-page-store.ts')), businessMethods(baseline('remote-page-store.ts')))
   const effect = text => text.match(/  ctx\.effect\(\(\) => \{\n    const remove = ctx\.on\('connection\/reset',[\s\S]*?\}, 'wechat assistant lifecycle'\)/)?.[0]
   assert.ok(effect(source('index.ts'))); assert.equal(effect(source('index.ts')), effect(baseline('index.ts')))
   assert.doesNotMatch(source('remote-page-store.ts'), /diagnostic/i)

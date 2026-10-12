@@ -58,7 +58,7 @@ export class NativeUpdateStore {
         try { const status = await this.call('status') as { plugin?: unknown }; legacy = Boolean(status && !status.plugin) } catch {}
         if (this.disposed || revision !== this.checkRevision) return
         this.patch({ check: null, error: legacy
-          ? '当前运行的连接服务尚不支持此更新入口。若刚安装新版，请在任务结束后退出并重新打开 Desktop；无需重新配对。仍不可用时请在原生插件管理器核对安装。'
+          ? '当前运行的连接服务尚不支持此更新入口。若刚安装新版，请在任务结束后正常重启当前 DSH；无需重新配对。仍不可用时请在原生插件管理器核对安装。'
           : '本次更新检查未完成，不能据此判断已是最新版。请稍后重试；配对和聊天不受此次检查失败影响。' })
       }
       finally { this.patch({ checking: false }) }

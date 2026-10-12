@@ -6,4 +6,4 @@ export declare const inject: string[];
  * Inert DSH/Cordis entry point. All mutable resources are created by the
  * mounted runtime and are released with this plugin fiber.
  */
-export declare const apply: (ctx: Context) => void | (() => void);
+export declare const apply: (ctx: Context) => void | (() => void) | Promise<void | (() => void)>;

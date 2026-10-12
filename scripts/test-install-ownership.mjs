@@ -5,7 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { createRequire } from 'node:module'
 import { applyEntryPatches } from '@deepseek-ai/cordis-plugin-include'
-import { assertCliInstallOwner, installProfile, PLUGIN_PACKAGE, NATIVE_PLUGIN_PACKAGE } from '../lib/install-profile.js'
+import { assertCliInstallOwner, webInstallOwner, installProfile, PLUGIN_PACKAGE, NATIVE_PLUGIN_PACKAGE } from '../lib/install-profile.js'
 import { updateAction, PluginUpdateService } from '../lib/update-service.js'
 import { install } from '../installer/bin/setup.mjs'
 const { parse } = createRequire(new URL('../installer/package.json', import.meta.url))('yaml')
@@ -50,26 +50,52 @@ test('official patch composition retains both gate rows: mixed packages are not 
 test('fresh and existing legacy Web remain eligible; Desktop installation is a separate owner', t => {
   const { home, profile } = fixture(t)
   assertCliInstallOwner(profile)
+  assert.equal(webInstallOwner(profile), undefined)
   register(profile, [PLUGIN_PACKAGE, 'unrelated-plugin'])
   register(path.join(home, 'profiles/desktop'), [NATIVE_PLUGIN_PACKAGE])
   fs.writeFileSync(path.join(home, 'gate-wechat-state.json'), 'fixture-pairing')
   const before = snapshot(home)
   assertCliInstallOwner(profile)
+  assert.equal(webInstallOwner(profile), PLUGIN_PACKAGE)
   assert.deepEqual(snapshot(home), before)
 })
-test('native-only, disabled native, mixed and unreadable native packages cannot trigger a second install', async t => {
+test('legacy core-only worker still refuses native ownership, while external NPX can identify it', async t => {
   const { home, profile } = fixture(t)
   for (const names of [[NATIVE_PLUGIN_PACKAGE], [NATIVE_PLUGIN_PACKAGE, PLUGIN_PACKAGE]]) {
     for (const enabled of [names, []]) {
       register(profile, names, enabled)
       const before = snapshot(home)
       assert.throws(() => assertCliInstallOwner(profile), /原生插件管理页/)
-      await assert.rejects(install({ home }), /原生插件管理页/)
+      if (names.length === 1) assert.equal(webInstallOwner(profile), NATIVE_PLUGIN_PACKAGE)
+      else {
+        assert.throws(() => webInstallOwner(profile), /两种/)
+        await assert.rejects(install({ home }), /两种/)
+      }
       // No archive exists; refusal must happen before staging, tool startup or native CLI.
       await assert.rejects(installProfile({ profile, directory: path.join(home, 'absent-job'), targetVersion: '1.7.12-rc.4' }), /原生插件管理页/)
       assert.deepEqual(snapshot(home), before, 'no helper, lock, archive, network selection or profile edit')
     }
   }
+})
+
+test('explicit native installer cannot replace a core owner, even when its target archive is absent', async t => {
+  const { home, profile } = fixture(t)
+  register(profile, [PLUGIN_PACKAGE])
+  const before = snapshot(home)
+  await assert.rejects(installProfile({ profile, directory: path.join(home, 'absent-job'), targetVersion: '1.7.14',
+    packageName: NATIVE_PLUGIN_PACKAGE }), /归属已变化/)
+  assert.deepEqual(snapshot(home), before)
+})
+
+test('owner resolution uses registration, including disabled or bundle-only native packages', t => {
+  const { home, profile } = fixture(t)
+  register(profile, [NATIVE_PLUGIN_PACKAGE], [])
+  assert.equal(webInstallOwner(profile), NATIVE_PLUGIN_PACKAGE)
+  register(profile, [], [NATIVE_PLUGIN_PACKAGE])
+  assert.equal(webInstallOwner(profile), NATIVE_PLUGIN_PACKAGE)
+  const before = snapshot(home)
+  assert.equal(webInstallOwner(profile), NATIVE_PLUGIN_PACKAGE)
+  assert.deepEqual(snapshot(home), before)
 })
 test('unregistered native leftovers do not prevent repairing the registered legacy owner', t => {
   const { profile } = fixture(t)
@@ -78,6 +104,7 @@ test('unregistered native leftovers do not prevent repairing the registered lega
   fs.mkdirSync(leftover, { recursive: true })
   fs.writeFileSync(path.join(leftover, 'package.json'), '{invalid')
   assertCliInstallOwner(profile)
+  assert.equal(webInstallOwner(profile), PLUGIN_PACKAGE)
 })
 test('invalid registration never silently becomes an empty installation', async t => {
   const { home, profile } = fixture(t)

@@ -3,14 +3,12 @@
  * phone authorization, profile copying, implicit installation or forced exit. */
 import fs from 'node:fs'
 import path from 'node:path'
-import { execFile } from 'node:child_process'
-import { promisify } from 'node:util'
-import { createHash, randomBytes } from 'node:crypto'
+import { randomBytes } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { compareVersions } from './update-policy.js'
 import { writePrivateJsonAtomic } from './secure-file.js'
 import { agentDshHome, agentProfileScope } from './agent-metadata.js'
-import { auditNativeArchive } from './update-download.js'
+import { checkedNativeSource as checkedSource, packNativeArchive } from './install-archive.js'
 import { LEGACY_UPDATE_MANUAL_MESSAGE, legacyUpdateError } from './install-capabilities.js'
 
 type Scope = 'web' | 'desktop'
@@ -64,18 +62,6 @@ export function companionTarget(home: string, scope: Scope): Target | undefined 
     if (installed.name !== owner || !versionPattern.test(installed.version)) return
     return { owner: owner === core ? 'cli' : 'native', version: installed.version }
   } catch { return }
-}
-function checkedSource(source: string, version: string): string {
-  if (!path.isAbsolute(source) || !versionPattern.test(version)) throw new Error('联动安装来源无效')
-  const actual = fs.realpathSync(source), manifest = read(path.join(actual, 'package.json'))
-  if (manifest.name !== native || manifest.version !== version || manifest.dsh?.bundle?.patch !== './cordis.patch.yml'
-      || ['preinstall', 'install', 'postinstall', 'prepare', 'prepack', 'postpack'].some(key => manifest.scripts?.[key])) throw new Error('联动安装包与目标版本不一致')
-  const metadata = read(path.join(actual, 'assets/release.json'))
-  const release = metadata.catalog?.releases?.find((row: any) => row.version === version)
-  const bytes = fs.readFileSync(path.join(actual, 'assets/plugin.tgz'))
-  if (!release || metadata.version !== version || release.asset?.bytes !== bytes.length
-      || createHash('sha256').update(bytes).digest('hex') !== release.asset.sha256) throw new Error('联动安装包校验失败')
-  return actual
 }
 /** Called after an explicit CLI install or first activation of a native bundle.
  * Capture the existing peer version: a later manual rollback invalidates this
@@ -147,34 +133,7 @@ function confirmation(home: string, offer: Offer): CompanionResult | undefined {
  * the two profiles. Install a verified, immutable tarball kept outside both
  * profiles, so updating/removing the source cannot break the recipient. */
 export async function stageCompanionArchive(home: string, source: string, version: string): Promise<string> {
-  const actual = checkedSource(source, version)
-  const pnpm = path.join(actual, 'node_modules/pnpm/bin/pnpm.cjs')
-  if (!fs.existsSync(pnpm)) throw new Error('安装包缺少内置打包工具，未使用全局工具替代')
-  const artifacts = path.join(root(home), 'artifacts')
-  fs.mkdirSync(artifacts, { recursive: true, mode: 0o700 })
-  const temporary = path.join(artifacts, `packing-${randomBytes(16).toString('hex')}.tgz`)
-  try {
-    // Published artifacts already carry their bundled, hoisted dependencies;
-    // packing must not inherit the user's isolated-linker install preference.
-    await promisify(execFile)(process.execPath, [pnpm, '--config.ignore-scripts=true', '--config.node-linker=hoisted', 'pack', '--out', temporary], {
-      cwd: actual, windowsHide: true, timeout: 60_000, maxBuffer: 1024 * 1024,
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
-    })
-    checkedSource(actual, version)
-    if (fs.statSync(temporary).size > 32 * 1024 * 1024) throw new Error('联动安装包超过安全大小限制')
-    const bytes = fs.readFileSync(temporary)
-    auditNativeArchive(bytes, version)
-    const digest = createHash('sha256').update(bytes).digest('hex')
-    const archive = path.join(artifacts, `${digest}.tgz`)
-    try { fs.writeFileSync(archive, bytes, { flag: 'wx', mode: 0o600 }) } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST'
-          || createHash('sha256').update(fs.readFileSync(archive)).digest('hex') !== digest) throw error
-    }
-    return archive
-  } finally {
-    // One exact randomly named file owned by this invocation, never a profile.
-    try { fs.unlinkSync(temporary) } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
-  }
+  return packNativeArchive(source, version, path.join(root(home), 'artifacts'))
 }
 /** Native manager errors (including build approval) remain refusals. No extra
  * scripts are approved, and downloaded is never reported as running. */

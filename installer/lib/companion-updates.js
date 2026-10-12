@@ -1,11 +1,9 @@
 /* Generated from the shared plugin installation sources. */
 
 // src/companion-updates.ts
-import fs from "node:fs";
-import path5 from "node:path";
-import { execFile as execFile2 } from "node:child_process";
-import { promisify as promisify2 } from "node:util";
-import { createHash as createHash2, randomBytes as randomBytes2 } from "node:crypto";
+import fs2 from "node:fs";
+import path6 from "node:path";
+import { randomBytes as randomBytes3 } from "node:crypto";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // src/update-policy.ts
@@ -408,6 +406,13 @@ function resolveAgentProfileScope(modulePath, argv, dshHome) {
   return "default";
 }
 
+// src/install-archive.ts
+import fs from "node:fs";
+import path5 from "node:path";
+import { execFile as execFile2 } from "node:child_process";
+import { promisify as promisify2 } from "node:util";
+import { createHash as createHash2, randomBytes as randomBytes2 } from "node:crypto";
+
 // src/update-download.ts
 import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
@@ -477,6 +482,54 @@ function auditNativeArchive(archive, version) {
   auditArchive(plugin, release);
 }
 
+// src/install-archive.ts
+function checkedNativeSource(source, version) {
+  if (!path5.isAbsolute(source) || !/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(version)) throw new Error("\u5B89\u88C5\u6765\u6E90\u65E0\u6548");
+  const actual = fs.realpathSync(source);
+  const read2 = (name) => JSON.parse(fs.readFileSync(path5.join(actual, name), "utf8"));
+  const manifest = read2("package.json");
+  if (manifest.name !== "dsh-wechat-remote" || manifest.version !== version || manifest.dsh?.bundle?.patch !== "./cordis.patch.yml" || ["preinstall", "install", "postinstall", "prepare", "prepack", "postpack"].some((key) => manifest.scripts?.[key])) throw new Error("\u5B89\u88C5\u5305\u4E0E\u76EE\u6807\u7248\u672C\u4E0D\u4E00\u81F4");
+  const metadata = read2("assets/release.json");
+  const release = metadata.catalog?.releases?.find((row) => row.version === version);
+  const bytes = fs.readFileSync(path5.join(actual, "assets/plugin.tgz"));
+  if (!release || metadata.version !== version || release.asset?.bytes !== bytes.length || createHash2("sha256").update(bytes).digest("hex") !== release.asset.sha256) throw new Error("\u5B89\u88C5\u5305\u6821\u9A8C\u5931\u8D25");
+  return actual;
+}
+async function packNativeArchive(source, version, directory) {
+  const actual = checkedNativeSource(source, version);
+  const pnpm = path5.join(actual, "node_modules/pnpm/bin/pnpm.cjs");
+  if (!fs.existsSync(pnpm)) throw new Error("\u5B89\u88C5\u5305\u7F3A\u5C11\u5185\u7F6E\u6253\u5305\u5DE5\u5177\uFF0C\u672A\u4F7F\u7528\u5168\u5C40\u5DE5\u5177\u66FF\u4EE3");
+  fs.mkdirSync(directory, { recursive: true, mode: 448 });
+  const temporary = path5.join(directory, `packing-${randomBytes2(16).toString("hex")}.tgz`);
+  try {
+    await promisify2(execFile2)(process.execPath, [pnpm, "--config.ignore-scripts=true", "--config.node-linker=hoisted", "pack", "--out", temporary], {
+      cwd: actual,
+      windowsHide: true,
+      timeout: 6e4,
+      maxBuffer: 1024 * 1024,
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" }
+    });
+    checkedNativeSource(actual, version);
+    if (fs.statSync(temporary).size > 32 * 1024 * 1024) throw new Error("\u5B89\u88C5\u5305\u8D85\u8FC7\u5B89\u5168\u5927\u5C0F\u9650\u5236");
+    const bytes = fs.readFileSync(temporary);
+    auditNativeArchive(bytes, version);
+    const digest = createHash2("sha256").update(bytes).digest("hex");
+    const archive = path5.join(directory, `${digest}.tgz`);
+    try {
+      fs.writeFileSync(archive, bytes, { flag: "wx", mode: 384 });
+    } catch (error) {
+      if (error.code !== "EEXIST" || createHash2("sha256").update(fs.readFileSync(archive)).digest("hex") !== digest) throw error;
+    }
+    return archive;
+  } finally {
+    try {
+      fs.unlinkSync(temporary);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+  }
+}
+
 // src/install-capabilities.ts
 var LEGACY_UPDATE_MANUAL_MESSAGE = "\u6B64\u5B89\u88C5\u7531 DSH Web \u547D\u4EE4\u884C\u7BA1\u7406\uFF0C\u4E0D\u652F\u6301\u4E00\u952E\u5728\u7EBF\u66F4\u65B0\u3002\u8BF7\u5148\u901A\u8FC7\u539F\u542F\u52A8\u65B9\u5F0F\u6B63\u5E38\u505C\u6B62 Web\uFF08\u540E\u53F0\u670D\u52A1\u9700\u6682\u505C\u81EA\u52A8\u91CD\u542F\uFF09\uFF0C\u518D\u6267\u884C\u539F\u5B89\u88C5\u547D\u4EE4\uFF1B\u539F\u751F\u5B89\u88C5\u5305\u8BF7\u4F7F\u7528 DSH \u63D2\u4EF6\u7BA1\u7406\u9875\u3002\u672A\u505C\u6B62\u6216\u4FEE\u6539\u5F53\u524D\u8282\u70B9\u3002";
 function legacyUpdateError() {
@@ -493,18 +546,18 @@ function scopeOf(value) {
   return value === "desktop" ? "desktop" : value === "web" || value === "default" ? "web" : void 0;
 }
 function read(file) {
-  return JSON.parse(fs.readFileSync(file, "utf8"));
+  return JSON.parse(fs2.readFileSync(file, "utf8"));
 }
 function root(home) {
-  return path5.join(home, "harness-remote", "installation-offers");
+  return path6.join(home, "harness-remote", "installation-offers");
 }
 function offerTarget(offer) {
   return { scope: offer.to, fromVersion: offer.previous, version: offer.version };
 }
 function recordResult(home, scope, offer, value) {
-  const directory = root(home), file = path5.join(directory, `result-${scope}.json`);
+  const directory = root(home), file = path6.join(directory, `result-${scope}.json`);
   try {
-    if (read(path5.join(directory, `${scope}.json`)).id !== offer.id) return false;
+    if (read(path6.join(directory, `${scope}.json`)).id !== offer.id) return false;
   } catch {
     return false;
   }
@@ -517,10 +570,10 @@ function recordResult(home, scope, offer, value) {
   return true;
 }
 function companionTarget(home, scope) {
-  const profile = path5.join(home, "profiles", scope);
+  const profile = path6.join(home, "profiles", scope);
   let manifest;
   try {
-    manifest = read(path5.join(profile, "package.json"));
+    manifest = read(path6.join(profile, "package.json"));
   } catch {
     return;
   }
@@ -531,29 +584,19 @@ function companionTarget(home, scope) {
   const owner = owners[0];
   if (scope === "desktop" && owner !== native) return;
   try {
-    const installed = read(path5.join(profile, "node_modules", owner, "package.json"));
+    const installed = read(path6.join(profile, "node_modules", owner, "package.json"));
     if (installed.name !== owner || !versionPattern2.test(installed.version)) return;
     return { owner: owner === core ? "cli" : "native", version: installed.version };
   } catch {
     return;
   }
 }
-function checkedSource(source, version) {
-  if (!path5.isAbsolute(source) || !versionPattern2.test(version)) throw new Error("\u8054\u52A8\u5B89\u88C5\u6765\u6E90\u65E0\u6548");
-  const actual = fs.realpathSync(source), manifest = read(path5.join(actual, "package.json"));
-  if (manifest.name !== native || manifest.version !== version || manifest.dsh?.bundle?.patch !== "./cordis.patch.yml" || ["preinstall", "install", "postinstall", "prepare", "prepack", "postpack"].some((key) => manifest.scripts?.[key])) throw new Error("\u8054\u52A8\u5B89\u88C5\u5305\u4E0E\u76EE\u6807\u7248\u672C\u4E0D\u4E00\u81F4");
-  const metadata = read(path5.join(actual, "assets/release.json"));
-  const release = metadata.catalog?.releases?.find((row) => row.version === version);
-  const bytes = fs.readFileSync(path5.join(actual, "assets/plugin.tgz"));
-  if (!release || metadata.version !== version || release.asset?.bytes !== bytes.length || createHash2("sha256").update(bytes).digest("hex") !== release.asset.sha256) throw new Error("\u8054\u52A8\u5B89\u88C5\u5305\u6821\u9A8C\u5931\u8D25");
-  return actual;
-}
 function offerCompanionUpdate(home, from, source, version) {
   const to = from === "web" ? "desktop" : "web", peer = companionTarget(home, to);
   if (!peer || peer.owner === "cli" || compareVersions(version, peer.version) <= 0) return;
-  if (source) source = checkedSource(source, version);
+  if (source) source = checkedNativeSource(source, version);
   else if (from !== "web" || !versionPattern2.test(version)) throw new Error("\u53EA\u6709 Web \u53EF\u901A\u77E5\u539F\u751F Desktop \u83B7\u53D6\u540C\u7248\u672C npm \u5305");
-  const directory = root(home), file = path5.join(directory, `${to}.json`);
+  const directory = root(home), file = path6.join(directory, `${to}.json`);
   try {
     const existing = read(file);
     if (existing.schema === 2 && existing.from === from && existing.version === version && existing.previous === peer.version) {
@@ -562,26 +605,26 @@ function offerCompanionUpdate(home, from, source, version) {
     if (versionPattern2.test(existing.version) && compareVersions(existing.version, version) > 0) return;
   } catch {
   }
-  const offer = { schema: 2, id: randomBytes2(16).toString("hex"), from, to, source, version, previous: peer.version };
+  const offer = { schema: 2, id: randomBytes3(16).toString("hex"), from, to, source, version, previous: peer.version };
   writePrivateJsonAtomic(file, offer);
   return offer;
 }
 function validateCompanionOffer(home, scope, offer) {
   if (offer.schema !== 2 || !/^[a-f0-9]{32}$/.test(offer.id) || offer.to !== scope || offer.from !== (scope === "web" ? "desktop" : "web") || !versionPattern2.test(offer.version) || !versionPattern2.test(offer.previous) || compareVersions(offer.version, offer.previous) <= 0) throw new Error("\u8054\u52A8\u66F4\u65B0\u8BF7\u6C42\u65E0\u6548");
-  const current = read(path5.join(root(home), `${scope}.json`));
+  const current = read(path6.join(root(home), `${scope}.json`));
   if (["schema", "id", "from", "to", "version", "previous", "source"].some((key) => current[key] !== offer[key])) {
     throw new Error("\u8054\u52A8\u66F4\u65B0\u8BF7\u6C42\u5DF2\u53D8\u5316\uFF0C\u672A\u6267\u884C\u65E7\u8BF7\u6C42");
   }
   const target = companionTarget(home, scope);
   if (!target || ![offer.previous, offer.version].includes(target.version)) throw new Error("\u53E6\u4E00\u7AEF\u7684\u5B89\u88C5\u3001\u7248\u672C\u6216\u542F\u7528\u72B6\u6001\u5DF2\u53D8\u5316\uFF0C\u672A\u66FF\u6362\u63D2\u4EF6");
   if (offer.source) {
-    if (target.version !== offer.version) checkedSource(offer.source, offer.version);
+    if (target.version !== offer.version) checkedNativeSource(offer.source, offer.version);
   } else if (scope !== "desktop" || offer.from !== "web") throw new Error("\u8054\u52A8\u5B89\u88C5\u6765\u6E90\u65E0\u6548");
   return target;
 }
 function decision(home, offer) {
   try {
-    const value = read(path5.join(root(home), `decision-${offer.to}.json`));
+    const value = read(path6.join(root(home), `decision-${offer.to}.json`));
     return value.id === offer.id ? value.action : void 0;
   } catch {
     return;
@@ -596,7 +639,7 @@ function decideCompanionOffer(home, offer, action) {
   if (!["approve", "later"].includes(action)) throw new Error("\u65E0\u6548\u7684\u66F4\u65B0\u9009\u62E9");
   if (decision(home, offer) === "approve") return;
   if (action === "approve") recordResult(home, offer.to, offer, pending());
-  writePrivateJsonAtomic(path5.join(root(home), `decision-${offer.to}.json`), { id: offer.id, action });
+  writePrivateJsonAtomic(path6.join(root(home), `decision-${offer.to}.json`), { id: offer.id, action });
 }
 function confirmation(home, offer) {
   if (companionTarget(home, offer.to)?.owner === "cli") return manualWeb();
@@ -610,39 +653,7 @@ function confirmation(home, offer) {
   };
 }
 async function stageCompanionArchive(home, source, version) {
-  const actual = checkedSource(source, version);
-  const pnpm = path5.join(actual, "node_modules/pnpm/bin/pnpm.cjs");
-  if (!fs.existsSync(pnpm)) throw new Error("\u5B89\u88C5\u5305\u7F3A\u5C11\u5185\u7F6E\u6253\u5305\u5DE5\u5177\uFF0C\u672A\u4F7F\u7528\u5168\u5C40\u5DE5\u5177\u66FF\u4EE3");
-  const artifacts = path5.join(root(home), "artifacts");
-  fs.mkdirSync(artifacts, { recursive: true, mode: 448 });
-  const temporary = path5.join(artifacts, `packing-${randomBytes2(16).toString("hex")}.tgz`);
-  try {
-    await promisify2(execFile2)(process.execPath, [pnpm, "--config.ignore-scripts=true", "--config.node-linker=hoisted", "pack", "--out", temporary], {
-      cwd: actual,
-      windowsHide: true,
-      timeout: 6e4,
-      maxBuffer: 1024 * 1024,
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" }
-    });
-    checkedSource(actual, version);
-    if (fs.statSync(temporary).size > 32 * 1024 * 1024) throw new Error("\u8054\u52A8\u5B89\u88C5\u5305\u8D85\u8FC7\u5B89\u5168\u5927\u5C0F\u9650\u5236");
-    const bytes = fs.readFileSync(temporary);
-    auditNativeArchive(bytes, version);
-    const digest = createHash2("sha256").update(bytes).digest("hex");
-    const archive = path5.join(artifacts, `${digest}.tgz`);
-    try {
-      fs.writeFileSync(archive, bytes, { flag: "wx", mode: 384 });
-    } catch (error) {
-      if (error.code !== "EEXIST" || createHash2("sha256").update(fs.readFileSync(archive)).digest("hex") !== digest) throw error;
-    }
-    return archive;
-  } finally {
-    try {
-      fs.unlinkSync(temporary);
-    } catch (error) {
-      if (error.code !== "ENOENT") throw error;
-    }
-  }
+  return packNativeArchive(source, version, path6.join(root(home), "artifacts"));
 }
 async function applyNativeCompanion(home, scope, runningVersion, offer, services) {
   services.signal?.throwIfAborted();
@@ -696,12 +707,12 @@ function mount(ctx, version, options) {
     throw new Error("\u5F53\u524D\u5B89\u88C5\u4E0D\u652F\u6301\u8054\u52A8\u66F4\u65B0");
   }, dispose() {
   } };
-  const directory = root(home), inbox = path5.join(directory, `${scope}.json`);
+  const directory = root(home), inbox = path6.join(directory, `${scope}.json`);
   const ownChanged = () => {
     const own = companionTarget(home, scope);
     return own && own.version !== version;
   };
-  fs.mkdirSync(directory, { recursive: true, mode: 448 });
+  fs2.mkdirSync(directory, { recursive: true, mode: 448 });
   const receipt = (offer, value) => {
     if (stopped) return;
     try {
@@ -734,7 +745,7 @@ function mount(ctx, version, options) {
         return;
       }
       try {
-        const last = read(path5.join(directory, `result-${scope}.json`));
+        const last = read(path6.join(directory, `result-${scope}.json`));
         if (last.id === offer.id && ["unavailable", "complete"].includes(last.state)) {
           status = last;
           return;
@@ -773,9 +784,9 @@ function mount(ctx, version, options) {
     }
   };
   function existsInbox() {
-    return fs.existsSync(inbox);
+    return fs2.existsSync(inbox);
   }
-  const watcher = fs.watch(directory, (_event, filename) => {
+  const watcher = fs2.watch(directory, (_event, filename) => {
     if ([`${scope}.json`, `decision-${scope}.json`].includes(String(filename))) void check();
   });
   watcher.on("error", () => {
@@ -803,16 +814,16 @@ function mount(ctx, version, options) {
   }
   const kickoff = setImmediate(() => {
     if (stopped || ownChanged()) return;
-    const source = path5.resolve(path5.dirname(fileURLToPath2(import.meta.url)), "../..");
+    const source = path6.resolve(path6.dirname(fileURLToPath2(import.meta.url)), "../..");
     try {
       let packageName;
       try {
-        packageName = read(path5.join(source, "package.json")).name;
+        packageName = read(path6.join(source, "package.json")).name;
       } catch {
       }
-      const ownPackage = read(path5.join(path5.dirname(fileURLToPath2(import.meta.url)), "../package.json")).name;
+      const ownPackage = read(path6.join(path6.dirname(fileURLToPath2(import.meta.url)), "../package.json")).name;
       if (packageName === native || scope === "web" && ownPackage === core) {
-        const seen = path5.join(directory, `offered-${scope}.json`);
+        const seen = path6.join(directory, `offered-${scope}.json`);
         let previous;
         try {
           previous = read(seen);
@@ -830,14 +841,14 @@ function mount(ctx, version, options) {
   const reportedStatus = () => {
     const to = scope === "web" ? "desktop" : "web";
     try {
-      const offer = read(path5.join(directory, `${to}.json`));
+      const offer = read(path6.join(directory, `${to}.json`));
       if (offer.from === scope && offer.version === version) {
         const peer = validateCompanionOffer(home, to, offer);
         if (peer.version !== version) {
           const notice = confirmation(home, offer);
           if (notice) return notice;
         }
-        const last = read(path5.join(directory, `result-${to}.json`));
+        const last = read(path6.join(directory, `result-${to}.json`));
         if (last.schema === 2 && last.id === offer.id && ["pending", "busy", "preparing", "installing", "verifying", "recovering", "restart-required", "complete", "unavailable"].includes(last.state)) {
           if (["complete", "restart-required"].includes(last.state) && peer.version !== version) {
             return { state: "unavailable", message: "\u53E6\u4E00\u7AEF\u7684\u5B89\u88C5\u5DF2\u53D8\u5316\uFF0C\u8BF7\u5728\u8BE5\u5E94\u7528\u5185\u6838\u5BF9\uFF1B\u5F53\u524D\u8282\u70B9\u4E0D\u53D7\u5F71\u54CD\u3002" };
@@ -848,7 +859,7 @@ function mount(ctx, version, options) {
     } catch {
     }
     try {
-      const offer = read(path5.join(directory, `${to}.json`));
+      const offer = read(path6.join(directory, `${to}.json`));
       if (offer.from === scope && offer.version === version) {
         try {
           validateCompanionOffer(home, to, offer);
@@ -883,7 +894,7 @@ function mount(ctx, version, options) {
     const to = scope === "web" ? "desktop" : "web";
     const offers = [to, scope].flatMap((key) => {
       try {
-        return [read(path5.join(directory, `${key}.json`))];
+        return [read(path6.join(directory, `${key}.json`))];
       } catch {
         return [];
       }

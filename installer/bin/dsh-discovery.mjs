@@ -121,10 +121,44 @@ export async function chooseDsh(options = {}) {
   return candidates[index].cli
 }
 
-// POSIX npm/npx normally starts through a bin symlink, not lib/bin.js.
-// This is a conservative refusal signal only; it never grants lifecycle authority.
+// Read Node's executable and script position, never arbitrary later arguments.
+// Tests, npm and package inspectors legitimately pass DSH paths as data.
+// This only supplies a refusal signal, never authority to stop a process.
+const dshEntry = /(?:[/\\](?:dsh|apps[/\\]cli)[/\\]lib[/\\]bin\.js|[/\\](?:\.bin|bin)[/\\]dsh)$/i
+const nodeExecutable = /(?:^|[/\\])node(?:js|\.exe)?$/i
+const nodeValueFlags = new Set(['-r', '--require', '--import', '--loader', '--experimental-loader', '-C', '--conditions', '--icu-data-dir', '--openssl-config', '--redirect-warnings', '--diagnostic-dir'])
+const nonServerFlags = /^(?:-e|-p|-c|--eval|--print|--check|--test)(?:=|$)/
+function nodeScriptIndex(args) {
+  if (!nodeExecutable.test(args[0] || '')) return -1
+  for (let i = 1; i < args.length; i++) {
+    const value = args[i]
+    if (value === '--') return i + 1
+    if (nonServerFlags.test(value)) return -1
+    if (!value.startsWith('-')) return i
+    if (nodeValueFlags.has(value)) i++
+  }
+  return -1
+}
 export function looksLikeDshProcess(command) {
-  return /(?:[/\\](?:dsh|apps[/\\]cli)[/\\]lib[/\\]bin\.js|[/\\](?:\.bin|bin)[/\\]dsh)(?:["'\s]|$)/i.test(command || '')
+  // /proc retains exact argument boundaries, including spaces in the script.
+  if (Array.isArray(command)) {
+    const index = nodeScriptIndex(command)
+    return index >= 0 && dshEntry.test(command[index] || '')
+  }
+  return String(command || '').split(/\r?\n/).some(line => {
+    const tokens = [...line.matchAll(/"[^"]*"|'[^']*'|\S+/g)]
+    const args = tokens.map(token => token[0].replace(/^(["'])(.*)\1$/s, '$2'))
+    const index = nodeScriptIndex(args)
+    if (index < 0 || !tokens[index]) return false
+    if (dshEntry.test(args[index])) return true
+    if (/^["']/.test(tokens[index][0]) || !/^(?:[/\\]|[A-Za-z]:[/\\])/.test(args[index])
+        || /\.(?:[cm]?js|ts)$/i.test(args[index])) return false
+    // macOS ps loses argv quoting. Reassemble only this first absolute script
+    // path with spaces; never advance past an earlier script or another path.
+    const rest = line.slice(tokens[index].index)
+    const entry = rest.match(/^(.*?(?:[/\\](?:dsh|apps[/\\]cli)[/\\]lib[/\\]bin\.js|[/\\](?:\.bin|bin)[/\\]dsh))(?=\s|$)/i)?.[1]
+    return Boolean(entry && !/\s(?:-|[/\\]|[A-Za-z]:[/\\])|\.(?:[cm]?js|ts)\s/i.test(entry))
+  })
 }
 
 /** Conservatively refuse stopped-host installation while Web is running on a
@@ -144,7 +178,7 @@ export async function mayHaveRunningDsh() {
       for (const pid of fs.readdirSync('/proc').filter(name => /^\d+$/.test(name))) {
         try {
           const args = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0')
-          if (args.some(looksLikeDshProcess)) return true
+          if (looksLikeDshProcess(args)) return true
         } catch { /* Exited or inaccessible process. */ }
       }
       return false

@@ -69,6 +69,7 @@ try {
     'plugin-version.ts',
     'install-runtime.ts',
     'install-profile.ts',
+    'install-archive.ts',
     'install-lifecycle.ts',
     'install-capabilities.ts',
     'install-control.ts',

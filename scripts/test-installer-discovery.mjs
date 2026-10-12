@@ -98,6 +98,7 @@ test('home resolution matches DSH defaults and tilde expansion', () => {
 })
 test('CLI options preserve default behavior and reject ambiguity', () => {
   assert.deepEqual(parseArguments([]), {})
+  assert.deepEqual(parseArguments(['--no-start']), { startAfterInstall: false })
   assert.deepEqual(parseArguments(['--profile', 'web', '--home', root, '--repair', '--dsh-cli', 'C:/test/lib/bin.js']),
     { profileName: 'web', home: root, repair: true, cli: 'C:/test/lib/bin.js' })
   for (const args of [['--profile'], ['--home', '--repair'], ['--unknown'], ['--repair', '--repair']]) {
@@ -116,6 +117,49 @@ test('POSIX global and npx symlinks resolve to the same canonical CLI', { skip: 
 test('running-host guard recognizes POSIX symlink entry points as well as Windows CLI', () => {
   for (const command of ['node /home/user/.npm/_npx/abc/node_modules/.bin/dsh web',
     'node /opt/homebrew/bin/dsh web', 'node /Users/u/cache with spaces/node_modules/@deepseek-ai/dsh/lib/bin.js web',
-    'node C:\\npm\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js web']) assert(looksLikeDshProcess(command))
+    'node C:\\npm\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js web',
+    '"C:\\Program Files\\nodejs\\node.exe" "C:\\用户\\cache with spaces\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js" web',
+    '/usr/local/bin/node --trace-warnings --inspect=127.0.0.1:9229 /usr/local/bin/dsh web',
+    'node --require /tmp/register.cjs --import /tmp/register.mjs /opt/homebrew/bin/dsh web',
+    'node -- /opt/homebrew/bin/dsh web']) assert(looksLikeDshProcess(command), command)
   for (const command of ['node server.js', 'npm exec @deepseek-ai/dsh web', '/bin/dsh-unrelated web']) assert(!looksLikeDshProcess(command))
+})
+
+test('DSH paths passed to another script do not incorrectly block installation', () => {
+  for (const command of [
+    'node test.mjs /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js',
+    'node /tmp/test.mjs /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js',
+    'node "/tmp/test with spaces.mjs" "/opt/cache with spaces/node_modules/@deepseek-ai/dsh/lib/bin.js"',
+    'node /tmp/test with spaces.mjs /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js',
+    'node /tmp/inspector /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js',
+    'node /usr/local/lib/node_modules/npm/bin/npm-cli.js exec -- /usr/local/bin/dsh web',
+    'node /usr/local/lib/node_modules/npm/bin/npm-cli.js inspect /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js',
+    'node --require /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js /tmp/inspector.mjs',
+    'node --eval "console.log(process.argv)" /usr/local/bin/dsh',
+    'node --check /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js',
+    'node --test /usr/local/lib/node_modules/@deepseek-ai/dsh/lib/bin.js',
+  ]) assert.equal(looksLikeDshProcess(command), false, command)
+})
+
+test('Linux argv recognizes only the actual script and preserves whitespace exactly', () => {
+  const cli = '/home/user/cache with spaces/node_modules/@deepseek-ai/dsh/lib/bin.js'
+  for (const args of [
+    ['/usr/bin/node', cli, 'web'],
+    ['node', '--import', '/tmp/preload with spaces.mjs', cli, 'web'],
+    ['node', '--trace-warnings', '--', cli, '--profile', 'web'],
+    ['nodejs', '/opt/homebrew/bin/dsh', 'web'],
+  ]) assert.equal(looksLikeDshProcess(args), true, JSON.stringify(args))
+  for (const args of [
+    ['node', '/tmp/probe.mjs', cli],
+    ['node', '/tmp/probe with spaces', cli],
+    ['node', '-r', cli, '/tmp/probe.mjs'],
+    ['node', '-e', 'console.log(process.argv)', cli],
+    ['node', '--check', cli],
+    ['npm', 'exec', cli, 'web'],
+  ]) assert.equal(looksLikeDshProcess(args), false, JSON.stringify(args))
+})
+
+test('macOS process listing checks each command independently', () => {
+  assert.equal(looksLikeDshProcess('node /tmp/test.mjs /usr/local/bin/dsh\nnode server.js\n'), false)
+  assert.equal(looksLikeDshProcess('node /tmp/test.mjs /usr/local/bin/dsh\n/usr/bin/node /usr/local/bin/dsh web\n'), true)
 })

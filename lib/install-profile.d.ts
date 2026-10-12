@@ -1,6 +1,7 @@
 import type { InstallRuntime } from './install-runtime.js';
 export declare const PLUGIN_PACKAGE = "@harness-remote/dsh-wechat-remote";
 export declare const NATIVE_PLUGIN_PACKAGE = "dsh-wechat-remote";
+export type WebInstallPackage = typeof PLUGIN_PACKAGE | typeof NATIVE_PLUGIN_PACKAGE;
 export declare class ProfileOwnershipError extends Error {
     constructor(message: string);
 }
@@ -8,6 +9,9 @@ export declare class ProfileOwnershipError extends Error {
  * even though they carry the same runtime. Never repair one by adding the other.
  * Inspect only the selected profile; another host's installation is irrelevant.
  * Unreferenced node_modules leftovers from a failed native add are not owners. */
+export declare function webInstallOwner(profile: string): WebInstallPackage | undefined;
+/** Legacy in-process update workers must still only replace their own core.
+ * The external NPX installer instead selects the existing native package. */
 export declare function assertCliInstallOwner(profile: string, activeRoot?: string): void;
 export interface ProfileInstall {
     profile: string;
@@ -15,6 +19,7 @@ export interface ProfileInstall {
     cli: string;
     targetVersion: string;
     runtime: InstallRuntime;
+    packageName?: WebInstallPackage;
 }
 export declare function safeProfileName(value: string): boolean;
 /** Copy without following links. Backups are restored to the SAME original path. */

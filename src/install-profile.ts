@@ -7,6 +7,7 @@ import type { InstallRuntime } from './install-runtime.js'
 
 export const PLUGIN_PACKAGE = '@harness-remote/dsh-wechat-remote'
 export const NATIVE_PLUGIN_PACKAGE = 'dsh-wechat-remote'
+export type WebInstallPackage = typeof PLUGIN_PACKAGE | typeof NATIVE_PLUGIN_PACKAGE
 export class ProfileOwnershipError extends Error {
   constructor(message: string) { super(message); this.name = 'ProfileOwnershipError' }
 }
@@ -14,14 +15,14 @@ export class ProfileOwnershipError extends Error {
  * even though they carry the same runtime. Never repair one by adding the other.
  * Inspect only the selected profile; another host's installation is irrelevant.
  * Unreferenced node_modules leftovers from a failed native add are not owners. */
-export function assertCliInstallOwner(profile: string, activeRoot?: string): void {
+export function webInstallOwner(profile: string): WebInstallPackage | undefined {
   if (path.basename(profile).toLowerCase() === 'desktop') {
     throw new ProfileOwnershipError('Desktop 由桌面应用管理，请在其插件管理页安装或更新；此命令不会更新 Desktop。')
   }
   let manifest: any
   try { manifest = JSON.parse(fs.readFileSync(path.join(profile, 'package.json'), 'utf8')) }
   catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT' && !activeRoot) return
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
     throw new ProfileOwnershipError('无法读取当前 DSH 配置的安装归属，未替换插件。')
   }
   const object = (value: any) => value && typeof value === 'object' && !Array.isArray(value)
@@ -35,15 +36,22 @@ export function assertCliInstallOwner(profile: string, activeRoot?: string): voi
     throw new ProfileOwnershipError('DSH 配置的插件列表无效，未替换插件。')
   }
   const referenced = (name: string) => Object.hasOwn(manifest.dependencies ?? {}, name) || bundles.includes(name)
-  if (referenced(NATIVE_PLUGIN_PACKAGE)) {
-    throw new ProfileOwnershipError(referenced(PLUGIN_PACKAGE)
-      ? '当前 DSH 配置同时登记了两种微信连接插件安装包，未替换插件。请先在该端原生插件管理页核对安装来源，勿重复安装。'
-      : '当前插件由该端 DSH 原生插件管理页管理，请回到该页面更新；未另外安装第二份插件。')
+  if (referenced(NATIVE_PLUGIN_PACKAGE) && referenced(PLUGIN_PACKAGE)) {
+    throw new ProfileOwnershipError('当前 DSH 配置同时登记了两种微信连接插件安装包，未替换插件。请先在该端原生插件管理页核对安装来源，勿重复安装。')
+  }
+  return referenced(NATIVE_PLUGIN_PACKAGE) ? NATIVE_PLUGIN_PACKAGE : referenced(PLUGIN_PACKAGE) ? PLUGIN_PACKAGE : undefined
+}
+/** Legacy in-process update workers must still only replace their own core.
+ * The external NPX installer instead selects the existing native package. */
+export function assertCliInstallOwner(profile: string, activeRoot?: string): void {
+  const owner = webInstallOwner(profile)
+  if (owner === NATIVE_PLUGIN_PACKAGE) {
+    throw new ProfileOwnershipError('当前插件由该端 DSH 原生插件管理页管理，请回到该页面更新；未另外安装第二份插件。')
   }
   if (activeRoot) {
     let matches = false
     try { matches = fs.realpathSync(activeRoot) === fs.realpathSync(path.join(profile, 'node_modules', PLUGIN_PACKAGE)) } catch {}
-    if (!referenced(PLUGIN_PACKAGE) || !matches) {
+    if (owner !== PLUGIN_PACKAGE || !matches) {
       throw new ProfileOwnershipError('运行中的插件与当前配置登记的安装来源不一致，未替换插件。')
     }
   }
@@ -51,6 +59,7 @@ export function assertCliInstallOwner(profile: string, activeRoot?: string): voi
 export interface ProfileInstall {
   profile: string; directory: string; cli: string; targetVersion: string
   runtime: InstallRuntime
+  packageName?: WebInstallPackage
 }
 export function safeProfileName(value: string): boolean { return /^[A-Za-z0-9_-]{1,80}$/.test(value) }
 /** Copy without following links. Backups are restored to the SAME original path. */
@@ -162,7 +171,10 @@ export async function installProfile(job: ProfileInstall): Promise<void> {
   if (scope.toLowerCase() === 'desktop') throw new Error('Desktop 插件安装由桌面应用管理，不能使用 CLI 修改。')
   if (!safeProfileName(scope) || path.dirname(job.profile) !== path.join(home, 'profiles')
     || !/^[\w.+-]{1,80}$/.test(job.targetVersion)) throw new Error('安装目标不明确。')
-  assertCliInstallOwner(job.profile)
+  const packageName = job.packageName ?? PLUGIN_PACKAGE
+  if (![PLUGIN_PACKAGE, NATIVE_PLUGIN_PACKAGE].includes(packageName)) throw new Error('无效的安装包名称。')
+  const owner = webInstallOwner(job.profile)
+  if (owner && owner !== packageName) throw new ProfileOwnershipError('当前插件安装归属已变化，未添加第二份插件。请在原生插件管理页核对。')
   fs.mkdirSync(job.profile, { recursive: true, mode: 0o700 })
   const archive = path.join(job.directory, 'release.tgz')
   // A local file dependency is identified by its source, not just its bytes.
@@ -193,8 +205,8 @@ export async function installProfile(job: ProfileInstall): Promise<void> {
     await run('install')
     await run()
   }
-  const installed = path.join(job.profile, 'node_modules', PLUGIN_PACKAGE)
+  const installed = path.join(job.profile, 'node_modules', packageName)
   if (JSON.parse(fs.readFileSync(path.join(installed, 'package.json'), 'utf8')).version !== job.targetVersion) throw new Error('安装后插件版本不匹配。')
   const after = JSON.parse(fs.readFileSync(path.join(job.profile, 'package.json'), 'utf8'))
-  if (!after.dsh?.profile?.bundles?.includes(PLUGIN_PACKAGE)) throw new Error('DSH 尚未将插件注册为原生 profile 层。')
+  if (webInstallOwner(job.profile) !== packageName || !after.dsh?.profile?.bundles?.includes(packageName)) throw new Error('DSH 尚未将插件注册为唯一的原生安装。')
 }

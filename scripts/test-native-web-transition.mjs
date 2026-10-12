@@ -1,5 +1,5 @@
 /** Full official Web host, published outer 1.7.13 -> candidate via native Add.
- * node script DSH_BIN OLD_OUTER_TGZ NEW_OUTER_TGZ NEW_FIXTURE_ROOT
+ * node script DSH_BIN OLD_OUTER_TGZ NEW_OUTER_TGZ NEW_FIXTURE_ROOT [http]
  * Fresh data only. Native inspect/install, real pnpm, graceful cold restart.
  * The loopback diagnostic calls public host APIs; it does not replace the old
  * updater, fake activation, approve scripts, log in, or start a model task.
@@ -8,12 +8,14 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import net from 'node:net'
+import http from 'node:http'
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { pathToFileURL } from 'node:url'
 
-const [cliArg, oldArg, nextArg, rootArg] = process.argv.slice(2)
+const [cliArg, oldArg, nextArg, rootArg, transport = 'file'] = process.argv.slice(2)
 assert(cliArg && oldArg && nextArg && rootArg, 'DSH_BIN OLD_OUTER_TGZ NEW_OUTER_TGZ NEW_FIXTURE_ROOT required')
+assert(['file', 'http'].includes(transport), 'optional transport must be http')
 assert(['darwin', 'linux'].includes(process.platform))
 const cli = fs.realpathSync(cliArg), baseline = fs.realpathSync(oldArg), candidate = fs.realpathSync(nextArg)
 const root = path.resolve(rootArg)
@@ -39,7 +41,7 @@ fs.mkdirSync(home)
 json(path.join(home, 'harness-remote-public.json'), { enabled: false, relayOrigin: 'https://relay.xyxfood.xyz' })
 const report = { fixture: root, platform: process.platform, dsh: dsh.version,
   from: oldManifest.version, to: nextManifest.version, targetSha256: sha(fs.readFileSync(candidate)),
-  scope: 'actual native Add backend and cold host boot; not old button or GUI automation', checks: [], ok: false }
+  scope: 'actual native Add backend and cold host boot; not old button or GUI automation', transport, checks: [], ok: false }
 const tools = path.join(root, 'tooling'); fs.mkdirSync(tools)
 const extracted = spawnSync('tar', ['-xzf', baseline, '-C', tools], { encoding: 'utf8' })
 assert.equal(extracted.status, 0, extracted.stderr)
@@ -63,6 +65,26 @@ for (let first = 7810; first < 8100; first += 4) {
 }
 assert(port)
 Object.assign(env, { DSH_PORT: String(port), WECHAT_GATE_PORT: String(port + 2), WECHAT_GATE_LOCAL_PORT: String(port + 3) })
+// Native Add accepts an online tarball without a separate user download. Keep
+// the original host and released plugin untouched; only the artifact source
+// is a local test server. This does NOT turn the refused @latest input into an
+// upgrade or prove that the frozen 1.7.13 update button can perform one.
+let source = candidate, archiveServer, archiveGets = 0
+if (transport === 'http') {
+  const route = `/dsh-wechat-remote-${nextManifest.version}.tgz`
+  archiveServer = http.createServer((req, res) => {
+    if (req.url !== route || !['GET', 'HEAD'].includes(req.method)) { res.writeHead(404); res.end(); return }
+    res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': fs.statSync(candidate).size })
+    if (req.method === 'HEAD') { res.end(); return }
+    archiveGets++
+    const stream = fs.createReadStream(candidate)
+    stream.on('error', error => res.destroy(error))
+    res.on('close', () => stream.destroy())
+    stream.pipe(res)
+  })
+  await new Promise((resolve, reject) => { archiveServer.once('error', reject); archiveServer.listen(0, '127.0.0.1', resolve) })
+  source = `http://127.0.0.1:${archiveServer.address().port}${route}`
+}
 const probe = path.join(root, 'probe.mjs'), auth = randomUUID(), sessionId = 'native-transition-fixture'
 fs.writeFileSync(probe, `import http from 'node:http';
 export const inject = ['sessionController', 'pluginManager'];
@@ -81,9 +103,9 @@ export async function apply(ctx) {
         if (!await ctx.get('sessions').flush(ctx.get('sessions').get(value.sessionId))) throw Error('fixture session not persisted');
       } else if (req.url === '/inspect-latest') value = await manager.inspect('dsh-wechat-remote@latest');
       else if (req.url === '/native-add' && req.method === 'POST') {
-        const inspected = await manager.inspect(${JSON.stringify(candidate)});
+        const inspected = await manager.inspect(${JSON.stringify(source)});
         value = { inspected, result: inspected.status === 'accepted'
-          ? await manager.installBundle(${JSON.stringify(candidate)},{enabled:false,requestId:'fixture-native-add'}) : null };
+          ? await manager.installBundle(${JSON.stringify(source)},{enabled:false,requestId:'fixture-native-add'}) : null };
       } else if (req.url === '/exit' && req.method === 'POST') {
         value = {stopping:true}; setTimeout(() => ctx.get('appExit')(0), 30);
       } else throw Error('unknown fixture operation');
@@ -157,13 +179,15 @@ try {
   assert.equal(installed.inspected.status,'accepted')
   assert.equal(installed.result.application,'restart-required',JSON.stringify(installed))
   assert.equal(installed.result.bundle,owner)
+  if (transport === 'http') assert(archiveGets > 0, 'native package manager must actually download the online artifact')
   const stillOld = await ready(oldManifest.version)
   assert.equal(stillOld.pid,before.pid,'native Add must not restart the host secretly')
   const rows = stillOld.bundles.filter(row=>[owner,otherOwner].includes(row.name))
   assert.equal(rows.length,1);assert.equal(rows[0].enabled,true);assert.equal(rows[0].version,nextManifest.version)
   assert.deepEqual(preserved(),saved)
   assert.equal(binding(),beforeBinding)
-  report.checks.push({stage:'native-add',sameOwner:true,oneBundle:true,enabledPreserved:true,oldRuntimeStillServing:true,result:installed.result.application})
+  report.checks.push({stage:'native-add',sameOwner:true,oneBundle:true,enabledPreserved:true,oldRuntimeStillServing:true,
+    ...(transport === 'http' ? {nativeArchiveDownloads:archiveGets} : {}),result:installed.result.application})
   await stop(); start(); const after = await ready(nextManifest.version)
   assert.notEqual(after.pid,before.pid)
   assert(after.sessions.items.some(item=>item.sessionId===sessionId))
@@ -175,6 +199,7 @@ try {
   const gate = (await statusResponse.json()).gate
   assert.equal(gate.management,'authenticated-rpc');assert.equal(gate.updates,'native-v1')
   const manifest=JSON.parse(fs.readFileSync(path.join(profile,'package.json')))
+  if (transport === 'http') assert.equal(manifest.dependencies[owner],source,'native URL dependency must be recorded truthfully')
   const ownNames = names => names.filter(name=>[owner,otherOwner].includes(name))
   assert.deepEqual(ownNames(Object.keys(manifest.dependencies)),[owner]);assert.deepEqual(ownNames(manifest.dsh.profile.bundles),[owner])
   report.checks.push({stage:'cold-restart',running:after.described.value.pluginVersion,sixComponentsActive:true,
@@ -184,6 +209,7 @@ try {
 finally {
   try { await stop() } catch(error) { report.ok=false;report.cleanupError=String(error);process.exitCode=1 }
   if(child&&child.exitCode===null&&child.signalCode===null)child.kill('SIGTERM')
+  if(archiveServer) await new Promise(resolve => { archiveServer.close(resolve); archiveServer.closeAllConnections() })
   json(path.join(root,'result.json'),report)
 }
 console.log(JSON.stringify(report,null,2))

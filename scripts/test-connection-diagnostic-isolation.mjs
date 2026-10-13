@@ -31,10 +31,13 @@ async function load(name, extra = {}) {
 const { RemotePageStore } = await load('remote-page-store.ts')
 const { ConnectionDiagnosticStore } = await load('connection-diagnostic-store.ts')
 
-test('normal status/pairing/decision lifecycles and original assistant reset remain unchanged by diagnostics', () => {
+test('normal pairing lifecycle and original assistant reset remain independent of diagnostics', () => {
   // Updater selection now follows the host capability on both Web and Desktop.
   // The ordinary business methods below it must still stay independent of diagnostics.
-  const businessMethods = text => text.slice(text.indexOf('  refresh ='))
+  const businessMethods = text => {
+    const start = text.indexOf('  generateQr =')
+    return text.slice(start, text.indexOf('\n  }\n', start) + 5)
+  }
   assert.ok(source('remote-page-store.ts').includes('  refresh ='))
   assert.equal(businessMethods(source('remote-page-store.ts')), businessMethods(baseline('remote-page-store.ts')))
   const effect = text => text.match(/  ctx\.effect\(\(\) => \{\n    const remove = ctx\.on\('connection\/reset',[\s\S]*?\}, 'wechat assistant lifecycle'\)/)?.[0]
@@ -43,7 +46,7 @@ test('normal status/pairing/decision lifecycles and original assistant reset rem
   assert.doesNotMatch(source('connection-diagnostic-store.ts'), /remote-page-store|RemotePageStore|NativeUpdateStore|WebUpdateStore/)
 })
 
-test('throwing diagnostic observer cannot affect pairing, status, decisions, identity cleanup or native updates', async () => {
+test('throwing diagnostic observer cannot affect pairing, status, identity cleanup or native updates', async () => {
   const timers = new Map(); let timerId = 0, host = 'first', faults = 0, successes = 0
   const { RemotePageStore: TimedPage } = await load('remote-page-store.ts', {
     setInterval(fn) { const id = ++timerId; timers.set(id, fn); return id }, clearInterval(id) { timers.delete(id) },
@@ -53,19 +56,17 @@ test('throwing diagnostic observer cannot affect pairing, status, decisions, ide
     calls.push(endpoint)
     if (endpoint === 'connection-diagnostics') return report()
     if (endpoint === 'pair-code') return { mode: 'public-relay', qrDataUrl: 'data:image/png;base64,fixture', expiresAt: Date.now() + 900000 }
-    if (endpoint === 'companion-decision') { assert.equal(payload.offerId, 'offer'); return {} }
     assert.equal(endpoint, 'status')
-    return { gate: runtime, lan: { ip: 'fixture', port: 4001 }, publicRelay: { enabled: true, state: 'online' }, companionUpdate: { state: 'confirmation-required', offerId: 'offer' } }
+    return { gate: runtime, lan: { ip: 'fixture', port: 4001 }, publicRelay: { enabled: true, state: 'online' } }
   }
   const business = new TimedPage(describe, call), diagnostics = new ConnectionDiagnosticStore(describe, call)
   const offBad = diagnostics.subscribe(() => { faults++; throw Error('injected diagnostic observer failure') })
   const offGood = diagnostics.subscribe(() => { successes++ })
   const offPage = business.subscribe(() => {})
   try {
-    await business.refresh(); await business.generateQr(); await business.decide('later')
+    await business.refresh(); await business.generateQr()
     assert.equal(faults, 0, 'ordinary work never notifies even an open broken auxiliary view')
     assert.equal(calls.includes('connection-diagnostics'), false); assert.equal(business.getSnapshot().qrState, 'ready')
-    assert.equal(business.getSnapshot().decisionError, null); assert.equal(business.getSnapshot().deciding, false)
     const before = business.getSnapshot(); await diagnostics.diagnose()
     assert.equal(faults, 2); assert.equal(successes, 2, 'one bad observer cannot prevent other views receiving results')
     assert.equal(business.getSnapshot(), before, 'diagnostic-only updates preserve the exact normal snapshot object')

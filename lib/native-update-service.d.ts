@@ -55,7 +55,6 @@ export interface NativeUpdateOptions {
         release?: Release;
         channel: 'stable' | 'preview';
     }>;
-    otherBusy?(): boolean;
 }
 export declare class NativeUpdateService {
     private options;

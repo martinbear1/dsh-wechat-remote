@@ -13,59 +13,56 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const out = path.resolve(root, 'artifacts/update-ui')
+const out = path.resolve(root, 'artifacts/current-endpoint-ui')
 const browser = process.env.UPDATE_UI_BROWSER || 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'
 assert(fs.existsSync(browser), 'Provide an installed Chromium path as UPDATE_UI_BROWSER; this script never installs one')
 fs.mkdirSync(out, { recursive: true })
 const require = createRequire(import.meta.url)
+let activationState
 const css = fs.readFileSync(path.join(root, 'src/client/HarnessRemoteSettings.module.css'), 'utf8')
 async function load(name) {
   const result = await build({ entryPoints: [path.join(root, 'src/client', `${name}.tsx`)], bundle: true, write: false,
-    format: 'cjs', platform: 'node', jsx: 'automatic', external: ['react', 'react/jsx-runtime', '*.css'] })
+    format: 'cjs', platform: 'node', jsx: 'automatic', external: ['react', 'react/jsx-runtime', '*.css', '@deepseek-ai/dsh-client-ui-primitives'] })
   const module = { exports: {} }
   vm.runInNewContext(result.outputFiles[0].text, { module, exports: module.exports, require(id) {
+    if (id === 'react' && name === 'InstallationResultPanel') return { ...require(id), useEffect() {}, useState: value => [value === null ? activationState : value, noAction] }
+    if (id === '@deepseek-ai/dsh-client-ui-primitives') return { Modal: ({ title, children }) => createElement('section', { className: 'installationDialog' }, createElement('h3', null, title), children) }
     if (id.endsWith('.css')) return new Proxy({}, { get: (_, key) => key === '__esModule' ? false : key })
     return require(id)
   } })
   return module.exports[name]
 }
 const NativeUpdateCard = await load('NativeUpdateCard')
-const PluginUpdateCard = await load('PluginUpdateCard')
-const CompanionUpdateCard = await load('CompanionUpdateCard')
+const InstallationResultPanel = await load('InstallationResultPanel')
 const noAction = () => assert.fail('A static render cannot trigger an update or network call')
 const passive = value => ({ getSnapshot: () => value, subscribe: noAction, refresh: noAction, install: noAction })
-const advice = { label: '暂无可用更新', severity: 'none', message: '', current: { agentVersion: '0.2.0-rc.1', pluginVersion: '1.7.14-rc.20' }, checkedAt: 1791376800000 }
-const check = { channel: 'stable', canInstall: false, ticket: '', reason: '', advice }
-function companion(current, state = 'confirmation-required') {
-  const peer = current === 'desktop' ? 'web' : 'desktop'
-  return { state, offerId: 'visual-only', target: { scope: peer, fromVersion: '1.7.13', version: '1.7.14-rc.20' },
-    versions: { current, running: '1.7.14-rc.20', installed: '1.7.14-rc.20', peer, peerInstalled: '1.7.13' },
-    message: `${peer === 'web' ? 'Web' : 'Desktop'} 插件可从 1.7.13 更新至 1.7.14-rc.20。确认后会等待任务空闲；保留原配对与会话。` }
-}
+const version = JSON.parse(fs.readFileSync(path.join(root, 'package.json'))).version
+const advice = { label: '暂无可用更新', severity: 'none', message: '', current: { agentVersion: '0.2.0-rc.2', pluginVersion: version }, checkedAt: 1791376800000 }
+const check = { channel: 'preview', canInstall: false, ticket: '', reason: '', advice }
 const scenes = [
-  { name: 'desktop-peer-confirm', current: 'desktop', width: 820 },
-  { name: 'web-peer-confirm', current: 'web', width: 820 },
-  { name: 'desktop-narrow', current: 'desktop', width: 400 },
-  { name: 'desktop-dark', current: 'desktop', width: 820, dark: true },
-  { name: 'desktop-updating', current: 'desktop', width: 820, state: 'installing' },
-  { name: 'desktop-peer-absent', current: 'desktop', width: 820, state: 'idle' },
-  { name: 'desktop-restart', current: 'desktop', width: 820, restart: true, state: 'unavailable' },
+  { name: 'web-restart', scope: 'web', width: 820, phase: 'restart-required' },
+  { name: 'desktop-restart', scope: 'desktop', width: 820, phase: 'restart-required' },
+  { name: 'web-ready', scope: 'web', width: 820, phase: 'ready' },
+  { name: 'desktop-narrow', scope: 'desktop', width: 400, phase: 'restart-required' },
+  { name: 'desktop-dark', scope: 'desktop', width: 820, phase: 'restart-required', dark: true },
+  { name: 'web-incomplete', scope: 'web', width: 820, phase: 'incomplete' },
+  { name: 'unknown', width: 400, phase: 'unknown' },
 ]
 const results = []
 for (const scene of scenes) {
-  const value = companion(scene.current, scene.state)
-  if (scene.state === 'idle') { delete value.target; value.versions.peerInstalled = null; value.message = '' }
-  if (scene.state === 'installing') value.message = '正在升级 Web 插件，请暂勿关闭 Web、退出 Desktop 或重复安装。'
-  if (scene.state === 'unavailable') { delete value.target; value.message = '另一端的安装或启用状态已变化，请在该端核对。' }
-  const current = createElement(scene.current === 'desktop' ? NativeUpdateCard : PluginUpdateCard, { embedded: true, store: passive({ check,
-    status: scene.restart ? { phase: 'restart-required', targetVersion: '1.7.14-rc.21', message: '请在任务结束后退出并重新打开 Desktop。' } : { phase: 'idle', message: '' },
-    progress: null, error: '', checking: false }) })
-  const markup = renderToStaticMarkup(createElement('section', { className: 'updateCard', 'aria-label': '插件更新' },
-    createElement('h3', { className: 'updateHeading' }, '插件更新'), current,
-    createElement('div', null, createElement(CompanionUpdateCard, { value, compact: true, onDecide: noAction }))))
+  activationState = { phase: scene.phase, scope: scene.scope, installedVersion: version,
+    runningVersion: scene.phase === 'restart-required' ? '1.7.13' : version }
+  const sceneCheck = { ...check, advice: { ...advice, current: { ...advice.current, pluginVersion: activationState.runningVersion } } }
+  const current = createElement(NativeUpdateCard, { embedded: true, scope: scene.scope, store: passive({ check: sceneCheck,
+    status: scene.phase === 'restart-required' ? { phase: 'restart-required', targetVersion: version } : { phase: 'idle', message: '' },
+    error: '', checking: false }) })
+  const markup = renderToStaticMarkup(createElement('main', null,
+    createElement(InstallationResultPanel, { packageName: 'dsh-wechat-remote', readInstallation: noAction, onDismiss: noAction, onOpenDetails: noAction }),
+    createElement('section', { className: 'updateCard', 'aria-label': '插件更新' },
+      createElement('h3', { className: 'updateHeading' }, '插件更新'), current)))
   const html = path.join(out, scene.name + '.html'), screenshot = path.join(out, scene.name + '.png')
   const dark = scene.dark ? `:root { color-scheme: dark; --dsw-alias-label-primary:#edf1f7; --dsw-alias-label-secondary:#b4becc; --dsw-alias-label-tertiary:#9da8b8; --dsw-alias-bg-layer-1:#242832; --dsw-alias-bg-layer-3:#20242c; --dsw-alias-border-l2:#454b58; --text-primary:#edf1f7; --text-secondary:#a7b1c0; } body{background:#15171c}` : 'body{background:#f5f6f8}'
-  fs.writeFileSync(html, `<!doctype html><html><head><meta charset="utf-8"><style>${css}\nbody{margin:0;padding:20px;font:13px/1.5 "Microsoft YaHei",sans-serif;color:var(--dsw-alias-label-primary,#171a20)}main{max-width:${Math.min(scene.width - 40, 760)}px;margin:auto}button{font-family:inherit}#metrics{display:none}${dark}</style></head><body><main>${markup}</main><output id="metrics"></output><script>const card=document.querySelector('.updateCard');document.querySelector('#metrics').textContent=JSON.stringify({width:innerWidth,scrollWidth:document.documentElement.scrollWidth,cardWidth:card.getBoundingClientRect().width,cardScrollWidth:card.scrollWidth,cardClientWidth:card.clientWidth,height:document.querySelector('main').getBoundingClientRect().height});</script></body></html>`)
+  fs.writeFileSync(html, `<!doctype html><html><head><meta charset="utf-8"><style>${css}\nbody{margin:0;padding:20px;font:13px/1.5 "Microsoft YaHei",sans-serif;color:var(--dsw-alias-label-primary,#171a20)}main{max-width:${Math.min(scene.width - 40, 760)}px;margin:auto}button{font-family:inherit}.installationDialog{padding:18px;margin-bottom:18px;background:var(--dsw-alias-bg-layer-3,#fff);border:1px solid var(--dsw-alias-border-l2,#ddd);border-radius:12px}.installationDialog h3{margin-top:0}#metrics{display:none}${dark}</style></head><body>${markup}<output id="metrics"></output><script>const card=document.querySelector('.updateCard');document.querySelector('#metrics').textContent=JSON.stringify({width:innerWidth,scrollWidth:document.documentElement.scrollWidth,cardWidth:card.getBoundingClientRect().width,cardScrollWidth:card.scrollWidth,cardClientWidth:card.clientWidth,height:document.querySelector('main').getBoundingClientRect().height});</script></body></html>`)
   const profile = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-update-ui-')))
   try {
     const dom = execFileSync(browser, ['--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--disable-background-networking',

@@ -17,12 +17,10 @@ export interface HarnessRemoteHostDescription {
     agentInstanceId?: string;
     agentVersion?: string;
     pluginVersion?: string;
+    installedPluginVersion?: string;
     gate?: GateRuntimeInfo;
 }
-export type CallPairingManagement = (endpoint: 'status' | 'pair-code' | 'companion-decision' | 'update-check' | 'update-start' | 'update-status' | 'connection-diagnostics', payload?: {
-    offerId: string;
-    action: 'approve' | 'later';
-} | {
+export type CallPairingManagement = (endpoint: 'status' | 'pair-code' | 'update-check' | 'update-start' | 'update-status' | 'connection-diagnostics', payload?: {
     ticket: string;
 }, signal?: AbortSignal) => Promise<unknown>;
 export declare function diagnosticUnsupported(): Error;
@@ -33,13 +31,4 @@ export declare function resolvePairingClient(describeHost: () => Promise<Harness
     status: () => Promise<unknown>;
     pairCode: () => Promise<unknown>;
     diagnose: (signal: AbortSignal) => Promise<unknown>;
-    decide: (offerId: string, action: "approve" | "later") => Promise<unknown>;
-} | {
-    host: HarnessRemoteHostDescription;
-    runtime: GateRuntimeInfo;
-    localOrigin: string;
-    status: () => Promise<unknown>;
-    pairCode: () => Promise<unknown>;
-    diagnose: (_signal: AbortSignal) => Promise<unknown>;
-    decide: (offerId: string, action: "approve" | "later") => Promise<any>;
 }>;

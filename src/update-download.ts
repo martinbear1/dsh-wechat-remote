@@ -187,10 +187,10 @@ export function auditNativeArchive(archive: Buffer, version: string): void {
       || !files.has('package/native/lib/index.js') || !files.has('package/native/lib/client.js')
       || !files.has('package/cordis.patch.yml') || !plugin || metadata?.version !== version
       || ['preinstall', 'install', 'postinstall', 'prepare', 'prepack', 'postpack'].some(key => manifest.scripts?.[key])) {
-    throw new Error('原生联动安装包结构或版本不匹配')
+    throw new Error('原生安装包结构或版本不匹配')
   }
   const release = metadata.catalog?.releases?.find((row: Release) => row.version === version)
-  if (!release) throw new Error('原生联动安装包缺少内置版本信息')
+  if (!release) throw new Error('原生安装包缺少内置版本信息')
   auditArchive(plugin, release)
 }
 

@@ -7,7 +7,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
 // Type-only: pulls the canonical Settings slot contract.
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
-import { CompanionPanel } from './CompanionPanel.tsx'
+import { InstallationResultPanel } from './InstallationResultPanel.tsx'
+import { readInstallationState } from './installation-state.js'
 import { featureView } from './feature-client.js'
 import type { CallPairingManagement } from './pairing-client.js'
 import { RemotePageStore } from './remote-page-store.js'
@@ -142,6 +143,12 @@ export function apply(ctx: HarnessRemoteClientContext): void {
   }, 'wechat connection diagnostics')
   const openPlugin = () => openPluginPage(name => ctx.get(name))
   const injected = () => ({ describeHost, callManagement, store, assistants, clawbotCall, featureCall, diagnostics, resourcesCall, resourceConnection })
+  const readInstallation = async (packageName: string) => {
+    const generation = connectionGeneration
+    const state = await readInstallationState(name => ctx.get(name), describeHost, packageName)
+    if (generation !== connectionGeneration) throw new Error('当前连接已变化')
+    return state
+  }
   ctx.slots.inject('settings.section', () =>
     ctx.slots.register(
       {
@@ -159,7 +166,9 @@ export function apply(ctx: HarnessRemoteClientContext): void {
     // registers the embedded core. Both owners use the same component/API.
     ctx.slots.inject(name, () => {
       const disposers = ['dsh-wechat-remote', '@harness-remote/dsh-wechat-remote'].map(key =>
-        ctx.slots.register({ name, key, inject: injected }, name === 'plugins.bundle.activation' ? CompanionPanel : HarnessRemoteSettings))
+        name === 'plugins.bundle.activation'
+          ? ctx.slots.register({ name, key, inject: () => ({ readInstallation }) }, InstallationResultPanel)
+          : ctx.slots.register({ name, key, inject: injected }, HarnessRemoteSettings))
       return () => disposers.forEach(dispose => dispose())
     })
   }

@@ -32,7 +32,6 @@ export interface NativeUpdateOptions {
   manager(): Manager | undefined
   sessions(): { list(request: object, signal: AbortSignal): Promise<{ items: { running: boolean }[] }> } | undefined
   release(): Promise<{ advice: UpdateAdvice; release?: Release; channel: 'stable' | 'preview' }>
-  otherBusy?(): boolean
 }
 export class NativeUpdateService {
   private state: NativeUpdateStatus = { phase: 'idle', message: '' }
@@ -133,7 +132,7 @@ export class NativeUpdateService {
       this.plan = undefined
       try {
         if (this.disposed) throw Error('连接已关闭，请重新打开设置')
-        if (this.operation || this.options.otherBusy?.()) throw Error('正在处理插件更新，请等待完成')
+        if (this.operation) throw Error('正在处理插件更新，请等待完成')
         if (['restart-required', 'unknown'].includes(status.phase)) throw Error(status.message)
         const { own } = await this.inventory()
         if (own.version !== this.options.runningVersion) throw Error('安装版本和运行版本不同，请先正常重启当前 DSH')
@@ -152,7 +151,7 @@ export class NativeUpdateService {
     return this.checking
   }
   start = (ticket: string): NativeUpdateStatus => {
-    if (this.disposed || this.operation || this.options.otherBusy?.()) throw Error('连接或更新状态已变化，请稍后重新检查')
+    if (this.disposed || this.operation) throw Error('连接或更新状态已变化，请稍后重新检查')
     const plan = this.plan
     if (!plan || !/^[a-f0-9]{48}$/.test(ticket) || ticket !== plan.ticket || plan.expires <= Date.now()) throw Error('更新确认已过期，请重新检查更新')
     this.plan = undefined
@@ -214,7 +213,7 @@ export class NativeUpdateService {
       const identity = (manager: Manager) => (manager as any)[symbols.original] ?? manager
       const liveManager = this.options.manager()
       if (!liveManager || identity(liveManager) !== identity(current.manager) || identity(current.manager) !== identity(before.manager)
-          || current.own.name !== plan.bundle || current.own.version !== state.previousVersion || this.options.otherBusy?.()) throw Error('安装状态已变化，未执行旧更新请求')
+          || current.own.name !== plan.bundle || current.own.version !== state.previousVersion) throw Error('安装状态已变化，未执行旧更新请求')
       this.save({ ...state, phase: 'installing', message: '原生插件管理器正在安装更新。网络较慢时请耐心等待，暂勿退出 DSH 或重复安装。' })
       admitted = true
       // Same public entry as native install UI: outer npm exact version uses

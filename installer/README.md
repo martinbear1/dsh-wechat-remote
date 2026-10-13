@@ -24,4 +24,4 @@ npx -y dsh-wechat-remote@latest
 
 Desktop 新装请在原生插件管理器中添加 `dsh-wechat-remote@latest`，已有安装使用插件内检查更新。本命令不安装、更新或停止 Desktop，也不支持 `--profile desktop`。提示待生效时，任务结束后完全退出并重新打开，无需重新配对。
 
-更新仅针对你选择的节点。未安装、已停用的另一端不会被自动安装或启用。
+Web 和 Desktop 分别管理各自的插件更新。若安装后提示需要重启，请先等待任务结束：Desktop 完整退出后重新打开；Web 重启实际服务，仅刷新网页不会生效。无需重新配对。

@@ -19,7 +19,7 @@ const { openPluginPage } = await load('page-navigation')
 const runtime = { profileScope: 'desktop', management: 'authenticated-rpc', localDoor: { port: 4000, state: 'listening' }, publicDoor: { port: 4001, state: 'listening' } }
 const fixture = () => {
   let calls = [], id = 'first', expire = Date.now() + 900000
-  const state = { gate: runtime, lan: { ip: 'fixture', port: 4001 }, publicRelay: { enabled: false, state: 'disabled' }, companionUpdate: { state: 'confirmation-required', message: 'fixture', offerId: 'a'.repeat(32) } }
+  const state = { gate: runtime, lan: { ip: 'fixture', port: 4001 }, publicRelay: { enabled: false, state: 'disabled' } }
   const store = new RemotePageStore(async () => ({ computerName: 'fixture', agentName: 'fixture', agentInstanceId: id, gate: runtime }), async (endpoint) => {
     calls.push(endpoint)
     await new Promise(resolve => setImmediate(resolve))
@@ -58,94 +58,6 @@ test('expired QR clears without regeneration; another host never inherits it', a
     assert.equal(f.store.getSnapshot().qr, null)
   } finally { f.store.dispose() }
 })
-test('one synchronous decision guard protects all entry points; viewing does not approve', async () => {
-  const f = fixture()
-  try {
-    await f.store.refresh()
-    assert.equal(f.calls.includes('companion-decision'), false)
-    await Promise.all([f.store.decide('approve'), f.store.decide('approve')])
-    assert.equal(f.calls.filter(x => x === 'companion-decision').length, 1)
-  } finally { f.store.dispose() }
-})
-
-test('new page cannot display old backend completion as present-day alignment', async () => {
-  const f = fixture()
-  try {
-    f.state.companionUpdate = { state: 'complete', message: '两端插件已对齐' }
-    await f.store.refresh()
-    assert.equal(f.store.getSnapshot().status.companionUpdate.state, 'unverified')
-    assert.equal(f.state.companionUpdate.state, 'complete', 'does not mutate backend snapshot')
-    f.state.plugin = { runningVersion: '1.7.12-rc.7', installedVersion: '1.7.12-rc.7' }
-    await f.store.refresh()
-    assert.equal(f.store.getSnapshot().status.companionUpdate.state, 'complete')
-  } finally { f.store.dispose() }
-})
-
-test('companion busy boundary refreshes native advice once, not on every status poll', async () => {
-  const busyStates = ['preparing', 'installing', 'verifying', 'recovering']
-  for (const terminal of ['complete', 'unavailable', 'restart-required', 'deferred']) {
-    let state = 'installing', reads = 0
-    const store = new RemotePageStore(async () => ({ computerName: 'fixture', agentName: 'fixture', gate: runtime }), async endpoint => {
-      if (endpoint === 'status') return { plugin: { runningVersion: '1.7.12' }, gate: runtime, companionUpdate: { state } }
-      assert.equal(endpoint, 'update-check', 'viewing cannot install or approve')
-      reads++
-      return { advice: { current: {} }, channel: 'stable', canInstall: false, ticket: '',
-        reason: busyStates.includes(state) ? '正在处理插件更新，请等待完成' : '', status: { phase: 'complete', message: '已生效' } }
-    })
-    let off
-    try {
-      await store.refresh()
-      off = store.nativeUpdates.subscribe(() => {})
-      await store.nativeUpdates.refresh(); assert.equal(reads, 1)
-      for (state of busyStates) await store.refresh()
-      assert.equal(reads, 1, 'busy progress must not repeatedly fetch the catalog')
-      state = terminal; await store.refresh(); await new Promise(resolve => setImmediate(resolve))
-      assert.equal(reads, 2); assert.equal(store.nativeUpdates.getSnapshot().check.reason, '')
-      await store.refresh(); assert.equal(reads, 2)
-    } finally { off?.(); store.dispose() }
-  }
-})
-
-test('companion completion while views are hidden is revalidated once on return', async () => {
-  let state = 'installing', reads = 0
-  const store = new RemotePageStore(async () => ({ computerName: 'fixture', agentName: 'fixture', gate: runtime }), async endpoint => {
-    if (endpoint === 'status') return { plugin: { runningVersion: '1.7.12' }, gate: runtime, companionUpdate: { state } }
-    assert.equal(endpoint, 'update-check'); reads++
-    return { advice: { current: {} }, canInstall: false, reason: state === 'installing' ? 'busy' : '', status: { phase: 'complete' } }
-  })
-  let off
-  try {
-    await store.refresh(); off = store.nativeUpdates.subscribe(() => {}); await store.nativeUpdates.refresh(); off()
-    state = 'complete'; await store.refresh(); assert.equal(reads, 1)
-    off = store.nativeUpdates.subscribe(() => {}); await new Promise(resolve => setImmediate(resolve))
-    assert.equal(reads, 2); assert.equal(store.nativeUpdates.getSnapshot().check.reason, '')
-  } finally { off?.(); store.dispose() }
-})
-
-test('missing companion state is not completion, and old Web never gets native checks', async () => {
-  const f = fixture()
-  try {
-    await f.store.refresh()
-    let invalidations = 0
-    f.store.nativeUpdates.invalidateCheck = () => invalidations++
-    f.state.companionUpdate = { state: 'installing' }; await f.store.refresh()
-    assert.equal(invalidations, 1)
-    delete f.state.companionUpdate; await f.store.refresh(); assert.equal(invalidations, 1)
-    f.state.companionUpdate = { state: 'complete' }; f.state.plugin = { runningVersion: '1.7.12' }
-    await f.store.refresh(); assert.equal(invalidations, 2)
-  } finally { f.store.dispose() }
-  let state = 'installing'
-  const webRuntime = { ...runtime, profileScope: 'web' }
-  const web = new RemotePageStore(async () => ({ computerName: 'web', agentName: 'web', gate: webRuntime }), async endpoint => {
-    assert.equal(endpoint, 'status')
-    return { plugin: { runningVersion: '1.7.12' }, gate: webRuntime, companionUpdate: { state } }
-  })
-  try {
-    await web.refresh(); state = 'complete'; await web.refresh()
-    assert.equal(web.nativeUpdates, undefined)
-  } finally { web.dispose() }
-})
-
 test('Web native capability selects one authenticated updater, with no update checks during ordinary status refresh', async () => {
   const calls = [], webRuntime = { ...runtime, profileScope: 'web', updates: 'native-v1' }
   const store = new RemotePageStore(async () => ({ computerName: 'fixture', agentName: 'fixture', gate: webRuntime }), async endpoint => {
@@ -223,9 +135,9 @@ test('actual client and service follow live manager capability; old Desktop with
 })
 
 test('host replacement disposes the old in-flight native check without transferring its reason', async () => {
-  let id = 'first', state = 'installing', release, checks = 0
+  let id = 'first', release, checks = 0
   const store = new RemotePageStore(async () => ({ computerName: 'fixture', agentName: 'fixture', agentInstanceId: id, gate: runtime }), async endpoint => {
-    if (endpoint === 'status') return { plugin: { runningVersion: '1.7.12' }, gate: runtime, companionUpdate: { state } }
+    if (endpoint === 'status') return { plugin: { runningVersion: '1.7.12' }, gate: runtime }
     assert.equal(endpoint, 'update-check'); checks++
     if (id === 'first') return new Promise(resolve => { release = resolve })
     return { advice: { current: {} }, canInstall: false, reason: '', status: { phase: 'complete' } }
@@ -234,7 +146,7 @@ test('host replacement disposes the old in-flight native check without transferr
   try {
     await store.refresh(); const old = store.nativeUpdates
     off = old.subscribe(() => {}); const pending = old.refresh()
-    id = 'second'; state = 'complete'; await store.refresh()
+    id = 'second'; await store.refresh()
     nextOff = store.nativeUpdates.subscribe(() => {}); await store.nativeUpdates.refresh()
     release({ advice: { current: {} }, canInstall: false, reason: 'old host busy', status: { phase: 'complete' } })
     await pending; await new Promise(resolve => setImmediate(resolve))

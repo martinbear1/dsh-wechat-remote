@@ -4,7 +4,6 @@ import { FishLogo } from '@deepseek-ai/dsh-client-ui-primitives'
 import styles from './HarnessRemoteSettings.module.css'
 import { PluginUpdateCard } from './PluginUpdateCard.tsx'
 import { NativeUpdateCard } from './NativeUpdateCard.tsx'
-import { CompanionPanel } from './CompanionPanel.tsx'
 import { type HarnessRemoteHostDescription,
   type CallPairingManagement } from './pairing-client.js'
 import { pageStore, type RemotePageStore } from './remote-page-store.js'
@@ -216,7 +215,6 @@ export function HarnessRemoteSettings({
         <h3 className={styles.updateHeading}>插件更新</h3>
         {localOrigin && store.updates ? <PluginUpdateCard store={store.updates} embedded /> : null}
         {store.nativeUpdates ? <NativeUpdateCard store={store.nativeUpdates} scope={runtime?.profileScope} embedded /> : null}
-        <CompanionPanel describeHost={describeHost} callManagement={callManagement} store={store} compact />
       </section>
       {assistants ? <AssistantPresetsPanel store={assistants} featureCall={featureCall} /> : null}
       {clawbotCall ? <ClawbotPanel call={clawbotCall} nodeName={agentName} hostName={hostName} /> : null}

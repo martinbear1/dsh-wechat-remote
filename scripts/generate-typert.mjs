@@ -193,7 +193,6 @@ try {
     'dsh-compatibility-api.ts',
     'secure-file.ts',
     'node-storage.ts',
-    'companion-updates.ts',
     'secure-lan.ts',
   ]
   for (const file of hostSources) {

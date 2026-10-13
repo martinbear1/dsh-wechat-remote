@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from 'react'
 import type { NativeUpdateStore } from './native-update-store.js'
 import styles from './HarnessRemoteSettings.module.css'
+import { manualRestartInstruction } from './installation-state.js'
 
 export function NativeUpdateCard({ store, scope = 'desktop', embedded = false }: { store: NativeUpdateStore; scope?: string; embedded?: boolean }): JSX.Element {
   const desktop = scope === 'desktop'
@@ -26,9 +27,7 @@ export function NativeUpdateCard({ store, scope = 'desktop', embedded = false }:
         <small className={styles.updateChecked}>仅更新当前端，保留配对与会话；{desktop ? '完成后需退出并重新打开。' : '完成后需正常重启此 Web 服务，仅刷新网页不会生效。'}</small></> : null}
     </> : null}
     {status?.phase !== 'idle' && status ? <div role="status" aria-live="polite">{busy ? <progress className={styles.updateProgress} aria-label={`${label} 插件更新中`} /> : null}
-      {status.phase === 'restart-required' ? <p className={styles.updatePeerNote}>{desktop
-        ? '任务结束后，选择「应用 → 退出」再打开 Desktop；无需重新配对，Web 不受影响。'
-        : '任务结束后，通过原启动方式正常重启此 Web 服务；仅刷新网页不会生效，无需重新配对，其他节点不受影响。'}</p>
+      {status.phase === 'restart-required' ? <p className={styles.updateNote}>{manualRestartInstruction(scope)} 无需重新配对。</p>
         : status.phase !== 'complete' ? <p>{status.message}</p> : null}</div> : null}
     {error ? <p role="alert">{error}</p> : null}
   </div>

@@ -7,7 +7,6 @@ export interface PairingOperations {
     status(): unknown;
     pairCode(): Promise<unknown>;
     unavailable(): boolean;
-    companionDecision?(id: string, action: 'approve' | 'later'): void;
     updateCheck?(): Promise<unknown>;
     updateStart?(ticket: string): unknown;
     updateStatus?(): Promise<unknown>;

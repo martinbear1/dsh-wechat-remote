@@ -8,17 +8,11 @@ const clientBuild = await build({ entryPoints: ['src/client/pairing-client.ts'],
 const { resolvePairingClient } = await import('data:text/javascript;base64,'
   + Buffer.from(clientBuild.outputFiles[0].contents).toString('base64'))
 const signal = () => new AbortController().signal
-test('companion decisions require exact local operator payload and stale choices are rejected', async () => {
-  const calls = [], id = 'a'.repeat(32)
+test('retired cross-endpoint operation is refused without invoking legacy callbacks', async () => {
   const h = createPairingHandler({ unavailable: () => false, status: () => ({}), pairCode: async () => ({}),
-    companionDecision(offer, action) { if (offer !== id) throw Error('stale'); calls.push(action) } })
-  for (const payload of [null, [], {}, { offerId: id, action: 'install-any' }, { offerId: id, action: 'approve', source: 'remote' }]) {
-    assert.equal((await h.call('companion-decision', payload, signal())).ok, false)
-  }
-  assert.equal(calls.length, 0)
-  assert.equal((await h.call('companion-decision', { offerId: id, action: 'approve' }, signal())).ok, true)
-  assert.equal((await h.call('companion-decision', { offerId: 'b'.repeat(32), action: 'approve' }, signal())).error.code, 'pairing/stale-offer')
-  assert.deepEqual(calls, ['approve'])
+    companionDecision() { assert.fail('removed operation must never run') } })
+  assert.equal((await h.call('companion-decision', {}, signal())).error.code, 'pairing/not-found')
+  assert.equal((await h.call('companion-decision', { offerId: 'a'.repeat(32), action: 'approve' }, signal())).ok, false)
 })
 function mount(id, extras = {}) {
   let removed = 0, calls = 0

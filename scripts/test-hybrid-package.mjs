@@ -28,6 +28,8 @@ const list = dir => fs.readdirSync(dir, { withFileTypes: true }).flatMap(e =>
 try {
   execFileSync('tar', ['-xf', artifact, '-C', stage], { windowsHide: true, timeout: 30000 })
   const outer = path.join(stage, 'package'), native = path.join(outer, 'native')
+  for (const file of list(outer)) assert.doesNotMatch(file, /(?:companion-updates|CompanionPanel|CompanionUpdateCard)\.(?:js|d\.ts)$/, 'retired update code must not ship in either entry style')
+  assert.doesNotMatch(fs.readFileSync(path.join(native, 'lib/client.js'), 'utf8'), /微信连接 · 联动更新|确认并等待空闲后更新|当前节点可独立使用，不会自动安装另一端/)
   const outerMeta = read(path.join(outer, 'package.json')), nativeMeta = read(path.join(native, 'package.json'))
   const selfResources = createRequire(path.join(outer, 'package.json'))
   for (const [entry, file] of [['resource-library', 'resource-library-component.js'], ['private-resource-prompt', 'private-resources/native.js']]) {

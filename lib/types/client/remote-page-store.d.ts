@@ -13,23 +13,6 @@ export interface GateStatus {
         runningVersion: string;
         installedVersion: string;
     };
-    companionUpdate?: {
-        state: string;
-        message: string;
-        offerId?: string;
-        target?: {
-            scope: 'desktop' | 'web';
-            fromVersion: string;
-            version: string;
-        };
-        versions?: {
-            current: 'desktop' | 'web';
-            running: string;
-            installed: string | null;
-            peer: 'desktop' | 'web';
-            peerInstalled: string | null;
-        };
-    };
     lan: {
         ip: string;
         port: number;
@@ -56,8 +39,6 @@ export interface PageSnapshot {
     localOrigin: string | null;
     qr: PairCode | null;
     error: string | null;
-    decisionError: string | null;
-    deciding: boolean;
 }
 export declare class RemotePageStore {
     private describeHost;
@@ -79,7 +60,6 @@ export declare class RemotePageStore {
     private client;
     refresh: () => Promise<void>;
     generateQr: () => Promise<void>;
-    decide: (action: "approve" | "later") => Promise<void>;
     dispose: () => void;
 }
 export declare function pageStore(describe: () => Promise<HarnessRemoteHostDescription>, call: CallPairingManagement): RemotePageStore;

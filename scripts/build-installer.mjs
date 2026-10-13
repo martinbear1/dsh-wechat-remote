@@ -8,7 +8,14 @@ import { auditArchive } from '../lib/update-download.js'
 const root = fileURLToPath(new URL('../', import.meta.url))
 const target = path.join(root, 'installer', 'lib')
 fs.mkdirSync(target, { recursive: true })
-for (const name of ['install-control', 'update-worker', 'update-session-verification', 'install-profile', 'install-archive', 'install-runtime', 'update-download', 'update-policy', 'secure-file', 'node-storage', 'companion-updates']) {
+const helpers = ['install-control', 'update-worker', 'update-session-verification', 'install-profile', 'install-archive', 'install-runtime', 'update-download', 'update-policy', 'secure-file', 'node-storage']
+// This directory contains build output only. Prune retired helper modules so
+// the installer wildcard cannot silently ship code deleted from the sources.
+if (fs.lstatSync(target).isSymbolicLink() || fs.realpathSync(target) !== path.resolve(target)) throw new Error('Installer build target redirected')
+for (const name of fs.readdirSync(target)) {
+  if (name.endsWith('.js') && ![...helpers.map(name => name + '.js'), 'native-recovery.js'].includes(name)) fs.rmSync(path.join(target, name))
+}
+for (const name of helpers) {
   await build({ entryPoints: [path.join(root, 'src', name + '.ts')], bundle: true,
     platform: 'node', target: 'node22', format: 'esm', outfile: path.join(target, name + '.js'),
     banner: { js: '/* Generated from the shared plugin installation sources. */' } })

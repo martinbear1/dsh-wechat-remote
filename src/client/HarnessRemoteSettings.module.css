@@ -66,21 +66,9 @@
 .pageDialogContent.pageDialogContent { min-height: 0; overflow-y: auto; }
 .helpText { color: var(--dsw-alias-label-secondary, #647084); font-size: 12px; line-height: 1.7; margin: 8px 0; }
 
-.companionCard {
-  border: 1px solid var(--dsw-alias-state-business-primary, #4e79ff);
-  border-left-width: 4px;
-  border-radius: 10px;
-  background: var(--dsw-alias-bg-layer-3, #fff);
-  padding: 14px 16px;
-  line-height: 1.6;
-  overflow-wrap: anywhere;
-}
-.companionCard strong { font-size: 14px; }
-.companionCard p { margin: 4px 0; font-size: 13px; }
-.companionCard small { color: var(--dsw-alias-label-secondary, #4d5564); }
-.companionCard progress { display: block; width: 100%; margin: 8px 0; accent-color: #4e79ff; }
-.companionCard[data-state='complete'] { border-color: var(--dsw-alias-state-success-primary, #1f9d68); }
-.companionCard[data-state='unavailable'], .companionCard[data-state='recovering'] { border-color: #b5861d; }
+.installationResult { line-height: 1.7; overflow-wrap: anywhere; }
+.installationResult > strong { font-size: 15px; }
+.installationResult p { margin: 8px 0; }
 
 /* Assistant modes are a compact owner-facing catalog, not an installation log. */
 .assistantsCard { padding: 14px 18px; border: 1px solid var(--dsw-alias-border-l2, #e2e6ee); border-radius: 12px; background: var(--dsw-alias-bg-layer-3, #fff); line-height: 1.5; overflow-wrap: anywhere; }
@@ -412,20 +400,15 @@
 .updateControl .updateLabel { font-size: 12px; font-weight: 500; }
 .updateControl .updateChecked { margin-top: 0; }
 .updateRow > .updateActions { margin-top: 0; }
-.updateEndpoint p, .companionInline p { margin: 4px 0; }
+.updateEndpoint p { margin: 4px 0; }
 .updateScope { color: var(--dsw-alias-label-tertiary, #7d8492); font-size: 12px; font-weight: 400; }
 .updateEndpoint + div { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--dsw-alias-border-l2, #ddd); }
 .updateActions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
 .updateActions .primaryButton { width: auto; min-height: 32px; padding: 0 12px; }
 .updateActions .secondaryButton { min-height: 32px; }
-.updatePeerNote { margin: 0; color: var(--dsw-alias-label-tertiary, #7d8492); font-size: 12px; }
+.updateNote { margin: 0; color: var(--dsw-alias-label-tertiary, #7d8492); font-size: 12px; }
 .updateDetails { color: var(--dsw-alias-label-secondary, #647084); font-size: 12px; }
 .updateDetails summary { cursor: pointer; margin-top: 4px; }
-.companionInline strong { font-size: 13px; font-weight: 500; }
-.companionInline small { display: block; color: var(--dsw-alias-label-secondary, #647084); font-size: 12px; margin-top: 4px; }
-.companionInline progress { display: block; width: 100%; height: 8px; margin: 8px 0; accent-color: var(--dsw-alias-state-business-primary, #4e79ff); }
-.companionInline[data-state='complete'] .updateCopy > strong { color: var(--dsw-alias-state-success-primary, #1f9d68); }
-.companionInline[data-state='unavailable'] .updateCopy > strong, .companionInline[data-state='recovering'] .updateCopy > strong { color: #b5861d; }
 .updateLabel { color: inherit; }
 .updateLabel[data-severity="none"] { color: #218b5c; }
 .updateLabel[data-severity="unknown"] { color: var(--text-secondary, #858b96); }

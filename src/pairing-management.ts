@@ -8,7 +8,6 @@ export interface PairingOperations {
   status(): unknown
   pairCode(): Promise<unknown>
   unavailable(): boolean
-  companionDecision?(id: string, action: 'approve' | 'later'): void
   updateCheck?(): Promise<unknown>
   updateStart?(ticket: string): unknown
   updateStatus?(): Promise<unknown>
@@ -53,16 +52,6 @@ export function createPairingHandler(operations: PairingOperations) {
           || typeof value.ticket !== 'string' || !/^[a-f0-9]{48}$/.test(value.ticket) || !operations.updateStart) return failure('update/bad-request', '无效的更新确认')
       try { return { ok: true, value: operations.updateStart(value.ticket) } }
       catch (error) { return failure('update/not-started', error instanceof Error ? error.message : '尚未启动更新，请重新检查') }
-    }
-    if (endpoint === 'companion-decision') {
-      const value = payload as { offerId?: unknown; action?: unknown }
-      if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).sort().join(',') !== 'action,offerId'
-          || typeof value.offerId !== 'string' || !/^[a-f0-9]{32}$/.test(value.offerId)
-          || !['approve', 'later'].includes(String(value.action)) || !operations.companionDecision) return failure('pairing/bad-request', '无效的更新选择')
-      try {
-        operations.companionDecision(value.offerId, value.action as 'approve' | 'later')
-        return { ok: true, value: operations.status() }
-      } catch { return failure('pairing/stale-offer', '更新通知已变化，请刷新后重新选择') }
     }
     if (!payload || typeof payload !== 'object' || Array.isArray(payload) || Object.keys(payload).length) {
       return failure('pairing/bad-request', '无效的配对请求')

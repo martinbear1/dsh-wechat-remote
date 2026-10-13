@@ -88,7 +88,7 @@ test('preparation does not render an earlier successful job; two check requests 
   } finally { store.dispose() }
 })
 
-test('native settings puts both endpoints inside one update block, with read-only rendering', async () => {
+test('native settings renders only the current endpoint, with read-only rendering', async () => {
   const source = (await build({ entryPoints: [fileURLToPath(new URL('../src/client/HarnessRemoteSettings.tsx', import.meta.url))],
     bundle: true, write: false, platform: 'node', format: 'cjs', jsx: 'automatic',
     external: ['react', 'react/jsx-runtime', '*.css', '@deepseek-ai/dsh-client-ui-primitives'], logLevel: 'silent' })).outputFiles[0].text
@@ -101,16 +101,12 @@ test('native settings puts both endpoints inside one update block, with read-onl
   const noAction = () => assert.fail('render must not refresh, install, approve, or generate a QR')
   const passive = value => ({ getSnapshot: () => value, subscribe: noAction, refresh: noAction, install: noAction })
   for (const current of ['desktop', 'web']) {
-    const peer = current === 'desktop' ? 'web' : 'desktop'
     const runtime = { profileScope: current, publicDoor: { state: 'listening' } }
     const snapshot = { loadState: 'ready', qrState: 'idle', runtime, localOrigin: current === 'web' ? 'http://localhost' : null,
-      error: null, decisionError: null, deciding: false,
-      status: { plugin: { runningVersion: '1.7.12', installedVersion: '1.7.12' }, lan: { ip: '127.0.0.1' },
-        companionUpdate: { state: 'confirmation-required', message: `${peer} update`, offerId: 'immutable-offer',
-          target: { scope: peer, fromVersion: '1.7.10', version: '1.7.12' },
-          versions: { current, running: '1.7.12', installed: '1.7.12', peer, peerInstalled: '1.7.10' } } } }
+      error: null,
+      status: { plugin: { runningVersion: '1.7.12', installedVersion: '1.7.12' }, lan: { ip: '127.0.0.1' } } }
     const diagnostics = { getSnapshot: () => ({ diagnosticState: 'idle', diagnosticReport: null }), subscribe: noAction, diagnose: noAction, cancel: noAction }
-    const store = { ...passive(snapshot), decide: noAction, generateQr: noAction,
+    const store = { ...passive(snapshot), generateQr: noAction,
       nativeUpdates: passive({ check: { ...initial, advice: { ...initial.advice, severity: 'none', label: '暂无可用更新' }, canInstall: false }, status: { phase: 'idle', message: '' } }),
       updates: undefined }
     const props = { store, diagnostics, describeHost: noAction, callManagement: noAction }
@@ -118,11 +114,9 @@ test('native settings puts both endpoints inside one update block, with read-onl
     assert.equal((html.match(/aria-label="插件更新"/g) || []).length, 1)
     const updateBlock = html.match(/<section[^>]*aria-label="插件更新"[^>]*>([\s\S]*?)<\/section>/)?.[0]
     assert(updateBlock, 'the unified update block is present')
-    assert.equal((updateBlock.match(/class="updateCard"/g) || []).length, 1, 'current and peer have no nested card borders')
+    assert.equal((updateBlock.match(/class="updateCard"/g) || []).length, 1, 'no nested card borders')
     assert.match(html, /当前端/)
-    assert.match(html, /同一主机/)
-    assert.match(html, new RegExp(`确认更新 ${peer === 'web' ? 'Web' : 'Desktop'}`))
-    assert(!html.includes('另一端插件</h4>'))
+    assert.doesNotMatch(html, /同一主机|另一端|联动更新|确认更新/)
     assert.match(html, /<summary>连接帮助<\/summary><\/details><\/section>$/, 'quiet help is the last page entry')
     assert.doesNotMatch(html, /<details[^>]*\bopen[=> ]/, 'help does not default to expanded')
     assert(!html.includes('aria-label="连接诊断"'), 'closed help does not mount or observe diagnostic content')
@@ -145,20 +139,18 @@ test('native settings puts both endpoints inside one update block, with read-onl
       store.nativeUpdates = passive({ check: { ...initial, canInstall: false }, status: { phase: 'restart-required', targetVersion: '1.7.13', message: 'Web 需要重启' } })
       const pendingHtml = renderToStaticMarkup(createElement(module.exports.HarnessRemoteSettings, props))
       assert.match(pendingHtml, /已安装，待重启 Web 服务/)
-      assert.match(pendingHtml, /仅刷新网页不会生效/)
+      assert.match(pendingHtml, /刷新网页不会生效/)
       assert.doesNotMatch(pendingHtml, /应用 → 退出/)
     }
     if (current === 'desktop') {
       snapshot.status.plugin.installedVersion = '1.7.13'
-      snapshot.status.companionUpdate = { state: 'self-restart-required', message: '等待当前 Desktop 重启，Web 未更新。',
-        versions: { current, running: '1.7.12', installed: '1.7.13', peer, peerInstalled: '1.7.10' } }
       store.nativeUpdates = passive({ check: { ...initial, canInstall: false }, status: { phase: 'restart-required', targetVersion: '1.7.13', message: 'Desktop 需要重启' } })
       const pendingHtml = renderToStaticMarkup(createElement(module.exports.HarnessRemoteSettings, { store, describeHost: noAction, callManagement: noAction }))
       assert.equal((pendingHtml.match(/应用 → 退出/g) || []).length, 1, 'one restart instruction in the unified update block')
       assert(!pendingHtml.includes('新版插件尚未生效，请完整重启 Desktop'), 'removed duplicate hero notice')
       assert(pendingHtml.includes('已安装，待重新打开 Desktop'))
       assert(pendingHtml.indexOf('应用 → 退出') > pendingHtml.indexOf('aria-label="插件更新"'))
-      assert(pendingHtml.includes('Web 不受影响'))
+      assert(!pendingHtml.includes('Web 不受影响'))
       store.nativeUpdates = passive({ check: { ...initial, canInstall: false }, status: { phase: 'failed', message: '安装失败，请核对' } })
       const failedHtml = renderToStaticMarkup(createElement(module.exports.HarnessRemoteSettings, { store, describeHost: noAction, callManagement: noAction }))
       assert(failedHtml.includes('更新未完成')); assert(failedHtml.includes('安装失败，请核对'))

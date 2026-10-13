@@ -72,8 +72,7 @@ import { mountPairingManagement } from './pairing-management.js'
 import { DshCompatibilityApi } from './dsh-compatibility-api.js'
 import { loadGateState, saveGateState, type GateState } from './gate-state.js'
 import { prepareNodeStorage } from './node-storage.js'
-import { mountCompanionUpdates } from './companion-updates.js'
-import { PluginUpdateService, acceptsUpdateRequest } from './update-service.js'
+import { PluginUpdateService } from './update-service.js'
 import { NativeUpdateService, supportsNativeUpdates } from './native-update-service.js'
 import { PLUGIN_VERSION } from './plugin-version.js'
 import { runConnectionDiagnostics } from './connection-diagnostics.js'
@@ -316,9 +315,8 @@ export function mountWechatGate(ctx: Context, startup?: LegacyGateStartup): () =
   const updater = new PluginUpdateService(ctx, { web: UPSTREAM_PORT, gate: PUBLIC_PORT, local: LOCAL_PORT })
   const nativeUpdater = new NativeUpdateService({ home: agentDshHome(ctx), scope: selectedGatePorts.profileScope, runningVersion: PLUGIN_VERSION,
     manager: () => ctx.get('pluginManager') as any, sessions: () => ctx.get('sessionController') as any,
-    release: () => updater.nativeRelease(), otherBusy: () => ['preparing', 'installing', 'verifying', 'recovering'].includes(companionUpdates.status().state) })
+    release: () => updater.nativeRelease() })
   ctx.effect(() => () => nativeUpdater.dispose(), 'wechat native updater')
-  const companionUpdates = mountCompanionUpdates(ctx, PLUGIN_VERSION, { isUpdating: nativeUpdater.isBusy })
   const compatibilityApi = new DshCompatibilityApi(ctx, UPSTREAM_PORT)
   let taskNotifications: TaskNotifications | undefined
 
@@ -448,7 +446,6 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
     return {
       gate: gateRuntimeSnapshot(),
       plugin: { runningVersion: PLUGIN_VERSION, installedVersion: installedPluginVersion() },
-      companionUpdate: companionUpdates.status(),
       lan: { ip: lanIPv4(), port: PUBLIC_PORT },
       // Status never releases a QR ticket; only the explicit pair-code operation
       // (authenticated native channel or restricted legacy loopback door) does.
@@ -483,17 +480,6 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
     }
     const url = new URL(req.url ?? '/', 'http://gate.local')
     if (url.pathname.startsWith('/gate/update/')) { void updater.handle(req, res); return }
-    if (url.pathname === '/gate/companion/decision') {
-      if (req.method !== 'POST' || !acceptsUpdateRequest(req, UPSTREAM_PORT, LOCAL_PORT)) { res.writeHead(403); res.end(); return }
-      void readBody(req, 1024).then(raw => {
-        const value = JSON.parse(raw)
-        if (!value || Object.keys(value).sort().join(',') !== 'action,offerId' || !/^[a-f0-9]{32}$/.test(value.offerId)
-            || !['approve', 'later'].includes(value.action)) throw new Error('Invalid choice')
-        companionUpdates.decide(value.offerId, value.action)
-        res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(gateStatusValue()))
-      }).catch(() => { res.writeHead(400); res.end('更新通知已变化，请刷新后重试') })
-      return
-    }
     if (url.pathname === '/pair') return servePairQR(req, res)
     if (url.pathname === '/pair/code') return servePairCode(req, res)
     if (url.pathname === '/gate/status') return serveGateStatus(req, res)
@@ -584,7 +570,6 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
     disposed = true
     void pairingManagement?.dispose().catch(error => console.warn('[wechat-gate] pairing route cleanup failed:', messageOf(error)))
     updater.dispose()
-    companionUpdates.dispose()
     secureLan.close()
     compatibilityApi.dispose()
     taskNotifications?.dispose()
@@ -908,7 +893,6 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
             platform: process.platform, profileKind: desktopHost ? 'desktop' : 'web',
             relayEnabled: publicRelayStatus.enabled === true, relayState: publicRelayStatus.state },
         }),
-        companionDecision: (id, action) => companionUpdates.decide(id, action),
         updateCheck: nativeUpdater.check, updateStart: nativeUpdater.start, updateStatus: nativeUpdater.status,
         unavailable: () => disposed,
       })

@@ -141,13 +141,18 @@ exports.apply({
       if (spec.name !== 'settings.section') {
         assert(['dsh-wechat-remote', '@harness-remote/dsh-wechat-remote'].includes(spec.key))
         nativeKeys.add(`${spec.name}:${spec.key}`)
-        assert.equal(typeof spec.inject().callManagement, 'function')
         assert.equal(typeof component, 'function')
-        assert.equal(spec.inject().store, sharedStore, 'every entry must share the exact same host store')
+        if (spec.name === 'plugins.bundle.config') {
+          assert.equal(typeof spec.inject().callManagement, 'function')
+          assert.equal(spec.inject().store, sharedStore, 'settings and native detail share one host store')
+        } else {
+          assert.equal(typeof spec.inject().readInstallation, 'function')
+          assert.equal(spec.inject().store, undefined, 'activation has no polling page or updater dependency')
+        }
         if (spec.name === 'plugins.bundle.config') assert.equal(component, settingsComponent, 'native detail and settings render the same full page')
         if (spec.name === 'plugins.bundle.activation') {
           const onDismiss = () => {}
-          const view = component({ ...spec.inject(), onDismiss })
+          const view = component({ ...spec.inject(), packageName: spec.key, onDismiss })
           assert.equal(view.type, 'NativeModal', 'activation must be prominent, not an inline footer below the plugin list')
           assert.equal(view.props.open, true)
           assert.equal(view.props.onClose, onDismiss, 'closing the native guide never approves an update')

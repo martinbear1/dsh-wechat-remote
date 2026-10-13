@@ -23,7 +23,7 @@ const call=async request=>{
   if(request.action==='login.poll')return window.fixture;
   throw Error('This visual fixture never performs mutations');
 };
-createRoot(document.querySelector('#root')).render(<ClawbotPanel call={call} nodeName="DeepSeek Harness · Desktop" hostName="Peach"/>);
+createRoot(document.querySelector('#root')).render(<ClawbotPanel call={call}/>);
 `, resolveDir: root, loader: 'tsx' }, bundle: true, write: false, outfile: path.join(out, 'preview.js'),
   format: 'iife', platform: 'browser', jsx: 'automatic', define: { 'process.env.NODE_ENV': '"production"' },
   plugins: [{ name: 'actual-css-modules', setup(api) {

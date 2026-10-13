@@ -267,7 +267,7 @@ function panelHarness(options = {}) {
   })
   function render() {
     assert(!disposed); cursor = 0; dirty = false
-    tree = module.exports.MyResourcesPanel({ call, nodeName: 'DeepSeek Harness', hostName: '测试节点', ...options })
+    tree = module.exports.MyResourcesPanel({ call, ...options })
     const pending = effects; effects = []; pending.forEach(effect => effect())
   }
   function nodes(value = tree) {
@@ -299,9 +299,25 @@ async function mounted(value = state(), options = {}) {
   assert.deepEqual(h.calls.map(c => c.request), [{ op: 'status' }])
   await h.resolve(0, ok(value)); return h
 }
+function resourceCards(h) {
+  const grids = h.nodes().filter(node => node.props?.['aria-label'] === '资源卡片')
+  assert.equal(grids.length, 1, 'all resource states belong to one grid')
+  const cards = h.nodes(grids[0]).filter(node => node.type === 'article')
+  assert.equal(cards.length, h.nodes().filter(node => node.type === 'article').length, 'no resource rows or cards outside the grid')
+  assert.equal(cards.at(-1)?.props['aria-label'], '定制专属助手')
+  assert.equal(cards.filter(node => node.props['aria-label'] === '定制专属助手').length, 1)
+  assert(!h.nodes(cards.at(-1)).some(node => node.type === 'button' || node.type === 'a'), 'discovery copy never starts an order, download or navigation')
+  assert(h.text(cards.at(-1)).includes('设置 → 联系客服'))
+  assert(!h.text().includes('当前节点：'))
+  assert(!h.text().includes('新聊天可使用新版'))
+  assert(!h.text().includes('已有聊天保留原版本'))
+  assert(!h.nodes().some(node => /^h[1-6]$/.test(node.type) && ['已安装', '可安装的资源'].includes(h.text(node))))
+  return cards
+}
 
 test('panel mounts with local status only; catalog refresh and installation each require a click', async () => {
-  const h = await mounted(state([])); assert(h.text().includes('点击刷新查看已购资源'))
+  const h = await mounted(state([])); assert(h.text().includes('点击右上角「刷新」领取安装'))
+  assert.equal(resourceCards(h).length, 1)
   await h.flush(); assert.equal(h.calls.length, 1)
   await h.click('刷新'); assert.deepEqual(h.calls[1].request, { op: 'refresh' })
   await h.resolve(1, ok(state())); assert(h.text().includes('故事伙伴'))
@@ -316,12 +332,13 @@ test('panel mounts with local status only; catalog refresh and installation each
 
 test('an unsuccessful or pending catalog read is not displayed as an empty resource catalog', async () => {
   const h = await mounted(state([]))
-  assert(!h.text().includes('暂无可安装的资源')); assert(h.text().includes('点击刷新'))
+  assert(!h.text().includes('暂未收到资源')); assert(h.text().includes('点击右上角「刷新」'))
   await h.click('刷新')
-  assert(!h.text().includes('暂无可安装的资源'))
+  assert(!h.text().includes('暂未收到资源'))
   await h.resolve(1, fail('resources-unavailable'))
   assert(h.text().includes('资源服务暂未就绪'))
-  assert(!h.text().includes('暂无可安装的资源'))
+  assert(!h.text().includes('暂未收到资源'))
+  assert.equal(resourceCards(h).length, 1)
   await h.click('刷新')
   await h.resolve(2, ok(state()))
   assert(h.text().includes('故事伙伴'))
@@ -465,23 +482,61 @@ test('only a successful catalog-bearing operation records an empty catalog as qu
 })
 
 test('empty cloud catalog is stated only after refresh completes successfully', async () => {
-  const h = await mounted(state([])); assert(!h.text().includes('暂无可安装的资源'))
-  await h.click('刷新'); assert(!h.text().includes('暂无可安装的资源'))
-  await h.resolve(1, ok(state([]))); assert(h.text().includes('暂无可安装的资源'))
+  const h = await mounted(state([])); assert(!h.text().includes('暂未收到资源'))
+  assert.equal(resourceCards(h).length, 1)
+  await h.click('刷新'); assert(!h.text().includes('暂未收到资源'))
+  await h.resolve(1, ok(state([]))); assert(h.text().includes('暂未收到资源，交付后点击刷新即可领取。'))
+  assert.equal(resourceCards(h).length, 1)
   assert.equal(h.calls.length, 2); h.unmount()
 })
 
-test('one local card and one remote row per resource; versions remain in closed disclosure sections', async () => {
+test('local and delivered resources share one grid with one card per resource and discovery last', async () => {
   const h = await mounted(state([item({ version: '1.0.0', state: 'installed', enabled: true }),
     item({ version: '1.1.0', state: 'installed', enabled: false }), item(),
     item({ version: '1.0.0', resourceId: 'other' }), item({ resourceId: 'other' })]))
-  const cards = h.nodes().filter(node => node.type === 'article')
-  assert.deepEqual(cards.map(node => node.props['data-resource-id']), ['story', 'other'])
+  const cards = resourceCards(h)
+  assert.deepEqual(cards.map(node => node.props['data-resource-id']), ['story', 'other', undefined])
+  assert.deepEqual(cards.slice(0, -1).map(node => node.props['data-resource-state']), ['local', 'delivery'])
   const histories = h.nodes().filter(node => node.type === 'details')
   assert.equal(histories.length, 2); assert(histories.every(node => !node.props.open))
-  assert(h.text().includes('已安装')); assert(h.text().includes('可安装的资源'))
-  assert(h.text().includes('已有聊天保留原版本'))
+  assert(h.text(cards[0]).includes('已停用')); assert(h.text(cards[1]).includes('待安装'))
+  assert(h.text(cards[0]).includes('可更新至 v1.2.0'))
+  assert(h.text(cards[0]).includes('旧会话使用对应版本'), 'historical stop guidance remains inside the closed version disclosure')
   assert(h.button('启用 故事伙伴 v1.1.0')); assert(h.button('停用 故事伙伴 v1.0.0'))
+  h.unmount()
+})
+
+test('any number of resources keeps installed cards first, delivered cards next and one discovery card last', async () => {
+  const rows = [
+    item({ resourceId: 'remote-d', name: 'D 待安装' }),
+    item({ resourceId: 'local-b', name: 'B 已装', state: 'installed', enabled: false }),
+    item({ resourceId: 'remote-a', name: 'A 待安装' }),
+    item({ resourceId: 'remote-c', name: 'C 待安装', state: 'installing' }),
+    item({ resourceId: 'local-a', name: 'A 已装', state: 'unavailable', presetId: 'native-local', enabled: true }),
+    item({ resourceId: 'remote-b', name: 'B 待安装', state: 'unavailable' }),
+  ]
+  const h = await mounted(state(rows))
+  const cards = resourceCards(h)
+  assert.equal(cards.length, 7, 'do not truncate the grid to a single row')
+  assert.deepEqual(cards.slice(0, -1).map(node => node.props['data-resource-id']), ['local-a', 'local-b', 'remote-a', 'remote-b', 'remote-c', 'remote-d'])
+  assert.deepEqual(cards.slice(0, -1).map(node => node.props['data-resource-state']), ['local', 'local', 'delivery', 'delivery', 'delivery', 'delivery'])
+  assert(h.text(cards[3]).includes('待重试')); assert(h.text(cards[4]).includes('安装中'))
+  assert.equal(h.calls.length, 1, 'reordering is presentation only')
+  h.unmount()
+})
+
+test('successful installation moves a delivered card to the local section without duplicating its family', async () => {
+  const installed = item({ resourceId: 'already', name: '已有资源', state: 'installed', enabled: true })
+  const h = await mounted(state([item(), installed]))
+  assert.deepEqual(resourceCards(h).slice(0, -1).map(node => node.props['data-resource-state']), ['local', 'delivery'])
+  await h.click('安装 故事伙伴 v1.2.0')
+  assert.deepEqual(h.calls[1].request, { op: 'install', resourceId: 'story', version: '1.2.0' })
+  await h.resolve(1, ok(state([item({ state: 'installed', enabled: true }), installed])))
+  const cards = resourceCards(h)
+  assert.equal(cards.length, 3)
+  assert.deepEqual(cards.slice(0, -1).map(node => node.props['data-resource-state']), ['local', 'local'])
+  assert.equal(cards.filter(node => node.props['data-resource-id'] === 'story').length, 1)
+  assert.equal(h.calls.length, 2, 'installation does not trigger another download or automatic start')
   h.unmount()
 })
 

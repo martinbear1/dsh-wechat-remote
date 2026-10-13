@@ -307,7 +307,10 @@ try {
     const manifest = JSON.parse(fs.readFileSync(path.join(project, kind === 'core' ? 'package.json' : 'installer/package.json'), 'utf8'))
     const owned = path.join(profileDir, 'embedded', kind), decoy = path.join(profileDir, 'node_modules', manifest.name)
     for (const directory of [owned, decoy]) {
-      fs.mkdirSync(directory, { recursive: true }); fs.writeFileSync(path.join(directory, 'package.json'), JSON.stringify({ ...manifest, icon: 'fixture-icon.svg' }))
+      fs.mkdirSync(directory, { recursive: true }); fs.writeFileSync(path.join(directory, 'package.json'), JSON.stringify(manifest))
+      const shippedIcon = path.join(directory, manifest.icon)
+      fs.mkdirSync(path.dirname(shippedIcon), { recursive: true })
+      fs.copyFileSync(path.join(project, 'lib/assets/wechat.png'), shippedIcon)
       fs.writeFileSync(path.join(directory, 'fixture-icon.svg'), fixtureIcon)
       const assetRoot = path.join(directory, kind === 'core' ? 'lib' : 'native/lib', 'assistant-presets')
       fs.mkdirSync(assetRoot, { recursive: true })
@@ -340,8 +343,8 @@ try {
       const localePath = resolvePluginResource(specifier + '/locale/zh.json', parent)
       assert(localePath.startsWith(owned + path.sep), 'display metadata cannot be read from the decoy package')
     }
-    // A generic fixture verifies the native manifest contract without shipping
-    // or implying permission to use any third-party brand artwork.
+    // Verify the shipped image/text through the actual host, then exercise the
+    // independent generic SVG and rejection cases. This is not a license grant.
     for (const { manifest, owned } of fixtures) {
       const manifestFile = path.join(owned, 'package.json'), parent = pathToFileURL(manifestFile).href
       const groupSpecifier = manifest.name + '/group-assistants'
@@ -374,9 +377,12 @@ try {
       }
       assert.equal(relocated.nativeCollaborationModule(), manifest.name + '/collaboration', 'the shipped authoring module chooses its actual core or Desktop outer package, not a hardcoded research package')
       const meta = readPluginMeta(manifest.name, parent)
-      assert.equal(meta?.icon, 'data:image/svg+xml;base64,' + Buffer.from(fixtureIcon).toString('base64'))
+      assert.equal(meta?.icon, 'data:image/png;base64,' + fs.readFileSync(path.join(project, 'lib/assets/wechat.png')).toString('base64'))
       assert.equal(meta?.title?.zh, '微信连接')
+      assert.equal(meta?.description?.zh, '连接微信小程序，随时与电脑上的助手协作。')
       assert.equal(meta?.error, undefined)
+      fs.writeFileSync(manifestFile, JSON.stringify({ ...manifest, icon: 'fixture-icon.svg' }))
+      assert.equal(readPluginMeta(manifest.name, parent)?.icon, 'data:image/svg+xml;base64,' + Buffer.from(fixtureIcon).toString('base64'))
       for (const invalidIcon of ['https://example.invalid/logo.svg', '../outside-fixture.svg', 'too-large.svg']) {
         fs.writeFileSync(path.join(path.dirname(owned), 'outside-fixture.svg'), fixtureIcon)
         fs.writeFileSync(path.join(owned, 'too-large.svg'), Buffer.alloc(256 * 1024 + 1))
@@ -405,7 +411,7 @@ try {
       'native request and result retain per-session mode', 'withdrawn selected default is reported without mutation',
       'actual native session creation with explicit mode and workspace while default is unavailable', 'no automatic message', 'ordinary default creation retained',
       'native profile resolver self-reference beats same-name package for ESM and CJS', 'native Chinese component metadata resolves within owning core/installer package',
-      'native manifest icon accepts contained SVG and rejects URL/traversal/oversize without losing display text', ...settingsChecks], liveProfileTouched: false }))
+      'native metadata loads the actual shipped PNG and Chinese subtitle in both installation styles; accepts contained SVG and rejects URL/traversal/oversize without losing display text', ...settingsChecks], liveProfileTouched: false }))
 } finally {
   await ctx?.fiber.dispose()
   featureAccess?.close()

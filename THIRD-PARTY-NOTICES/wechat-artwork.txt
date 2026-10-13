@@ -1,0 +1,17 @@
+WeChat artwork / 微信标识
+
+File: lib/assets/wechat.png (outer package: native/lib/assets/wechat.png)
+Source: https://pc.weixin.qq.com/ (apple-touch-icon-precomposed)
+Original image: https://res.wx.qq.com/a/wx_fed/assets/res/OTE0YTAw.png
+Retrieved: 2026-10-14
+SHA-256: 058bf1b3661dac713bb1807fbadbe1e6c2b1f5513d93ecae61c986ebb76b1edf
+
+The image is the unmodified official source file, displayed at the size chosen
+by DSH's native package artwork component. WeChat and its marks belong to Tencent.
+The plugin is independently developed and is not an official Tencent/WeChat product.
+The project's MIT license does not grant rights to Tencent trademarks or artwork.
+Official source availability does not by itself grant trademark endorsement or
+third-party product branding rights; confirm the intended use before public release.
+
+Brand reference: https://wechat.design/brand/main-brand/
+Brand resources: https://wechat.design/tool/brand/

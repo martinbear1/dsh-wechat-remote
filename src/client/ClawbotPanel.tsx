@@ -29,7 +29,7 @@ const quietMessages = new Set([
 ])
 
 /** Owner-facing channel controls. Not a second chat UI or a preset selector. */
-export function ClawbotPanel({ call, nodeName, hostName }: { call: ClawbotCall; nodeName?: string; hostName?: string }): JSX.Element {
+export function ClawbotPanel({ call }: { call: ClawbotCall }): JSX.Element {
   const [status, setStatus] = useState<ClawbotStatus>()
   const [sessions, setSessions] = useState<ClawbotSession[]>([])
   const [selected, setSelected] = useState('')
@@ -153,7 +153,6 @@ export function ClawbotPanel({ call, nodeName, hostName }: { call: ClawbotCall; 
       help="将微信私聊接到本节点的一个会话。绑定后选择会话，再开启接入；暂停不会删除绑定或取消已开始的任务。"
       actions={<>
         <div className={styles.bindingControls} aria-label="节点绑定">
-          <span className={ui.meta}>节点绑定</span>
           <span data-state={loginActive ? 'pending' : expired ? 'expired' : paired ? 'paired' : 'unpaired'} role="status">
             <StatusLabel state={!status || loginActive ? 'ongoing' : expired ? 'warning' : paired ? 'done' : 'off'}>{pairingState}</StatusLabel>
           </span>
@@ -166,8 +165,6 @@ export function ClawbotPanel({ call, nodeName, hostName }: { call: ClawbotCall; 
         </div>
         <ActionButton variant="ghost" aria-label="刷新" disabled={busy} onClick={() => void refresh()}>刷新</ActionButton>
       </>} />
-    <p className={`${ui.meta} ${styles.node}`}>当前节点：{nodeName || '读取中'}{hostName ? ' · ' + hostName : ''}</p>
-
     {showPairing && login ? <div className={styles.pairing}>
         {loginActive && login.status === 'wait' ? <img src={login.qrDataUrl} width="180" height="180" alt="微信 ClawBot 节点绑定码" /> : null}
         <div className={styles.pairingCopy}><strong role="status">{pairingLabel}</strong>

@@ -154,6 +154,26 @@ test('assistant UI separates creation from ready-made modes and preserves exact 
   assert(!builtinHtml.includes('安装教师助理'));assert(!builtinHtml.includes('安装项目助理'));assert(!builtinHtml.includes('安装定制助手'))
 })
 
+test('default cards always show teacher, project, designer without mutating the shared catalog',async()=>{
+  const AssistantPresetsPanel=await panelForSSR()
+  const names={teacher:'教师助理',project:'项目助理',designer:'助手设计师',general:'通用工作助理'}
+  for(const ids of [
+    ['teacher','project','designer'],['teacher','designer','project'],
+    ['project','teacher','designer'],['project','designer','teacher'],
+    ['designer','teacher','project'],['designer','project','teacher'],
+    ['designer','project'],['designer'],[],
+  ]) {
+    const templates=Object.freeze([...ids,'general'].map(id=>Object.freeze({id,name:names[id],description:'fixture'})))
+    const snapshot={...catalog,templates}
+    const store=new AssistantStore(async()=>snapshot);await store.load()
+    const html=renderToStaticMarkup(createElement(AssistantPresetsPanel,{store}))
+    const headings=[...html.matchAll(/<h4>([^<]*)<\/h4>/g)].map(match=>match[1])
+    assert.deepEqual(headings,[...['teacher','project','designer'].filter(id=>ids.includes(id)).map(id=>id==='designer'?'定制我的助手':names[id]),names.general])
+    assert.deepEqual(store.getSnapshot().catalog.templates.map(item=>item.id),[...ids,'general'])
+    assert.equal(store.getSnapshot().catalog,snapshot,'render keeps the original catalog object')
+  }
+})
+
 test('help has one tooltip source with an accessible unique description, never a duplicate browser title',async()=>{
   const AssistantPresetsPanel=await panelForSSR()
   const templates=[{id:'teacher',name:'教师助理'},{id:'project',name:'项目助理'},{id:'designer',name:'定制助手'}]

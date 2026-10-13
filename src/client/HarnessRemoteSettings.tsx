@@ -203,8 +203,8 @@ export function HarnessRemoteSettings({
       {diagnostics ? <div className={styles.connectionHelp}><ConnectionDiagnostics store={diagnostics} /></div> : null}
       </section>
       {assistants ? <AssistantPresetsPanel store={assistants} featureCall={featureCall} /> : null}
-      {clawbotCall ? <ClawbotPanel call={clawbotCall} nodeName={agentName} hostName={hostName} /> : null}
-      {resourcesCall ? <MyResourcesPanel key={resourceGeneration} call={resourcesCall} nodeName={agentName} hostName={hostName} onStart={startResource} /> : null}
+      {clawbotCall ? <ClawbotPanel call={clawbotCall} /> : null}
+      {resourcesCall ? <MyResourcesPanel key={resourceGeneration} call={resourcesCall} onStart={startResource} /> : null}
     </section>
   )
 }

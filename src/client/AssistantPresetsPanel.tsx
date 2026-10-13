@@ -14,6 +14,7 @@ const stateLabel = (item: any) => available(item) ? '已安装' : item.state ===
 
 /** Display aliases never rename an approved native preset or create a new ID. */
 const displayName = (item: any) => item.templateId === 'designer' || item.id === 'designer' ? '定制我的助手' : item.name
+const defaultTemplateIds = ['teacher', 'project', 'designer']
 
 function Help({ label, children }: { label: string; children: string }): JSX.Element {
   const tooltipId = useId()
@@ -60,6 +61,8 @@ export function AssistantPresetsPanel({ store, featureCall }: { store: Assistant
   const pending = drafts.filter((item: any) => item.state === 'draft')
   const history = drafts.filter((item: any) => item.source !== 'builtin' && item.state !== 'draft' && (!available(item) || item.replacement))
   const templates = catalog?.templates || []
+  // Presentation order is local; never reorder the shared/native catalog.
+  const defaultTemplates = defaultTemplateIds.map(id => templates.find((item: any) => item.id === id)).filter(Boolean)
   const installedFor = (id: string) => active.find((item: any) => item.templateId === id)
   const use = (item: any) => void store.start(item.presetId, lifetime.current?.signal)
   const toggleAssistant = (templateId: string, enabled: boolean) => {
@@ -117,7 +120,7 @@ export function AssistantPresetsPanel({ store, featureCall }: { store: Assistant
     {accessError || !allowed && feature ? <p className={ui.warning} role="status">{accessError || access?.message || '请联网核对资格，在小程序设置中兑换体验码。'}</p> : null}
     {componentUnavailable ? <p className={ui.copy} role="status">请在下方「包含的组件」中开启「微信群协作助手」。助手偏好和资料已保留。</p> : null}
     {catalog && (catalog.native?.supported || templates.some((item: any) => item.builtin)) ?
-      <div className={ui.grid}>{templates.filter((item: any) => ['teacher', 'project', 'designer'].includes(item.id)).map(template)}</div> : null}
+      <div className={ui.grid}>{defaultTemplates.map(template)}</div> : null}
     <fieldset className={styles.featureBody} disabled={!unlocked || accessBusy} aria-label="助手功能">
     {!catalog && !error ? <p role="status">正在读取当前电脑的助手…</p> : null}
     {catalog && !catalog.native?.supported ? <p role="status">{catalog.native?.reason || '当前 DSH 暂不支持安装助手，请先检查版本。'}</p> : null}
@@ -136,11 +139,11 @@ export function AssistantPresetsPanel({ store, featureCall }: { store: Assistant
         <ActionButton disabled={busy} onClick={() => store.dismissPreview()}>暂不安装</ActionButton></div>
     </div> : null}
     {pending.length ? <div><h4 className={styles.subheading}>待安装的助手</h4><div className={ui.grid}>{pending.map(entry)}</div></div> : null}
-    {active.some((item: any) => !['teacher', 'project', 'designer'].includes(item.templateId)) ? <div><h4 className={styles.subheading}>我已安装的其他助手</h4>
-      <div className={ui.grid}>{active.filter((item: any) => !['teacher', 'project', 'designer'].includes(item.templateId)).map(entry)}</div></div> : null}
-    {history.length || templates.some((item: any) => !['teacher', 'project', 'designer'].includes(item.id)) ? <details className={ui.details}>
+    {active.some((item: any) => !defaultTemplateIds.includes(item.templateId)) ? <div><h4 className={styles.subheading}>我已安装的其他助手</h4>
+      <div className={ui.grid}>{active.filter((item: any) => !defaultTemplateIds.includes(item.templateId)).map(entry)}</div></div> : null}
+    {history.length || templates.some((item: any) => !defaultTemplateIds.includes(item.id)) ? <details className={ui.details}>
       <summary>更多助手与安装记录</summary>
-      {catalog?.native?.supported ? <div className={ui.grid}>{templates.filter((item: any) => !['teacher', 'project', 'designer'].includes(item.id)).map(template)}</div> : null}
+      {catalog?.native?.supported ? <div className={ui.grid}>{templates.filter((item: any) => !defaultTemplateIds.includes(item.id)).map(template)}</div> : null}
       {history.length ? <details className={ui.details}><summary>以前安装的助手（{history.length}）</summary>
         <p>旧会话可能仍在使用旧模式；卸载前请核对，聊天与资料不会在这里删除。</p><div className={ui.grid}>{history.map(entry)}</div></details> : null}
     </details> : null}

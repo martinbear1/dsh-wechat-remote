@@ -7,7 +7,6 @@
 .preview p { margin: 8px 0; }
 .helpButton { display: inline-flex; align-items: center; justify-content: center; padding: 0; width: 14px; height: 14px; font-size: 10px; line-height: 1; border: 1px solid var(--dsw-alias-border-l2, #d7dce4); border-radius: 4px; background: transparent; color: var(--dsw-alias-label-tertiary, #7d8492); cursor: help; }
 .helpButton:focus-visible, .bindingManagement summary:focus-visible { outline: 2px solid var(--dsw-alias-state-business-primary, #4d6bfe); outline-offset: 3px; }
-.node { margin: -4px 0 12px; }
 .bindingControls { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 10px; }
 .bindingManagement { color: var(--dsw-alias-label-secondary, #647084); font-size: 12px; }
 .bindingManagement summary { cursor: pointer; padding: 4px 0; width: fit-content; }

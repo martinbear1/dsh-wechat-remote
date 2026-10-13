@@ -71,7 +71,7 @@ function harness() {
   vm.runInContext(source, context)
   function render() {
     assert(!disposed); cursor = 0; dirty = false
-    tree = module.exports.ClawbotPanel({ call, nodeName: 'DeepSeek Harness · Desktop', hostName: 'fixture-computer' })
+    tree = module.exports.ClawbotPanel({ call })
     const pending = effects; effects = []; pending.forEach(effect => effect())
   }
   function nodes(value = tree) {
@@ -252,10 +252,13 @@ test('replacing call releases old polling lane; late old finally does not unlock
   h.unmount()
 })
 
-test('pairing comes before target selection and identifies this node and its computer', async () => {
+test('desktop removes redundant node copy while keeping accessible binding state and actions', async () => {
   const h = await mounted(status({ state: 'disabled' }))
-  assert(h.text().includes('当前节点：DeepSeek Harness · Desktop · fixture-computer'))
-  assert(h.text().indexOf('节点绑定') < h.text().indexOf('接入会话'))
+  assert(!h.text().includes('当前节点：'))
+  assert(!h.nodes().some(n => h.text(n) === '节点绑定'))
+  const binding = h.find(n => n.props?.['aria-label'] === '节点绑定')
+  assert(h.text(binding).includes('未绑定'))
+  assert(h.text().indexOf('未绑定') < h.text().indexOf('接入会话'))
   assert(h.find(n => n.type === 'input' && n.props.role === 'switch').props.disabled)
   assert(!h.button('显示绑定码').props.disabled)
   assert(!h.nodes().some(n => n.type === 'img'))
@@ -555,6 +558,11 @@ test('active replacement status takes precedence over both a valid or an expired
 
 test('binding management is adjacent to binding status before session controls, with one explicit receive switch', async () => {
   const h = await mounted(status({ paired: true, enabled: true, state: 'ready', target: { id: 's1', title: 'A' } }))
+  assert(!h.text().includes('当前节点：'))
+  assert(!h.nodes().some(n => h.text(n) === '节点绑定'))
+  const binding = h.find(n => n.props?.['aria-label'] === '节点绑定')
+  assert(h.text(binding).includes('已绑定此节点'))
+  assert(h.text(binding).includes('绑定管理'))
   assert(h.text().indexOf('绑定管理') < h.text().indexOf('接入会话'))
   assert.equal(h.nodes().filter(n => n.props?.role === 'switch').length, 1)
   assert(h.nodes().some(n => n.props?.['data-dot-state'] === 'done'))

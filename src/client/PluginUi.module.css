@@ -17,7 +17,8 @@
 .clawbotIcon::before, .clawbotIcon::after { content: ''; position: absolute; width: 15%; height: 15%; top: 21.5%; background: currentColor; border-radius: 50%; }
 .clawbotIcon::before { left: 32%; }
 .clawbotIcon::after { right: 32%; }
-.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); gap: 12px; }
+/* Keep up to three equal card slots, including empty slots; narrow hosts wrap. */
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, max(220px, calc((100% - 24px) / 3))), 1fr)); gap: 12px; }
 .card { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 14px; border: 1px solid var(--dsw-alias-border-l2, #e4e5e8); border-radius: 10px; }
 .card h4, .card p { margin: 0; }
 .card h4 { font-size: 13px; font-weight: 600; }

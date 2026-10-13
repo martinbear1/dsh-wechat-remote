@@ -43,6 +43,11 @@ const sceneDefinitions = [
   { name: 'desktop-narrow', width: 400, scope: 'desktop' },
   { name: 'desktop-dark', width: 1040, scope: 'desktop', dark: true },
   { name: 'web-narrow-qr-warning', width: 400, scope: 'web', qr: true, warning: true },
+  { name: 'resources-empty', width: 1040, scope: 'desktop', resourceScene: 'empty' },
+  { name: 'resources-one', width: 1040, scope: 'desktop', resourceScene: 'one' },
+  { name: 'resources-many', width: 1040, scope: 'desktop', resourceScene: 'many' },
+  { name: 'resources-medium', width: 700, scope: 'desktop' },
+  { name: 'resources-history-open', width: 1040, scope: 'desktop', expandHistory: true },
 ]
 let fixture, activeHooks, suppressedSdkWarmups = 0
 const wrapped = new WeakMap()
@@ -108,7 +113,7 @@ function data(scene) {
     { id: 'project', name: '项目助理', description: '协助项目目标、里程碑、进度与协作反馈。' },
     { id: 'designer', name: '定制助手', description: '用对话设计适合自己的助手模式。' },
   ].map(item => ({ ...item, builtin: { enabled: item.id !== 'project', state: item.id === 'project' ? 'unknown' : 'installed', nativeState: item.id === 'project' ? 'disabled' : 'installed' } }))
-  const items = [
+  let items = [
     { resourceId: 'fixture-creative', version: '1.0.0', name: '私人创作助手', description: '保留已有角色与故事的第一版。',
       presetId: 'fixture-creative-1', enabled: true, state: 'installed' },
     { resourceId: 'fixture-creative', version: '1.1.0', name: '私人创作助手', description: '一起设计角色、场景与短故事。',
@@ -118,6 +123,12 @@ function data(scene) {
       presetId: 'fixture-review-1', enabled: false, state: 'installed' },
     { resourceId: 'fixture-adventure', version: '2.0.0', name: '文字冒险伙伴', description: '按你的偏好展开一段互动故事。', state: 'available' },
   ]
+  if (scene.resourceScene === 'empty') items = []
+  if (scene.resourceScene === 'one') items = [items[1]]
+  if (scene.resourceScene === 'many') items.push(...Array.from({ length: 4 }, (_, index) => ({
+    resourceId: 'fixture-more-' + index, name: '定制资源 ' + (index + 1), version: '1.0.0', state: 'available',
+    description: '交付到当前账号，点击安装后即可使用。',
+  })))
   fixture = {
     scope: scene.scope,
     feature: { schemaVersion: 1, nodeId: 'fixture-node', checkedAt: now, expiresAt: now + 60000,
@@ -156,18 +167,36 @@ function data(scene) {
 // replacement DSH header. Only the plugin-owned <section> is under test.
 const lightTokens = `:root{color-scheme:light;--dsw-alias-label-primary:#18191c;--dsw-alias-label-secondary:#626975;--dsw-alias-label-tertiary:#888f9b;--dsw-alias-label-primary-foreground:#fff;--dsw-alias-border-l2:#e3e5e8;--dsw-alias-border-l3:#c8cdd3;--dsw-alias-bg-layer-1:#fff;--dsw-alias-bg-layer-2:#f7f8fa;--dsw-alias-bg-layer-3:#fff;--dsw-alias-bg-layer-4:#fff;--dsw-alias-button-primary-fill:#18191c;--dsw-alias-button-primary-hover:#303238;--dsw-alias-interactive-bg-hover:#eff1f4;--dsw-alias-brand-primary:#18191c;--dsw-alias-state-business-primary:#4d6bfe;--dsw-alias-state-success-primary:#20ae69;--dsw-alias-state-warn-primary:#a56c17;--dsw-alias-state-error-primary:#d84c50;--dsw-static-deepseek-450:#5977ff}`
 const darkTokens = `:root{color-scheme:dark;--dsw-alias-label-primary:#e9edf2;--dsw-alias-label-secondary:#b2bac7;--dsw-alias-label-tertiary:#959dac;--dsw-alias-label-primary-foreground:#181a1e;--dsw-alias-border-l2:#3a404b;--dsw-alias-border-l3:#737b89;--dsw-alias-bg-layer-1:#17191e;--dsw-alias-bg-layer-2:#242730;--dsw-alias-bg-layer-3:#20232a;--dsw-alias-bg-layer-4:#2d323c;--dsw-alias-button-primary-fill:#e9edf2;--dsw-alias-button-primary-hover:#cbd3df;--dsw-alias-interactive-bg-hover:#303642;--dsw-alias-brand-primary:#e9edf2;--dsw-alias-state-warn-primary:#e0b36b;--dsw-alias-state-error-primary:#f98287}`
-const geometryScript = `function measure(){const main=document.querySelector('main');const panels=[...main.querySelectorAll('section[aria-label]')];const overflow=[...main.querySelectorAll('*')].filter(el=>{const c=getComputedStyle(el),r=el.getBoundingClientRect();return c.display!=='none'&&c.visibility!=='hidden'&&r.width&&r.height&&el.scrollWidth>el.clientWidth+1&&['visible','clip'].includes(c.overflowX)&&el.tagName!=='SELECT'}).map(el=>({tag:el.tagName,label:el.getAttribute('aria-label'),className:el.className,scroll:el.scrollWidth,client:el.clientWidth}));document.querySelector('#metrics').textContent=JSON.stringify({viewport:innerWidth,pageScroll:document.documentElement.scrollWidth,width:main.getBoundingClientRect().width,height:main.getBoundingClientRect().height,panels:panels.map(p=>({label:p.getAttribute('aria-label'),width:p.getBoundingClientRect().width,scroll:p.scrollWidth,client:p.clientWidth})),overflow});}window.addEventListener('load',measure);measure();`
+const geometryScript = `function measure(){
+  const main=document.querySelector('main');
+  const panels=[...main.querySelectorAll('section[aria-label]')];
+  const rect=el=>{const r=el.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height}};
+  const grid=main.querySelector('[aria-label="资源卡片"]');
+  const cards=[...grid.querySelectorAll(':scope > article')];
+  const groupCard=main.querySelector('section[aria-label="微信群协作助手"] article');
+  const overflow=[...main.querySelectorAll('*')].filter(el=>{const c=getComputedStyle(el),r=el.getBoundingClientRect();return c.display!=='none'&&c.visibility!=='hidden'&&r.width&&r.height&&el.scrollWidth>el.clientWidth+1&&['visible','clip'].includes(c.overflowX)&&el.tagName!=='SELECT'}).map(el=>({tag:el.tagName,label:el.getAttribute('aria-label'),className:el.className,scroll:el.scrollWidth,client:el.clientWidth}));
+  document.querySelector('#metrics').textContent=JSON.stringify({viewport:innerWidth,pageScroll:document.documentElement.scrollWidth,...rect(main),
+    panels:panels.map(p=>({label:p.getAttribute('aria-label'),...rect(p),scroll:p.scrollWidth,client:p.clientWidth})),
+    resources:{...rect(grid),columns:getComputedStyle(grid).gridTemplateColumns.split(' ').map(Number.parseFloat),
+      cards:cards.map(el=>({...rect(el),id:el.getAttribute('data-resource-id'),state:el.getAttribute('data-resource-state'),label:el.getAttribute('aria-label')})),
+      historyCount:grid.querySelectorAll('details').length,openHistories:grid.querySelectorAll('details[open]').length},groupCard:rect(groupCard),overflow});
+}window.addEventListener('load',measure);measure();`
 const results = []
 for (const scene of sceneDefinitions) {
   const props = data(scene)
   const markup = renderToStaticMarkup(React.createElement(HarnessRemoteSettings, props))
-  assert(markup.includes('微信群协作助手') && markup.includes('私人创作助手') && markup.includes('可更新至 v1.2.0'), 'All real feature panels must render')
+  assert(markup.includes('微信群协作助手') && markup.includes('定制你的专属助手'), 'All real feature panels must render')
+  assert(markup.includes('私人创作助手') === (scene.resourceScene !== 'empty'))
+  if (!scene.resourceScene || scene.resourceScene === 'many') assert(markup.includes('可更新至 v1.2.0'))
+  assert(!markup.includes('当前节点：') && !markup.includes('新聊天可使用新版，已有聊天保留原版本。'))
   assert(markup.includes('本节点已暂停') === Boolean(scene.warning))
   assert(!markup.includes('正在读取本地资源'), 'The resource panel must use its fixture state')
   const html = path.join(out, scene.name + '.html'), screenshot = path.join(out, scene.name + '.png')
   const contentWidth = Math.min(960, scene.width - 40)
-  const surfaceHeight = scene.width < 640 ? 3400 : scene.qr ? 2100 : scene.warning ? 1800 : 1500
-  fs.writeFileSync(html, `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; font-src data:"><title>隔离布局样例 · ${scene.name}</title><style>${lightTokens}${scene.dark ? darkTokens : ''}${css}html{background:var(--dsw-alias-bg-layer-1)}body{box-sizing:border-box;margin:0;padding:20px;font:13px/1.5 "Microsoft YaHei",system-ui,sans-serif;color:var(--dsw-alias-label-primary)}main{width:${contentWidth}px;max-width:100%;margin:auto}button,input,select{font-family:inherit}.fixtureNote{margin:0 0 12px;color:var(--dsw-alias-label-tertiary);font-size:11px}.fixtureHeader{margin-bottom:20px}.fixtureHeader h1{font-size:20px;line-height:1.4;margin:0 0 6px}.fixtureHeader p{font-size:12px;margin:4px 0;color:var(--dsw-alias-label-secondary)}.fixtureHeader small{font-size:11px;color:var(--dsw-alias-label-tertiary);font-weight:400}#metrics{display:none}</style></head><body><main><p class="fixtureNote">隔离静态布局样例 · 虚构数据 · 按钮不执行操作 · 原生 UI SDK ${nativeVersion}</p><header class="fixtureHeader"><h1>微信连接 <small>v${version}</small></h1><p>dsh-wechat-remote</p><p>连接微信，随时与电脑上的助手协作。</p></header>${markup}</main><output id="metrics"></output><script>${geometryScript}</script></body></html>`)
+  const surfaceHeight = scene.width < 640 ? 3400 : scene.qr || scene.expandHistory ? 2100 : scene.warning || scene.resourceScene === 'many' ? 1800 : 1500
+  const expandHistory = scene.expandHistory
+    ? `document.querySelectorAll('[aria-label="资源卡片"] details').forEach(detail=>{detail.open=true});` : ''
+  fs.writeFileSync(html, `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; font-src data:"><title>隔离布局样例 · ${scene.name}</title><style>${lightTokens}${scene.dark ? darkTokens : ''}${css}html{background:var(--dsw-alias-bg-layer-1)}body{box-sizing:border-box;margin:0;padding:20px;font:13px/1.5 "Microsoft YaHei",system-ui,sans-serif;color:var(--dsw-alias-label-primary)}main{width:${contentWidth}px;max-width:100%;margin:auto}button,input,select{font-family:inherit}.fixtureNote{margin:0 0 12px;color:var(--dsw-alias-label-tertiary);font-size:11px}.fixtureHeader{margin-bottom:20px}.fixtureHeader h1{font-size:20px;line-height:1.4;margin:0 0 6px}.fixtureHeader p{font-size:12px;margin:4px 0;color:var(--dsw-alias-label-secondary)}.fixtureHeader small{font-size:11px;color:var(--dsw-alias-label-tertiary);font-weight:400}#metrics{display:none}</style></head><body><main><p class="fixtureNote">隔离静态布局样例 · 虚构数据 · 按钮不执行操作 · 原生 UI SDK ${nativeVersion}</p><header class="fixtureHeader"><h1>微信连接 <small>v${version}</small></h1><p>dsh-wechat-remote</p><p>连接微信小程序，随时与电脑上的助手协作。</p></header>${markup}</main><output id="metrics"></output><script>${expandHistory}${geometryScript}</script></body></html>`)
   let metrics
   if (screenshots) {
     const profile = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-detail-layout-')))
@@ -181,9 +210,36 @@ for (const scene of sceneDefinitions) {
       assert(match, scene.name + ': browser geometry missing')
       metrics = JSON.parse(match[1].replaceAll('&quot;', '"').replaceAll('&amp;', '&'))
       assert(metrics.pageScroll <= metrics.viewport, scene.name + ': document overflow')
-      assert(Math.abs(metrics.width - contentWidth) < 1, scene.name + ': host content width not honored')
+      // Chromium versions differ in whether --window-size includes window chrome.
+      // The fixture column must still fill its actual available width, never overflow it.
+      const availableWidth = Math.min(contentWidth, metrics.viewport - 40)
+      assert(Math.abs(metrics.width - availableWidth) < 1, `${scene.name}: host content width ${metrics.width}, expected ${availableWidth}`)
       assert.deepEqual(metrics.overflow, [], scene.name + ': content overflow')
       for (const panel of metrics.panels) assert(panel.scroll <= panel.client + 1, scene.name + ': panel overflow: ' + panel.label)
+      const expectedColumns = scene.width < 640 ? 1 : scene.width < 900 ? 2 : 3
+      const resources = metrics.resources, cards = resources.cards
+      assert.equal(resources.columns.length, expectedColumns, scene.name + ': wrong responsive column count')
+      assert.equal(cards.length, scene.resourceScene === 'empty' ? 1 : scene.resourceScene === 'one' ? 2 : scene.resourceScene === 'many' ? 8 : 4,
+        scene.name + ': missing or duplicated resource cards')
+      assert.equal(cards.at(-1).label, '定制专属助手', scene.name + ': discovery card must stay last')
+      assert.equal(cards.filter(card => card.label === '定制专属助手').length, 1)
+      let deliverySeen = false
+      for (const card of cards.slice(0, -1)) {
+        if (card.state === 'delivery') deliverySeen = true
+        else assert.equal(deliverySeen, false, scene.name + ': local resources must precede deliveries')
+      }
+      for (const card of cards) {
+        assert(Math.abs(card.width - resources.columns[0]) < 1, scene.name + ': a card must occupy one equal grid slot')
+        assert(Math.abs(card.width - metrics.groupCard.width) < 1, scene.name + ': resource and assistant card widths differ')
+        assert(card.x >= resources.x - 1 && card.x + card.width <= resources.x + resources.width + 1, scene.name + ': card escapes grid')
+      }
+      if (expectedColumns > 1) assert(cards[0].width < resources.width / 1.5, scene.name + ': a single card must not stretch across the row')
+      for (let index = 1; index < Math.min(expectedColumns, cards.length); index++)
+        assert(Math.abs(cards[index].y - cards[0].y) < 1, scene.name + ': first-row cards must align')
+      if (scene.expandHistory) {
+        assert(resources.historyCount > 0, scene.name + ': no history fixture')
+        assert.equal(resources.openHistories, resources.historyCount, scene.name + ': version histories were not opened')
+      } else assert.equal(resources.openHistories, 0, scene.name + ': history should be collapsed initially')
       assert(metrics.height < surfaceHeight - 100, scene.name + ': full page exceeds screenshot surface')
       assert(fs.statSync(screenshot).size > 1000, scene.name + ': screenshot missing')
     } finally {

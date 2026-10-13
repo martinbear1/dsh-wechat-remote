@@ -9,13 +9,11 @@ interface StartState { call: MyResourcesCall; key: string; busy: boolean; error:
 interface StopIntent { call: MyResourcesCall; item: MyResourceItem }
 interface Props {
   call: MyResourcesCall
-  nodeName?: string
-  hostName?: string
   onStart?: (presetId: string, signal: AbortSignal) => Promise<void>
 }
 
 /** Local reads on open; downloads, activation and new conversations require separate clicks. */
-export function MyResourcesPanel({ call, nodeName, hostName, onStart }: Props): JSX.Element {
+export function MyResourcesPanel({ call, onStart }: Props): JSX.Element {
   const [snapshot, setSnapshot] = useState(() => ({ call, view: initialResourcesView() }))
   const [startState, setStartState] = useState<StartState | null>(null)
   const [stopIntent, setStopIntent] = useState<StopIntent | null>(null)
@@ -105,17 +103,15 @@ export function MyResourcesPanel({ call, nodeName, hostName, onStart }: Props): 
   return <section className={ui.panel} aria-label="我的资源" aria-busy={busy}>
     <SectionHeading icon="resources" title="我的资源" actions={<ActionButton variant="ghost" disabled={busy}
       onClick={() => void activeStore()?.refresh()}>{view.busy && !installing && !toggling ? '读取中…' : '刷新'}</ActionButton>} />
-    {nodeName ? <p className={`${ui.meta} ${styles.node}`}>当前节点：{nodeName}{hostName ? ` · ${hostName}` : ''}</p> : null}
     {!data && !error ? <p className={ui.copy} role="status">正在读取本地资源…</p> : null}
     {data?.notice ? <p className={ui.warning} role="status">{data.notice}</p> : null}
     {data && !data.supported && !data.notice ? <p className={ui.warning} role="status">当前 DSH 暂不支持安装资源，请更新后重试。</p> : null}
-    {groups.local.length ? <div className={styles.collection} aria-label="已安装的预设">
-      <h4 className={styles.sectionTitle}>已安装</h4>
-      <div className={ui.grid}>{groups.local.map(group => {
+    <div className={`${ui.grid} ${styles.resourceGrid}`} aria-label="资源卡片">
+      {groups.local.map(group => {
         const item = group.primary
         const otherDelivery = group.delivery.filter(release => release !== group.update)
         const historyErrors = group.local.some(release => itemErrors[resourceKey(release.resourceId, release.version)])
-        return <article key={group.resourceId} className={ui.card} data-resource-id={group.resourceId}>
+        return <article key={group.resourceId} className={`${ui.card} ${styles.resourceCard}`} data-resource-id={group.resourceId} data-resource-state="local">
           <div className={styles.versionHeading}><h4>{item.name}</h4><span className={ui.meta}>v{item.version}</span></div>
           {item.description ? <p className={ui.copy}>{item.description}</p> : null}
           <div className={styles.primaryActions}>{status(item)}{item.state === 'installed' && item.enabled && (!onStart || !item.presetId) ? null : controls(item)}</div>{feedback(item)}
@@ -123,7 +119,7 @@ export function MyResourcesPanel({ call, nodeName, hostName, onStart }: Props): 
             <div className={styles.versionCopy}><span className={ui.copy}>可更新至 v{group.update.version}</span>{feedback(group.update)}</div>
             {controls(group.update, { update: true })}
           </div> : null}
-          <details className={ui.details}>
+          <details className={`${ui.details} ${styles.history}`}>
             <summary>版本记录{historyErrors ? ' · 有操作未完成' : ''}</summary>
             <p className={ui.copy}>旧会话使用对应版本，停用后可能无法继续打开。</p>
             {group.local.map(release => versionRow(release, { history: true, historic: release !== item,
@@ -131,23 +127,27 @@ export function MyResourcesPanel({ call, nodeName, hostName, onStart }: Props): 
             {otherDelivery.length ? <><p className={styles.historyLabel}>其他可安装版本</p>{otherDelivery.map(release => versionRow(release))}</> : null}
           </details>
         </article>
-      })}</div>
-      {groups.local.some(group => group.update || group.local.length > 1) ? <p className={`${ui.copy} ${styles.note}`}>新聊天可使用新版，已有聊天保留原版本。</p> : null}
-    </div> : null}
-    {groups.delivery.length ? <div className={styles.collection} aria-label="可安装的资源">
-      <h4 className={styles.sectionTitle}>可安装的资源</h4>
-      <div>{groups.delivery.map(group => <article key={group.resourceId} className={styles.deliveryRow} data-resource-id={group.resourceId}>
-        <div className={styles.versionCopy}><div className={styles.versionHeading}><strong>{group.primary.name}</strong><span className={ui.meta}>v{group.primary.version}</span></div>
+      })}
+      {groups.delivery.map(group => <article key={group.resourceId} className={`${ui.card} ${styles.resourceCard}`} data-resource-id={group.resourceId} data-resource-state="delivery">
+          <div className={styles.versionHeading}><h4>{group.primary.name}</h4><span className={ui.meta}>v{group.primary.version}</span></div>
           {group.primary.description ? <p className={ui.copy}>{group.primary.description}</p> : null}{feedback(group.primary)}
-          {group.delivery.length > 1 ? <details className={ui.details}><summary>版本记录</summary>
+          <div className={styles.primaryActions}>
+            <StatusLabel state={group.primary.state === 'installing' ? 'ongoing' : group.primary.state === 'unavailable' ? 'warning' : 'off'}>
+              {group.primary.state === 'installing' ? '安装中' : group.primary.state === 'unavailable' ? '待重试' : '待安装'}
+            </StatusLabel>{controls(group.primary)}
+          </div>
+          {group.delivery.length > 1 ? <details className={`${ui.details} ${styles.history}`}><summary>版本记录</summary>
             {group.delivery.slice(1).map(item => versionRow(item))}
           </details> : null}
-        </div>{controls(group.primary)}
-      </article>)}</div>
-    </div> : null}
-    {data?.supported && !busy && !data.notice && !error ? !catalogRead && !groups.delivery.length
-      ? <p className={`${ui.copy} ${styles.note}`}>点击刷新查看已购资源与更新。</p>
-      : catalogRead && !hasItems ? <p className={ui.copy} role="status">暂无可安装的资源。</p> : null : null}
+      </article>)}
+      <article className={`${ui.card} ${styles.resourceCard} ${styles.discoverCard}`} aria-label="定制专属助手">
+        <div className={styles.discoverHeading}><span className={styles.discoverMark} aria-hidden="true">＋</span><h4>定制你的专属助手</h4></div>
+        <p className={ui.copy}>角色设定、创作陪伴、工作协作，按你的想法定制。</p>
+        <p className={styles.contactHint}>打开小程序「设置 → 联系客服」<br />咨询购买或定制</p>
+        <p className={ui.copy} role="status">{data?.supported && !busy && !data.notice && !error && catalogRead && !hasItems
+          ? '暂未收到资源，交付后点击刷新即可领取。' : '已购买？交付到你的账号后，点击右上角「刷新」领取安装。'}</p>
+      </article>
+    </div>
     {intent ? <div className={styles.confirm} role="alert">
       <p>使用「{intent.item.name}」v{intent.item.version} 的已有会话可能无法继续，确认停用？</p>
       <div className={ui.cardActions}><ActionButton disabled={busy} onClick={() => {

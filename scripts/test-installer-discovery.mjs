@@ -163,3 +163,15 @@ test('macOS process listing checks each command independently', () => {
   assert.equal(looksLikeDshProcess('node /tmp/test.mjs /usr/local/bin/dsh\nnode server.js\n'), false)
   assert.equal(looksLikeDshProcess('node /tmp/test.mjs /usr/local/bin/dsh\n/usr/bin/node /usr/local/bin/dsh web\n'), true)
 })
+
+test('running Desktop hosts do not block Web CLI installation on macOS or Windows', () => {
+  const desktopCommands = [
+    '/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness --expose-internals /Applications/DeepSeek Harness.app/Contents/Resources/app.asar/dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/index.js /Applications/DeepSeek Harness.app/Contents/Resources/app.asar/dsh /Users/test/.dsh/profiles/desktop',
+    '"C:\\Users\\test\\AppData\\Local\\Programs\\DeepSeek Harness\\DeepSeek Harness.exe" --expose-internals "C:\\Users\\test\\AppData\\Local\\Programs\\DeepSeek Harness\\resources\\app.asar\\dsh\\node_modules\\@deepseek-ai\\dsh-desktop-host\\lib\\index.js"',
+    'node /opt/dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/index.js /opt/dsh /home/test/.dsh/profiles/desktop',
+  ]
+  for (const command of desktopCommands) assert.equal(looksLikeDshProcess(command), false, command)
+  assert.equal(looksLikeDshProcess(desktopCommands.join('\n')), false)
+  assert.equal(looksLikeDshProcess(desktopCommands.join('\n') + '\n/usr/local/bin/node /usr/local/bin/dsh web'), true,
+    'a real Web host still must stop before replacing its dependencies')
+})

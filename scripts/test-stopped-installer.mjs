@@ -28,7 +28,7 @@ function snapshot(root) {
     return [name, fs.statSync(file).isDirectory() ? '<directory>' : fs.readFileSync(file).toString('base64')]
   }))
 }
-async function fixture(t, { running = [], owner, installedVersion = '1.7.13', failNative = false, packOwnerRace = false } = {}) {
+async function fixture(t, { running = [], owner, installedVersion = '1.7.13', failNative = false, packOwnerRace = false, peerRefresh = false } = {}) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-stopped-installer-')))
   const home = path.join(root, 'home'), profile = path.join(home, 'profiles/web'), assets = path.join(root, 'assets')
   const cliRoot = path.join(root, 'fixture-dsh'), cli = path.join(cliRoot, 'lib/bin.js')
@@ -49,10 +49,18 @@ async function fixture(t, { running = [], owner, installedVersion = '1.7.13', fa
   fs.mkdirSync(desktop)
   fs.writeFileSync(path.join(desktop, 'package.json'), JSON.stringify({ dependencies: { [native]: '1.7.14-rc.33' }, dsh: { profile: { bundles: [native] } } }))
   fs.writeFileSync(path.join(desktop, 'settings.json'), 'desktop fixture settings')
+  const desktopState = path.join(home, 'harness-remote/instances/desktop-fixture')
+  fs.mkdirSync(desktopState, { recursive: true })
+  const desktopFacts = path.join(desktopState, 'human-workflow-fixture-facts.json')
+  const factsBefore = JSON.stringify({ schema: 1, asOf: 1000, records: [] })
+  const factsAfter = JSON.stringify({ schema: 1, asOf: 2000, records: [] })
+  fs.writeFileSync(desktopFacts, factsBefore)
   const desktopBefore = snapshot(desktop), profileBefore = snapshot(profile), called = path.join(root, 'native-called')
   t.after(() => {
     try {
       assert.deepEqual(snapshot(desktop), desktopBefore)
+      assert.equal(fs.readFileSync(desktopFacts, 'utf8'), peerRefresh && fs.existsSync(called) ? factsAfter : factsBefore,
+        'Web installation/rollback must neither reject nor undo an independent Desktop refresh')
       for (const file of ['settings.json', 'credentials.yaml', 'session.json']) assert.equal(fs.readFileSync(path.join(home, file), 'utf8'), 'preserved ' + file)
       assert.equal(fs.existsSync(path.join(home, 'harness-remote/installation-offers')), false, 'NPX does not publish a Desktop update offer')
     } finally {
@@ -72,6 +80,9 @@ async function fixture(t, { running = [], owner, installedVersion = '1.7.13', fa
       if(name==='package/package.json')packageManifest=JSON.parse(tar.subarray(at,at+size));at+=Math.ceil(size/512)*512;}
     assert.equal(packageManifest.name,${JSON.stringify(expectedOwner)});assert.equal(packageManifest.version,${JSON.stringify(version)});
     fs.writeFileSync(${JSON.stringify(called)},'native add');
+    // Deterministic peer activity during native add, not an installer write:
+    // the old full-home checksum rejected even this timestamp-only change.
+    if(${JSON.stringify(peerRefresh)})fs.writeFileSync(${JSON.stringify(desktopFacts)},${JSON.stringify(factsAfter)});
     const installed=path.join(p,'node_modules',packageManifest.name);fs.mkdirSync(installed,{recursive:true});fs.writeFileSync(path.join(installed,'package.json'),JSON.stringify(packageManifest));
     m.dependencies[packageManifest.name]=process.argv[6];m.dsh.profile.bundles=[...new Set([...m.dsh.profile.bundles,packageManifest.name])];fs.writeFileSync(path.join(p,'package.json'),JSON.stringify(m));
     if(${JSON.stringify(failNative)}){fs.writeFileSync(path.join(p,'cordis.patch.yml'),'partial failed mutation');process.exit(9);}`)
@@ -113,7 +124,7 @@ async function fixture(t, { running = [], owner, installedVersion = '1.7.13', fa
   fs.writeFileSync(copy, source)
   const { install } = await import(pathToFileURL(copy).href), { calls } = await import(harnessUrl)
   const phases = []
-  return { home, profile, called, calls, phases, manifest, patch, original, profileBefore, racedManifest,
+  return { home, profile, called, calls, phases, manifest, patch, original, profileBefore, racedManifest, desktopFacts, factsAfter,
     install: () => install({ home, cli, assetsRoot: assets, open: false, startAfterInstall: false, bundledOnly: true, onProgress: row => phases.push(row.phase) }) }
 }
 
@@ -137,6 +148,25 @@ for (const owner of [undefined, native, core]) test(`stopped install ${owner ?? 
   assert.deepEqual(manifest.dsh.profile.bundles, ['other-plugin', expectedOwner])
   assert.equal(JSON.parse(fs.readFileSync(path.join(f.profile, 'node_modules', expectedOwner, 'package.json'))).version, version)
   assert.equal(f.calls.includes('pack'), expectedOwner === native)
+  assert.equal(fs.existsSync(path.join(f.profile, '.harness-remote-update.lock')), false)
+})
+
+for (const owner of [undefined, native, core]) test(`Desktop facts changing during Web ${owner ?? 'fresh'} install do not cause checksum rejection`, async t => {
+  const f = await fixture(t, { owner, peerRefresh: true })
+  assert.deepEqual(await f.install(), { version, changed: true, starting: false })
+  assert.deepEqual(f.phases, ['preparing', 'installing'], 'peer activity must not roll back a successful Web install')
+  assert.equal(fs.readFileSync(f.desktopFacts, 'utf8'), f.factsAfter)
+  const manifest = JSON.parse(fs.readFileSync(f.manifest))
+  assert.deepEqual([native, core].filter(name => Object.hasOwn(manifest.dependencies, name)), [owner ?? native])
+  assert.equal(fs.existsSync(path.join(f.profile, '.harness-remote-update.lock')), false)
+})
+
+for (const owner of [native, core]) test(`Web ${owner} native failure rolls back only Web, preserving concurrent Desktop changes`, async t => {
+  const f = await fixture(t, { owner, peerRefresh: true, failNative: true })
+  await assert.rejects(f.install(), /退出码 9/)
+  assert.deepEqual(snapshot(f.profile), f.profileBefore)
+  assert.equal(fs.readFileSync(f.desktopFacts, 'utf8'), f.factsAfter)
+  assert.deepEqual(f.phases, ['preparing', 'installing', 'rolling-back'])
   assert.equal(fs.existsSync(path.join(f.profile, '.harness-remote-update.lock')), false)
 })
 

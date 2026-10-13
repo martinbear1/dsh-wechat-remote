@@ -175,6 +175,42 @@ test('busy tasks before and after preparation never install or end a task', asyn
     assert.equal(f.state.installs.length, 0); assert.equal(f.state.running, true)
   }
 })
+
+test('native updates ignore peer data refreshes and keep each profile result independent', async t => {
+  // Models peer writes at deterministic await boundaries, not real Desktop
+  // execution or GUI acceptance. Only the current host's native manager runs.
+  for (const scope of ['web', 'desktop']) for (const owner of ['dsh-wechat-remote', '@harness-remote/dsh-wechat-remote']) {
+    await t.test(`${scope}/${owner}`, async t => {
+      const f = fixture(t, { scope })
+      const peer = scope === 'web' ? 'desktop' : 'web'
+      const directory = path.join(f.home, 'harness-remote/instances', peer)
+      const journalDirectory = path.join(f.home, 'harness-remote-updates', `native-${peer}`)
+      fs.mkdirSync(directory, { recursive: true }); fs.mkdirSync(journalDirectory, { recursive: true })
+      const facts = path.join(directory, 'human-workflow-fixture-facts.json')
+      const journal = path.join(journalDirectory, 'status.json')
+      fs.writeFileSync(facts, JSON.stringify({ asOf: 1000, records: [] }))
+      const peerJournal = JSON.stringify({ phase: 'installing', jobId: 'a'.repeat(32), targetVersion: '2.0.0' })
+      fs.writeFileSync(journal, peerJournal)
+      const bytes = owner.startsWith('@') ? coreFixture(f) : null
+      t.mock.method(globalThis, 'fetch', async () => { assert(bytes); return new Response(bytes) })
+      const nativeInstall = f.manager.installBundle
+      f.manager.installBundle = async (...args) => {
+        fs.writeFileSync(facts, JSON.stringify({ asOf: 2000, records: [] }))
+        return nativeInstall(...args)
+      }
+      f.service.start((await f.service.check()).ticket)
+      assert.equal((await finish(f.service)).phase, 'restart-required')
+      assert.equal(f.state.installs.length, 1)
+      f.service.dispose()
+      const restarted = new NativeUpdateService({ ...f.options, runningVersion: '1.8.0' })
+      t.after(() => restarted.dispose())
+      assert.equal((await restarted.status()).phase, 'complete')
+      assert.equal(JSON.parse(fs.readFileSync(facts, 'utf8')).asOf, 2000)
+      assert.equal(fs.readFileSync(journal, 'utf8'), peerJournal, 'peer result is never read as our result or rewritten')
+      assert.equal(f.state.installs.length, 1, 'recovery never repeats an install')
+    })
+  }
+})
 test('changed catalog, disabled owner, mixed owner, missing manager and unsupported scope refuse safely', async t => {
   for (const scenario of ['catalog', 'disabled', 'mixed', 'missing', 'scope', 'owner']) {
     const f = fixture(t, scenario === 'scope' ? { scope: '../desktop' } : {})

@@ -11,11 +11,11 @@ const bundle = async name => (await build({ entryPoints: [fileURLToPath(new URL(
   bundle: true, write: false, platform: 'node', format: 'cjs', jsx: 'automatic', external: ['react', 'react/jsx-runtime', '*.css'], logLevel: 'silent' })).outputFiles[0].text
 const code = await bundle('web-update-store.ts'), view = await bundle('PluginUpdateCard.tsx')
 const initial = { canInstall: true, mode: 'automatic', ticket: 'ticket', reason: '', advice: { label: '可更新', message: '', severity: 'info', targetVersion: '1.7.9', current: { agentVersion: '0.1.5', pluginVersion: '1.7.8' } } }
-async function harness(fetcher) {
+async function harness(fetcher, check = initial) {
   const module = { exports: {} }
   vm.runInNewContext(code, { module, exports: module.exports, fetch, AbortSignal, URL, Date, setTimeout, clearTimeout })
   const store = new module.exports.WebUpdateStore('http://127.0.0.1:3183', async (url, options) => {
-    if (url.endsWith('/check')) return new Response(JSON.stringify(initial))
+    if (url.endsWith('/check')) return new Response(JSON.stringify(check))
     return fetcher(url, options)
   })
   await store.refresh()
@@ -32,6 +32,33 @@ async function harness(fetcher) {
   return { store, click, elements }
 }
 const settle = async () => { for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve)) }
+
+for (const mode of ['none', 'manual', 'automatic']) test(`historical success is not this installation's success (${mode})`, async () => {
+  const priorSuccess = { jobId: 'earlier-rc55-job', phase: 'complete', terminal: true, ok: true, progress: 100,
+    message: '插件更新完成，DSH 已恢复；原节点无需重新配对。' }
+  const check = { ...initial, mode, channel: 'preview', canInstall: mode === 'automatic', lastResult: priorSuccess,
+    advice: { ...initial.advice, current: { agentVersion: '0.1.7-rc.2', pluginVersion: '1.7.13' } } }
+  const h = await harness(() => assert.fail('checking history must not start, poll, or resume an install'), check)
+  try {
+    assert.equal(h.store.getSnapshot().progress, null)
+    assert.equal(h.store.getSnapshot().check.advice.current.pluginVersion, '1.7.13')
+    assert.equal(h.store.getSnapshot().check.canInstall, mode === 'automatic', 'display changes cannot change update admission')
+    assert.equal(h.elements().some(n => n.type === 'progress'), false)
+    assert(!JSON.stringify(h.elements()).includes(priorSuccess.message))
+    await h.store.refresh()
+    assert.equal(h.store.getSnapshot().progress, null, 'rechecking cannot resurrect an old success')
+  } finally { h.store.dispose() }
+})
+
+for (const phase of ['failed', 'unknown', 'attention']) test(`historical ${phase} remains visible for explicit operator review`, async () => {
+  const lastResult = { phase, terminal: true, progress: 0, message: '需要核对的旧记录', ...(phase === 'failed' ? { ok: false } : {}) }
+  const h = await harness(() => assert.fail('read-only review'), { ...initial, canInstall: false, mode: 'none', lastResult })
+  try {
+    assert.equal(h.store.getSnapshot().progress.phase, phase)
+    assert(JSON.stringify(h.elements()).includes(lastResult.message))
+    assert.equal(h.elements().some(n => n.type === 'progress'), false)
+  } finally { h.store.dispose() }
+})
 
 test('confirmed rejection shows failure without 100% and consumes shared single-use ticket', async () => {
   const h = await harness(async () => new Response(JSON.stringify({ error: '下载失败' }), { status: 409 }))

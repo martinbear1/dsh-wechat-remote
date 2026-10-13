@@ -50,7 +50,11 @@ export class WebUpdateStore {
         if (data.activeJob?.statusOrigin) this.follow(data.activeJob)
         else if (data.lastResult?.phase === 'unknown') this.patch({ progress: data.lastResult })
         else if (data.mode === 'busy') this.patch({ progress: { phase: 'preparing', progress: 0, message: '更新仍在准备或等待确认，请稍后重新检查；不要重复安装。', terminal: true } })
-        else this.patch({ progress: data.lastResult ?? null })
+        // A legacy check returns its last saved receipt, not this page's
+        // installation result. The operator may since have reinstalled or
+        // changed versions. Only follow() can confirm success for the exact
+        // job being observed; retain failures/unconfirmed records for review.
+        else this.patch({ progress: data.lastResult?.ok === true ? null : data.lastResult ?? null })
       } catch (error) { this.patch({ check: null, error: error instanceof Error ? error.message : '暂时无法检查更新' }) }
       finally { this.patch({ checking: false }) }
     })().finally(() => { this.reading = undefined })

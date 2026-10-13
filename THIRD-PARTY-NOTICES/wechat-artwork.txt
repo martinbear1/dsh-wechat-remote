@@ -1,13 +1,15 @@
 WeChat artwork / 微信标识
 
-File: lib/assets/wechat.png (outer package: native/lib/assets/wechat.png)
-Source: https://pc.weixin.qq.com/ (apple-touch-icon-precomposed)
-Original image: https://res.wx.qq.com/a/wx_fed/assets/res/OTE0YTAw.png
+File: lib/assets/wechat.svg (outer package: native/lib/assets/wechat.svg)
+Source: https://pc.weixin.qq.com/ (Windows portal vector mark)
+Original vector: https://res.wx.qq.com/t/wx_fed/base/portal/windows/res/assets/logo.ca85d20a32.svg
 Retrieved: 2026-10-14
-SHA-256: 058bf1b3661dac713bb1807fbadbe1e6c2b1f5513d93ecae61c986ebb76b1edf
+SHA-256: d1c1c296796b3c4cbdce5b896c30815d3376a3766a4254bc1086ab70804f1e72
 
-The image is the unmodified official source file, displayed at the size chosen
-by DSH's native package artwork component. WeChat and its marks belong to Tencent.
+Both path contours and their proportions are retained from the official vector.
+The neutral fill is changed to #07C160; a matching 0 0 40 33 viewBox enables
+responsive display without distortion. No background or additional frame is drawn.
+DSH retains its standard native artwork frame. WeChat and its marks belong to Tencent.
 The plugin is independently developed and is not an official Tencent/WeChat product.
 The project's MIT license does not grant rights to Tencent trademarks or artwork.
 Official source availability does not by itself grant trademark endorsement or

@@ -31,11 +31,13 @@ try {
   for (const file of list(outer)) assert.doesNotMatch(file, /(?:companion-updates|CompanionPanel|CompanionUpdateCard)\.(?:js|d\.ts)$/, 'retired update code must not ship in either entry style')
   assert.doesNotMatch(fs.readFileSync(path.join(native, 'lib/client.js'), 'utf8'), /微信连接 · 联动更新|确认并等待空闲后更新|当前节点可独立使用，不会自动安装另一端/)
   const outerMeta = read(path.join(outer, 'package.json')), nativeMeta = read(path.join(native, 'package.json'))
-  const expectedIcon = fs.readFileSync('lib/assets/wechat.png')
-  assert.equal(createHash('sha256').update(expectedIcon).digest('hex'), '058bf1b3661dac713bb1807fbadbe1e6c2b1f5513d93ecae61c986ebb76b1edf')
+  const expectedIcon = fs.readFileSync('lib/assets/wechat.svg')
+  assert.equal(createHash('sha256').update(expectedIcon).digest('hex'), 'd1c1c296796b3c4cbdce5b896c30815d3376a3766a4254bc1086ab70804f1e72')
+  assert.match(expectedIcon.toString(), /viewBox="0 0 40 33"/)
+  assert.doesNotMatch(expectedIcon.toString(), /<(?:rect|image|script|foreignObject)\b|stroke=|background|(?:href|style)=/i, 'transparent native artwork has no background, border, remote content or active markup')
   for (const [directory, meta] of [[outer, outerMeta], [native, nativeMeta]]) {
-    assert.equal(meta.icon, directory === outer ? './native/lib/assets/wechat.png' : './lib/assets/wechat.png')
-    assert.deepEqual(fs.readFileSync(path.resolve(directory, meta.icon)), expectedIcon, 'both native installation paths carry the same original local artwork')
+    assert.equal(meta.icon, directory === outer ? './native/lib/assets/wechat.svg' : './lib/assets/wechat.svg')
+    assert.deepEqual(fs.readFileSync(path.resolve(directory, meta.icon)), expectedIcon, 'both native installation paths carry the same local vector artwork')
     assert(expectedIcon.length < 256 * 1024)
     assert.equal(meta.description, '连接微信小程序，随时与电脑上的助手协作。')
   }

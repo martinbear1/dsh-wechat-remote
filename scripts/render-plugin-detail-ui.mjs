@@ -236,6 +236,10 @@ for (const scene of sceneDefinitions) {
       if (expectedColumns > 1) assert(cards[0].width < resources.width / 1.5, scene.name + ': a single card must not stretch across the row')
       for (let index = 1; index < Math.min(expectedColumns, cards.length); index++)
         assert(Math.abs(cards[index].y - cards[0].y) < 1, scene.name + ': first-row cards must align')
+      for (let first = 0; first < cards.length; first += expectedColumns) {
+        for (const card of cards.slice(first, first + expectedColumns))
+          assert(Math.abs(card.height - cards[first].height) < 1, scene.name + ': cards on the same row must have equal heights, including discovery')
+      }
       if (scene.expandHistory) {
         assert(resources.historyCount > 0, scene.name + ': no history fixture')
         assert.equal(resources.openHistories, resources.historyCount, scene.name + ': version histories were not opened')

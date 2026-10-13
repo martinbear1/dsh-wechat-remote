@@ -1,4 +1,4 @@
-.resourceGrid { align-items: start; }
+.resourceGrid { align-items: stretch; }
 .resourceCard { box-sizing: border-box; min-height: 144px; }
 .versionHeading, .primaryActions, .versionRow, .update { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; min-width: 0; }
 .versionHeading { justify-content: space-between; }

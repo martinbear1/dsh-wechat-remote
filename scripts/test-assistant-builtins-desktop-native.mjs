@@ -310,7 +310,7 @@ try {
       fs.mkdirSync(directory, { recursive: true }); fs.writeFileSync(path.join(directory, 'package.json'), JSON.stringify(manifest))
       const shippedIcon = path.join(directory, manifest.icon)
       fs.mkdirSync(path.dirname(shippedIcon), { recursive: true })
-      fs.copyFileSync(path.join(project, 'lib/assets/wechat.png'), shippedIcon)
+      fs.copyFileSync(path.join(project, 'lib/assets/wechat.svg'), shippedIcon)
       fs.writeFileSync(path.join(directory, 'fixture-icon.svg'), fixtureIcon)
       const assetRoot = path.join(directory, kind === 'core' ? 'lib' : 'native/lib', 'assistant-presets')
       fs.mkdirSync(assetRoot, { recursive: true })
@@ -377,7 +377,7 @@ try {
       }
       assert.equal(relocated.nativeCollaborationModule(), manifest.name + '/collaboration', 'the shipped authoring module chooses its actual core or Desktop outer package, not a hardcoded research package')
       const meta = readPluginMeta(manifest.name, parent)
-      assert.equal(meta?.icon, 'data:image/png;base64,' + fs.readFileSync(path.join(project, 'lib/assets/wechat.png')).toString('base64'))
+      assert.equal(meta?.icon, 'data:image/svg+xml;base64,' + fs.readFileSync(path.join(project, 'lib/assets/wechat.svg')).toString('base64'))
       assert.equal(meta?.title?.zh, '微信连接')
       assert.equal(meta?.description?.zh, '连接微信小程序，随时与电脑上的助手协作。')
       assert.equal(meta?.error, undefined)
@@ -411,7 +411,7 @@ try {
       'native request and result retain per-session mode', 'withdrawn selected default is reported without mutation',
       'actual native session creation with explicit mode and workspace while default is unavailable', 'no automatic message', 'ordinary default creation retained',
       'native profile resolver self-reference beats same-name package for ESM and CJS', 'native Chinese component metadata resolves within owning core/installer package',
-      'native metadata loads the actual shipped PNG and Chinese subtitle in both installation styles; accepts contained SVG and rejects URL/traversal/oversize without losing display text', ...settingsChecks], liveProfileTouched: false }))
+      'native metadata loads the actual shipped transparent SVG and Chinese subtitle in both installation styles; accepts contained SVG and rejects URL/traversal/oversize without losing display text', ...settingsChecks], liveProfileTouched: false }))
 } finally {
   await ctx?.fiber.dispose()
   featureAccess?.close()

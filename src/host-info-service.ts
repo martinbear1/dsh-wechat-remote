@@ -12,9 +12,11 @@ import { fileURLToPath } from 'node:url'
 
 import type { Context } from '@deepseek-ai/cordis'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
-import { loadAgentDescriptor, startupDirectory, type AgentCapability } from './agent-metadata.js'
+import { agentDshHome, agentProfileScope, loadAgentDescriptor, startupDirectory, type AgentCapability } from './agent-metadata.js'
 import type { HostPlatformDescriptor } from './host-platform.js'
 import { PLUGIN_VERSION } from './plugin-version.js'
+import { readOtherEndpointInfo, type OtherEndpointInfo } from './other-endpoint-info.js'
+export type { OtherEndpointInfo } from './other-endpoint-info.js'
 
 export interface WechatHostDescribeRequest {}
 
@@ -91,6 +93,13 @@ export class WechatHostInfoService extends TypertRemoteService {
     super(ctx, 'wechatHost')
     this.gateRuntime = config.gateRuntime
     this.privateUpdatesReady = config.privateUpdatesReady
+  }
+
+  /** Explicit, optional read via the existing authenticated DSH channel only. */
+  @Remote('otherEndpoint')
+  async otherEndpoint(request: WechatHostDescribeRequest, signal: AbortSignal): Promise<OtherEndpointInfo> {
+    void request
+    return readOtherEndpointInfo({ home: agentDshHome(this.ctx), scope: agentProfileScope(this.ctx), signal })
   }
 
   @Remote('describe')

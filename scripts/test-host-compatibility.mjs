@@ -10,7 +10,10 @@ import { TurnActivityCompatibility } from '../lib/turn-activity.js'
 import { nativeInstallSessions, quiesceNativeHost } from '../lib/install-control.js'
 
 test('final generated manifest exposes identical strict schemas to old and new loaders', () => {
-  assert.equal(TYPERT.invocations.filter(i => !['humanTools', 'wechatClawbot', 'wechatFeatures', 'wechatImport', 'wechatResources'].includes(i.namespace)).length, 17)
+  assert.equal(TYPERT.invocations.filter(i => !['humanTools', 'wechatClawbot', 'wechatFeatures', 'wechatImport', 'wechatResources'].includes(i.namespace)).length, 18)
+  const otherEndpoint = TYPERT.invocations.find(i => i.namespace === 'wechatHost' && i.method === 'otherEndpoint')
+  assert(otherEndpoint, 'optional read-only summary is generated through the native protocol')
+  assert(otherEndpoint.parameters[0].codec.schema.safeParse({}).success)
   const resources = TYPERT.invocations.filter(i => i.namespace === 'wechatResources')
   assert.deepEqual(resources.map(i => i.method), ['control'])
   const resourceRequest = resources[0].parameters[0].codec.schema

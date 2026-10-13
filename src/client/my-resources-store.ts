@@ -24,31 +24,63 @@ export interface MyResourcesView {
   toggling: string | null
   error: string
   itemErrors: Record<string, string>
+  /** UI evidence only: an empty local status is not an empty cloud catalog. */
+  catalogRead: boolean
 }
 export const resourceKey = (resourceId: string, version: string): string => `${resourceId}@${version}`
 export const localActivationUnavailable = (item: MyResourceItem): boolean => item.state === 'unavailable'
   && Boolean(item.presetId) && typeof item.enabled === 'boolean'
-/** SemVer precedence only; no lexical sorting or floating version coercion. */
-function newerVersion(left: string, right: string): boolean {
+/** SemVer precedence only; null means the server supplied an unknown version shape. */
+export function compareResourceVersions(left: string, right: string): number | null {
   const pattern = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/
   const a = pattern.exec(left), b = pattern.exec(right)
-  if (!a || !b || [a, b].some(match => match[4]?.split('.').some(part => /^\d+$/.test(part) && part.length > 1 && part[0] === '0'))) return false
+  if (!a || !b || [a, b].some(match => match[4]?.split('.').some(part => /^\d+$/.test(part) && part.length > 1 && part[0] === '0'))) return null
   const numeric = (x: string, y: string) => x.length - y.length || (x === y ? 0 : x > y ? 1 : -1)
-  for (let index = 1; index <= 3; index++) { const order = numeric(a[index], b[index]); if (order) return order > 0 }
-  if (!a[4] || !b[4]) return !a[4] && Boolean(b[4])
+  for (let index = 1; index <= 3; index++) { const order = numeric(a[index], b[index]); if (order) return order }
+  if (!a[4] || !b[4]) return !a[4] && !b[4] ? 0 : !a[4] ? 1 : -1
   const ap = a[4].split('.'), bp = b[4].split('.')
   for (let index = 0; index < Math.max(ap.length, bp.length); index++) {
     const x = ap[index], y = bp[index]
-    if (x === undefined || y === undefined) return x !== undefined
+    if (x === undefined || y === undefined) return x === y ? 0 : x === undefined ? -1 : 1
     if (x === y) continue
     const nx = /^\d+$/.test(x), ny = /^\d+$/.test(y)
-    return nx && ny ? numeric(x, y) > 0 : nx !== ny ? !nx : x > y
+    return nx && ny ? numeric(x, y) : nx !== ny ? nx ? -1 : 1 : x > y ? 1 : -1
   }
-  return false
+  return 0
 }
+const newerVersion = (left: string, right: string): boolean => (compareResourceVersions(left, right) ?? 0) > 0
 export const isResourceUpdate = (item: MyResourceItem, items: MyResourceItem[]): boolean => item.state === 'available'
   && items.some(local => local.resourceId === item.resourceId && local.state === 'installed' && newerVersion(item.version, local.version))
-export const initialResourcesView = (): MyResourcesView => ({ data: null, busy: false, installing: null, toggling: null, error: '', itemErrors: {} })
+export const isLocalResource = (item: MyResourceItem): boolean => item.state === 'installed' || Boolean(item.presetId) || typeof item.enabled === 'boolean'
+export interface MyResourceGroup {
+  resourceId: string
+  local: MyResourceItem[]
+  delivery: MyResourceItem[]
+  /** Latest known local version, not the version of every existing session. */
+  primary: MyResourceItem
+  update?: MyResourceItem
+}
+/** Presentation grouping only. Never changes activation, downloaded files, preset IDs or sessions. */
+export function groupResources(items: readonly MyResourceItem[]): { local: MyResourceGroup[]; delivery: MyResourceGroup[] } {
+  const families = new Map<string, MyResourceItem[]>()
+  for (const item of items) { const family = families.get(item.resourceId) ?? []; family.push(item); families.set(item.resourceId, family) }
+  const local: MyResourceGroup[] = [], delivery: MyResourceGroup[] = []
+  const newestFirst = (a: MyResourceItem, b: MyResourceItem) => {
+    const aKnown = compareResourceVersions(a.version, a.version) !== null, bKnown = compareResourceVersions(b.version, b.version) !== null
+    return aKnown !== bKnown ? aKnown ? -1 : 1 : compareResourceVersions(b.version, a.version) ?? a.version.localeCompare(b.version)
+  }
+  for (const [resourceId, family] of families) {
+    const installed = family.filter(isLocalResource).sort(newestFirst), available = family.filter(item => !isLocalResource(item)).sort(newestFirst)
+    const primary = installed[0] ?? available[0]
+    const update = installed.length ? available.find(item => item.state === 'available' && newerVersion(item.version, installed[0].version)) : undefined
+    const group: MyResourceGroup = { resourceId, local: installed, delivery: available, primary, ...(update ? { update } : {}) }
+    if (installed.length) local.push(group)
+    else delivery.push(group)
+  }
+  const byName = (a: MyResourceGroup, b: MyResourceGroup) => a.primary.name.localeCompare(b.primary.name) || a.resourceId.localeCompare(b.resourceId)
+  return { local: local.sort(byName), delivery: delivery.sort(byName) }
+}
+export const initialResourcesView = (): MyResourcesView => ({ data: null, busy: false, installing: null, toggling: null, error: '', itemErrors: {}, catalogRead: false })
 const errors: Record<string, string> = {
   'resources-unavailable': '资源服务暂未就绪，请稍后刷新。',
   'resources-unbound': '请先在小程序中绑定当前节点。',
@@ -114,7 +146,8 @@ export class MyResourcesStore {
           if (request.op === 'setEnabled' && (!item || item.state !== 'installed' || item.enabled !== request.enabled)
             && !(item?.state === 'unavailable' && item.message)) nextErrors[targetKey!] = '启停结果尚未确认，请刷新后查看。'
         }
-        this.set({ data: result.value, itemErrors: nextErrors })
+        this.set({ data: result.value, itemErrors: nextErrors,
+          ...(request.op === 'refresh' || request.op === 'install' ? { catalogRead: true } : {}) })
       } catch (cause) {
         if (this.disposed) return
         const text = message(cause, request.op)
@@ -127,7 +160,7 @@ export class MyResourcesStore {
           ? { ...this.state.data, items: this.state.data.items.filter(item => item.state === 'installed' || item.presetId || typeof item.enabled === 'boolean') }
           : this.state.data
         // Ordinary network failures leave the last local/native facts and catalog visible.
-        this.set({ data, ...(clearDelivery ? { error: text, itemErrors: {} }
+        this.set({ data, ...(clearDelivery ? { error: text, itemErrors: {}, catalogRead: false }
           : targetKey ? { itemErrors: { ...this.state.itemErrors, [targetKey]: text } } : { error: text }) })
       } finally {
         if (!this.disposed) { this.flight = undefined; this.set({ busy: false, installing: null, toggling: null }) }

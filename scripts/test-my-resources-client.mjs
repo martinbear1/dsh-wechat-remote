@@ -13,7 +13,7 @@ const { MyResourcesStore, resourceKey, isResourceUpdate } = await import('data:t
 const panelBuild = await build({
   entryPoints: [fileURLToPath(new URL('../src/client/MyResourcesPanel.tsx', import.meta.url))],
   bundle: true, write: false, platform: 'node', format: 'cjs', target: 'node22', jsx: 'automatic',
-  external: ['react', 'react/jsx-runtime'],
+  external: ['react', 'react/jsx-runtime', '@deepseek-ai/dsh-client-ui-primitives'],
   plugins: [{ name: 'css-fixture', setup(api) {
     api.onLoad({ filter: /\.module\.css$/ }, () => ({ contents: 'export default {}', loader: 'js' }))
   } }],
@@ -228,7 +228,7 @@ test('dispose cancels queued invocation and ignores late results without waking 
   await f.store.refresh(); assert.equal(f.calls.length, 1)
 })
 
-function panelHarness() {
+function panelHarness(options = {}) {
   const cells = [], calls = []
   let cursor = 0, dirty = false, tree, effects = [], disposed = false, owner = 0
   const makeCall = owner => request => {
@@ -253,16 +253,21 @@ function panelHarness() {
       }
     },
   }
-  const jsx = { jsx: (type, props) => ({ type, props }), jsxs: (type, props) => ({ type, props }) }
+  const element = (type, props) => typeof type === 'function' ? type(props) : ({ type, props })
+  const jsx = { jsx: element, jsxs: element }
+  const primitives = {
+    Button: props => element('button', props), StateDot: props => element('i', props), Tooltip: props => props.children,
+  }
   const module = { exports: {} }
   vm.runInNewContext(panelBuild.outputFiles[0].text, {
     module, exports: module.exports,
-    require(name) { if (name === 'react') return react; if (name === 'react/jsx-runtime') return jsx; assert.fail('unexpected dependency: ' + name) },
+    require(name) { if (name === 'react') return react; if (name === 'react/jsx-runtime') return jsx; if (name === '@deepseek-ai/dsh-client-ui-primitives') return primitives; assert.fail('unexpected dependency: ' + name) },
+    AbortController,
     setInterval() { assert.fail('resource panel must not poll') }, setTimeout() { assert.fail('resource panel must not schedule background work') },
   })
   function render() {
     assert(!disposed); cursor = 0; dirty = false
-    tree = module.exports.MyResourcesPanel({ call, nodeName: 'DeepSeek Harness', hostName: '测试节点' })
+    tree = module.exports.MyResourcesPanel({ call, nodeName: 'DeepSeek Harness', hostName: '测试节点', ...options })
     const pending = effects; effects = []; pending.forEach(effect => effect())
   }
   function nodes(value = tree) {
@@ -289,8 +294,8 @@ function panelHarness() {
     unmount() { cells.forEach(cell => cell?.cleanup?.()); disposed = true },
   }
 }
-async function mounted(value = state()) {
-  const h = panelHarness(); await h.flush()
+async function mounted(value = state(), options = {}) {
+  const h = panelHarness(options); await h.flush()
   assert.deepEqual(h.calls.map(c => c.request), [{ op: 'status' }])
   await h.resolve(0, ok(value)); return h
 }
@@ -311,12 +316,12 @@ test('panel mounts with local status only; catalog refresh and installation each
 
 test('an unsuccessful or pending catalog read is not displayed as an empty resource catalog', async () => {
   const h = await mounted(state([]))
-  assert(h.text().includes('暂无资源'))
+  assert(!h.text().includes('暂无可安装的资源')); assert(h.text().includes('点击刷新'))
   await h.click('刷新')
-  assert(!h.text().includes('暂无资源'))
+  assert(!h.text().includes('暂无可安装的资源'))
   await h.resolve(1, fail('resources-unavailable'))
   assert(h.text().includes('资源服务暂未就绪'))
-  assert(!h.text().includes('暂无资源'))
+  assert(!h.text().includes('暂无可安装的资源'))
   await h.click('刷新')
   await h.resolve(2, ok(state()))
   assert(h.text().includes('故事伙伴'))
@@ -343,6 +348,8 @@ test('installed activation buttons use exact versions and never install or switc
   const h = await mounted(state([old, newer]))
   assert(h.text().includes('已启用')); assert(h.text().includes('已停用'))
   await h.click('停用 故事伙伴 v1.1.0')
+  assert.equal(h.calls.length, 1, 'stopping a historical preset needs explicit confirmation')
+  await h.click('确认停用')
   assert.deepEqual(h.calls[1].request, { op: 'setEnabled', resourceId: 'story', version: '1.1.0', enabled: false })
   assert(h.button('处理中… 故事伙伴 v1.1.0').props.disabled)
   assert(h.button('启用 故事伙伴 v1.2.0').props.disabled)
@@ -402,7 +409,7 @@ test('unavailable local resource shows retry activation and stop, then ordinary 
 test('installation authorization failure removes stale cloud cards but keeps local controls and a visible reason', async () => {
   const local = item({ version: '1.1.0', state: 'unavailable', presetId: 'local-preset', enabled: true })
   const h = await mounted(state([local, item()]))
-  await h.click('安装 故事伙伴 v1.2.0'); await h.resolve(1, fail('resources-forbidden'))
+  await h.click('更新 故事伙伴 v1.2.0'); await h.resolve(1, fail('resources-forbidden'))
   assert(!h.text().includes('v1.2.0')); assert(h.text().includes('当前账号无法领取'))
   assert(!h.button('重试启用 故事伙伴 v1.1.0').props.disabled)
   assert(!h.button('停用 故事伙伴 v1.1.0').props.disabled); h.unmount()
@@ -443,4 +450,107 @@ test('unmount ignores status, refresh and install replies and creates no timer o
     await next.resolve(1, ok(state([item({ state: 'installed' })])))
     await next.flush(); assert.equal(next.calls.length, 2)
   }
+})
+
+test('only a successful catalog-bearing operation records an empty catalog as queried', async () => {
+  const f = storeFixture(); await f.load(state([]))
+  assert.equal(f.store.getSnapshot().catalogRead, false)
+  let pending = f.store.refresh(); await flush(); f.calls[1].resolve(fail('resources-network')); await pending
+  assert.equal(f.store.getSnapshot().catalogRead, false)
+  pending = f.store.refresh(); await flush(); f.calls[2].resolve(ok(state([]))); await pending
+  assert.equal(f.store.getSnapshot().catalogRead, true)
+  pending = f.store.refresh(); await flush(); f.calls[3].resolve(fail('resources-forbidden')); await pending
+  assert.equal(f.store.getSnapshot().catalogRead, false, 'revoked account cannot inherit the previous account catalog evidence')
+  f.store.dispose()
+})
+
+test('empty cloud catalog is stated only after refresh completes successfully', async () => {
+  const h = await mounted(state([])); assert(!h.text().includes('暂无可安装的资源'))
+  await h.click('刷新'); assert(!h.text().includes('暂无可安装的资源'))
+  await h.resolve(1, ok(state([]))); assert(h.text().includes('暂无可安装的资源'))
+  assert.equal(h.calls.length, 2); h.unmount()
+})
+
+test('one local card and one remote row per resource; versions remain in closed disclosure sections', async () => {
+  const h = await mounted(state([item({ version: '1.0.0', state: 'installed', enabled: true }),
+    item({ version: '1.1.0', state: 'installed', enabled: false }), item(),
+    item({ version: '1.0.0', resourceId: 'other' }), item({ resourceId: 'other' })]))
+  const cards = h.nodes().filter(node => node.type === 'article')
+  assert.deepEqual(cards.map(node => node.props['data-resource-id']), ['story', 'other'])
+  const histories = h.nodes().filter(node => node.type === 'details')
+  assert.equal(histories.length, 2); assert(histories.every(node => !node.props.open))
+  assert(h.text().includes('已安装')); assert(h.text().includes('可安装的资源'))
+  assert(h.text().includes('已有聊天保留原版本'))
+  assert(h.button('启用 故事伙伴 v1.1.0')); assert(h.button('停用 故事伙伴 v1.0.0'))
+  h.unmount()
+})
+
+test('historical deactivation requires a separate confirmation, cancellation has no side effect', async () => {
+  const h = await mounted(state([item({ version: '1.0.0', state: 'installed', enabled: true }), item({ state: 'installed', enabled: true })]))
+  await h.click('停用 故事伙伴 v1.0.0')
+  assert(h.text().includes('已有会话可能无法继续')); assert.equal(h.calls.length, 1)
+  await h.click('取消'); assert(!h.text().includes('确认停用？')); assert.equal(h.calls.length, 1)
+  await h.click('停用 故事伙伴 v1.0.0'); await h.click('确认停用')
+  assert.deepEqual(h.calls[1].request, { op: 'setEnabled', resourceId: 'story', version: '1.0.0', enabled: false })
+  h.unmount(); await h.resolve(1, ok(state()))
+})
+
+test('start uses the exact installed native preset only and never downloads or changes activation', async () => {
+  const starts = [], result = deferred()
+  const h = await mounted(state([item({ state: 'installed', presetId: 'native-story-v2', enabled: true }),
+    item({ version: '1.0.0', state: 'installed', presetId: 'native-story-v1', enabled: true })]), {
+    onStart: (presetId, signal) => { starts.push({ presetId, signal }); return result.promise },
+  })
+  const click = h.button('开始使用 故事伙伴 v1.2.0').props.onClick
+  click(); click(); await h.flush()
+  assert.equal(starts.length, 1); assert.equal(starts[0].presetId, 'native-story-v2'); assert.equal(starts[0].signal.aborted, false)
+  assert(h.button('打开中… 故事伙伴 v1.2.0').props.disabled); assert(h.button('刷新').props.disabled)
+  assert.equal(h.calls.length, 1)
+  result.resolve(); await h.flush()
+  assert(!h.button('开始使用 故事伙伴 v1.2.0').props.disabled); assert.equal(h.calls.length, 1)
+  h.unmount()
+})
+
+test('disabled resource enables first, then an independent start click opens the new session', async () => {
+  const starts = [], local = item({ state: 'installed', presetId: 'native-story', enabled: false })
+  const h = await mounted(state([local]), { onStart: async (id) => { starts.push(id) } })
+  assert(!h.nodes().some(node => node.type === 'button' && String(node.props['aria-label']).startsWith('开始使用')))
+  await h.click('启用 故事伙伴 v1.2.0'); assert.equal(starts.length, 0)
+  await h.resolve(1, ok(state([{ ...local, enabled: true }]))); assert.equal(starts.length, 0)
+  await h.click('开始使用 故事伙伴 v1.2.0'); assert.deepEqual(starts, ['native-story'])
+  assert.deepEqual(h.calls.map(call => call.request.op), ['status', 'setEnabled']); h.unmount()
+})
+
+test('start failure is local and sanitized; a changed node or unmount aborts and ignores late starts', async () => {
+  const local = item({ state: 'installed', presetId: 'native-story', enabled: true })
+  const failed = await mounted(state([local]), { onStart: () => { throw Error('/private/token') } })
+  await failed.click('开始使用 故事伙伴 v1.2.0')
+  assert(failed.text().includes('暂时无法打开会话')); assert(!failed.text().includes('/private'))
+  assert(!failed.button('刷新').props.disabled); assert.equal(failed.calls.length, 1); failed.unmount()
+  for (const operation of ['node', 'unmount']) {
+    let signal
+    const pending = deferred()
+    const h = await mounted(state([local]), { onStart: (_, value) => { signal = value; return pending.promise } })
+    const stale = h.button('开始使用 故事伙伴 v1.2.0').props.onClick
+    await h.click('开始使用 故事伙伴 v1.2.0')
+    if (operation === 'node') await h.replaceCall(); else h.unmount()
+    assert.equal(signal.aborted, true)
+    pending.reject(Error('old node /private/path')); await h.flush()
+    if (operation === 'node') {
+      assert(!h.text().includes('暂时无法打开会话')); assert(!h.text().includes('故事伙伴'))
+      await h.resolve(1, ok(state([local]))); stale(); await h.flush(); assert.equal(h.calls.length, 2)
+      assert(!h.button('开始使用 故事伙伴 v1.2.0').props.disabled); h.unmount()
+    }
+  }
+})
+
+test('historical stop confirmation cannot outlive its node and stop the same ID on another node', async () => {
+  const rows = [item({ version: '1.0.0', state: 'installed', enabled: true }), item({ state: 'installed', enabled: true })]
+  const h = await mounted(state(rows))
+  await h.click('停用 故事伙伴 v1.0.0')
+  const staleConfirm = h.button('确认停用').props.onClick
+  await h.replaceCall(); await h.resolve(1, ok(state(rows)))
+  assert(!h.text().includes('确认停用？'))
+  staleConfirm(); await h.flush(); assert.equal(h.calls.length, 2)
+  h.unmount()
 })

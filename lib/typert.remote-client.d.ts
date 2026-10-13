@@ -10,7 +10,7 @@ import type { WechatDirectoryCreateRequest, WechatDirectoryCreateResult, WechatD
 import type { FeatureControlResult } from '@harness-remote/dsh-wechat-remote/features'
 import type { WechatHistoryWindowRequest, WechatHistoryWindowResult } from '@harness-remote/dsh-wechat-remote/history'
 import type { HistoryImportResult } from '@harness-remote/dsh-wechat-remote/history-import'
-import type { WechatHostDescribeRequest, WechatHostDescribeResult } from '@harness-remote/dsh-wechat-remote/host-info'
+import type { OtherEndpointInfo, WechatHostDescribeRequest, WechatHostDescribeResult } from '@harness-remote/dsh-wechat-remote/host-info'
 import type { AssistantDraftRequest, AssistantInstallRequest, AssistantVersionRequest, AutomationApproveRequest, AutomationPauseRequest, AutomationPreviewRequest, AutomationStatusRequest, AutomationTaskRequest, CoverPreviewRequest, HumanResult, ModeApprovalRequest, ModeVersionRequest } from '@harness-remote/dsh-wechat-remote/human-tools'
 import type { HumanAckWireRequest, HumanActionRequest } from '@harness-remote/dsh-wechat-remote/human-tools/protocol'
 import type { ResourceRequest, ResourceResult } from '@harness-remote/dsh-wechat-remote/resource-library/protocol'
@@ -79,6 +79,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
   }
   interface TypertRemoteNamespace$776563686174486f7374 {
     describe: (request: WechatHostDescribeRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatHostDescribeResult>>
+    otherEndpoint: (request: WechatHostDescribeRequest, signal?: AbortSignal) => Promise<RemoteResult<OtherEndpointInfo>>
   }
   interface TypertRemoteNamespace$776563686174496d706f7274 {
     control: (request: { action: string; inputJson?: string; }, signal?: AbortSignal) => Promise<RemoteResult<HistoryImportResult>>
@@ -132,6 +133,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'wechatHistory/page': (request: WechatHistoryWindowRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatHistoryWindowResult>>
     'wechatHistory/window': (request: WechatHistoryWindowRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatHistoryWindowResult>>
     'wechatHost/describe': (request: WechatHostDescribeRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatHostDescribeResult>>
+    'wechatHost/otherEndpoint': (request: WechatHostDescribeRequest, signal?: AbortSignal) => Promise<RemoteResult<OtherEndpointInfo>>
     'wechatImport/control': (request: { action: string; inputJson?: string; }, signal?: AbortSignal) => Promise<RemoteResult<HistoryImportResult>>
     'wechatResources/control': (request: ResourceRequest, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
   }

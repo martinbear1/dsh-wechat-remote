@@ -1,7 +1,9 @@
 /** Harness Remote's lazy page inside the native Web Settings navigation. */
 import { useId, useSyncExternalStore } from 'react'
-import { FishLogo } from '@deepseek-ai/dsh-client-ui-primitives'
+import { FishLogo, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import styles from './HarnessRemoteSettings.module.css'
+import ui from './PluginUi.module.css'
+import { ActionButton, StatusLabel } from './PluginUi.js'
 import { PluginUpdateCard } from './PluginUpdateCard.tsx'
 import { NativeUpdateCard } from './NativeUpdateCard.tsx'
 import { InstallationRestartNotice } from './InstallationRestartNotice.js'
@@ -17,6 +19,7 @@ import { ConnectionDiagnostics } from './ConnectionDiagnostics.js'
 import type { ConnectionDiagnosticStore } from './connection-diagnostic-store.js'
 import { MyResourcesPanel } from './MyResourcesPanel.js'
 import type { MyResourcesCall } from './my-resources-store.js'
+import { OtherEndpointSummary, type ReadOtherEndpoint } from './OtherEndpointSummary.js'
 const absentResourceConnection = { subscribe: (_listener: () => void) => () => {}, getSnapshot: () => 0 }
 export type { HarnessRemoteHostDescription } from './pairing-client.js'
 
@@ -29,18 +32,10 @@ export interface HarnessRemoteSettingsProps {
   clawbotCall?: ClawbotCall
   featureCall?: FeatureCall
   resourcesCall?: MyResourcesCall
+  startResource?: (presetId: string, signal: AbortSignal) => Promise<void>
+  readOtherEndpoint?: ReadOtherEndpoint
   resourceConnection?: { subscribe: (listener: () => void) => () => void; getSnapshot: () => number }
   readInstallation?: () => Promise<InstallationState>
-}
-
-function StatusDot({ ok, busy = false }: { ok: boolean; busy?: boolean }): JSX.Element {
-  return (
-    <span
-      className={styles.statusDot}
-      data-state={busy ? 'busy' : ok ? 'ready' : 'off'}
-      aria-hidden
-    />
-  )
 }
 
 function Capability({
@@ -55,13 +50,12 @@ function Capability({
   busy?: boolean
 }): JSX.Element {
   return (
-    <div className={styles.capability}>
-      <StatusDot ok={ok} busy={busy} />
-      <div className={styles.capabilityCopy}>
-        <strong>{title}</strong>
-        <span>{detail}</span>
-      </div>
-    </div>
+    <Tooltip label={`${title}：${detail}`} side="bottom">
+      <span className={styles.capability} tabIndex={0}>
+        <StatusLabel state={busy ? 'ongoing' : ok ? 'done' : 'off'}>{title}</StatusLabel>
+        <span className={styles.capabilityDetail}>{detail}</span>
+      </span>
+    </Tooltip>
   )
 }
 
@@ -74,6 +68,8 @@ export function HarnessRemoteSettings({
   clawbotCall,
   featureCall,
   resourcesCall,
+  startResource,
+  readOtherEndpoint,
   resourceConnection = absentResourceConnection,
   readInstallation,
 }: HarnessRemoteSettingsProps): JSX.Element {
@@ -111,13 +107,15 @@ export function HarnessRemoteSettings({
   const installation = { readInstallation, runningVersion: status?.plugin?.runningVersion ?? host?.pluginVersion,
     installedVersion: status?.plugin?.installedVersion ?? host?.installedPluginVersion,
     scope: runtime?.profileScope, hostIdentity: host?.agentInstanceId ?? host?.computerName }
+  const currentVersion = { agentVersion: host?.agentVersion, pluginVersion: installation.runningVersion }
 
   return (
     <section className={styles.root} aria-labelledby={titleId}>
+      <section className={ui.panel} aria-label="连接与管理">
       <div className={styles.hero}>
         <div className={styles.identity}>
           <span className={styles.mark} aria-hidden>
-            <FishLogo size={28} />
+            <FishLogo size={22} />
           </span>
           <div className={styles.identityCopy}>
             <h3 id={titleId}>微信连接</h3>
@@ -128,14 +126,13 @@ export function HarnessRemoteSettings({
             </p>
           </div>
         </div>
-        <span className={styles.overall} data-ready={loadState === 'ready'}>
-          <StatusDot ok={loadState === 'ready'} busy={loadState === 'loading'} />
+        <StatusLabel state={loadState === 'loading' ? 'ongoing' : loadState === 'ready' ? 'done' : 'error'}>
           {loadState === 'loading'
             ? '检测中'
             : loadState === 'ready'
               ? '服务正常'
               : '暂不可用'}
-        </span>
+        </StatusLabel>
       </div>
 
       <div className={styles.capabilities}>
@@ -162,44 +159,28 @@ export function HarnessRemoteSettings({
       {error !== null ? (
         <div className={styles.notice} role="status">
           <span>{error}</span>
-          <button type="button" onClick={() => void loadStatus()}>
-            重试
-          </button>
+          <ActionButton onClick={() => void loadStatus()}>重试</ActionButton>
         </div>
       ) : null}
 
-      {qrState === 'idle' ? (
-        <div className={styles.connectCard}>
-          <div>
-            <strong>添加到微信</strong>
-            <p>打开「Agent远程管理助手」→ 添加节点，扫描配对二维码。</p>
-          </div>
-          <button
-            type="button"
-            className={styles.primaryButton}
-            disabled={loadState !== 'ready'}
-            onClick={() => void generateQr()}
-          >
-            生成二维码
-          </button>
-        </div>
-      ) : (
         <div className={styles.pairingCard}>
           <div className={styles.pairingHead}>
             <div>
-              <strong>扫描二维码</strong>
-              <p>小程序「设置 → 添加节点」</p>
+              <strong>添加到微信</strong>
+              <p>打开「Agent远程管理助手」小程序 → 添加节点，扫码配对。</p>
+              {qrState === 'ready' && qr ? <p className={styles.securityNote}>
+                {qr?.mode === 'public-relay' ? '远程内容端到端加密。' : '当前可通过同一局域网连接。'}
+              </p> : null}
             </div>
-            <button
-              type="button"
-              className={styles.secondaryButton}
+            <ActionButton
+              variant={qrState === 'idle' ? 'primary' : 'outline'}
               disabled={qrState === 'loading' || loadState !== 'ready'}
               onClick={() => void generateQr()}
             >
-              {qrState === 'loading' ? '生成中…' : '重新生成'}
-            </button>
+              {qrState === 'loading' ? '生成中…' : qrState === 'idle' ? '生成二维码' : '重新生成'}
+            </ActionButton>
           </div>
-          <div className={styles.qrArea}>
+          {qrState !== 'idle' ? <div className={styles.qrArea}>
             {loadState === 'ready' && qrState === 'ready' && qr !== null ? (
               <img className={styles.qr} src={qr.qrDataUrl} alt="Agent远程管理助手配对二维码" />
             ) : (
@@ -208,26 +189,22 @@ export function HarnessRemoteSettings({
               </div>
             )}
             {qrState === 'ready' && qr !== null ? (
-              <small className={styles.qrValidity}>有效至 {new Date(qr.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · 切换页面不重新生成</small>
+              <small className={styles.qrValidity}>有效至 {new Date(qr.expiresAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</small>
             ) : null}
-          </div>
-          <p className={styles.securityNote}>
-            {qr?.mode === 'public-relay'
-              ? '配对后自动选择更快的连接；远程内容端到端加密。'
-              : '当前可通过同一局域网连接。'}
-          </p>
+          </div> : null}
         </div>
-      )}
-      <section className={styles.updateCard} aria-label="插件更新">
+      <section className={styles.updateSection} aria-label="插件更新">
         <h3 className={styles.updateHeading}>插件更新</h3>
         {!store.nativeUpdates ? <InstallationRestartNotice {...installation} /> : null}
-        {localOrigin && store.updates ? <PluginUpdateCard store={store.updates} embedded /> : null}
-        {store.nativeUpdates ? <NativeUpdateCard store={store.nativeUpdates} scope={runtime?.profileScope} installation={installation} embedded /> : null}
+        {localOrigin && store.updates ? <PluginUpdateCard store={store.updates} current={currentVersion} embedded /> : null}
+        {store.nativeUpdates ? <NativeUpdateCard store={store.nativeUpdates} scope={runtime?.profileScope} installation={installation} current={currentVersion} embedded /> : null}
+        <OtherEndpointSummary readOtherEndpoint={readOtherEndpoint} connection={resourceConnection} />
+      </section>
+      {diagnostics ? <div className={styles.connectionHelp}><ConnectionDiagnostics store={diagnostics} /></div> : null}
       </section>
       {assistants ? <AssistantPresetsPanel store={assistants} featureCall={featureCall} /> : null}
       {clawbotCall ? <ClawbotPanel call={clawbotCall} nodeName={agentName} hostName={hostName} /> : null}
-      {resourcesCall ? <MyResourcesPanel key={resourceGeneration} call={resourcesCall} nodeName={agentName} hostName={hostName} /> : null}
-      {diagnostics ? <ConnectionDiagnostics store={diagnostics} /> : null}
+      {resourcesCall ? <MyResourcesPanel key={resourceGeneration} call={resourcesCall} nodeName={agentName} hostName={hostName} onStart={startResource} /> : null}
     </section>
   )
 }

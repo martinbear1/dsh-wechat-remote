@@ -2,6 +2,8 @@ import type { Context } from '@deepseek-ai/cordis';
 import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol';
 import { type AgentCapability } from './agent-metadata.js';
 import type { HostPlatformDescriptor } from './host-platform.js';
+import { type OtherEndpointInfo } from './other-endpoint-info.js';
+export type { OtherEndpointInfo } from './other-endpoint-info.js';
 export interface WechatHostDescribeRequest {
 }
 export interface WechatGateDoorInfo {
@@ -60,6 +62,8 @@ export declare class WechatHostInfoService extends TypertRemoteService {
     private readonly gateRuntime?;
     private readonly privateUpdatesReady?;
     constructor(ctx: Context, config?: WechatHostInfoConfig);
+    /** Explicit, optional read via the existing authenticated DSH channel only. */
+    otherEndpoint(request: WechatHostDescribeRequest, signal: AbortSignal): Promise<OtherEndpointInfo>;
     describe(request: WechatHostDescribeRequest, signal: AbortSignal): Promise<WechatHostDescribeResult>;
 }
 export default WechatHostInfoService;

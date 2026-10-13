@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ClawbotRequest, ClawbotSession, ClawbotStatus } from '../clawbot/contracts.js'
 import { featureLeaseAllows } from './feature-client.js'
-import styles from './HarnessRemoteSettings.module.css'
+import { ActionButton, PluginSwitch, SectionHeading, StatusLabel } from './PluginUi.js'
+import ui from './PluginUi.module.css'
+import styles from './FeaturePanels.module.css'
 
 export type ClawbotCall = (request: ClawbotRequest) => Promise<ClawbotStatus | { sessions: ClawbotSession[] }>
 const pairingLabels: Record<string, string> = { wait: '打开微信首页「＋ → 扫一扫」', scaned: '已扫码，请在微信中确认',
@@ -144,35 +146,49 @@ export function ClawbotPanel({ call, nodeName, hostName }: { call: ClawbotCall; 
       + (status.pending ? '\n未完成的微信消息将停止处理和发送；电脑上已开始的任务仍会继续，请到原会话查看。' : ''))) return
     void run({ action: 'disconnect', expectedRevision: status.revision, abandonPending: status.pending > 0 }, false, status.enabled)
   }
-  return <section className={`${styles.updateCard} ${styles.clawbotCard}`} aria-label="微信 ClawBot 私聊接线">
-    <div className={styles.clawbotHead}><h3 className={styles.updateHeading}><span className={styles.clawbotMark} aria-hidden />微信 ClawBot 私聊接线 <small>实验性</small></h3>
-      <button type="button" aria-label="刷新" className={styles.clawbotTextButton} disabled={busy} onClick={() => void refresh()}><span aria-hidden>↻ </span>刷新</button></div>
-    <p className={styles.clawbotNode}>当前节点：{nodeName || '读取中'}{hostName ? ' · ' + hostName : ''}</p>
+  const receiveState = !status || loginActive ? 'ongoing' : !allowed || expired ? 'warning' : !status.enabled ? 'off'
+    : status.state === 'error' ? 'error' : status.state === 'ready' ? 'done' : 'ongoing'
+  return <section className={ui.panel} aria-label="微信 ClawBot 私聊接线">
+    <SectionHeading icon="clawbot" title="微信 ClawBot 私聊接线"
+      help="将微信私聊接到本节点的一个会话。绑定后选择会话，再开启接入；暂停不会删除绑定或取消已开始的任务。"
+      actions={<>
+        <div className={styles.bindingControls} aria-label="节点绑定">
+          <span className={ui.meta}>节点绑定</span>
+          <span data-state={loginActive ? 'pending' : expired ? 'expired' : paired ? 'paired' : 'unpaired'} role="status">
+            <StatusLabel state={!status || loginActive ? 'ongoing' : expired ? 'warning' : paired ? 'done' : 'off'}>{pairingState}</StatusLabel>
+          </span>
+          {status?.paired && !loginActive ? <details className={styles.bindingManagement}><summary>绑定管理</summary>
+            <div className={styles.managementActions}>
+              {!expired ? <ActionButton disabled={!allowed || busy} onClick={startPairing}>重新绑定</ActionButton> : null}
+              <ActionButton disabled={busy} onClick={disconnect}>移除绑定</ActionButton>
+            </div>
+          </details> : null}
+        </div>
+        <ActionButton variant="ghost" aria-label="刷新" disabled={busy} onClick={() => void refresh()}>刷新</ActionButton>
+      </>} />
+    <p className={`${ui.meta} ${styles.node}`}>当前节点：{nodeName || '读取中'}{hostName ? ' · ' + hostName : ''}</p>
 
-    <div className={styles.clawbotSection} aria-label="节点绑定">
-      <div className={styles.clawbotRow}><strong>节点绑定</strong><span className={styles.clawbotStatus} data-state={loginActive ? 'pending' : expired ? 'expired' : paired ? 'paired' : 'unpaired'} role="status">{pairingState}</span></div>
-      {showPairing && login ? <div className={styles.clawbotPairing}>
+    {showPairing && login ? <div className={styles.pairing}>
         {loginActive && login.status === 'wait' ? <img src={login.qrDataUrl} width="180" height="180" alt="微信 ClawBot 节点绑定码" /> : null}
-        <div className={styles.clawbotPairingCopy}><strong role="status">{pairingLabel}</strong>
-          {loginActive && login.status === 'wait' ? <p className={styles.clawbotNote}>用微信首页扫一扫扫描此码，再确认绑定。此码不是小程序配对码。</p> : null}
-          {loginActive && login.status === 'need_verifycode' ? <form onSubmit={e => { e.preventDefault(); void run({ action: 'login.poll', loginId: login.id, verifyCode: code }); setCode('') }}>
+        <div className={styles.pairingCopy}><strong role="status">{pairingLabel}</strong>
+          {loginActive && login.status === 'wait' ? <p className={ui.copy}>用微信首页扫一扫扫描此码，再确认绑定。此码不是小程序配对码。</p> : null}
+          {loginActive && login.status === 'need_verifycode' ? <form className={styles.verification} onSubmit={e => { e.preventDefault(); void run({ action: 'login.poll', loginId: login.id, verifyCode: code }); setCode('') }}>
             <input aria-label="微信验证码" value={code} autoComplete="off" inputMode="numeric" maxLength={16} onChange={e => setCode(e.target.value)} />
-            <button type="submit" className={styles.primaryButton} disabled={!allowed || busy || !/^\d{1,16}$/.test(code)}>确认验证码</button>
+            <ActionButton type="submit" variant="primary" disabled={!allowed || busy || !/^\d{1,16}$/.test(code)}>确认验证码</ActionButton>
           </form> : null}
-          <div className={styles.clawbotActions}>
-            {!loginActive ? <button type="button" className={styles.primaryButton} disabled={!allowed || busy} onClick={startPairing}>{expired ? '重新绑定' : '重新显示绑定码'}</button> : null}
-            {loginActive ? <button type="button" className={styles.clawbotTextButton} disabled={busy && foreground.current?.action !== 'login.poll'} onClick={() => void run({ action: 'login.cancel', loginId: login.id })}>取消绑定</button> : null}
+          <div className={ui.cardActions}>
+            {!loginActive ? <ActionButton variant="primary" disabled={!allowed || busy} onClick={startPairing}>{expired ? '重新绑定' : '重新显示绑定码'}</ActionButton> : null}
+            {loginActive ? <ActionButton disabled={busy && foreground.current?.action !== 'login.poll'} onClick={() => void run({ action: 'login.cancel', loginId: login.id })}>取消绑定</ActionButton> : null}
           </div>
         </div>
-      </div> : !paired ? <div className={styles.clawbotPairingEntry}>
-        <p className={styles.clawbotNote}>用微信首页「＋ → 扫一扫」扫描此处的 ClawBot 绑定码。</p>
-        <button type="button" className={styles.primaryButton} disabled={!status || !allowed || busy} onClick={startPairing}>{expired ? '重新绑定' : '显示绑定码'}</button>
+      </div> : !paired ? <div className={styles.pairingEntry}>
+        <p className={ui.copy}>用微信首页「＋ → 扫一扫」扫描 ClawBot 绑定码。</p>
+        <ActionButton variant="primary" disabled={!status || !allowed || busy} onClick={startPairing}>{expired ? '重新绑定' : '显示绑定码'}</ActionButton>
       </div> : null}
-    </div>
 
-    <div className={styles.clawbotSection} aria-label="微信消息">
-      <div className={styles.clawbotRow}><strong>接入会话</strong></div>
-      <div className={styles.clawbotRow}>
+    <div className={styles.messageControls} aria-label="微信消息">
+      <div className={styles.sessionControl}>
+        <strong>接入会话</strong>
         <select aria-label="ClawBot 目标会话" value={selected} disabled={!status || (busy && foreground.current?.action !== 'sessions')}
           onFocus={() => void run({ action: 'sessions' })} onChange={e => { selectedByUser.current = true; setSelected(e.target.value) }}>
           <option value="">选择已有会话</option>
@@ -181,27 +197,18 @@ export function ClawbotPanel({ call, nodeName, hostName }: { call: ClawbotCall; 
             {group.sessions.map(s => <option key={s.id} value={s.id}>{sessionTitle(s)}</option>)}
           </optgroup>)}
         </select>
-        <button type="button" className={styles.secondaryButton} disabled={!allowed || !selected || !status || busy || selected === status.target?.id}
-          onClick={() => void run({ action: 'route', sessionId: selected, expectedRevision: status?.revision })}>接到此会话</button>
+        <ActionButton disabled={!allowed || !selected || !status || busy || selected === status.target?.id}
+          onClick={() => void run({ action: 'route', sessionId: selected, expectedRevision: status?.revision })}>接到此会话</ActionButton>
       </div>
-      <div className={styles.clawbotReceiveRow}>
-        <div><strong>启用私聊接入</strong><p className={styles.clawbotNote} role="status">{label}</p></div>
-        <label className={styles.clawbotToggle}>
-          <input type="checkbox" role="switch" aria-label="启用私聊接入" checked={status?.enabled || false} disabled={!status || busy || (!status.enabled && !canEnable)}
-            onChange={e => void run({ action: 'enabled', enabled: e.target.checked, expectedRevision: status?.revision })} />
-          <span className={styles.clawbotSwitchTrack} aria-hidden />
-        </label>
+      <div className={styles.receiveControl}>
+        <span role="status"><StatusLabel state={receiveState}>{label}</StatusLabel></span>
+        <PluginSwitch label="启用私聊接入" title="暂停接入会保留绑定，已开始的任务继续运行。"
+          checked={status?.enabled || false} disabled={!status || busy || (!status.enabled && !canEnable)}
+          onChange={value => void run({ action: 'enabled', enabled: value, expectedRevision: status?.revision })} />
       </div>
-      <p className={styles.clawbotNote}>关闭只暂停私聊接入，不解除绑定，也不取消 DSH 已开始的任务。</p>
     </div>
-    {status?.message && !quietMessages.has(status.message) ? <p className={styles.clawbotNote} role="status">{status.message}</p> : null}
-    {status?.uncertain ? <p className={styles.clawbotNote}>有 {status.uncertain} 条消息的处理结果待确认，请到原会话查看。</p> : null}
-    {error ? <p className={styles.clawbotError} role="alert">{error}</p> : null}
-    {status?.paired && !loginActive ? <details className={styles.clawbotManage}><summary>绑定管理</summary>
-      <div className={styles.clawbotActions}>
-        {!expired ? <button type="button" className={styles.secondaryButton} disabled={!allowed || busy} onClick={startPairing}>重新绑定</button> : null}
-        <button type="button" className={styles.clawbotTextButton} disabled={busy} onClick={disconnect}>移除绑定</button>
-      </div>
-    </details> : null}
+    {status?.message && !quietMessages.has(status.message) ? <p className={ui.copy} role="status">{status.message}</p> : null}
+    {status?.uncertain ? <p className={ui.warning} role="status">{status.uncertain} 条消息的结果待确认，请查看原会话。</p> : null}
+    {error ? <p className={ui.error} role="alert">{error}</p> : null}
   </section>
 }

@@ -19,13 +19,14 @@ function UpdateResultNotice({ store, status, scope }: { store: NativeUpdateStore
     onDismiss: () => setNotice(null) })
 }
 
-export function NativeUpdateCard({ store, scope = 'desktop', embedded = false, installation }: { store: NativeUpdateStore; scope?: string; embedded?: boolean; installation?: InstallationRestartProps }): JSX.Element {
+export function NativeUpdateCard({ store, scope = 'desktop', embedded = false, installation, current }: { store: NativeUpdateStore; scope?: string; embedded?: boolean; installation?: InstallationRestartProps; current?: { agentVersion?: string; pluginVersion?: string } }): JSX.Element {
   const desktop = scope === 'desktop'
   const label = desktop ? 'Desktop' : 'Web'
   const { check, status, checking, starting, error } = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
   const busy = starting || status?.phase === 'preparing' || status?.phase === 'installing'
   const pending = status && ['preparing', 'installing', 'restart-required', 'unknown'].includes(status.phase)
   const installed = status?.phase === 'restart-required' || status?.phase === 'complete'
+  const versions = check?.advice.current ?? current
   const phaseLabel = status?.phase === 'restart-required' ? desktop ? '已安装，待重新打开 Desktop' : '已安装，待重启 Web 服务'
     : status?.phase === 'unknown' ? '更新结果待核对'
     : status?.phase === 'failed' ? '更新未完成'
@@ -33,10 +34,10 @@ export function NativeUpdateCard({ store, scope = 'desktop', embedded = false, i
   return <div className={embedded ? styles.updateEndpoint : styles.updateCard}>
     {status?.phase !== 'restart-required' && installation ? <InstallationRestartNotice {...installation} /> : null}
     <div className={styles.updateRow}><div className={styles.updateCopy}><strong>{label} <span className={styles.updateScope}>当前端</span></strong>
-      {check ? <div className={styles.updateVersions}><span>DSH <strong>{check.advice.current.agentVersion || '未确认'}</strong></span><span>插件运行 <strong>{check.advice.current.pluginVersion || '未确认'}</strong></span>{installed && status.targetVersion && status.targetVersion !== check.advice.current.pluginVersion ? <span>已安装 <strong>{status.targetVersion}</strong></span> : null}{check.channel === 'preview' ? <span>预览通道</span> : null}</div> : null}</div>
+      {versions ? <div className={styles.updateVersions}><span>DSH <strong>{versions.agentVersion || '未确认'}</strong></span><span>插件运行 <strong>{versions.pluginVersion || '未确认'}</strong></span>{installed && status.targetVersion && status.targetVersion !== versions.pluginVersion ? <span>已安装 <strong>{status.targetVersion}</strong></span> : null}{check?.channel === 'preview' ? <span>预览通道</span> : null}</div> : null}</div>
       <div className={styles.updateControl}><button type="button" className={styles.secondaryButton} disabled={checking || busy} onClick={() => void store.refresh()}>{checking ? '检查中…' : '检查更新'}</button>
         {check ? <strong className={styles.updateLabel} data-severity={status?.phase === 'failed' ? 'required' : status?.phase === 'complete' ? 'none' : pending ? status?.phase === 'unknown' ? 'unknown' : 'info' : check.advice.severity}>{phaseLabel || check.advice.label}</strong> : null}
-        {check?.advice.checkedAt ? <small className={styles.updateChecked}>检查于 {new Date(check.advice.checkedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</small> : null}</div></div>
+        </div></div>
     {check ? <>
       {!installed && !pending && check.advice.targetVersion ? <p>可更新至 {check.advice.targetVersion}</p> : null}
       {!pending && check.reason ? <p>{check.reason}</p> : null}

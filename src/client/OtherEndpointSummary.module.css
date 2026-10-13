@@ -1,0 +1,5 @@
+.summary { font-size: 12px; color: var(--dsw-alias-label-secondary, #647084); }
+.summary > summary { cursor: pointer; width: fit-content; padding: 4px 0; }
+.summary > summary:focus-visible { outline: 2px solid var(--dsw-alias-state-business-primary, #4d6bfe); outline-offset: 3px; }
+.row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 14px; padding-top: 6px; }
+.row strong { color: var(--dsw-alias-label-primary, #171a20); font-weight: 500; }

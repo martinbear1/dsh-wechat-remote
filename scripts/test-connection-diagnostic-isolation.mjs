@@ -177,7 +177,7 @@ test('diagnostic render boundary encloses only lazily mounted auxiliary content,
   assert.match(text, /static getDerivedStateFromError\(\)/)
   assert.match(text, /expanded \? <DiagnosticBoundary><DiagnosticContent store=\{store\} \/><\/DiagnosticBoundary> : null/)
   assert.doesNotMatch(text, /useEffect\(\(\) => \(\) => store\./)
-  assert.match(source('HarnessRemoteSettings.tsx'), /diagnostics \? <ConnectionDiagnostics store=\{diagnostics\} \/> : null/)
+  assert.match(source('HarnessRemoteSettings.tsx'), /diagnostics \? <div className=\{styles.connectionHelp\}><ConnectionDiagnostics store=\{diagnostics\} \/><\/div> : null/)
   // This is an explicit source-structure check. No renderer package is installed;
   // handler/SSR tests do not substitute for a real React error-boundary mount test.
 })

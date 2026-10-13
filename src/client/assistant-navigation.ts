@@ -7,7 +7,11 @@ export function nativeAssistantNavigation(get: (name: string) => any) {
   return {
     reset() { epoch++; busy = false },
     async start(presetId: string, lifetime?: AbortSignal) {
-      if (!/^[a-z][a-z0-9_-]{0,63}$/.test(presetId)) throw new Error('助手身份无效')
+      // Purchased resources have a bounded resource ID plus a version digest.
+      // Keep the existing assistant identity limit; only that concrete resource
+      // format may exceed it, and the native picker still must list the exact ID.
+      if (!/^[a-z][a-z0-9_-]{0,63}$/.test(presetId)
+        && !/^hr-resource-[a-z0-9][a-z0-9-]{0,63}-[a-f0-9]{12}$/.test(presetId)) throw new Error('助手身份无效')
       if (busy || lifetime?.aborted) return
       const generation = epoch
       const navigation = get('uiWorkspace'), slots = get('slots')

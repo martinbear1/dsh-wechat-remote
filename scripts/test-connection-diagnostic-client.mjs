@@ -280,7 +280,7 @@ test('help is collapsed and inert until explicit check; report requires preview 
   try {
     let tree = render()
     assert.equal(tree.type, 'details'); assert.equal(tree.props.open, undefined, 'native details defaults to closed')
-    assert.equal(tree.props.children[0].type, 'summary'); assert.equal(tree.props.children[0].props.children, '连接帮助')
+    assert.equal(tree.props.children[0].type, 'summary'); assert.equal(tree.props.children[0].props.children, '连接诊断与帮助')
     assert.equal(button(tree, '检查连接'), undefined, 'closed help does not mount diagnostic controls')
     assert.equal(f.calls.length, 0)
     tree.props.onToggle({ currentTarget: { open: true } }); tree = render(); await tick()
@@ -406,7 +406,7 @@ test('actual settings Generate and Regenerate buttons depend only on business re
     snapshot = { ...base, qrState,
       qr: qrState === 'ready' ? { mode: 'public-relay', qrDataUrl: 'data:image/png;base64,fixture', expiresAt: Date.now() + 900000 } : null }
     const label = qrState === 'idle' ? '生成二维码' : '重新生成'
-    const button = all(render()).find(node => node.type === 'button' && node.props.children === label)
+    const button = all(render()).find(node => node.type?.name === 'ActionButton' && node.props.children === label)
     assert.ok(button, `${diagnosticState}/${qrState}: real pairing button remains visible`)
     assert.equal(button.props.disabled, false, `${diagnosticState}/${qrState}: diagnosis cannot gate pairing`)
     const before = clicks; button.props.onClick(); assert.equal(clicks, before + 1, 'button still dispatches explicit pairing')
@@ -414,10 +414,10 @@ test('actual settings Generate and Regenerate buttons depend only on business re
   for (const diagnosticState of diagnostics) {
     diagnosticSnapshot = { diagnosticState, diagnosticReport: null }
     snapshot = { ...base, qrState: 'loading', qr: null }
-    assert.equal(all(render()).find(node => node.type === 'button' && node.props.children === '生成中…').props.disabled, true,
+    assert.equal(all(render()).find(node => node.type?.name === 'ActionButton' && node.props.children === '生成中…').props.disabled, true,
       'business in-flight guard is retained independently of diagnostics')
     snapshot = { ...snapshot, loadState: 'error', qrState: 'idle' }
-    assert.equal(all(render()).find(node => node.type === 'button' && node.props.children === '生成二维码').props.disabled, true,
+    assert.equal(all(render()).find(node => node.type?.name === 'ActionButton' && node.props.children === '生成二维码').props.disabled, true,
       'actual host unavailability is still respected; this is not a diagnostic result')
   }
 })

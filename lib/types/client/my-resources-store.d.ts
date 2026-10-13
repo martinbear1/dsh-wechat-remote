@@ -46,10 +46,28 @@ export interface MyResourcesView {
     toggling: string | null;
     error: string;
     itemErrors: Record<string, string>;
+    /** UI evidence only: an empty local status is not an empty cloud catalog. */
+    catalogRead: boolean;
 }
 export declare const resourceKey: (resourceId: string, version: string) => string;
 export declare const localActivationUnavailable: (item: MyResourceItem) => boolean;
+/** SemVer precedence only; null means the server supplied an unknown version shape. */
+export declare function compareResourceVersions(left: string, right: string): number | null;
 export declare const isResourceUpdate: (item: MyResourceItem, items: MyResourceItem[]) => boolean;
+export declare const isLocalResource: (item: MyResourceItem) => boolean;
+export interface MyResourceGroup {
+    resourceId: string;
+    local: MyResourceItem[];
+    delivery: MyResourceItem[];
+    /** Latest known local version, not the version of every existing session. */
+    primary: MyResourceItem;
+    update?: MyResourceItem;
+}
+/** Presentation grouping only. Never changes activation, downloaded files, preset IDs or sessions. */
+export declare function groupResources(items: readonly MyResourceItem[]): {
+    local: MyResourceGroup[];
+    delivery: MyResourceGroup[];
+};
 export declare const initialResourcesView: () => MyResourcesView;
 export declare class MyResourcesStore {
     private readonly call;

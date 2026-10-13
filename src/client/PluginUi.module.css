@@ -1,0 +1,39 @@
+/* Only plugin-owned surfaces. Native detail headers and component lists retain
+   the host's layout; these tokens also follow the host's light/dark theme. */
+.panel { box-sizing: border-box; min-width: 0; border: 1px solid var(--dsw-alias-border-l2, #e4e5e8); border-radius: 12px; padding: 16px 18px; background: var(--dsw-alias-bg-layer-3, #fff); color: var(--dsw-alias-label-primary, #171a20); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.header, .heading, .actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; min-width: 0; }
+.header { justify-content: space-between; margin-bottom: 12px; }
+.heading { gap: 8px; }
+.heading h3 { margin: 0; font-size: 14px; font-weight: 600; line-height: 22px; }
+.actions { margin-left: auto; }
+.experimental, .meta { font-size: 12px; color: var(--dsw-alias-label-tertiary, #7d8492); font-weight: 400; }
+.experimental { cursor: help; }
+.status { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--dsw-alias-label-secondary, #647084); }
+.offDot { width: 6px; height: 6px; border-radius: 50%; flex: none; background: var(--dsw-alias-label-tertiary, #7d8492); }
+.icon, .clawbotIcon { width: 20px; height: 20px; flex: none; }
+.icon { color: var(--dsw-alias-state-business-primary, #4d6bfe); }
+/* Match the mini-program Settings icon: pale accent tile and accent dots. */
+.clawbotIcon { position: relative; display: inline-block; color: var(--dsw-alias-state-business-primary, #4d6bfe); background: color-mix(in srgb, currentColor 12%, transparent); border-radius: 31.25%; }
+.clawbotIcon::before, .clawbotIcon::after { content: ''; position: absolute; width: 15%; height: 15%; top: 21.5%; background: currentColor; border-radius: 50%; }
+.clawbotIcon::before { left: 32%; }
+.clawbotIcon::after { right: 32%; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); gap: 12px; }
+.card { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 14px; border: 1px solid var(--dsw-alias-border-l2, #e4e5e8); border-radius: 10px; }
+.card h4, .card p { margin: 0; }
+.card h4 { font-size: 13px; font-weight: 600; }
+.copy { color: var(--dsw-alias-label-secondary, #647084); font-size: 12px; }
+.cardActions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: auto; padding-top: 4px; }
+.warning { color: var(--dsw-alias-state-warn-primary, #a36b13); font-size: 12px; }
+.error { color: var(--dsw-alias-state-error-primary, #d34e4e); font-size: 12px; }
+.details { margin-top: 12px; color: var(--dsw-alias-label-secondary, #647084); font-size: 12px; }
+.details summary { cursor: pointer; width: fit-content; padding: 4px 0; }
+.details summary:focus-visible, .experimental:focus-visible { outline: 2px solid var(--dsw-alias-state-business-primary, #4d6bfe); outline-offset: 3px; }
+.switch { box-sizing: border-box; position: relative; flex: none; width: 36px; height: 20px; padding: 2px; border: 0; border-radius: 999px; background: var(--dsw-alias-border-l3, #babdc4); cursor: pointer; }
+.switch[aria-checked='true'] { background: var(--dsw-alias-brand-primary, #171a20); }
+.switch:disabled { opacity: .5; cursor: default; }
+.switch:focus-visible { outline: 2px solid var(--dsw-alias-state-business-primary, #4d6bfe); outline-offset: 2px; }
+.thumb { display: block; width: 16px; height: 16px; border-radius: 50%; background: var(--dsw-alias-label-primary-foreground, #fff); transition: transform 120ms ease; }
+.switch[aria-checked='false'] .thumb { background: var(--dsw-alias-switch-thumb, #fff); }
+.switch[aria-checked='true'] .thumb { transform: translateX(16px); }
+@media (max-width: 520px) { .panel { padding: 14px; } }
+@media (prefers-reduced-motion: reduce) { .thumb { transition: none; } }

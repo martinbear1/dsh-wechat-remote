@@ -21,6 +21,12 @@ async function panelForSSR() {
     plugins:[{name:'panel-style-test',setup(plugin){plugin.onLoad({filter:/\.css$/},()=>({contents:'export default {}',loader:'js'}))}}]})
   const module={exports:{}}
   vm.runInNewContext(built.outputFiles[0].text,{module,exports:module.exports,require(id){
+    if(id==='@deepseek-ai/dsh-client-ui-primitives')return {
+      Button:({size,variant,...props})=>createElement('button',props),
+      StateDot:({state})=>createElement('span',{'data-dot-state':state,'aria-hidden':true}),
+      Tooltip:({children,label})=>createElement('span',{'data-tooltip':label},children),
+      Switch:({checked,label,disabled,title})=>createElement('button',{type:'button',role:'switch','aria-checked':checked,'aria-label':label,disabled,title}),
+    }
     return require(id)
   }},{filename:'assistant-panel-ssr.cjs'})
   return module.exports.AssistantPresetsPanel
@@ -154,12 +160,27 @@ test('help has one tooltip source with an accessible unique description, never a
   const store=new AssistantStore(async()=>({...catalog,templates}));await store.load()
   const html=renderToStaticMarkup(createElement(AssistantPresetsPanel,{store}))
   const helpButtons=[...html.matchAll(/<button\b([^>]*aria-describedby="([^"]+)"[^>]*)>\?<\/button>/g)]
-  assert.equal(helpButtons.length,4)
-  assert.equal(new Set(helpButtons.map(match=>match[2])).size,4)
+  assert.equal(helpButtons.length,3,'only per-preset help uses a question mark; the section uses the shared experimental tooltip')
+  assert.equal(new Set(helpButtons.map(match=>match[2])).size,3)
+  assert.match(html,/>实验性<\/span>/)
   for(const [,attributes,id] of helpButtons){
-    assert.doesNotMatch(attributes,/\btitle=/,'custom tooltip must not also show a delayed browser tooltip')
-    assert(html.includes(`<span id="${id}" role="tooltip">`),'description resolves to the actual tooltip text')
+    assert.doesNotMatch(attributes,/\btitle=/,'native tooltip must not also show a delayed browser tooltip')
+    assert(html.includes(`<span id="${id}" hidden="">`),'accessible description remains available before the native tooltip opens')
   }
+})
+
+test('compact group header and preset cards preserve the node gate without mounting extra controls',async()=>{
+  const AssistantPresetsPanel=await panelForSSR()
+  const templates=['teacher','project','designer'].map(id=>({id,name:id,description:'fixture',builtin:{state:'installed'}}))
+  const drafts=templates.map(item=>({id:item.id,templateId:item.id,state:'installed',nativeState:'installed',presetId:'preset-'+item.id}))
+  const calls=[],store=new AssistantStore(async method=>{calls.push(method);return {...catalog,templates,drafts}})
+  await store.load()
+  const html=renderToStaticMarkup(createElement(AssistantPresetsPanel,{store}))
+  assert.equal((html.match(/role="switch"/g)||[]).length,1)
+  assert(html.indexOf('启用本节点助手')<html.indexOf('aria-label="助手功能"'))
+  assert.match(html,/<fieldset[^>]*disabled=""[^>]*aria-label="助手功能"/)
+  assert.equal((html.match(/<article\b/g)||[]).length,3)
+  assert.deepEqual(calls,['assistantCatalog'],'render does not install or toggle the node')
 })
 
 test('start is a real native action after a fresh readiness check, never an install or prompt',async()=>{

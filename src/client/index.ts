@@ -142,7 +142,18 @@ export function apply(ctx: HarnessRemoteClientContext): void {
     return () => { remove(); diagnostics.dispose() }
   }, 'wechat connection diagnostics')
   const openPlugin = () => openPluginPage(name => ctx.get(name))
-  const injected = () => ({ describeHost, callManagement, store, assistants, clawbotCall, featureCall, diagnostics, resourcesCall, resourceConnection })
+  const startResource = async (presetId: string, signal: AbortSignal) => {
+    if (!assistantNavigation) throw new Error('原生会话入口尚未就绪，请稍后再试。')
+    await assistantNavigation.start(presetId, signal)
+  }
+  const readOtherEndpoint: import('./OtherEndpointSummary.js').ReadOtherEndpoint = async signal => {
+    const generation = connectionGeneration
+    const response = await ctx.connection.rpc.call('/api', 'wechatHost/otherEndpoint', { args: { request: {} } }, signal)
+    if (generation !== connectionGeneration || signal.aborted) throw new Error('当前连接已变化')
+    if (!response.ok) throw new Error('版本信息暂不可用')
+    return response.value as import('../other-endpoint-info.js').OtherEndpointInfo
+  }
+  const injected = () => ({ describeHost, callManagement, store, assistants, clawbotCall, featureCall, diagnostics, resourcesCall, resourceConnection, startResource, readOtherEndpoint })
   const readInstallation = async (packageName: string) => {
     const generation = connectionGeneration
     const state = await readInstallationState(name => ctx.get(name), describeHost, packageName)

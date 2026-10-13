@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url'
 const { outputFiles } = await build({
   entryPoints: [fileURLToPath(new URL('../src/client/ClawbotPanel.tsx', import.meta.url))],
   bundle: true, write: false, platform: 'node', format: 'cjs', target: 'node22', jsx: 'automatic',
-  external: ['react', 'react/jsx-runtime'],
+  external: ['react', 'react/jsx-runtime', '@deepseek-ai/dsh-client-ui-primitives'],
   plugins: [{ name: 'css-fixture', setup(api) {
     api.onLoad({ filter: /\.module\.css$/ }, () => ({ contents: 'export default {}', loader: 'js' }))
   } }],
@@ -47,10 +47,23 @@ function harness() {
       }
     },
   }
-  const jsx = { Fragment: Symbol('Fragment'), jsx: (type, props) => ({ type, props }), jsxs: (type, props) => ({ type, props }) }
+  const element = (type, props) => typeof type === 'function' ? type(props) : ({ type, props })
+  const jsx = { Fragment: Symbol('Fragment'), jsx: element, jsxs: element }
+  // Exercise the real shared wrappers with the public native primitive props.
+  // The native Switch calls onChange(boolean); its DOM is the host's concern.
+  const nativeUi = {
+    Button: ({ size, variant, ...props }) => element('button', props),
+    Tooltip: ({ children }) => children,
+    StateDot: ({ state }) => element('span', { 'data-dot-state': state, 'aria-hidden': true }),
+    Switch: ({ checked, onChange, label, ...props }) => element('input', {
+      ...props, type: 'checkbox', role: 'switch', checked, 'aria-label': label,
+      onChange: event => onChange(event.target.checked),
+    }),
+  }
   const module = { exports: {} }
   const context = vm.createContext({ module, exports: module.exports, Error,
-    require(name) { if (name === 'react') return react; if (name === 'react/jsx-runtime') return jsx; assert.fail('unexpected dependency: ' + name) },
+    require(name) { if (name === 'react') return react; if (name === 'react/jsx-runtime') return jsx;
+      if (name === '@deepseek-ai/dsh-client-ui-primitives') return nativeUi; assert.fail('unexpected dependency: ' + name) },
     setInterval(fn, ms) { assert.equal(ms, 4000); intervals.set(++intervalId, fn); return intervalId },
     clearInterval(id) { intervals.delete(id) }, window: { confirm: text => { confirms.push(text); return confirmResult } },
     Date: class extends Date { static now() { return now } },
@@ -496,9 +509,9 @@ test('waiting QR has one cancel action, a homepage-scanner instruction and one a
   assert(!h.nodes().some(n => n.type === 'button' && /显示绑定码|重新绑定/.test(h.text(n))))
   assert.equal(h.nodes().filter(n => n.type === 'input' && n.props.role === 'switch').length, 1)
   assert(h.find(n => n.type === 'input' && n.props.role === 'switch').props.disabled)
-  const label = h.find(n => n.type === 'label')
-  assert.equal(label.props.children[0].props['aria-label'], '启用私聊接入')
-  assert.equal(label.props.children[1].props['aria-hidden'], true)
+  const toggle = h.find(n => n.props?.role === 'switch')
+  assert.equal(toggle.props['aria-label'], '启用私聊接入')
+  assert(toggle.props.title.includes('保留绑定'))
   h.unmount()
 })
 
@@ -538,4 +551,21 @@ test('active replacement status takes precedence over both a valid or an expired
     assert(h.text().includes('绑定完成后可开启')); assert(!h.text().includes('请重新绑定'))
     h.unmount()
   }
+})
+
+test('binding management is adjacent to binding status before session controls, with one explicit receive switch', async () => {
+  const h = await mounted(status({ paired: true, enabled: true, state: 'ready', target: { id: 's1', title: 'A' } }))
+  assert(h.text().indexOf('绑定管理') < h.text().indexOf('接入会话'))
+  assert.equal(h.nodes().filter(n => n.props?.role === 'switch').length, 1)
+  assert(h.nodes().some(n => n.props?.['data-dot-state'] === 'done'))
+  assert(!h.text().includes('关闭只暂停私聊接入'))
+  h.unmount()
+})
+
+test('uncertain outcomes remain visible separately from routine receive state and do not mutate messages', async () => {
+  const h = await mounted(status({ paired: true, enabled: true, state: 'ready', uncertain: 2, target: { id: 's1', title: 'A' }, message: '' }))
+  assert(h.text().includes('接收中'))
+  assert(h.text().includes('2 条消息的结果待确认，请查看原会话。'))
+  assert.equal(h.calls.length, 1)
+  h.unmount()
 })

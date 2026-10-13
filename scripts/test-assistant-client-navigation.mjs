@@ -6,6 +6,7 @@ import path from 'node:path'
 import { transform } from 'esbuild'
 import { AssistantSessionIntents } from '../lib/assistant-presets/session-intents.js'
 import { WorkflowFileStore } from '../lib/human-workflow/persistence.js'
+import { resourceIdValid, resourcePresetId } from '../lib/private-resources/contract.js'
 const source = await readFile(new URL('../src/client/assistant-navigation.ts', import.meta.url), 'utf8')
 const { code } = await transform(source, { loader: 'ts', format: 'esm', target: 'es2022' })
 const { nativeAssistantNavigation } = await import('data:text/javascript;base64,' + Buffer.from(code).toString('base64'))
@@ -23,6 +24,31 @@ test('shortcut stages in native sessionless composer, with no creation/default/p
   const f = fixture(); await f.controller.start(presetId)
   assert.deepEqual(f.calls, ['load', 'clear', ['select', presetId]])
   assert(!/remote\.create|assistantSessionPrepare|pickDirectory|workspaces\.create/.test(source))
+})
+
+test('resource shortcuts accept the exact bounded generated identity, including maximum resource ID length', async () => {
+  for (const length of [1, 39, 40, 64]) {
+    const resourceId = 'a'.repeat(length)
+    assert(resourceIdValid(resourceId))
+    const id = resourcePresetId({ resourceId, version: '1.0.0' }), f = fixture()
+    f.snapshot.options.push({ id })
+    await f.controller.start(id)
+    assert.deepEqual(f.calls, ['load', 'clear', ['select', id]])
+  }
+})
+
+test('long resource identity never bypasses exact native availability or allows arbitrary longer identities', async () => {
+  const id = resourcePresetId({ resourceId: 'a'.repeat(64), version: '1.0.0' })
+  const unavailable = fixture()
+  await assert.rejects(unavailable.controller.start(id), /尚未就绪/)
+  assert.deepEqual(unavailable.calls, ['load'])
+  for (const invalid of ['a'.repeat(65), `hr-resource-${'a'.repeat(65)}-0123456789ab`,
+    `hr-resource-${'a'.repeat(64)}-0123456789ag`, `hr-resource-${'a'.repeat(64)}-0123456789abc`,
+    `hr-resource-${'a'.repeat(63)}_-0123456789ab`, `${id}/`, `${id}\n`]) {
+    const f = fixture(); f.snapshot.options.push({ id: invalid })
+    await assert.rejects(f.controller.start(invalid), /身份无效/)
+    assert.deepEqual(f.calls, [], 'invalid identities fail before reading or changing native state')
+  }
 })
 test('unknown/ambiguous native slot and disabled selection fail before any navigation', async () => {
   for (const broken of ['absent', 'duplicate', 'changed', 'disabled', 'noClear', 'noSelect']) {

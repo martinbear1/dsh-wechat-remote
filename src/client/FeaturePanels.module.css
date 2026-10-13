@@ -1,0 +1,36 @@
+.featureBody { min-width: 0; padding: 0; margin: 0; border: 0; display: flex; flex-direction: column; gap: 12px; }
+.featureBody:disabled { opacity: .65; }
+.cardHeading { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; }
+.subheading { margin: 4px 0 10px; font-size: 13px; font-weight: 600; }
+.preview { padding: 14px; border: 1px solid var(--dsw-alias-border-l2, #e4e5e8); border-radius: 10px; background: var(--dsw-alias-bg-layer-2, #f6f7f9); }
+.preview h4 { font-size: 13px; margin: 0 0 8px; }
+.preview p { margin: 8px 0; }
+.helpButton { display: inline-flex; align-items: center; justify-content: center; padding: 0; width: 14px; height: 14px; font-size: 10px; line-height: 1; border: 1px solid var(--dsw-alias-border-l2, #d7dce4); border-radius: 4px; background: transparent; color: var(--dsw-alias-label-tertiary, #7d8492); cursor: help; }
+.helpButton:focus-visible, .bindingManagement summary:focus-visible { outline: 2px solid var(--dsw-alias-state-business-primary, #4d6bfe); outline-offset: 3px; }
+.node { margin: -4px 0 12px; }
+.bindingControls { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 10px; }
+.bindingManagement { color: var(--dsw-alias-label-secondary, #647084); font-size: 12px; }
+.bindingManagement summary { cursor: pointer; padding: 4px 0; width: fit-content; }
+.managementActions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding-top: 8px; }
+.pairing, .pairingEntry { display: flex; align-items: center; flex-wrap: wrap; gap: 12px 20px; margin-bottom: 14px; padding: 14px; border: 1px solid var(--dsw-alias-border-l2, #e4e5e8); border-radius: 10px; }
+.pairing > img { width: 160px; height: 160px; flex: none; background: #fff; border-radius: 6px; }
+.pairingCopy { flex: 1 1 240px; min-width: 0; }
+.pairingCopy strong { font-size: 13px; }
+.pairingEntry { justify-content: space-between; }
+.pairingEntry p { margin: 0; }
+.verification { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.verification input, .sessionControl select { box-sizing: border-box; min-width: 0; height: 32px; padding: 5px 9px; border: 1px solid var(--dsw-alias-border-l2, #dfe2e7); border-radius: 8px; background: var(--dsw-alias-bg-layer-3, #fff); color: var(--dsw-alias-label-primary, #171a20); font: inherit; font-size: 12px; }
+.verification input { max-width: 180px; }
+.verification input:focus-visible, .sessionControl select:focus-visible { outline: 2px solid var(--dsw-alias-state-business-primary, #4d6bfe); outline-offset: 1px; }
+.messageControls, .sessionControl, .receiveControl { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; min-width: 0; }
+.messageControls { justify-content: space-between; }
+.sessionControl { flex: 1 1 380px; }
+.sessionControl strong { font-size: 12px; font-weight: 500; }
+.sessionControl select { flex: 1 1 150px; text-overflow: ellipsis; }
+.receiveControl { justify-content: flex-end; margin-left: auto; }
+@media (max-width: 520px) {
+  .sessionControl { flex-basis: 100%; }
+  .sessionControl strong { flex-basis: 100%; }
+  .pairing { justify-content: center; }
+  .pairingCopy { flex-basis: 100%; }
+}

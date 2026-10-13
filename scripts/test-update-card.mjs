@@ -122,7 +122,9 @@ test('native settings renders only the current endpoint, with read-only renderin
   const module = { exports: {} }, require = createRequire(import.meta.url)
   vm.runInNewContext(source, { module, exports: module.exports, require(id) {
     if (id.endsWith('.css')) return new Proxy({}, { get: (_, key) => key === '__esModule' ? false : key })
-    if (id === '@deepseek-ai/dsh-client-ui-primitives') return { FishLogo: () => null, Modal: 'div' }
+    if (id === '@deepseek-ai/dsh-client-ui-primitives') return { FishLogo: () => null, Modal: 'div',
+      Tooltip: ({ children }) => children, StateDot: () => null,
+      Button: ({ size, variant, ...props }) => createElement('button', props) }
     return require(id)
   } })
   const noAction = () => assert.fail('render must not refresh, install, approve, or generate a QR')
@@ -141,20 +143,20 @@ test('native settings renders only the current endpoint, with read-only renderin
     assert.equal((html.match(/aria-label="插件更新"/g) || []).length, 1)
     const updateBlock = html.match(/<section[^>]*aria-label="插件更新"[^>]*>([\s\S]*?)<\/section>/)?.[0]
     assert(updateBlock, 'the unified update block is present')
-    assert.equal((updateBlock.match(/class="updateCard"/g) || []).length, 1, 'no nested card borders')
+    assert.equal((updateBlock.match(/class="updateCard"/g) || []).length, 0, 'update is a section of the main connection card, no nested card borders')
     assert.match(html, /当前端/)
     assert.doesNotMatch(html, /同一主机|另一端|联动更新|确认更新/)
-    assert.match(html, /<summary>连接帮助<\/summary><\/details><\/section>$/, 'quiet help is the last page entry')
+    assert.match(html, /<summary>连接诊断与帮助<\/summary><\/details><\/div><\/section><\/section>$/, 'quiet help is inside the main connection card')
     assert.doesNotMatch(html, /<details[^>]*\bopen[=> ]/, 'help does not default to expanded')
     assert(!html.includes('aria-label="连接诊断"'), 'closed help does not mount or observe diagnostic content')
     assert(!html.includes('检查连接'), 'diagnostic controls are hidden by default')
     const withoutDiagnostics = renderToStaticMarkup(createElement(module.exports.HarnessRemoteSettings, { ...props, diagnostics: undefined }))
-    assert(!withoutDiagnostics.includes('连接帮助'), 'the diagnostic dependency is optional for legacy/native embeddings')
+    assert(!withoutDiagnostics.includes('连接诊断与帮助'), 'the diagnostic dependency is optional for legacy/native embeddings')
     snapshot.loadState = 'error'
     snapshot.error = '普通连接请求失败'
     const failedConnectionHtml = renderToStaticMarkup(createElement(module.exports.HarnessRemoteSettings, props))
     assert(failedConnectionHtml.includes('普通连接请求失败'))
-    assert.match(failedConnectionHtml, /<summary>连接帮助<\/summary><\/details><\/section>$/)
+    assert.match(failedConnectionHtml, /<summary>连接诊断与帮助<\/summary><\/details><\/div><\/section><\/section>$/)
     assert(!failedConnectionHtml.includes('检查连接'), 'normal errors never open diagnostics automatically')
     snapshot.loadState = 'ready'; snapshot.error = null
     if (current === 'web') {

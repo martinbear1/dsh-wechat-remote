@@ -10,14 +10,14 @@ class DiagnosticBoundary extends Component<{ children: ReactNode }, { failed: bo
   state = { failed: false }
   static getDerivedStateFromError() { return { failed: true } }
   render() {
-    return this.state.failed ? <p role="status">连接帮助暂不可用，其他功能可继续使用。</p> : this.props.children
+    return this.state.failed ? <p role="status">连接诊断暂不可用，其他功能可继续使用。</p> : this.props.children
   }
 }
 
 export function ConnectionDiagnostics({ store }: { store: ConnectionDiagnosticStore }): JSX.Element {
   const [expanded, setExpanded] = useState(false)
   return <details className={styles.updateDetails} onToggle={event => setExpanded(event.currentTarget.open)}>
-    <summary>连接帮助</summary>
+    <summary>连接诊断与帮助</summary>
     {expanded ? <DiagnosticBoundary><DiagnosticContent store={store} /></DiagnosticBoundary> : null}
   </details>
 }

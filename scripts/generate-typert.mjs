@@ -77,6 +77,7 @@ try {
     'directory-worker.ts',
     'host-platform.ts',
     'host-info-service.ts',
+    'other-endpoint-info.ts',
     'history-service.ts',
     'history-records.ts',
     'history-record-presentation.ts',

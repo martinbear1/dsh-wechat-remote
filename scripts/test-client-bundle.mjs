@@ -11,7 +11,7 @@ const manifest = JSON.parse(
 )
 const bundle = readFileSync(path.join(root, 'lib', 'client.js'), 'utf8')
 let registration = null
-let styleTag = null
+const styleTags = []
 const context = vm.createContext({
   fetch: async () => { throw new Error('no requests while rendering') },
   document: {
@@ -24,7 +24,7 @@ const context = vm.createContext({
     },
     head: {
       appendChild(tag) {
-        styleTag = tag
+        styleTags.push(tag)
       },
     },
   },
@@ -62,14 +62,17 @@ const exports = registration.factory((id) => {
   }
   throw new Error(`Unexpected external client module: ${id}`)
 })
-assert.ok(styleTag, 'client factory must install its component stylesheet')
+assert.ok(styleTags.length, 'client factory must install its component stylesheets')
+const styles = styleTags.map(tag => tag.textContent).join('\n')
+assert.equal(new Set(styleTags.map(tag => tag.dataset.pluginCss)).size, styleTags.length, 'each module has its own style tag')
+for (const tag of styleTags) assert.match(tag.textContent, /\.hr_[0-9a-f]{7}_[A-Za-z]/, 'every stylesheet has scoped selectors')
 assert.match(
-  styleTag.textContent,
+  styles,
   /\.hr_[0-9a-f]{7}_root\b/,
   'generated CSS selectors must have a valid alphabetic prefix',
 )
 assert.doesNotMatch(
-  styleTag.textContent,
+  styles,
   /\.[0-9][A-Za-z0-9_-]*\s*[{,:]/,
   'generated CSS must not contain selectors beginning with a digit',
 )

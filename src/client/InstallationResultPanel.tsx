@@ -28,7 +28,7 @@ export function InstallationResultPanel({ packageName, readInstallation, onDismi
       {state?.phase === 'ready' ? <p>当前端可以使用，无需重启。</p> : null}
       {state?.phase === 'disabled' ? <p>请在原生插件管理器中启用微信连接。</p> : null}
       {state?.phase === 'incomplete' ? <><p>请在插件详情查看未启动的组件或安装错误。若刚覆盖安装了新版，可先在任务结束后手动重启；若仍有报错，请保留错误信息核查。</p><p className={styles.helpText}>{manualRestartInstruction(state.scope)}</p></> : null}
-      {state?.phase === 'unknown' ? <p>请重新核对，或在原生插件管理器查看安装详情；暂不能确认已生效。</p> : null}
+      {state?.phase === 'unknown' ? <><p>暂不能确认已生效。若刚安装或更新后页面不可用，请先在任务结束后手动重启当前 DSH，再重新核对。</p><p className={styles.helpText}>{manualRestartInstruction(state.scope)}</p><p className={styles.helpText}>若重启后仍有问题，请在原生插件管理器查看安装详情，并保留错误信息。</p></> : null}
     </div>
     <div className={styles.actions}>
       {state && ['incomplete', 'unknown'].includes(state.phase) ? <button type="button" className={styles.secondaryButton} onClick={() => setRevision(value => value + 1)}>重新核对</button> : null}

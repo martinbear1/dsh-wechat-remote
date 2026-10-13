@@ -53,7 +53,9 @@ try {
   assert.equal(createRequire(path.join(outer, 'package.json')).resolve('dsh-wechat-remote/collaboration'), path.join(native, 'lib/collaboration.js'))
   assert(!fs.readFileSync(path.join(outer, 'cordis.patch.yml'), 'utf8').includes('/collaboration'), 'collaboration must not appear in the global Desktop bundle patch')
   assert.equal(outerMeta.dsh.bundle.patch, './cordis.patch.yml')
-  assert.match(fs.readFileSync(path.join(outer, 'cordis.patch.yml'), 'utf8'), /name: '\.\/native\/lib\/index\.js'/)
+  assert.match(fs.readFileSync(path.join(outer, 'cordis.patch.yml'), 'utf8'), /name: '\.\/native\/index\.js'/)
+  assert.equal(outerMeta.exports['.'], undefined, 'the Loader path must retain nested core ownership of its client half')
+  assert.deepEqual(fs.readFileSync(path.join(native, 'index.js')), fs.readFileSync('installer/native-entry.mjs'))
   for (const component of ['teacher', 'project', 'customizer']) {
     assert(fs.readFileSync(path.join(outer, 'cordis.patch.yml'), 'utf8').includes(`dsh-wechat-remote/assistant-${component}`))
     assert(fs.existsSync(path.join(native, `lib/assistant-presets/builtin-${component}.js`)))

@@ -11,7 +11,7 @@ const compiled = await compile('installation-state.ts'), ui = await compile('Ins
 const module = { exports: {} }; vm.runInNewContext(compiled, { module, exports: module.exports })
 const { readInstallationState, manualRestartInstruction } = module.exports
 const owners = ['dsh-wechat-remote', '@harness-remote/dsh-wechat-remote']
-const current = '1.7.14-rc.56', old = '1.7.13'
+const current = JSON.parse(fs.readFileSync('package.json', 'utf8')).version, old = '1.7.13'
 function fixture(scope, owner, running = current) {
   const calls = [], host = { pluginVersion: running, gate: { profileScope: scope } }
   const own = { name: owner, installed: true, enabled: true, version: current, rows: [{ entryId: 'gate' }, { entryId: 'mode' }] }
@@ -63,6 +63,13 @@ test('native inventory can confirm pending restart even when older host has no n
   assert.equal((await f.read()).phase, 'unknown')
 })
 
+test('withdrawn host definition with active components and installed package remains unconfirmed, not a made-up mismatch or success', async () => {
+  const f = fixture('web', owners[0])
+  const state = await readInstallationState(() => f.manager, async () => { throw Object.assign(new Error('strict definition withdrawn'), { code: 'gateway/definition-unavailable' }) }, owners[0])
+  assert.equal(state.phase, 'unknown'); assert.equal(state.installedVersion, current)
+  assert.equal(state.runningVersion, undefined)
+})
+
 function viewHarness(readInstallation) {
   const states = [], dependencies = [], effects = [], cleanups = []; let index = 0, effectIndex = 0, writes = 0, dismissals = 0, opens = 0
   const module = { exports: {} }
@@ -110,6 +117,9 @@ test('failed reads require explicit retry; dismissal fences late results', async
   const h = viewHarness(async () => { if (++reads === 1) throw Error('disconnected'); return new Promise(resolve => { release = resolve }) })
   h.render(); h.flush(); await settle(); let tree = h.render()
   assert.match(JSON.stringify(tree), /安装状态暂未确认/)
+  assert.match(JSON.stringify(tree), /若刚安装或更新后页面不可用/)
+  assert.match(JSON.stringify(tree), /Web 需要重启实际服务，仅刷新网页不会生效/)
+  assert.doesNotMatch(JSON.stringify(tree), /已安装，需重启当前 DSH 才能生效|安装已生效|立即重启/)
   h.elements(tree).find(n => n.type === 'button' && n.props.children === '重新核对').props.onClick()
   h.render(); h.flush(); h.unmount(); const before = h.writes
   release({ phase: 'ready' }); await settle(); assert.equal(h.writes, before); assert.equal(reads, 2)

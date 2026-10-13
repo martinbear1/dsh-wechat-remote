@@ -94,6 +94,7 @@ if (process.argv[2]) {
       fs.rmSync(native, { recursive: true, force: true }) // exact build-owned output only
     }
     fs.mkdirSync(native)
+    fs.copyFileSync(path.join(root, 'installer/native-entry.mjs'), path.join(native, 'index.js'))
     fs.copyFileSync(path.join(stage, 'package/package.json'), path.join(native, 'package.json'))
     fs.cpSync(path.join(stage, 'package/lib'), path.join(native, 'lib'), { recursive: true })
     fs.cpSync(path.join(stage, 'package/THIRD-PARTY-NOTICES'), path.join(native, 'THIRD-PARTY-NOTICES'), { recursive: true })

@@ -2,6 +2,7 @@ import type { CallPairingManagement } from './pairing-client.js'
 import type { NativeUpdateStatus } from '../native-update-service.js'
 import type { UpdateAdvice } from '../update-policy.js'
 export interface NativeCheck { advice: UpdateAdvice; channel: 'stable' | 'preview'; canInstall: boolean; reason: string; ticket: string; status: NativeUpdateStatus }
+export interface RestartNotice { jobId: string; installedVersion: string; runningVersion?: string }
 interface Snapshot { checking: boolean; starting: boolean; check: NativeCheck | null; status: NativeUpdateStatus | null; error: string | null }
 /** Same-node shared state: one check, one deliberate submission, no blind retry. */
 export class NativeUpdateStore {
@@ -10,6 +11,9 @@ export class NativeUpdateStore {
   private reading?: Promise<void>
   private timer?: ReturnType<typeof setTimeout>
   private disposed = false
+  // Memory-only presentation intent; never used to allow/refuse an update.
+  private noticeIntent?: { target?: string; previousJob?: string; acceptedJob?: string }
+  private restartNotice?: RestartNotice
   constructor(private call: CallPairingManagement) {}
   getSnapshot = () => this.value
   private patch(next: Partial<Snapshot>) { if (!this.disposed) { this.value = { ...this.value, ...next }; for (const listener of this.listeners) listener() } }
@@ -21,6 +25,26 @@ export class NativeUpdateStore {
     return () => { this.listeners.delete(listener); if (!this.listeners.size) { clearTimeout(this.timer); this.timer = undefined } }
   }
   private active() { return this.value.status && ['preparing', 'installing', 'unknown', 'restart-required'].includes(this.value.status.phase) }
+  takeRestartNotice = (): RestartNotice | undefined => {
+    const result = this.disposed ? undefined : this.restartNotice
+    this.restartNotice = undefined
+    return result
+  }
+  private observeRestart(status: NativeUpdateStatus, accepted = false) {
+    try {
+      const intent = this.noticeIntent
+      if (!status || typeof status !== 'object') return
+      if (accepted && intent) intent.acceptedJob = status.jobId
+      if (status.phase === 'failed' || status.phase === 'complete' || status.phase === 'idle') { this.noticeIntent = undefined; this.restartNotice = undefined; return }
+      if (!intent || status.phase !== 'restart-required' || typeof intent.target !== 'string' || !intent.target
+          || typeof status.jobId !== 'string' || !status.jobId
+          || status.targetVersion !== intent.target || status.jobId === intent.previousJob
+          || intent.acceptedJob && status.jobId !== intent.acceptedJob) return
+      this.noticeIntent = undefined
+      this.restartNotice = { jobId: status.jobId, installedVersion: status.targetVersion,
+        runningVersion: typeof status.previousVersion === 'string' ? status.previousVersion : undefined }
+    } catch { /* Presentation metadata must never change the update outcome. */ }
+  }
   refresh = (): Promise<void> => {
     if (this.disposed || this.value.starting) return Promise.resolve()
     if (this.reading) return this.reading
@@ -50,11 +74,16 @@ export class NativeUpdateStore {
   install = async (): Promise<void> => {
     const check = this.value.check
     if (this.disposed || this.value.starting || this.value.checking || !check?.canInstall || !check.ticket) return
+    try { this.noticeIntent = { target: check.advice.targetVersion, previousJob: check.status.jobId } }
+    catch { this.noticeIntent = undefined }
+    this.restartNotice = undefined
     this.patch({ starting: true, error: null, check: { ...check, canInstall: false, ticket: '' } })
     try {
       const status = await this.call('update-start', { ticket: check.ticket }) as NativeUpdateStatus
+      this.observeRestart(status, true)
       this.patch({ status })
     } catch (error) {
+      if ((error as { code?: string })?.code === 'update/not-started') this.noticeIntent = undefined
       this.patch({ status: (error as { code?: string })?.code === 'update/not-started'
         ? { phase: 'failed', message: error instanceof Error ? error.message : '尚未启动更新，请重新检查' }
         : { phase: 'unknown', message: '更新提交结果暂未确认，正在核对；请勿重复安装。' } })
@@ -66,10 +95,11 @@ export class NativeUpdateStore {
       try {
         const status = await this.call('update-status') as NativeUpdateStatus
         if (!status || !['idle', 'preparing', 'installing', 'restart-required', 'complete', 'failed', 'unknown'].includes(status.phase)) throw Error('invalid status')
+        this.observeRestart(status)
         this.patch({ status, error: status.phase === 'idle' ? '尚未发现已接受的更新，请重新检查后再操作。' : null })
       } catch { this.patch({ error: '更新状态暂不可用；恢复连接后继续核对，不会重复安装。' }) }
       finally { this.timer = undefined; this.poll() }
     }, 2000)
   }
-  dispose() { this.disposed = true; clearTimeout(this.timer); this.listeners.clear() }
+  dispose() { this.disposed = true; clearTimeout(this.timer); this.listeners.clear(); this.noticeIntent = undefined; this.restartNotice = undefined }
 }

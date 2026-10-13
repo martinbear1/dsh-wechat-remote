@@ -14,9 +14,16 @@ export function InstallationResultPanel({ packageName, readInstallation, onDismi
   useEffect(() => {
     let active = true
     setState(null)
-    void readInstallation(packageName).then(value => { if (active) setState(value) }, () => { if (active) setState({ phase: 'unknown' }) })
+    void Promise.resolve().then(() => readInstallation(packageName)).then(value => { if (active) setState(value) }, () => { if (active) setState({ phase: 'unknown' }) })
     return () => { active = false }
   }, [packageName, readInstallation, revision])
+  return renderInstallationResult({ state, onDismiss, onOpenDetails, onRetry: () => setRevision(value => value + 1) })
+}
+
+/** Shared passive view. Rendering/dismissal never reads, installs or restarts. */
+export function renderInstallationResult({ state, onDismiss, onOpenDetails, onRetry }: {
+  state: InstallationState | null; onDismiss: () => void; onOpenDetails?: () => void; onRetry?: () => void
+}): JSX.Element {
   const title = !state ? '正在核对安装结果…' : state.phase === 'restart-required' ? '已安装，需重启当前 DSH 才能生效'
     : state.phase === 'ready' ? '安装已生效' : state.phase === 'disabled' ? '已安装，尚未启用'
     : state.phase === 'incomplete' ? '组件尚未全部就绪' : '安装状态暂未确认'
@@ -31,7 +38,7 @@ export function InstallationResultPanel({ packageName, readInstallation, onDismi
       {state?.phase === 'unknown' ? <><p>暂不能确认已生效。若刚安装或更新后页面不可用，请先在任务结束后手动重启当前 DSH，再重新核对。</p><p className={styles.helpText}>{manualRestartInstruction(state.scope)}</p><p className={styles.helpText}>若重启后仍有问题，请在原生插件管理器查看安装详情，并保留错误信息。</p></> : null}
     </div>
     <div className={styles.actions}>
-      {state && ['incomplete', 'unknown'].includes(state.phase) ? <button type="button" className={styles.secondaryButton} onClick={() => setRevision(value => value + 1)}>重新核对</button> : null}
+      {onRetry && state && ['incomplete', 'unknown'].includes(state.phase) ? <button type="button" className={styles.secondaryButton} onClick={onRetry}>重新核对</button> : null}
       {onOpenDetails ? <button type="button" className={styles.secondaryButton} onClick={() => { onDismiss(); onOpenDetails() }}>查看插件</button> : null}
       <button type="button" className={styles.primaryButton} onClick={onDismiss}>知道了</button>
     </div>

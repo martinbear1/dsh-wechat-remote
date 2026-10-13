@@ -121,8 +121,17 @@ test('failed reads require explicit retry; dismissal fences late results', async
   assert.match(JSON.stringify(tree), /Web 需要重启实际服务，仅刷新网页不会生效/)
   assert.doesNotMatch(JSON.stringify(tree), /已安装，需重启当前 DSH 才能生效|安装已生效|立即重启/)
   h.elements(tree).find(n => n.type === 'button' && n.props.children === '重新核对').props.onClick()
-  h.render(); h.flush(); h.unmount(); const before = h.writes
+  h.render(); h.flush(); await settle(); h.unmount(); const before = h.writes
   release({ phase: 'ready' }); await settle(); assert.equal(h.writes, before); assert.equal(reads, 2)
+})
+
+test('synchronous read failure stays dismissible and never becomes an activation blocker', async () => {
+  const h = viewHarness(() => { throw Error('provider unavailable') })
+  h.render(); h.flush(); await settle()
+  const tree = h.render()
+  assert.match(JSON.stringify(tree), /安装状态暂未确认/)
+  tree.props.onClose(); assert.equal(h.dismissals, 1)
+  h.unmount()
 })
 test('removed peer-update runtime cannot be reintroduced by slots, transport or package lists', () => {
   for (const file of ['src/companion-updates.ts', 'src/client/CompanionPanel.tsx', 'src/client/CompanionUpdateCard.tsx']) assert.equal(fs.existsSync(file), false)

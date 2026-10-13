@@ -1,9 +1,25 @@
-import { useSyncExternalStore } from 'react'
-import type { NativeUpdateStore } from './native-update-store.js'
+import { useEffect, useState, useSyncExternalStore } from 'react'
+import type { NativeUpdateStore, RestartNotice } from './native-update-store.js'
+import type { NativeUpdateStatus } from '../native-update-service.js'
 import styles from './HarnessRemoteSettings.module.css'
 import { manualRestartInstruction } from './installation-state.js'
+import { renderInstallationResult } from './InstallationResultPanel.js'
+import { InstallationRestartNotice, type InstallationRestartProps } from './InstallationRestartNotice.js'
 
-export function NativeUpdateCard({ store, scope = 'desktop', embedded = false }: { store: NativeUpdateStore; scope?: string; embedded?: boolean }): JSX.Element {
+/** First mounted view takes the shared, one-shot notice. No RPC or gate. */
+function UpdateResultNotice({ store, status, scope }: { store: NativeUpdateStore; status: NativeUpdateStatus | null; scope: string }): JSX.Element | null {
+  const [notice, setNotice] = useState<{ owner: NativeUpdateStore; value: RestartNotice } | null>(null)
+  useEffect(() => {
+    try { const value = store.takeRestartNotice?.(); if (value) setNotice({ owner: store, value }) }
+    catch { /* An auxiliary result view cannot interrupt the update/page. */ }
+  }, [store, status])
+  if (notice?.owner !== store || status?.phase !== 'restart-required' || status.jobId !== notice.value.jobId) return null
+  return renderInstallationResult({ state: { phase: 'restart-required', installedVersion: notice.value.installedVersion,
+    runningVersion: notice.value.runningVersion, ...(scope === 'web' || scope === 'desktop' ? { scope } : {}) },
+    onDismiss: () => setNotice(null) })
+}
+
+export function NativeUpdateCard({ store, scope = 'desktop', embedded = false, installation }: { store: NativeUpdateStore; scope?: string; embedded?: boolean; installation?: InstallationRestartProps }): JSX.Element {
   const desktop = scope === 'desktop'
   const label = desktop ? 'Desktop' : 'Web'
   const { check, status, checking, starting, error } = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
@@ -15,6 +31,7 @@ export function NativeUpdateCard({ store, scope = 'desktop', embedded = false }:
     : status?.phase === 'failed' ? '更新未完成'
     : busy ? `正在更新 ${label} 插件` : status?.phase === 'complete' ? '更新已生效' : ''
   return <div className={embedded ? styles.updateEndpoint : styles.updateCard}>
+    {status?.phase !== 'restart-required' && installation ? <InstallationRestartNotice {...installation} /> : null}
     <div className={styles.updateRow}><div className={styles.updateCopy}><strong>{label} <span className={styles.updateScope}>当前端</span></strong>
       {check ? <div className={styles.updateVersions}><span>DSH <strong>{check.advice.current.agentVersion || '未确认'}</strong></span><span>插件运行 <strong>{check.advice.current.pluginVersion || '未确认'}</strong></span>{installed && status.targetVersion && status.targetVersion !== check.advice.current.pluginVersion ? <span>已安装 <strong>{status.targetVersion}</strong></span> : null}{check.channel === 'preview' ? <span>预览通道</span> : null}</div> : null}</div>
       <div className={styles.updateControl}><button type="button" className={styles.secondaryButton} disabled={checking || busy} onClick={() => void store.refresh()}>{checking ? '检查中…' : '检查更新'}</button>
@@ -30,5 +47,6 @@ export function NativeUpdateCard({ store, scope = 'desktop', embedded = false }:
       {status.phase === 'restart-required' ? <p className={styles.updateNote}>{manualRestartInstruction(scope)} 无需重新配对。</p>
         : status.phase !== 'complete' ? <p>{status.message}</p> : null}</div> : null}
     {error ? <p role="alert">{error}</p> : null}
+    <UpdateResultNotice store={store} status={status} scope={scope} />
   </div>
 }

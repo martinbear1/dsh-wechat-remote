@@ -7,3 +7,10 @@ export declare function InstallationResultPanel({ packageName, readInstallation,
     onDismiss: () => void;
     onOpenDetails?: () => void;
 }): JSX.Element;
+/** Shared passive view. Rendering/dismissal never reads, installs or restarts. */
+export declare function renderInstallationResult({ state, onDismiss, onOpenDetails, onRetry }: {
+    state: InstallationState | null;
+    onDismiss: () => void;
+    onOpenDetails?: () => void;
+    onRetry?: () => void;
+}): JSX.Element;

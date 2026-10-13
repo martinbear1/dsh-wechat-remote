@@ -145,6 +145,8 @@ exports.apply({
         if (spec.name === 'plugins.bundle.config') {
           assert.equal(typeof spec.inject().callManagement, 'function')
           assert.equal(spec.inject().store, sharedStore, 'settings and native detail share one host store')
+          assert.equal(typeof spec.inject().readInstallation, 'function')
+          assert.equal(spec.inject().readInstallation, spec.inject().readInstallation, 'detail inventory reader stays stable across snapshot renders')
         } else {
           assert.equal(typeof spec.inject().readInstallation, 'function')
           assert.equal(spec.inject().store, undefined, 'activation has no polling page or updater dependency')

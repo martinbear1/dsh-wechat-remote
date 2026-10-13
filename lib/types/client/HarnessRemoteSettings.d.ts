@@ -1,3 +1,4 @@
+import type { InstallationState } from './installation-state.js';
 import { type HarnessRemoteHostDescription, type CallPairingManagement } from './pairing-client.js';
 import { type RemotePageStore } from './remote-page-store.js';
 import type { AssistantStore } from './assistant-store.js';
@@ -19,5 +20,6 @@ export interface HarnessRemoteSettingsProps {
         subscribe: (listener: () => void) => () => void;
         getSnapshot: () => number;
     };
+    readInstallation?: () => Promise<InstallationState>;
 }
-export declare function HarnessRemoteSettings({ describeHost, callManagement, store, diagnostics, assistants, clawbotCall, featureCall, resourcesCall, resourceConnection, }: HarnessRemoteSettingsProps): JSX.Element;
+export declare function HarnessRemoteSettings({ describeHost, callManagement, store, diagnostics, assistants, clawbotCall, featureCall, resourcesCall, resourceConnection, readInstallation, }: HarnessRemoteSettingsProps): JSX.Element;

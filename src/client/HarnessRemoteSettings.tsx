@@ -4,6 +4,8 @@ import { FishLogo } from '@deepseek-ai/dsh-client-ui-primitives'
 import styles from './HarnessRemoteSettings.module.css'
 import { PluginUpdateCard } from './PluginUpdateCard.tsx'
 import { NativeUpdateCard } from './NativeUpdateCard.tsx'
+import { InstallationRestartNotice } from './InstallationRestartNotice.js'
+import type { InstallationState } from './installation-state.js'
 import { type HarnessRemoteHostDescription,
   type CallPairingManagement } from './pairing-client.js'
 import { pageStore, type RemotePageStore } from './remote-page-store.js'
@@ -28,6 +30,7 @@ export interface HarnessRemoteSettingsProps {
   featureCall?: FeatureCall
   resourcesCall?: MyResourcesCall
   resourceConnection?: { subscribe: (listener: () => void) => () => void; getSnapshot: () => number }
+  readInstallation?: () => Promise<InstallationState>
 }
 
 function StatusDot({ ok, busy = false }: { ok: boolean; busy?: boolean }): JSX.Element {
@@ -72,6 +75,7 @@ export function HarnessRemoteSettings({
   featureCall,
   resourcesCall,
   resourceConnection = absentResourceConnection,
+  readInstallation,
 }: HarnessRemoteSettingsProps): JSX.Element {
   const resourceGeneration = useSyncExternalStore(resourceConnection.subscribe, resourceConnection.getSnapshot, resourceConnection.getSnapshot)
   const { loadState, qrState, status, runtime, host, localOrigin, qr, error } = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
@@ -104,6 +108,9 @@ export function HarnessRemoteSettings({
   const identityReady = relay?.enabled === true && relay.state !== 'disabled'
   const agentName = status?.agent?.agentName || host?.agentName || 'DeepSeek Harness'
   const hostName = status?.agent?.hostName || host?.computerName || '当前电脑'
+  const installation = { readInstallation, runningVersion: status?.plugin?.runningVersion ?? host?.pluginVersion,
+    installedVersion: status?.plugin?.installedVersion ?? host?.installedPluginVersion,
+    scope: runtime?.profileScope, hostIdentity: host?.agentInstanceId ?? host?.computerName }
 
   return (
     <section className={styles.root} aria-labelledby={titleId}>
@@ -213,8 +220,9 @@ export function HarnessRemoteSettings({
       )}
       <section className={styles.updateCard} aria-label="插件更新">
         <h3 className={styles.updateHeading}>插件更新</h3>
+        {!store.nativeUpdates ? <InstallationRestartNotice {...installation} /> : null}
         {localOrigin && store.updates ? <PluginUpdateCard store={store.updates} embedded /> : null}
-        {store.nativeUpdates ? <NativeUpdateCard store={store.nativeUpdates} scope={runtime?.profileScope} embedded /> : null}
+        {store.nativeUpdates ? <NativeUpdateCard store={store.nativeUpdates} scope={runtime?.profileScope} installation={installation} embedded /> : null}
       </section>
       {assistants ? <AssistantPresetsPanel store={assistants} featureCall={featureCall} /> : null}
       {clawbotCall ? <ClawbotPanel call={clawbotCall} nodeName={agentName} hostName={hostName} /> : null}

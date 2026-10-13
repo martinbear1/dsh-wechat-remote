@@ -47,17 +47,22 @@ const scenes = [
   { name: 'desktop-dark', scope: 'desktop', width: 820, phase: 'restart-required', dark: true },
   { name: 'web-incomplete', scope: 'web', width: 820, phase: 'incomplete' },
   { name: 'unknown', width: 400, phase: 'unknown' },
+  { name: 'desktop-detail-warm', scope: 'desktop', width: 820, phase: 'restart-required', detail: true },
+  { name: 'web-detail-narrow', scope: 'web', width: 400, phase: 'restart-required', detail: true },
+  { name: 'desktop-detail-dark', scope: 'desktop', width: 820, phase: 'restart-required', detail: true, dark: true },
 ]
 const results = []
 for (const scene of scenes) {
   activationState = { phase: scene.phase, scope: scene.scope, installedVersion: version,
     runningVersion: scene.phase === 'restart-required' ? '1.7.13' : version }
   const sceneCheck = { ...check, advice: { ...advice, current: { ...advice.current, pluginVersion: activationState.runningVersion } } }
-  const current = createElement(NativeUpdateCard, { embedded: true, scope: scene.scope, store: passive({ check: sceneCheck,
-    status: scene.phase === 'restart-required' ? { phase: 'restart-required', targetVersion: version } : { phase: 'idle', message: '' },
+  const current = createElement(NativeUpdateCard, { embedded: true, scope: scene.scope,
+    ...(scene.detail ? { installation: { runningVersion: '1.7.13', installedVersion: version, scope: scene.scope } } : {}),
+    store: passive({ check: sceneCheck,
+    status: scene.phase === 'restart-required' && !scene.detail ? { phase: 'restart-required', targetVersion: version } : { phase: 'idle', message: '' },
     error: '', checking: false }) })
   const markup = renderToStaticMarkup(createElement('main', null,
-    createElement(InstallationResultPanel, { packageName: 'dsh-wechat-remote', readInstallation: noAction, onDismiss: noAction, onOpenDetails: noAction }),
+    scene.detail ? null : createElement(InstallationResultPanel, { packageName: 'dsh-wechat-remote', readInstallation: noAction, onDismiss: noAction, onOpenDetails: noAction }),
     createElement('section', { className: 'updateCard', 'aria-label': '插件更新' },
       createElement('h3', { className: 'updateHeading' }, '插件更新'), current)))
   const html = path.join(out, scene.name + '.html'), screenshot = path.join(out, scene.name + '.png')

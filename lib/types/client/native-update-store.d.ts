@@ -9,6 +9,11 @@ export interface NativeCheck {
     ticket: string;
     status: NativeUpdateStatus;
 }
+export interface RestartNotice {
+    jobId: string;
+    installedVersion: string;
+    runningVersion?: string;
+}
 interface Snapshot {
     checking: boolean;
     starting: boolean;
@@ -24,11 +29,15 @@ export declare class NativeUpdateStore {
     private reading?;
     private timer?;
     private disposed;
+    private noticeIntent?;
+    private restartNotice?;
     constructor(call: CallPairingManagement);
     getSnapshot: () => Snapshot;
     private patch;
     subscribe: (listener: () => void) => () => void;
     private active;
+    takeRestartNotice: () => RestartNotice | undefined;
+    private observeRestart;
     refresh: () => Promise<void>;
     install: () => Promise<void>;
     private poll;

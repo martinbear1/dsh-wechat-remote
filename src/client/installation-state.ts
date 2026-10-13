@@ -18,6 +18,14 @@ interface Manager {
 const owners = ['dsh-wechat-remote', '@harness-remote/dsh-wechat-remote']
 const version = (value: unknown): string | undefined => typeof value === 'string' && /^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(value) ? value : undefined
 
+/** Presentation only: never an installation/update admission check. */
+export function pendingRestart(running: unknown, installed: unknown, scope?: string): InstallationState | undefined {
+  const runningVersion = version(running), installedVersion = version(installed)
+  if (!runningVersion || !installedVersion || runningVersion === installedVersion) return
+  return { phase: 'restart-required', runningVersion, installedVersion,
+    ...(scope === 'desktop' || scope === 'web' ? { scope } : {}) }
+}
+
 /** Activation-only read of the current native manager. No catalog, filesystem,
  * install, restart, peer discovery or background polling. A new client can read
  * the old host's running version without invoking new updater operations. */

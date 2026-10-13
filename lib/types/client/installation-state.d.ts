@@ -5,6 +5,8 @@ export interface InstallationState {
     installedVersion?: string;
     runningVersion?: string;
 }
+/** Presentation only: never an installation/update admission check. */
+export declare function pendingRestart(running: unknown, installed: unknown, scope?: string): InstallationState | undefined;
 /** Activation-only read of the current native manager. No catalog, filesystem,
  * install, restart, peer discovery or background polling. A new client can read
  * the old host's running version without invoking new updater operations. */

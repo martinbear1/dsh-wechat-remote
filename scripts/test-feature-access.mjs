@@ -22,6 +22,44 @@ const importLease = (nodeId = 'test-node', patch = {}) => {
   return value
 }
 
+test('group component availability changes effective access without changing entitlements or saved opt-in', async t => {
+  let active = true, events = 0
+  const access = new FeatureAccess({ nodeId: () => 'test-node', read: async () => importLease(), groupAvailable: () => active })
+  t.after(() => access.close()); access.subscribe(() => events++)
+  await access.setGroupEnabled(true); await access.setHistoryImportEnabled(true)
+  const intent = structuredClone(access.requested), leaseBefore = access.snapshot().features
+  active = false; access.componentsChanged()
+  assert.equal(access.snapshot().groupComponentAvailable, false)
+  assert.equal(access.groupEnabled(), false); assert.equal(access.historyImportEnabled(), true)
+  assert.deepEqual(access.snapshot().features, leaseBefore); assert.deepEqual(access.requested, intent)
+  await assert.rejects(access.assert('group_assistant'), /电脑插件管理器/)
+  await assert.rejects(access.setGroupEnabled(true), /电脑插件管理器/)
+  active = true; access.componentsChanged()
+  assert.equal(access.groupEnabled(), true, 'restores only the existing identity-bound opt-in')
+  active = false; access.componentsChanged(); await access.setGroupEnabled(false)
+  active = true; access.componentsChanged(); assert.equal(access.groupEnabled(), false, 'explicit off is not overwritten')
+  assert(events >= 7)
+})
+
+test('assistant card control requires the physical component and current group authority, never enables a node', async t => {
+  const ctx = new Context(), calls = [], controller = { active: true, async setEnabled(...args) { calls.push(args.slice(0, 2)) } }
+  ctx.provide('wechatGroupAssistants', controller)
+  await ctx.plugin(WechatFeaturesService, { source: { nodeId: () => 'test-node', read: async () => lease(), groupAvailable: () => controller.active } })
+  t.after(() => ctx.fiber.dispose())
+  const service = ctx.get('wechatFeatures'), signal = new AbortController().signal
+  assert.equal((await service.control({ action: 'assistant.enabled', templateId: 'teacher', enabled: true }, signal)).ok, false)
+  assert.equal(calls.length, 0)
+  assert.equal((await service.control({ action: 'assistant.enabled', templateId: 'teacher', enabled: false }, signal)).ok, true)
+  assert.equal(service.access.groupEnabled(), false)
+  await service.access.setGroupEnabled(true)
+  assert.equal((await service.control({ action: 'assistant.enabled', templateId: 'teacher', enabled: true }, signal)).ok, true)
+  assert.deepEqual(calls, [['teacher', false], ['teacher', true]])
+  assert.equal((await service.control({ action: 'assistant.enabled', templateId: 'unknown', enabled: true }, signal)).ok, false)
+  controller.active = false; service.access.componentsChanged()
+  const unavailable = await service.control({ action: 'assistant.enabled', templateId: 'teacher', enabled: true }, signal)
+  assert.equal(unavailable.ok, false); assert.match(unavailable.error.message, /电脑插件管理器/)
+})
+
 test('one lease is singleflight, monotonic bounded, node/account bound and local group opt-in is separate', async t => {
   let clock = 0, nodeId = 'test-node', calls = 0, data = lease(), pending = deferred()
   const access = new FeatureAccess({ nodeId: () => nodeId, read: async () => { calls++; return pending.promise } }, undefined, () => clock)

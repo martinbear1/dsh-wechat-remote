@@ -41,6 +41,7 @@ if (!childStage) {
       fs.writeFileSync(path.join(packageDirectory, 'package.json'), JSON.stringify({ name: 'dsh-wechat-remote', type: 'module', exports: {
         './resource-library': './native/lib/resource-library-component.js',
         './private-resource-prompt': './native/lib/private-resources/native.js',
+        './collaboration': './native/lib/collaboration.js',
       } }))
       execFileSync(process.execPath, [path.join(repo, 'node_modules/typescript/bin/tsc'), '-p', path.join(repo, 'tsconfig.json'),
         '--outDir', path.join(packageDirectory, 'native/lib'), '--declaration', 'false', '--sourceMap', 'false'],
@@ -65,10 +66,16 @@ if (!childStage) {
   const { default: Projection } = await load('@deepseek-ai/dsh-session-projection')
   const { default: SystemPrompt, renderPrompt } = await load('@deepseek-ai/dsh-system-prompt')
   const { default: AgentPresets } = await load('@deepseek-ai/dsh-agent-preset-registry')
+  const { ToolRuntime } = await load('@deepseek-ai/dsh-tools')
+  const { SkillRegistry } = await load('@deepseek-ai/dsh-skill')
   const componentPath = require.resolve('dsh-wechat-remote/resource-library')
   const { WechatResourcesService } = await import(pathToFileURL(path.join(path.dirname(componentPath), 'private-resources/service.js')).href)
   const { NativeResourceRegistry } = await import(pathToFileURL(path.join(path.dirname(componentPath), 'private-resources/native.js')).href)
   const { parseResourcePreset } = await import(pathToFileURL(path.join(path.dirname(componentPath), 'private-resources/contract.js')).href)
+  const { readResourceAssistantDefinitions } = await import(pathToFileURL(path.join(path.dirname(componentPath), 'private-resources/assistant-provider.js')).href)
+  const { assistantGuidance } = await import(pathToFileURL(path.join(path.dirname(componentPath), 'assistant-presets/definition.js')).href)
+  const { ScopedCapabilities } = await import(pathToFileURL(path.join(path.dirname(componentPath), 'human-tools/scoped-capabilities.js')).href)
+  const { registerHumanWorkflowSkill, HUMAN_WORKFLOW_SKILL } = await import(pathToFileURL(path.join(path.dirname(componentPath), 'human-workflow/dsh-skill.js')).href)
   const { nativeAssistantCodec, parseNativeAssistantBase } = await import(pathToFileURL(path.join(path.dirname(componentPath), 'assistant-presets/native-adapter.js')).href)
   const fromBytes = bytes => {
     const value = parseResourcePreset(bytes)
@@ -250,6 +257,88 @@ if (!childStage) {
     assert.equal((await control({ op: 'refresh' })).items.filter(item => item.state === 'installed').length, 2)
     assert.equal(requests.length, deliveredRequests + 1, 'a resumed sibling provider works without recreating local resources')
     assert([...root.registry.get(WechatResourcesService).fibers].includes(ownedServiceFiber))
+    // Only synthetic backend authorization and side effects are substituted.
+    // Resource parsing/composition, native scope, shipped collaboration helper,
+    // ScopedCapabilities and Skill registration are the actual product code.
+    await root.plugin(ToolRuntime, { mode: 'native' }); await root.plugin(SkillRegistry)
+    let groupEnabled = true, writes = 0
+    const listeners = new Set()
+    const access = { groupEnabled: () => groupEnabled, subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn) },
+      assertCurrent() { if (!groupEnabled) throw Error('synthetic group authority denied') }, async assert() { this.assertCurrent() } }
+    const startGroupGate = async id => {
+      root.loader.builtins[id] = { name: id, apply(ctx) {
+        const lifetime = new AbortController(), capabilities = new ScopedCapabilities(lifetime.signal, async () => access.assertCurrent())
+        for (const name of ['human_capabilities', 'human_assistant_catalog', 'human_assistant_work_start']) capabilities.add({
+          name, description: 'Synthetic backend operation, no external side effect', parameters: { type: 'object', properties: {} },
+          output: { schema: { type: 'object' }, render: () => [] }, execute() { writes++; return { ok: true } },
+        })
+        capabilities.contribute(scope => registerHumanWorkflowSkill(scope))
+        ctx.provide('wechatFeatures', { access })
+        ctx.provide('humanTools', { async mountCapabilities(scope) { access.assertCurrent(); return capabilities.mount(scope) } })
+        return () => { lifetime.abort(); capabilities.close() }
+      } }
+      await root.loader.root.create({ id, name: `cordis:${id}` })
+      const fiber = root.loader.resolve(id).fiber; await fiber.await(); gates.push(fiber); return fiber
+    }
+    let groupGate = await startGroupGate('groupGateOne')
+    const groupResource = fromBytes(Buffer.from(JSON.stringify({ ...v1.value, schemaVersion: 2, version: '2.0.0', capabilities: ['wechat-group'],
+      systemPrompt: '群资源原文 {{cwd}}、{{model}}、不完整 {{，保留\r\n  ',
+      assistant: { schemaVersion: 1, name: v1.value.name, description: v1.value.description, role: '帮助协作工作 {{cwd}}', basePreset: 'standard',
+        methods: ['按实际需要使用协作能力 {{model}}。'], onboarding: [], skills: ['human-workflow'] } })))
+    releases.set(groupResource.value.version, groupResource); available = [groupResource.release]
+    const installedGroup = (await control({ op: 'install', resourceId: groupResource.value.resourceId, version: groupResource.value.version }))
+      .items.find(item => item.version === groupResource.value.version)
+    assert.equal(installedGroup.state, 'installed', installedGroup.message)
+    const provider = root.get('wechatResourceAssistants'), descriptions = await provider.definitions(timeoutSignal())
+    assert.equal(descriptions.length, 1); assert.equal(descriptions[0].presetId, installedGroup.presetId)
+    assert.equal((await provider.list(timeoutSignal()))[0].state, 'installed')
+    assert.equal((await provider.list(timeoutSignal(), { waitForReady: false }))[0].state, 'unknown')
+    const groupScope = await root.agentPresets.acquireScope(installedGroup.presetId); leases.push(groupScope)
+    assert.equal(renderPrompt(await root.systemPrompt.assemble({ scope: groupScope.key })),
+      [globalPrompt, groupResource.value.systemPrompt + '\n\n' + assistantGuidance(groupResource.value.assistant), nativeSuffix].filter(Boolean).join('\n\n'),
+      'actual native rendering keeps authored braces literal and includes the reviewed occupational method')
+    assert(root.tools.get('human_assistant_work_start', groupScope.key))
+    assert.equal((await root.skills.get('human-workflow', { scope: groupScope.key, signal: timeoutSignal() })).content, HUMAN_WORKFLOW_SKILL.content)
+    assert(!root.tools.get('human_assistant_work_start', oldScope.key))
+    assert(!root.tools.get('human_assistant_work_start'), 'resource capabilities cannot leak to host/global tools')
+    const groupTool = root.tools.get('human_assistant_work_start', groupScope.key)
+    await groupTool.execute({}, { signal: timeoutSignal() }); assert.equal(writes, 1)
+    groupEnabled = false
+    await assert.rejects(groupTool.execute({}, { signal: timeoutSignal() }), /authority denied/)
+    for (const notify of listeners) notify()
+    const settleResource = async expected => {
+      for (let attempt = 0; attempt < 200; attempt++) {
+        const item = (await control({ op: 'status' })).items.find(item => item.version === groupResource.value.version)
+        if (item?.state === expected) return item
+        await tick()
+      }
+      assert.fail(`group resource did not settle to ${expected}`)
+    }
+    await settleResource('unavailable')
+    assert.equal((await provider.list(timeoutSignal()))[0].state, 'unknown')
+    assert.deepEqual(await provider.definitions(timeoutSignal()), descriptions)
+    assert.equal((await root.agentPresets.resolve(installedOne.presetId)).broken, undefined)
+    groupEnabled = true; for (const notify of listeners) notify()
+    await settleResource('installed')
+    assert.equal((await provider.list(timeoutSignal()))[0].state, 'installed')
+    await bounded(groupGate.dispose(), 'group gate unload must not wait on its own resource diagnostics')
+    await settleResource('unavailable')
+    assert(!root.tools.get('human_assistant_work_start', groupScope.key), 'backend disposal withdraws even retained scopes')
+    assert.equal((await root.agentPresets.resolve(installedOne.presetId)).broken, undefined, 'ordinary local preset survives group gate loss')
+    groupGate = await startGroupGate('groupGateTwo')
+    await settleResource('installed')
+    assert.equal((await root.get('wechatResourceAssistants').list(timeoutSignal()))[0].state, 'installed')
+    await resourceFiber.dispose()
+    assert.deepEqual(await readResourceAssistantDefinitions(root, timeoutSignal()), descriptions, 'component off keeps verified business definitions readable')
+    await root.loader.root.create({ id: 'resourceFixture', name: 'dsh-wechat-remote/resource-library' })
+    resourceFiber = root.loader.resolve('resourceFixture').fiber
+    await bounded(root.loader.await(), 'resource restart must not deadlock group backend')
+    for (let attempt = 0; attempt < 200; attempt++) {
+      const restored = await root.get('wechatResourceAssistants').list(timeoutSignal())
+      if (restored[0]?.state === 'installed') break
+      await tick()
+    }
+    assert.equal((await root.get('wechatResourceAssistants').list(timeoutSignal()))[0].state, 'installed', 'offline restart revalidates group composition')
     await resourceFiber.dispose()
     assert(!(await root.agentPresets.list()).some(item => item.id === installedOne.presetId || item.id === installedTwo.presetId))
     console.log(JSON.stringify({ passed: true, nativeVersion: JSON.parse(fs.readFileSync(anchor, 'utf8')).version,
@@ -258,7 +347,11 @@ if (!childStage) {
         'actual delivery JSON matches shipped standard preset ID and full declaration shape',
         'actual native persona renders delivered prompts unchanged; full native tool execution is outside this fixture',
         'unsupported agent base saves unavailable and never enters the native roster', 'provider loss preserves resource service and local native definitions',
-        'provider recovery allows refresh without recreating the library', 'resource owner disposal unregisters only owned versions'],
+        'provider recovery allows refresh without recreating the library', 'resource owner disposal unregisters only owned versions',
+        'explicit resource group capability uses real native scoped tools and current shared Skill',
+        'ordinary and global scopes remain free of group capability; synthetic authorization refuses writes immediately',
+        'rights off/on and sibling gate reload preserve ordinary resources and recover authorized group resources',
+        'verified local resource definitions survive component off and native restart'],
       interceptedRequests: requests.length, externalNetworkRequests: 0, liveProfileTouched: false, modelCalls: 0 }))
   } finally {
     await bounded(resourceFiber?.dispose() ?? Promise.resolve(), 'resource fixture teardown must settle')

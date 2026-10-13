@@ -244,7 +244,9 @@ const assertOwner = (snapshot, version) => {
 const assertRuntime = (snapshot, artifact) => {
   assert.equal(snapshot.described.value.pluginVersion, artifact.manifest.version)
   assert(snapshot.sessions.items.some(item => item.sessionId === sessionId))
-  for (const id of ['gate', 'wechat-clawbot', 'harness-assistant-teacher', 'harness-assistant-project', 'harness-assistant-customizer', 'harness-resource-library'])
+  const groupComponents = artifact.manifest.exports?.['./group-assistants'] ? ['harness-group-assistants']
+    : ['harness-assistant-teacher', 'harness-assistant-project', 'harness-assistant-customizer']
+  for (const id of ['gate', 'wechat-clawbot', ...groupComponents, 'harness-resource-library'])
     assert(snapshot.entries.some(entry => entry.id === id && entry.state === 2), `inactive component ${id}`)
   for (const file of ['native/lib/plugin-version.js', 'native/lib/native-update-service.js', 'native/lib/gate-runtime.js'])
     assert.equal(sha(fs.readFileSync(path.join(profile, 'node_modules', owner, file))), sha(member(artifact.file, 'package/' + file)), `installed bytes differ: ${file}`)

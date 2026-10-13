@@ -6,11 +6,7 @@
       name: '@harness-remote/dsh-wechat-remote'
     - id: wechat-clawbot
       name: '@harness-remote/dsh-wechat-remote/clawbot'
-    - id: harness-assistant-teacher
-      name: '@harness-remote/dsh-wechat-remote/assistant-teacher'
-    - id: harness-assistant-project
-      name: '@harness-remote/dsh-wechat-remote/assistant-project'
-    - id: harness-assistant-customizer
-      name: '@harness-remote/dsh-wechat-remote/assistant-customizer'
+    - id: harness-group-assistants
+      name: '@harness-remote/dsh-wechat-remote/group-assistants'
     - id: harness-resource-library
       name: '@harness-remote/dsh-wechat-remote/resource-library'

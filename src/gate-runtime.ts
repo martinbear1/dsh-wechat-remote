@@ -639,6 +639,7 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
     preferenceFile: path.join(path.dirname(defaultGateStatePath(ctx)), 'wechat-feature-preferences-v1.json'),
     source: {
       nodeId: () => { if (!publicRelayGateway) throw new Error('Node unavailable'); return publicRelayGateway.agent.identity.nodeId },
+      groupAvailable: () => ctx.get('wechatGroupAssistants' as any)?.active === true,
       read: (signal: AbortSignal) => { if (!publicRelayGateway) throw new Error('Node unavailable'); return publicRelayGateway.agent.readFeatures(signal) },
     },
   })

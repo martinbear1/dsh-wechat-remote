@@ -9,11 +9,7 @@
       name: './native/index.js'
     - id: wechat-clawbot
       name: 'dsh-wechat-remote/clawbot'
-    - id: harness-assistant-teacher
-      name: 'dsh-wechat-remote/assistant-teacher'
-    - id: harness-assistant-project
-      name: 'dsh-wechat-remote/assistant-project'
-    - id: harness-assistant-customizer
-      name: 'dsh-wechat-remote/assistant-customizer'
+    - id: harness-group-assistants
+      name: 'dsh-wechat-remote/group-assistants'
     - id: harness-resource-library
       name: 'dsh-wechat-remote/resource-library'

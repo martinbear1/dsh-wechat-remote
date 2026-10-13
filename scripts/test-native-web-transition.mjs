@@ -254,7 +254,7 @@ try {
   await stop(); start(); const after = await ready(nextManifest.version)
   assert.notEqual(after.pid,before.pid)
   assert(after.sessions.items.some(item=>item.sessionId===sessionId))
-  for(const id of ['gate','wechat-clawbot','harness-assistant-teacher','harness-assistant-project','harness-assistant-customizer','harness-resource-library'])
+  for(const id of ['gate','wechat-clawbot','harness-group-assistants','harness-resource-library'])
     assert(after.entries.some(entry=>entry.id===id&&entry.state===2),`inactive component ${id}`)
   assert.deepEqual(preserved(),saved)
   assert.equal(binding(),beforeBinding)

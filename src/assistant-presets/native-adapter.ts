@@ -10,7 +10,8 @@ import { lstat, mkdir, open, readFile, readdir, realpath, rename } from 'node:fs
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { assistantDefinition, assistantGuidance, legacyAssistantGuidanceV1, legacyAssistantGuidanceV2, legacyAssistantGuidanceV3, legacyAssistantGuidanceV4, legacyAssistantGuidanceV5, type AssistantDefinition } from './definition.js'
-import type { NativeAssistantAdapter, NativeAssistantCapability, NativeAssistantInstallation, NativeAssistantPreview } from './types.js'
+import type { NativeAssistantAdapter, NativeAssistantCapability, NativeAssistantInstallation, NativeAssistantPreview, ResourceAssistantDefinition, ResourceAssistantStatus } from './types.js'
+import { readResourceAssistantDefinitions, type ResourceAssistantProvider } from '../private-resources/assistant-provider.js'
 import { BUILTIN_ASSISTANTS, builtinAssistants, type BuiltinAssistantStatus } from './builtins.js'
 import { HUMAN_WORKFLOW_SKILL } from '../human-workflow/dsh-skill.js'
 
@@ -238,6 +239,18 @@ class Adapter implements NativeAssistantAdapter {
   private codec?: Promise<NativePresetCodec>
   private queue: Promise<unknown> = Promise.resolve()
   constructor(private readonly host: Host, private readonly options: NativeAssistantAdapterOptions) {}
+  async resourceDefinitions(signal: AbortSignal): Promise<ResourceAssistantDefinition[]> {
+    signal = AbortSignal.any([signal, this.lifetime.signal]); signal.throwIfAborted()
+    const provider = this.host.get('wechatResourceAssistants') as ResourceAssistantProvider | undefined
+    const result = provider ? await provider.definitions(signal) : await readResourceAssistantDefinitions(this.host, signal)
+    signal.throwIfAborted(); return result
+  }
+  async resources(signal: AbortSignal, options: { waitForReady?: boolean } = {}): Promise<ResourceAssistantStatus[]> {
+    signal = AbortSignal.any([signal, this.lifetime.signal]); signal.throwIfAborted()
+    const provider = this.host.get('wechatResourceAssistants') as ResourceAssistantProvider | undefined
+    const result = await provider?.list(signal, options) || []
+    signal.throwIfAborted(); return result
+  }
   async builtins(signal: AbortSignal, options: { waitForReady?: boolean } = {}): Promise<BuiltinAssistantStatus[]> {
     const results: BuiltinAssistantStatus[] = []
     for (const definition of builtinAssistants()) {

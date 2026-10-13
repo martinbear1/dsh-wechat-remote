@@ -1,12 +1,14 @@
 {
   "name": "@harness-remote/dsh-wechat-remote",
-  "version": "1.7.14-rc.60",
+  "version": "1.7.14-rc.61",
   "description": "Agent远程管理助手：支持 Windows、macOS 与 Linux 上的 DeepSeek Harness，提供微信配对、安全局域网直连及端到端加密公网连接",
   "private": true,
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
+    "./group-assistants": { "types": "./lib/group-assistants-component.d.ts", "default": "./lib/group-assistants-component.js" },
+    "./group-assistants/locale/*.json": "./lib/assistant-presets/locales/group/*.json",
     "./resource-library": { "types": "./lib/resource-library-component.d.ts", "default": "./lib/resource-library-component.js" },
     "./resource-library/protocol": { "types": "./lib/private-resources/protocol.d.ts", "default": "./lib/private-resources/protocol.js" },
     "./resource-library/locale/*.json": "./lib/private-resources/locales/*.json",
@@ -117,7 +119,7 @@
     }
   },
   "scripts": {
-    "test:private-resources": "node --test scripts/test-private-resources-library.mjs scripts/test-private-resources-native.mjs scripts/test-private-resources-source.mjs scripts/test-my-resources-client.mjs scripts/test-resource-display-groups.mjs scripts/test-private-resources-delivery-contract.mjs scripts/test-private-resources-lifecycle.mjs scripts/test-private-resources-provider-native.mjs",
+    "test:private-resources": "node --test scripts/test-private-resources-library.mjs scripts/test-private-resources-native.mjs scripts/test-private-resources-source.mjs scripts/test-my-resources-client.mjs scripts/test-resource-display-groups.mjs scripts/test-private-resources-delivery-contract.mjs scripts/test-private-resources-lifecycle.mjs scripts/test-private-resources-provider-native.mjs scripts/test-resource-capabilities.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "bundle": "tsc -p tsconfig.json && node scripts/clean-client-types.mjs && tsc -p tsconfig.client.json && node scripts/build-client.mjs && node scripts/generate-typert.mjs",
     "verify": "node scripts/verify.mjs && node scripts/check-public-tree.mjs && npm run verify:pack",
@@ -130,7 +132,7 @@
     "test:private-updates": "node --test scripts/test-human-private-publication.mjs scripts/test-private-input-native.mjs",
     "test:private-updates:desktop": "node scripts/test-private-input-desktop-native.mjs",
     "test:native-update": "node --test scripts/test-native-update.mjs scripts/test-native-update-store.mjs scripts/test-legacy-handoff.mjs scripts/test-legacy-recovery.mjs",
-    "test:human-tools": "node --test scripts/test-human-receipt-recovery.mjs scripts/test-human-workspace-directory.mjs scripts/test-human-capability-index.mjs scripts/test-human-recipient-tools.mjs scripts/test-human-card-cover-renderer.mjs scripts/test-human-card-cover.mjs scripts/test-human-card-assets.mjs scripts/test-human-tools.mjs scripts/test-human-workflow.mjs scripts/test-human-workflow-sync.mjs scripts/test-human-workflow-service.mjs scripts/test-human-workflow-archive.mjs scripts/test-human-lifecycle.mjs scripts/test-human-submission-files.mjs scripts/test-human-operation-semantics.mjs scripts/test-human-known-members.mjs scripts/test-human-reminder-audience.mjs scripts/test-human-skill-refresh.mjs scripts/test-human-automation.mjs scripts/test-human-automation-native.mjs scripts/test-human-automation-gate.mjs scripts/test-scoped-capabilities.mjs scripts/test-assistant-registry.mjs scripts/test-assistant-native-adapter.mjs scripts/test-assistant-interaction.mjs scripts/test-assistant-business.mjs scripts/test-assistant-client-store.mjs scripts/test-assistant-client-navigation.mjs scripts/test-assistant-builtins.mjs",
+    "test:human-tools": "node --test scripts/test-human-receipt-recovery.mjs scripts/test-human-workspace-directory.mjs scripts/test-human-capability-index.mjs scripts/test-human-recipient-tools.mjs scripts/test-human-card-cover-renderer.mjs scripts/test-human-card-cover.mjs scripts/test-human-card-assets.mjs scripts/test-human-tools.mjs scripts/test-human-workflow.mjs scripts/test-human-workflow-sync.mjs scripts/test-human-workflow-service.mjs scripts/test-human-workflow-archive.mjs scripts/test-human-lifecycle.mjs scripts/test-human-submission-files.mjs scripts/test-human-operation-semantics.mjs scripts/test-human-known-members.mjs scripts/test-human-reminder-audience.mjs scripts/test-human-skill-refresh.mjs scripts/test-human-automation.mjs scripts/test-human-automation-native.mjs scripts/test-human-automation-gate.mjs scripts/test-scoped-capabilities.mjs scripts/test-assistant-registry.mjs scripts/test-assistant-native-adapter.mjs scripts/test-assistant-interaction.mjs scripts/test-assistant-business.mjs scripts/test-assistant-client-store.mjs scripts/test-assistant-client-navigation.mjs scripts/test-assistant-builtins.mjs scripts/test-group-assistants.mjs scripts/test-resource-assistant-business.mjs",
     "test:assistants:desktop": "node scripts/test-assistant-builtins-desktop-native.mjs && node scripts/test-assistant-entry-desktop-native.mjs",
     "test:collaboration:desktop": "node scripts/test-collaboration-scope-native.mjs",
     "test:lifecycle": "node scripts/test-gate-state.mjs && node scripts/test-secure-lan.mjs && node scripts/test-lifecycle.mjs",
@@ -251,6 +253,8 @@
     "typescript": "^5.8.3"
   },
   "files": [
+    "lib/group-assistants-component.js",
+    "lib/group-assistants-component.d.ts",
     "lib/resource-library-component.js",
     "lib/resource-library-component.d.ts",
     "lib/private-resources",

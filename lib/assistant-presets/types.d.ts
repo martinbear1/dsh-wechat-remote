@@ -1,5 +1,7 @@
 import type { AssistantDefinition } from './definition.js';
 import type { BuiltinAssistantStatus } from './builtins.js';
+import type { ResourceAssistantDefinition, ResourceAssistantStatus } from '../private-resources/assistant-provider.js';
+export type { ResourceAssistantDefinition, ResourceAssistantStatus } from '../private-resources/assistant-provider.js';
 /** Owner-management adapter only. Never register install as an Agent tool:
  * the core must authenticate the owner and verify its exact approved preview. */
 export interface NativeAssistantCapability {
@@ -40,6 +42,10 @@ export interface NativeAssistantAdapter {
     builtins?(signal: AbortSignal, options?: {
         waitForReady?: boolean;
     }): Promise<BuiltinAssistantStatus[]>;
+    resourceDefinitions?(signal: AbortSignal): Promise<ResourceAssistantDefinition[]>;
+    resources?(signal: AbortSignal, options?: {
+        waitForReady?: boolean;
+    }): Promise<ResourceAssistantStatus[]>;
     probe(): Promise<NativeAssistantCapability>;
     preview(input: {
         presetId: string;

@@ -1,10 +1,12 @@
 import type { FeatureGrant, FeatureLease } from '../feature-access.js';
 export type FeatureView = FeatureLease & {
     groupEnabled: boolean;
+    groupComponentAvailable?: boolean;
 };
 export type FeatureCall = (request: {
-    action: 'status' | 'group.enabled';
+    action: 'status' | 'group.enabled' | 'assistant.enabled';
     enabled?: boolean;
+    templateId?: string;
 }) => Promise<FeatureView>;
 export declare function featureLeaseAllows(lease: {
     checkedAt?: number;

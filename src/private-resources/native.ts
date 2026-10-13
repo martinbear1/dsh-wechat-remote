@@ -1,19 +1,26 @@
 import { realpathSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { nativeAssistantCodec, parseNativeAssistantBase, type NativePresetCodec } from '../assistant-presets/native-adapter.js'
-import { resourceError, resourcePresetId, RESOURCE_PROMPT_MAX_BYTES, type ResourcePreset } from './contract.js'
+import { COLLABORATION_COMPONENT_ID, nativeAssistantCapabilitiesReady, nativeAssistantCodec, nativeAssistantCompositionDigest, nativeCollaborationModule, parseNativeAssistantBase, type NativePresetCodec } from '../assistant-presets/native-adapter.js'
+import type { FeatureAccess } from '../feature-access.js'
+import { assistantGuidance, type AssistantDefinition } from '../assistant-presets/definition.js'
+import { resourceAssistant, resourceError, resourcePresetId, RESOURCE_PROMPT_MAX_BYTES, type ResourcePreset } from './contract.js'
 
 export interface ResourceHost { get(name: string): any }
-export interface NativeResourceOptions { codec?: NativePresetCodec; promptModule?: string }
+export interface NativeResourceOptions { codec?: NativePresetCodec; promptModule?: string; collaborationModule?: string }
+const collaborationNames = ['dsh-wechat-remote/collaboration', '@harness-remote/dsh-wechat-remote/collaboration']
+const collaborationId = COLLABORATION_COMPONENT_ID
 const promptVariable = 'harness_private_resource_prompt'
 /** Trusted shipped helper, not cloud code. Native interpolation is single-pass:
  * variable values containing {{...}} remain literal rather than being evaluated. */
 export default class ResourcePromptData {
   static inject = ['systemPrompt']
-  constructor(ctx: any, config: { text: string }) {
+  constructor(ctx: any, config: { text: string; assistant?: AssistantDefinition }) {
     if (!config || typeof config.text !== 'string' || Buffer.byteLength(config.text) > RESOURCE_PROMPT_MAX_BYTES)
       throw resourceError('resource-prompt-invalid', '预设正文无效。')
-    ctx.systemPrompt.variable(promptVariable, () => config.text)
+    // Validate structured method data in the trusted helper; it is never a
+    // module, template or executable input. The authored body stays literal.
+    const text = config.assistant === undefined ? config.text : `${config.text}\n\n${assistantGuidance(config.assistant)}`
+    ctx.systemPrompt.variable(promptVariable, () => text)
   }
 }
 function ownPromptModule(): string {
@@ -25,14 +32,17 @@ function ownPromptModule(): string {
 }
 export class NativeResourceRegistry {
   private readonly owned = new Map<string, () => Promise<void>>()
+  private readonly expected = new Map<string, string>()
+  private readonly groups = new Set<string>()
+  private groupLifetime = new AbortController()
   private readonly lifetime = new AbortController()
   private closing?: Promise<void>
   constructor(private readonly host: ResourceHost, private readonly options: NativeResourceOptions = {}) {}
   /** Native diagnostics can await the global Loader, including our own unload.
    * Stop waiting when this owner closes; never put that wait back on disposal.
    * A native registration may finish later and still needs its own disposer. */
-  private wait<T>(operation: () => Promise<T>, late?: (value: T) => Promise<void>): Promise<T> {
-    const signal = this.lifetime.signal
+  private wait<T>(operation: () => Promise<T>, late?: (value: T) => Promise<void>, caller?: AbortSignal): Promise<T> {
+    const signal = caller ? AbortSignal.any([this.lifetime.signal, caller]) : this.lifetime.signal
     signal.throwIfAborted()
     return new Promise<T>((resolve, reject) => {
       let settled = false
@@ -54,24 +64,56 @@ export class NativeResourceRegistry {
       throw resourceError('resource-host-unavailable', '当前 DSH 不支持加载此预设，请更新 DSH。')
     return registry
   }
+  groupAvailable(): boolean {
+    try { return this.featureAccess()?.groupEnabled() === true } catch { return false }
+  }
+  private featureAccess(): FeatureAccess | undefined {
+    const access = this.host.get('wechatFeatures')?.access
+    return typeof access?.assertCurrent === 'function' && typeof access?.groupEnabled === 'function' ? access : undefined
+  }
+  /** Cancel before queuing reconciliation: a native diagnostic can be waiting
+   * for the very gate that is unloading. Ordinary resources never join it. */
+  suspendGroups(): Promise<void> {
+    this.groupLifetime.abort(resourceError('resource-group-unavailable', '微信群协作暂不可用。'))
+    const disposers: (() => Promise<void>)[] = []
+    for (const id of this.groups) {
+      const dispose = this.owned.get(id); if (dispose) disposers.push(dispose)
+      this.owned.delete(id); this.expected.delete(id)
+    }
+    this.groups.clear()
+    return Promise.allSettled(disposers.map(dispose => Promise.resolve().then(dispose))).then(() => {})
+  }
   async register(resource: ResourcePreset): Promise<void> {
     this.lifetime.signal.throwIfAborted()
+    const assistant = resourceAssistant(resource), group = !!assistant
+    if (group && !this.groupAvailable()) throw resourceError('resource-group-unavailable', '请先开启本节点的微信群协作助手。')
+    if (group && this.groupLifetime.signal.aborted) this.groupLifetime = new AbortController()
+    const signal = group ? AbortSignal.any([this.lifetime.signal, this.groupLifetime.signal]) : this.lifetime.signal
+    const wait = <T>(operation: () => Promise<T>, late?: (value: T) => Promise<void>) => this.wait(operation, late, signal)
     const registry = this.registry(), id = resourcePresetId(resource)
     if (this.owned.has(id)) {
-      const found = await this.wait<any>(() => registry.resolve(id))
-      this.lifetime.signal.throwIfAborted()
+      const found = await wait<any>(() => registry.resolve(id))
+      signal.throwIfAborted()
       if (found?.id === id && found.broken === undefined) return
       throw resourceError('resource-activation-failed', '此预设暂时不可用，请重启节点后再试。')
     }
-    if ((await this.wait<any[]>(() => registry.list())).some((entry: any) => entry.id === id))
+    if ((await wait<any[]>(() => registry.list())).some((entry: any) => entry.id === id))
       throw resourceError('resource-preset-conflict', 'DSH 中已有同名预设身份，未覆盖原内容。')
-    const base = await this.wait<any>(() => registry.resolve(resource.basePreset))
-    if (!base || base.id !== resource.basePreset || base.broken !== undefined)
-      throw resourceError('resource-base-unavailable', '此预设所需的基础模式暂不可用。')
     const anchor = this.options.codec ? undefined : this.host.get('profileContext')?.installAnchor
-    const codec = this.options.codec || (typeof anchor === 'string' ? await this.wait(() => nativeAssistantCodec(anchor)) : undefined)
+    const codec = this.options.codec || (typeof anchor === 'string' ? await wait(() => nativeAssistantCodec(anchor)) : undefined)
     if (!codec) throw resourceError('resource-host-unavailable', '当前 DSH 暂不支持读取基础模式。')
-    const plugins = parseNativeAssistantBase(codec, await this.wait<any>(() => registry.readDocument(resource.basePreset)), resource.basePreset)
+    let document: unknown
+    try { document = await wait<any>(() => registry.readDocument(resource.basePreset)) }
+    catch { signal.throwIfAborted(); throw resourceError('resource-base-unavailable', '此预设所需的基础模式暂不可用。') }
+    // The selected base can itself have an unavailable group dependency. Read
+    // its declaration, remove our capability contribution, then audit the NEW
+    // composition. A plain resource must not inherit group startup or rights.
+    const withoutCollaboration = (rows: any[]): any[] => rows.filter(row => {
+      if (row.id === collaborationId && !collaborationNames.includes(row.name))
+        throw resourceError('resource-base-unavailable', '基础模式的群协作声明无法核对。')
+      return !collaborationNames.includes(row.name)
+    }).map(row => row.group === true ? { ...row, config: withoutCollaboration(row.config) } : row)
+    const plugins = withoutCollaboration(parseNativeAssistantBase(codec, document, resource.basePreset))
     const personas: any[] = []
     const scan = (rows: any[], nested = false) => {
       for (const row of rows) {
@@ -84,31 +126,56 @@ export class NativeResourceRegistry {
     const persona = personas[0]
     if (personas.length !== 1 || !persona.config || typeof persona.config.prefix !== 'string')
       throw resourceError('resource-base-unavailable', '基础模式需要一个明确的原生角色配置。')
-    // Preserve base tools, policy and suffix. Replace only the authored persona,
-    // without occupational guidance, human-workflow, extra role text or prompt editing.
+    // Preserve base tools, policy and suffix. Plain resources use their exact
+    // authored body; only explicitly declared group resources add local guidance.
     persona.config = { ...persona.config, prefix: `{{${promptVariable}}}` }
-    plugins.push({ id: 'harness-private-resource-data', name: this.options.promptModule || ownPromptModule(), config: { text: resource.systemPrompt } })
+    plugins.push({ id: 'harness-private-resource-data', name: this.options.promptModule || ownPromptModule(),
+      config: { text: resource.systemPrompt, ...(assistant ? { assistant } : {}) } })
+    if (group) plugins.push({ id: collaborationId, name: this.options.collaborationModule || nativeCollaborationModule() })
     let dispose: (() => Promise<void>) | undefined
     try {
-      dispose = await this.wait<() => Promise<void>>(() => registry.register({ id, name: `${resource.name} · ${resource.version}`, description: resource.description, plugins }),
+      if (group) {
+        const access = this.featureAccess()
+        if (!access) throw resourceError('resource-group-unavailable', '微信群协作暂不可用。')
+        access.assertCurrent('group_assistant')
+      }
+      dispose = await wait<() => Promise<void>>(() => registry.register({ id, name: `${resource.name} · ${resource.version}`, description: resource.description, plugins }),
         async late => { if (typeof late === 'function') await late() })
       if (typeof dispose !== 'function') throw resourceError('resource-activation-failed', 'DSH 未确认预设加载结果。')
-      const loaded = await this.wait<any>(() => registry.resolve(id))
-      this.lifetime.signal.throwIfAborted()
+      const loaded = await wait<any>(() => registry.resolve(id))
+      signal.throwIfAborted()
       if (!loaded || loaded.id !== id || loaded.broken !== undefined) throw resourceError('resource-activation-failed', '预设尚未成功加载，请核对基础模式和 DSH 版本。')
       this.owned.set(id, dispose)
+      this.expected.set(id, nativeAssistantCompositionDigest(plugins))
+      if (group) this.groups.add(id)
     } catch (error) { await dispose?.(); throw error }
+  }
+  async groupReady(resource: ResourcePreset, signal: AbortSignal): Promise<boolean> {
+    const id = resourcePresetId(resource)
+    if (!resourceAssistant(resource) || !this.groupAvailable() || !this.groups.has(id) || !this.owned.has(id)) return false
+    const caller = signal
+    signal = AbortSignal.any([signal, this.groupLifetime.signal])
+    try {
+      const registry = this.registry(), loaded = await this.wait<any>(() => registry.resolve(id), undefined, signal)
+      const anchor = this.options.codec ? undefined : this.host.get('profileContext')?.installAnchor
+      const codec = this.options.codec || (typeof anchor === 'string' ? await this.wait(() => nativeAssistantCodec(anchor), undefined, signal) : undefined)
+      if (!codec || loaded?.id !== id || loaded.broken !== undefined) return false
+      const actual = parseNativeAssistantBase(codec, await this.wait<any>(() => registry.readDocument(id), undefined, signal), id)
+      if (nativeAssistantCompositionDigest(actual) !== this.expected.get(id)) return false
+      const ready = await this.wait(() => nativeAssistantCapabilitiesReady(this.host, id, signal), undefined, signal)
+      return ready && this.groupAvailable() && this.groups.has(id) && this.owned.has(id)
+    } catch { caller.throwIfAborted(); return false }
   }
   close(): Promise<void> {
     if (this.closing) return this.closing
     this.lifetime.abort(resourceError('resource-library-closed', '资源组件已停止。'))
-    const entries = [...this.owned.values()]; this.owned.clear()
+    const entries = [...this.owned.values()]; this.owned.clear(); this.expected.clear(); this.groups.clear()
     return this.closing = Promise.allSettled(entries.map(dispose => Promise.resolve().then(dispose))).then(() => {})
   }
   async unregister(resource: Pick<ResourcePreset, 'resourceId' | 'version'>): Promise<void> {
     const id = resourcePresetId(resource), dispose = this.owned.get(id)
     if (!dispose) return
     await dispose()
-    this.owned.delete(id)
+    this.owned.delete(id); this.expected.delete(id); this.groups.delete(id)
   }
 }

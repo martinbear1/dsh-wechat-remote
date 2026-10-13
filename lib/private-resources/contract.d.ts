@@ -1,7 +1,7 @@
+import { type AssistantDefinition } from '../assistant-presets/definition.js';
 export declare const RESOURCE_MAX_BYTES: number;
 export declare const RESOURCE_PROMPT_MAX_BYTES: number;
-export interface ResourcePreset {
-    schemaVersion: 1;
+interface ResourcePresetData {
     kind: 'preset';
     resourceId: string;
     version: string;
@@ -10,6 +10,19 @@ export interface ResourcePreset {
     basePreset: string;
     systemPrompt: string;
 }
+/** Capabilities are data, not module specifiers. Only shipped code can map a
+ * known capability into a native composition. Historical v1 means ordinary. */
+export type ResourcePreset = ResourcePresetData & ({
+    schemaVersion: 1;
+} | {
+    schemaVersion: 2;
+    capabilities: [];
+} | {
+    schemaVersion: 2;
+    capabilities: ['wechat-group'];
+    assistant: AssistantDefinition;
+});
+export declare function resourceAssistant(resource: ResourcePreset): AssistantDefinition | undefined;
 export interface ResourceRelease {
     resourceId: string;
     version: string;
@@ -30,3 +43,4 @@ export declare function validateResourceRelease(value: ResourceRelease): Resourc
 export declare function parseResourcePreset(bytes: Uint8Array, expected?: ResourceRelease): ResourcePreset;
 export declare const resourceKey: (value: Pick<ResourcePreset, "resourceId" | "version">) => string;
 export declare const resourcePresetId: (value: Pick<ResourcePreset, "resourceId" | "version">) => string;
+export {};

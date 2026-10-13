@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto'
 import { copy, exact, fail, identifier, row, StateQueue, version, type WorkflowDataStore } from '../human-workflow/data.js'
 import { assistantDefinition, definitionDigest, type AssistantDefinition } from './definition.js'
 import { assistantTemplates } from './catalog.js'
-import type { NativeAssistantAdapter, NativeAssistantPreview, NativeAssistantInstallation } from './types.js'
+import type { NativeAssistantAdapter, NativeAssistantPreview, NativeAssistantInstallation, ResourceAssistantDefinition, ResourceAssistantStatus } from './types.js'
 import { validateNativeAssistantPreview } from './native-adapter.js'
 import { builtinAssistant, builtinAssistants, type BuiltinAssistantStatus } from './builtins.js'
 
@@ -21,6 +21,8 @@ export class AssistantRegistry {
   private readonly settle = new AbortController().signal
   private stopped = false
   private builtinStates: BuiltinAssistantStatus[] = []
+  private resourceDefinitions = new Map<string, ResourceAssistantDefinition>()
+  private resourceStates: ResourceAssistantStatus[] = []
   private constructor(private state: StateQueue<Ledger>, private nodeId: string, private native: AssistantNativeAdapter,
     private assertIdentity: () => void, private now: () => number) {}
   static async open(store: WorkflowDataStore, options: { nodeId: string; native: AssistantNativeAdapter; assertIdentity(): void; now?: () => number }): Promise<AssistantRegistry> {
@@ -31,7 +33,35 @@ export class AssistantRegistry {
     // Initialization must not await a component waiting for the host Loader.
     // The first real query/work call rechecks fully settled native availability.
     await registry.readBuiltins(new AbortController().signal, false)
+    await registry.readResources(new AbortController().signal, false)
     return registry
+  }
+  /** Read immutable local definitions even with the resource component off, so
+   * restoring business notes never depends on loading a native Agent scope. */
+  private async readResources(signal: AbortSignal, waitForReady = true): Promise<void> {
+    const definitions = await this.native.resourceDefinitions?.(signal) || []
+    this.check(signal)
+    for (const value of definitions) {
+      const definition = assistantDefinition(value.definition)
+      if (!/^resource_[a-f0-9]{64}$/.test(value.id) || value.version !== 1 || value.source !== 'resource'
+        || !/^hr-resource-[a-z0-9][a-z0-9._-]*-[a-f0-9]{12}$/.test(value.presetId)
+        || value.presetId.length > 128 || value.digest !== definitionDigest(definition))
+        throw fail('assistant-resource-invalid', '本地资源助手规格无效，请在我的资源中核对。')
+      const prior = this.resourceDefinitions.get(value.id)
+      if (prior && (prior.digest !== value.digest || prior.presetId !== value.presetId))
+        throw fail('assistant-resource-invalid', '本地资源版本内容发生变化，请核对资源包。')
+      this.resourceDefinitions.set(value.id, copy({ ...value, definition }))
+    }
+    let observed: ResourceAssistantStatus[] = []
+    try { observed = await this.native.resources?.(signal, { waitForReady }) || [] } catch { this.check(signal) }
+    this.check(signal)
+    this.resourceStates = [...this.resourceDefinitions.values()].map(definition => {
+      const current = observed.find(item => item.id === definition.id && item.version === definition.version && item.digest === definition.digest
+        && item.presetId === definition.presetId && item.source === 'resource' && ['installed', 'unknown'].includes(item.state)
+        && ['installed', 'disabled', 'unknown'].includes(item.nativeState) && (item.state === 'installed') === (item.nativeState === 'installed'))
+      return { ...definition, state: current?.state || 'unknown', nativeState: current?.nativeState || 'disabled',
+        ...(current?.reason ? { reason: current.reason } : {}) }
+    })
   }
   private async readBuiltins(signal: AbortSignal, waitForReady = true): Promise<void> {
     if (!this.native.builtins) return
@@ -43,6 +73,7 @@ export class AssistantRegistry {
         && item.presetId === definition.presetId && item.source === 'builtin' && ['installed', 'unknown'].includes(item.state)
         && ['installed', 'disabled', 'stale', 'unknown'].includes(item.nativeState) && (item.state === 'installed') === (item.nativeState === 'installed'))
       return { ...definition, source: 'builtin', state: observed?.state || 'unknown', nativeState: observed?.nativeState || 'unknown',
+        ...(typeof observed?.enabled === 'boolean' ? { enabled: observed.enabled } : {}),
         ...(observed?.reason ? { reason: observed.reason } : observed ? {} : { reason: '内置助手状态尚未核实。' }) }
     })
   }
@@ -73,11 +104,13 @@ export class AssistantRegistry {
         templates: templates.map(template => {
           const component = this.builtinStates.find(item => item.templateId === template.id)
           return { ...template, ...(component ? { builtin: { id: component.id, version: component.version, presetId: component.presetId,
-            name: component.name, state: component.state, nativeState: component.nativeState, ...(component.reason ? { reason: component.reason } : {}) } } : {}) }
+            name: component.name, state: component.state, nativeState: component.nativeState,
+            ...(typeof component.enabled === 'boolean' ? { enabled: component.enabled } : {}), ...(component.reason ? { reason: component.reason } : {}) } } : {}) }
         }),
         drafts: [...this.builtinStates.map(item => ({ id: item.id, version: item.version, digest: item.digest, presetId: item.presetId,
           name: item.name, description: item.definition.description, templateId: item.templateId, source: item.source,
-          state: item.state, nativeState: item.nativeState, ...(item.reason ? { reason: item.reason } : {}) })), ...this.state.current().entries.map(e => {
+          state: item.state, nativeState: item.nativeState, ...(typeof item.enabled === 'boolean' ? { enabled: item.enabled } : {}),
+          ...(item.reason ? { reason: item.reason } : {}) })), ...this.state.current().entries.map(e => {
           const observed = checked.get(`${e.id}:${e.version}`)
           const replacement = this.builtinStates.find(item => e.digest === item.sourceTemplateDigest)
           return { id: e.id, version: e.version, digest: e.digest, name: e.definition.name,
@@ -119,6 +152,8 @@ export class AssistantRegistry {
     this.check()
     const builtin = builtinAssistant(ref.id, ref.version)
     if (builtin) return { ...builtin, source: 'builtin', state: this.builtinStates.find(item => item.id === builtin.id)?.state || 'unknown' }
+    const resource = this.resourceDefinitions.get(ref.id)
+    if (resource && ref.version === resource.version) return copy({ ...resource, state: this.resourceStates.find(item => item.id === ref.id)?.state || 'unknown' })
     return publicEntry(this.find(ref.id, ref.version))
   }
   async preview(ref: { id: string; version: number }, signal: AbortSignal) {
@@ -179,6 +214,11 @@ export class AssistantRegistry {
         return this.builtinStates.find(item => item.id === ref.id)
           || { ...builtin, source: 'builtin' as const, state: 'unknown' as const, nativeState: 'unknown' as const, reason: '内置助手尚未就绪。' }
       }
+      if (ref.id.startsWith('resource_')) {
+        await this.readResources(signal)
+        const resource = this.resourceStates.find(item => item.id === ref.id && item.version === ref.version)
+        if (resource) return resource
+      }
       return this.reconcile(copy(this.find(ref.id, ref.version)), signal)
     })
     this.tail = operation.catch(() => {})
@@ -190,6 +230,11 @@ export class AssistantRegistry {
     this.check(signal)
     if (this.builtinStates.some(item => item.presetId === presetId)) {
       await this.readBuiltins(signal); return this.builtinStates.some(item => item.presetId === presetId && item.state === 'installed')
+    }
+    if (presetId.startsWith('hr-resource-')) {
+      await this.readResources(signal)
+      const resource = this.resourceStates.find(item => item.presetId === presetId)
+      return resource ? resource.state === 'installed' : undefined
     }
     const entry = this.state.current().entries.find(e => e.plan?.presetId === presetId)
     if (!entry) return undefined
@@ -247,6 +292,8 @@ export class AssistantRegistry {
     this.check()
     const builtin = this.builtinStates.find(item => item.presetId === presetId && item.state === 'installed')
     if (builtin) return copy(builtin)
+    const resource = this.resourceStates.find(item => item.presetId === presetId && item.state === 'installed')
+    if (resource) return copy(resource)
     const entry = this.state.current().entries.find(e => e.state === 'installed' && e.result?.presetId === presetId)
     return entry ? publicEntry(entry) : undefined
   }

@@ -31,8 +31,10 @@ try {
   copyFileSync(path.join(root, 'package.json'), path.join(packageRoot, 'package.json'))
   const hostSources = [
     'index.ts',
+    'group-assistants-component.ts',
     'resource-library-component.ts',
     'private-resources/contract.ts',
+    'private-resources/assistant-provider.ts',
     'private-resources/protocol.ts',
     'private-resources/source.ts',
     'private-resources/controller.ts',

@@ -1,9 +1,9 @@
 import { createHash } from 'node:crypto'
+import { assistantDefinition, type AssistantDefinition } from '../assistant-presets/definition.js'
 
 export const RESOURCE_MAX_BYTES = 2 * 1024 * 1024
 export const RESOURCE_PROMPT_MAX_BYTES = 1024 * 1024
-export interface ResourcePreset {
-  schemaVersion: 1
+interface ResourcePresetData {
   kind: 'preset'
   resourceId: string
   version: string
@@ -11,6 +11,15 @@ export interface ResourcePreset {
   description: string
   basePreset: string
   systemPrompt: string
+}
+/** Capabilities are data, not module specifiers. Only shipped code can map a
+ * known capability into a native composition. Historical v1 means ordinary. */
+export type ResourcePreset = ResourcePresetData & ({ schemaVersion: 1 } | {
+  schemaVersion: 2; capabilities: []
+} | { schemaVersion: 2; capabilities: ['wechat-group']; assistant: AssistantDefinition })
+export function resourceAssistant(resource: ResourcePreset): AssistantDefinition | undefined {
+  return resource.schemaVersion === 2 && resource.capabilities[0] === 'wechat-group' && 'assistant' in resource
+    ? structuredClone(resource.assistant) : undefined
 }
 export interface ResourceRelease { resourceId: string; version: string; sha256: string; bytes: number }
 export class ResourceError extends Error {
@@ -46,8 +55,22 @@ export function parseResourcePreset(bytes: Uint8Array, expected?: ResourceReleas
   try { value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) }
   catch { throw resourceError('resource-json-invalid', '资源不是有效的 UTF-8 JSON 预设。') }
   const keys = ['schemaVersion', 'kind', 'resourceId', 'version', 'name', 'description', 'basePreset', 'systemPrompt']
+  if (value?.schemaVersion === 2) {
+    keys.push('capabilities')
+    if (!Array.isArray(value.capabilities) || value.capabilities.length > 1
+      || value.capabilities.length === 1 && value.capabilities[0] !== 'wechat-group')
+      throw resourceError('resource-preset-invalid', '资源能力声明无效。')
+    if (value.capabilities.length) {
+      keys.push('assistant')
+      try {
+        const definition = assistantDefinition(value.assistant)
+        if (definition.name !== value.name || definition.description !== value.description || definition.basePreset !== value.basePreset)
+          throw new Error('resource assistant identity mismatch')
+      } catch { throw resourceError('resource-preset-invalid', '群资源的助手规格无效。') }
+    }
+  }
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== keys.length
-    || keys.some(key => !Object.hasOwn(value, key)) || value.schemaVersion !== 1 || value.kind !== 'preset'
+    || keys.some(key => !Object.hasOwn(value, key)) || ![1, 2].includes(value.schemaVersion) || value.kind !== 'preset'
     || !resourceIdValid(value.resourceId) || !resourceVersionValid(value.version)
     || !plain(value.name, 120) || !value.name.trim() || !plain(value.description, 2000)
     || !plain(value.basePreset, 256) || !value.basePreset.trim() || /[\r\n\t]/.test(value.basePreset)

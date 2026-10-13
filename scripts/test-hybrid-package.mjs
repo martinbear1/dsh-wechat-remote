@@ -32,7 +32,7 @@ try {
   assert.doesNotMatch(fs.readFileSync(path.join(native, 'lib/client.js'), 'utf8'), /微信连接 · 联动更新|确认并等待空闲后更新|当前节点可独立使用，不会自动安装另一端/)
   const outerMeta = read(path.join(outer, 'package.json')), nativeMeta = read(path.join(native, 'package.json'))
   const selfResources = createRequire(path.join(outer, 'package.json'))
-  for (const [entry, file] of [['resource-library', 'resource-library-component.js'], ['private-resource-prompt', 'private-resources/native.js']]) {
+  for (const [entry, file] of [['group-assistants', 'group-assistants-component.js'], ['resource-library', 'resource-library-component.js'], ['private-resource-prompt', 'private-resources/native.js']]) {
     assert.equal(outerMeta.exports[`./${entry}`], `./native/lib/${file}`)
     assert.equal(nativeMeta.exports[`./${entry}`].default, `./lib/${file}`)
     assert.equal(selfResources.resolve(`dsh-wechat-remote/${entry}`), path.join(native, 'lib', file))
@@ -57,7 +57,7 @@ try {
   assert.equal(outerMeta.exports['.'], undefined, 'the Loader path must retain nested core ownership of its client half')
   assert.deepEqual(fs.readFileSync(path.join(native, 'index.js')), fs.readFileSync('installer/native-entry.mjs'))
   for (const component of ['teacher', 'project', 'customizer']) {
-    assert(fs.readFileSync(path.join(outer, 'cordis.patch.yml'), 'utf8').includes(`dsh-wechat-remote/assistant-${component}`))
+    assert(!fs.readFileSync(path.join(outer, 'cordis.patch.yml'), 'utf8').includes(`dsh-wechat-remote/assistant-${component}`), 'individual presets are not top-level bundle components')
     assert(fs.existsSync(path.join(native, `lib/assistant-presets/builtin-${component}.js`)))
     assert.equal(nativeMeta.exports[`./assistant-${component}`].default, `./lib/assistant-presets/builtin-${component}.js`)
     assert.equal(outerMeta.exports[`./assistant-${component}`], `./native/lib/assistant-presets/builtin-${component}.js`)
@@ -67,6 +67,11 @@ try {
       const resource = self.resolve(`dsh-wechat-remote/assistant-${component}/locale/${language}.json`)
       assert(resource.startsWith(native + path.sep)); assert.equal(typeof read(resource).meta.title, 'string')
     }
+  }
+  assert.match(fs.readFileSync(path.join(outer, 'cordis.patch.yml'), 'utf8'), /dsh-wechat-remote\/group-assistants/)
+  for (const language of ['en', 'zh']) {
+    const resource = selfResources.resolve(`dsh-wechat-remote/group-assistants/locale/${language}.json`)
+    assert.equal(typeof read(resource).meta.title, 'string')
   }
   assert.equal(nativeMeta.version, version)
   assert.equal(nativeMeta.name, '@harness-remote/dsh-wechat-remote')

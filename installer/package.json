@@ -1,12 +1,14 @@
 {
   "name": "dsh-wechat-remote",
-  "version": "1.7.14-rc.60",
+  "version": "1.7.14-rc.61",
   "private": false,
   "description": "Agent远程管理助手：DSH 微信连接插件的一键安装与升级",
   "type": "module",
   "license": "MIT",
   "bin": { "dsh-wechat-remote": "bin/setup.mjs" },
   "exports": {
+    "./group-assistants": "./native/lib/group-assistants-component.js",
+    "./group-assistants/locale/*.json": "./native/lib/assistant-presets/locales/group/*.json",
     "./resource-library": "./native/lib/resource-library-component.js",
     "./resource-library/locale/*.json": "./native/lib/private-resources/locales/*.json",
     "./private-resource-prompt": "./native/lib/private-resources/native.js",

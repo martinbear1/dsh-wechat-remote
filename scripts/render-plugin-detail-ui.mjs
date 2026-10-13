@@ -107,7 +107,7 @@ function data(scene) {
     { id: 'teacher', name: '教师助理', description: '帮老师备课、布置作业、收作业与整理反馈。' },
     { id: 'project', name: '项目助理', description: '协助项目目标、里程碑、进度与协作反馈。' },
     { id: 'designer', name: '定制助手', description: '用对话设计适合自己的助手模式。' },
-  ].map(item => ({ ...item, builtin: { state: 'installed', nativeState: 'installed' } }))
+  ].map(item => ({ ...item, builtin: { enabled: item.id !== 'project', state: item.id === 'project' ? 'unknown' : 'installed', nativeState: item.id === 'project' ? 'disabled' : 'installed' } }))
   const items = [
     { resourceId: 'fixture-creative', version: '1.0.0', name: '私人创作助手', description: '保留已有角色与故事的第一版。',
       presetId: 'fixture-creative-1', enabled: true, state: 'installed' },
@@ -121,7 +121,7 @@ function data(scene) {
   fixture = {
     scope: scene.scope,
     feature: { schemaVersion: 1, nodeId: 'fixture-node', checkedAt: now, expiresAt: now + 60000,
-      groupEnabled: !scene.warning, features: { group_assistant: access, clawbot: access } },
+      groupEnabled: !scene.warning, groupComponentAvailable: true, features: { group_assistant: access, clawbot: access } },
     clawbot: { supported: true, revision: 1, enabled: !scene.warning && !scene.qr,
       state: scene.warning ? 'disabled' : scene.qr ? 'unpaired' : 'ready', paired: !scene.warning && !scene.qr,
       target: scene.warning ? null : { id: 'fixture-session', title: '本周创作计划' }, message: '', pending: 0,
@@ -146,7 +146,7 @@ function data(scene) {
   return { store, describeHost: noAction, callManagement: noAction, featureCall: noAction, clawbotCall: noAction,
     resourcesCall: noAction, startResource: noAction, readOtherEndpoint: noAction,
     assistants: passive({ catalog: { native: { supported: true }, templates, drafts: templates.map(item => ({ id: 'fixture-' + item.id,
-      templateId: item.id, name: item.name, source: 'builtin', state: 'installed', nativeState: 'installed', presetId: 'fixture-' + item.id })) },
+      templateId: item.id, name: item.name, source: 'builtin', ...item.builtin, presetId: 'fixture-' + item.id })) },
       preview: null, busy: false, message: '', error: '' }),
     diagnostics: passive({ diagnosticState: 'idle', diagnosticReport: null }),
   }

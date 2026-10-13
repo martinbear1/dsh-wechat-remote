@@ -33,6 +33,8 @@ export interface BuiltinAssistantStatus extends BuiltinAssistant {
     nativeState: 'installed' | 'disabled' | 'stale' | 'unknown';
     reason?: string;
     source: 'builtin';
+    /** Saved card preference, independent of the effective node/account gate. */
+    enabled?: boolean;
 }
 export declare function builtinAssistants(): BuiltinAssistant[];
 export declare const builtinAssistant: (id: string, version: number) => BuiltinAssistant | undefined;

@@ -302,7 +302,7 @@ try {
     assert.equal(owners.length, 1); assert.equal(owners[0].name, owner)
     assert.equal(owners[0].version, nextManifest.version)
     assert(after.sessions.items.some(item => item.sessionId === sessionId))
-    for (const id of ['gate', 'wechat-clawbot', 'harness-assistant-teacher', 'harness-assistant-project', 'harness-assistant-customizer', 'harness-resource-library']) {
+    for (const id of ['gate', 'wechat-clawbot', 'harness-group-assistants', 'harness-resource-library']) {
       assert(after.entries.some(entry => entry.id === id && entry.state === 2), `component inactive after handoff: ${id}`)
     }
     const afterFiles = savedFiles()

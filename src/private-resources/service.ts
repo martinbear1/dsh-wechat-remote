@@ -3,7 +3,8 @@ import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import path from 'node:path'
 import { agentDshHome, agentProfileScope } from '../agent-metadata.js'
 import { nodeStorageDirectory } from '../node-storage.js'
-import { PrivateResourceLibrary } from './library.js'
+import { PrivateResourceLibrary, type ResourceAssistantProvider } from './library.js'
+import { hostFeatureAccess } from '../feature-access.js'
 import { ResourceDeliveryClient, type DeliverySource } from './source.js'
 import { ResourceController } from './controller.js'
 import { ResourceError } from './contract.js'
@@ -12,6 +13,7 @@ import type { ResourceRequest, ResourceResult } from './protocol.js'
 declare module '@deepseek-ai/cordis' { interface Context {
   wechatResources: WechatResourcesService
   wechatResourceSource: DeliverySource
+  wechatResourceAssistants: ResourceAssistantProvider
 } }
 /** Host-authenticated resource management only; not a model-callable tool. */
 export class WechatResourcesService extends TypertRemoteService {
@@ -22,6 +24,20 @@ export class WechatResourcesService extends TypertRemoteService {
   constructor(ctx: Context) {
     super(ctx, 'wechatResources')
     const library = new PrivateResourceLibrary(ctx, path.join(nodeStorageDirectory(agentDshHome(ctx), agentProfileScope(ctx)), 'private-resources'))
+    // Definitions are local verified data, available before native activation;
+    // HumanTools can validate its history without waiting on its own tools.
+    void library.prepare()
+    ctx.provide('wechatResourceAssistants', {
+      definitions: signal => library.definitions(signal),
+      list: (signal, options) => library.assistantStatus(signal, options),
+    })
+    ctx.inject(['wechatFeatures'], scope => {
+      const access = hostFeatureAccess(scope)
+      const changed = () => { void library.setGroupAvailable(access.groupEnabled()).catch(() => {}) }
+      const unsubscribe = access.subscribe(changed)
+      changed()
+      return () => { unsubscribe(); void library.setGroupAvailable(false).catch(() => {}) }
+    })
     this.controller = new ResourceController(library, new ResourceDeliveryClient({ current: () => {
       // The gate is a sibling component, not an injected lifetime dependency.
       // Native optional lookup keeps installed presets alive while it restarts.

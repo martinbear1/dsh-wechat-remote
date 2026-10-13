@@ -26,6 +26,7 @@ export declare class AssistantStore {
     load: () => Promise<void>;
     private readyAssistant;
     start: (presetId: string, signal?: AbortSignal) => Promise<void>;
+    setEnabled: (templateId: string, enabled: boolean, change: (templateId: "teacher" | "project" | "designer", enabled: boolean) => Promise<unknown>, signal?: AbortSignal) => Promise<void>;
     dismissPreview: () => void;
     choose: (templateId: string) => Promise<void>;
     preview: (id: string, version: number) => Promise<void>;

@@ -217,3 +217,47 @@ test('concurrent shortcut clicks only dispatch one native entry',async()=>{
   const first=store.start('harness-customizer');await store.start('harness-customizer');gate.resolve();await first
   assert.equal(opens,1)
 })
+
+test('individual card control requires explicit support and never installs or opens a session',async()=>{
+  const item={id:'builtin_teacher',templateId:'teacher',source:'builtin',presetId:'harness-teacher',state:'installed',nativeState:'installed',enabled:true}
+  const calls=[],store=new AssistantStore(async method=>{calls.push(method);return {...catalog,drafts:[{...item}]}},()=>assert.fail('toggle is not a new session'))
+  await store.load()
+  await store.setEnabled('teacher',false,async(id,enabled)=>{calls.push([id,enabled]);item.enabled=enabled;item.nativeState='disabled';item.state='unknown'})
+  assert.deepEqual(calls,['assistantCatalog','assistantCatalog',['teacher',false],'assistantCatalog'])
+  assert.equal(store.getSnapshot().catalog.drafts[0].enabled,false)
+  delete item.enabled
+  await store.setEnabled('teacher',true,()=>assert.fail('old host must not receive unsupported control'))
+  assert.match(store.getSnapshot().error,/暂不支持/)
+})
+
+test('lost card-control response refreshes state without replay; owner change fences later mutation',async()=>{
+  const item={templateId:'teacher',source:'builtin',enabled:true,state:'installed'}
+  let controls=0,reads=0
+  const store=new AssistantStore(async()=>{reads++;return {...catalog,drafts:[{...item}]}})
+  await store.setEnabled('teacher',false,async()=>{controls++;item.enabled=false;throw Error('lost response')})
+  assert.equal(controls,1);assert.equal(reads,2);assert.equal(store.getSnapshot().catalog.drafts[0].enabled,false)
+  assert.equal(store.getSnapshot().error,'lost response')
+  const gate=deferred(),other=new AssistantStore(()=>gate.promise)
+  const pending=other.setEnabled('teacher',false,()=>assert.fail('obsolete owner must not change preferences'))
+  other.reset();gate.resolve({...catalog,drafts:[{...item}]});await pending
+  assert.equal(other.getSnapshot().catalog,null)
+})
+
+test('managed cards expose secondary enable/disable only on new hosts; stopping stays outside the disabled feature fieldset',async()=>{
+  const Panel=await panelForSSR()
+  const templates=['teacher','project','designer'].map(id=>({id,name:id,builtin:{state:'installed'}}))
+  const drafts=templates.map(item=>({templateId:item.id,source:'builtin',state:'installed',nativeState:'installed',enabled:item.id!=='project'}))
+  const store=new AssistantStore(async()=>({...catalog,templates,drafts}));await store.load()
+  const html=renderToStaticMarkup(createElement(Panel,{store,featureCall:()=>assert.fail('render cannot change features')}))
+  assert.equal((html.match(/>停用<\/button>/g)||[]).length,2)
+  assert.equal((html.match(/>启用<\/button>/g)||[]).length,1)
+  const cards=html.slice(0,html.indexOf('<fieldset'))
+  assert.equal((cards.match(/<article\b/g)||[]).length,3)
+  assert.match(cards,/<button[^>]*aria-label="停用teacher"[^>]*>停用<\/button>/)
+  assert.doesNotMatch(cards.match(/<button[^>]*aria-label="停用teacher"[^>]*>/)[0],/disabled/)
+  assert.match(cards.match(/<button[^>]*aria-label="启用project"[^>]*>/)[0],/disabled/,'enabling still requires effective node access')
+  for(const item of drafts)delete item.enabled
+  await store.load()
+  const old=renderToStaticMarkup(createElement(Panel,{store,featureCall:async()=>{}}))
+  assert.doesNotMatch(old,/>停用<\/button>|>启用<\/button>/)
+})

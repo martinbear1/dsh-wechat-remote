@@ -6,7 +6,7 @@ import { readPrivateJson, writePrivateJsonAtomic } from './secure-file.js'
 export type AccountFeature = 'group_assistant' | 'clawbot' | 'history_import'
 export interface FeatureGrant { allowed: boolean; reason: string; validUntil: number | null; message?: string }
 export interface FeatureLease { schemaVersion: 1; nodeId: string; accountInstance: string | null; checkedAt: number; expiresAt: number; features: Record<AccountFeature, FeatureGrant> }
-export type FeatureStatus = FeatureLease & { groupEnabled: boolean; historyImportEnabled: boolean }
+export type FeatureStatus = FeatureLease & { groupEnabled: boolean; groupComponentAvailable?: boolean; historyImportEnabled: boolean }
 export interface FeatureAuthorization { readonly owner: string; assertCurrent(): void; revalidate?(signal: AbortSignal): Promise<void> }
 export type FeatureControlResult = { ok: true; value: FeatureStatus } | { ok: false; error: { code: string; message: string } }
 const reasons = new Set(['allowed', 'public_access_required', 'public_quota_exhausted', 'feature_not_entitled', 'feature_disabled', 'feature_account_blocked', 'account_suspended', 'node_unbound', 'account_not_found'])
@@ -14,7 +14,7 @@ export function featureMessage(reason: string): string {
   return ({ public_access_required: '请先开通或续期公网服务。', public_quota_exhausted: '公网流量已用完，请补充后再使用。',
     feature_not_entitled: '此账号暂未开通此功能。', feature_disabled: '此功能暂未开放。', feature_account_blocked: '此账号暂不能使用此功能。',
     account_suspended: '此账号暂不可用。', node_unbound: '请先用小程序连接此节点。', account_not_found: '请先用小程序连接此节点。',
-    group_disabled: '请先开启微信群协作助手。', history_import_disabled: '请先在设置中开启网页会话导入。',
+    group_disabled: '请先开启微信群协作助手。', group_component_disabled: '请在电脑插件管理器启用微信群协作助手组件。', history_import_disabled: '请先在设置中开启网页会话导入。',
     unavailable: '暂时无法核对使用资格，请联网后刷新。', allowed: '' } as Record<string, string>)[reason] || '暂时无法核对使用资格，请联网后刷新。'
 }
 export class FeatureAccessError extends Error {
@@ -55,7 +55,7 @@ export class FeatureAccess {
   private historyIntent = 0
   private historyEpoch = 0
   private historyAuthority = ''
-  constructor(private readonly source: { nodeId(): string; read(signal: AbortSignal): Promise<unknown> },
+  constructor(private readonly source: { nodeId(): string; read(signal: AbortSignal): Promise<unknown>; groupAvailable?(): boolean },
     private readonly preferenceFile?: string, private readonly monotonic = () => performance.now()) {
     if (preferenceFile && existsSync(preferenceFile)) {
       try {
@@ -93,11 +93,17 @@ export class FeatureAccess {
     let nodeId: string; try { nodeId = this.source.nodeId() } catch { return undefined }
     return !this.closed && this.lease?.nodeId === nodeId && this.monotonic() < this.until ? this.lease : undefined
   }
-  groupEnabled(): boolean { const v = this.live(); return Boolean(v?.features.group_assistant.allowed && this.requested?.nodeId === v.nodeId && this.requested?.accountInstance === v.accountInstance) }
+  groupComponentAvailable(): boolean { try { return this.source.groupAvailable?.() ?? true } catch { return false } }
+  /** Component lifecycle changes effective access, never the user's saved intent. */
+  componentsChanged(): void { if (!this.closed) { this.renewWhileEnabled(); this.emit() } }
+  groupEnabled(): boolean { const v = this.live(); return this.groupComponentAvailable() && Boolean(v?.features.group_assistant.allowed && this.requested?.nodeId === v.nodeId && this.requested?.accountInstance === v.accountInstance) }
   historyImportEnabled(): boolean { const v = this.live(); return Boolean(v?.features.history_import.allowed && this.historyRequested?.nodeId === v.nodeId && this.historyRequested?.accountInstance === v.accountInstance) }
   grant(feature: AccountFeature, requireEnabled: boolean = true): FeatureGrant {
     const grant = this.live()?.features[feature] || { allowed: false, reason: 'unavailable', validUntil: null }
-    if (grant.allowed && feature === 'group_assistant' && requireEnabled && !this.groupEnabled()) return { allowed: false, reason: 'group_disabled', validUntil: null, message: featureMessage('group_disabled') }
+    if (grant.allowed && feature === 'group_assistant' && requireEnabled && !this.groupEnabled()) {
+      const reason = this.groupComponentAvailable() ? 'group_disabled' : 'group_component_disabled'
+      return { allowed: false, reason, validUntil: null, message: featureMessage(reason) }
+    }
     if (grant.allowed && feature === 'history_import' && requireEnabled && !this.historyImportEnabled()) return { allowed: false, reason: 'history_import_disabled', validUntil: null, message: featureMessage('history_import_disabled') }
     return { ...grant, message: featureMessage(grant.reason) }
   }
@@ -148,7 +154,10 @@ export class FeatureAccess {
     if (enabled) await this.assert('group_assistant', false)
     signal?.throwIfAborted()
     if (intent !== this.intent || this.closed) throw new FeatureAccessError('unavailable')
-    if (enabled) this.assertCurrent('group_assistant', false)
+    if (enabled) {
+      this.assertCurrent('group_assistant', false)
+      if (!this.groupComponentAvailable()) throw new FeatureAccessError('group_component_disabled')
+    }
     const lease = this.live(), next = enabled ? { nodeId: lease!.nodeId, accountInstance: lease!.accountInstance! } : undefined
     this.savePreferences(next, this.historyRequested)
     this.requested = next; this.renewWhileEnabled(); this.emit()
@@ -210,7 +219,7 @@ export class FeatureAccess {
     return { ...(v || { schemaVersion: 1, nodeId, accountInstance: null, checkedAt: 0, expiresAt: 0,
       features: { group_assistant: this.grant('group_assistant', false), clawbot: this.grant('clawbot'), history_import: this.grant('history_import', false) } }),
       features: { group_assistant: this.grant('group_assistant', false), clawbot: this.grant('clawbot'), history_import: this.grant('history_import', false) },
-      groupEnabled: this.groupEnabled(), historyImportEnabled: this.historyImportEnabled() }
+      groupEnabled: this.groupEnabled(), groupComponentAvailable: this.groupComponentAvailable(), historyImportEnabled: this.historyImportEnabled() }
   }
   close(): void { this.closed = true; this.invalidate(); this.listeners.clear() }
 }
@@ -218,16 +227,24 @@ export class FeatureAccess {
 declare module '@deepseek-ai/cordis' { interface Context { wechatFeatures: WechatFeaturesService } }
 export class WechatFeaturesService extends TypertRemoteService {
   readonly access: FeatureAccess
-  constructor(ctx: Context, config: { source: ConstructorParameters<typeof FeatureAccess>[0]; preferenceFile: string }) {
-    super(ctx, 'wechatFeatures'); this.access = new FeatureAccess(config.source, config.preferenceFile)
-    ctx.effect(() => () => this.access.close())
+  constructor(private readonly host: Context, config: { source: ConstructorParameters<typeof FeatureAccess>[0]; preferenceFile: string }) {
+    super(host, 'wechatFeatures'); this.access = new FeatureAccess(config.source, config.preferenceFile)
+    host.effect(() => () => this.access.close())
   }
   @Remote('control')
-  async control(request: { action: 'status' | 'group.enabled' | 'historyImport.enabled'; enabled?: boolean }, signal: AbortSignal): Promise<FeatureControlResult> {
+  async control(request: { action: 'status' | 'group.enabled' | 'assistant.enabled' | 'historyImport.enabled'; enabled?: boolean; templateId?: 'teacher' | 'project' | 'designer' }, signal: AbortSignal): Promise<FeatureControlResult> {
     try {
       signal.throwIfAborted()
       if (request?.action === 'status') { try { await this.access.refresh() } catch {} }
       else if (request?.action === 'group.enabled' && typeof request.enabled === 'boolean') await this.access.setGroupEnabled(request.enabled, signal)
+      else if (request?.action === 'assistant.enabled' && typeof request.enabled === 'boolean'
+        && ['teacher', 'project', 'designer'].includes(request.templateId || '')) {
+        const controller = this.host.get('wechatGroupAssistants' as any)
+        if (!controller?.active || typeof controller.setEnabled !== 'function') throw new FeatureAccessError('group_component_disabled')
+        if (request.enabled) await this.access.assert('group_assistant')
+        signal.throwIfAborted()
+        await controller.setEnabled(request.templateId, request.enabled, signal)
+      }
       else if (request?.action === 'historyImport.enabled' && typeof request.enabled === 'boolean') await this.access.setHistoryImportEnabled(request.enabled, signal)
       else throw new FeatureAccessError('unavailable')
       signal.throwIfAborted(); return { ok: true as const, value: this.access.snapshot() }

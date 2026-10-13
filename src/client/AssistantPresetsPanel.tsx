@@ -7,7 +7,7 @@ import { ActionButton, PluginSwitch, SectionHeading, StatusLabel } from './Plugi
 import ui from './PluginUi.module.css'
 import styles from './FeaturePanels.module.css'
 
-const available = (item: any) => item.state === 'installed' && (item.nativeState === undefined || item.nativeState === 'installed')
+const available = (item: any) => item.enabled !== false && item.state === 'installed' && (item.nativeState === undefined || item.nativeState === 'installed')
 const stateLabel = (item: any) => available(item) ? '已安装' : item.state === 'draft' ? '待安装'
   : item.nativeState === 'uninstalled' ? '未安装' : item.nativeState === 'disabled' ? '已停用'
     : item.state === 'pending-restart' ? '待重启' : '待核对'
@@ -52,6 +52,7 @@ export function AssistantPresetsPanel({ store, featureCall }: { store: Assistant
   }, [featureCall])
   const access = feature?.features.group_assistant
   const allowed = featureLeaseAllows(feature, access)
+  const componentUnavailable = feature?.groupComponentAvailable === false
   const unlocked = allowed && feature?.groupEnabled === true
   useEffect(() => { const controller = new AbortController(); lifetime.current = controller; void store.load(); return () => controller.abort() }, [store])
   const drafts = catalog?.drafts || []
@@ -61,6 +62,15 @@ export function AssistantPresetsPanel({ store, featureCall }: { store: Assistant
   const templates = catalog?.templates || []
   const installedFor = (id: string) => active.find((item: any) => item.templateId === id)
   const use = (item: any) => void store.start(item.presetId, lifetime.current?.signal)
+  const toggleAssistant = (templateId: string, enabled: boolean) => {
+    if (!featureCall || featureFlight.current) return
+    const epoch = featureEpoch.current
+    void store.setEnabled(templateId, enabled, async (id, next) => {
+      if (epoch !== featureEpoch.current) throw new Error('节点连接已变化，请刷新后重试。')
+      const status = await featureCall({ action: 'assistant.enabled', templateId: id, enabled: next })
+      if (epoch === featureEpoch.current) { setFeature(status); setAccessError('') }
+    }, lifetime.current?.signal)
+  }
   const instructions = (item: any) => item.id === 'designer' || item.templateId === 'designer'
     ? '先打开定制会话，说清职业和工作习惯；助手会设计可复用的模式。确认安装后，再用新模式开启工作会话。不会自动安装或发送消息。'
     : `先选工作区，再用「${item.name}」开始空白会话。手机连接此电脑后可继续该会话；发卡与提醒需在小程序设置中开启「微信群协作助手」。`
@@ -73,11 +83,15 @@ export function AssistantPresetsPanel({ store, featureCall }: { store: Assistant
         <Help label={`${displayName(item)}使用说明`}>{instructions(item)}</Help></div>
       <p className={ui.copy}>{item.id === 'designer' ? '用对话设计适合自己职业的助手模式' : item.description}</p>
       <div className={ui.cardActions}>
-        {!installed && included ? <span title={current?.reason || included.reason}><StatusLabel state="off">{current?.nativeState === 'disabled' ? '已停用' : '待就绪'}</StatusLabel></span> : null}
-        <ActionButton disabled={busy || Boolean(included && !installed)}
+        {!installed && included ? <span title={current?.reason || included.reason}><StatusLabel state="off">{current?.enabled === false || current?.nativeState === 'disabled' ? '已停用' : '待就绪'}</StatusLabel></span> : null}
+        <ActionButton disabled={busy || accessBusy || !unlocked || Boolean(included && !installed)}
           onClick={() => installed ? use(installed) : included ? void store.load() : void store.choose(item.id)}>
           {installed ? item.id === 'designer' ? '开始定制' : '开始使用' : included ? '开始使用' : '安装'}
         </ActionButton>
+        {included && typeof current?.enabled === 'boolean' ? <ActionButton variant="ghost" disabled={busy || accessBusy || !featureCall || componentUnavailable || !current.enabled && !unlocked}
+          aria-label={`${current.enabled ? '停用' : '启用'}${displayName(item)}`}
+          title="只控制此助手模式；已有会话和资料保留。"
+          onClick={() => toggleAssistant(item.id, !current.enabled)}>{current.enabled ? '停用' : '启用'}</ActionButton> : null}
       </div>
     </article>
   }
@@ -95,18 +109,18 @@ export function AssistantPresetsPanel({ store, featureCall }: { store: Assistant
   return <section className={ui.panel} aria-label="微信群协作助手" aria-busy={busy}>
     <SectionHeading icon="group" title="微信群协作助手"
       help="需要群协作资格、有效公网访问和剩余流量。开启本节点后，在小程序设置中开启手机入口。暂停不删除资料，不取消 DSH 已开始的任务。"
-      actions={<><span role="status"><StatusLabel state={!feature ? accessError ? 'warning' : 'ongoing' : !allowed ? 'warning' : feature.groupEnabled ? 'done' : 'off'}>
-        {!feature ? accessError ? '状态暂不可用' : '读取中' : !allowed ? '需要使用资格' : feature.groupEnabled ? '本节点已开启' : '本节点已暂停'}</StatusLabel></span>
+      actions={<><span role="status"><StatusLabel state={!feature ? accessError ? 'warning' : 'ongoing' : componentUnavailable ? 'off' : !allowed ? 'warning' : feature.groupEnabled ? 'done' : 'off'}>
+        {!feature ? accessError ? '状态暂不可用' : '读取中' : componentUnavailable ? '组件已停用' : !allowed ? '需要使用资格' : feature.groupEnabled ? '本节点已开启' : '本节点已暂停'}</StatusLabel></span>
         <PluginSwitch label="启用本节点助手" checked={feature?.groupEnabled || false}
-          disabled={accessBusy || !featureCall || !allowed && !feature?.groupEnabled} onChange={value => void refreshFeature(value)} />
+          disabled={busy || accessBusy || !featureCall || componentUnavailable || !allowed && !feature?.groupEnabled} onChange={value => void refreshFeature(value)} />
         <ActionButton variant="ghost" disabled={busy || accessBusy} onClick={() => { void refreshFeature(); void store.load() }}>{busy || accessBusy ? '读取中…' : '刷新'}</ActionButton></>} />
     {accessError || !allowed && feature ? <p className={ui.warning} role="status">{accessError || access?.message || '请联网核对资格，在小程序设置中兑换体验码。'}</p> : null}
+    {componentUnavailable ? <p className={ui.copy} role="status">请在下方「包含的组件」中开启「微信群协作助手」。助手偏好和资料已保留。</p> : null}
+    {catalog && (catalog.native?.supported || templates.some((item: any) => item.builtin)) ?
+      <div className={ui.grid}>{templates.filter((item: any) => ['teacher', 'project', 'designer'].includes(item.id)).map(template)}</div> : null}
     <fieldset className={styles.featureBody} disabled={!unlocked || accessBusy} aria-label="助手功能">
     {!catalog && !error ? <p role="status">正在读取当前电脑的助手…</p> : null}
     {catalog && !catalog.native?.supported ? <p role="status">{catalog.native?.reason || '当前 DSH 暂不支持安装助手，请先检查版本。'}</p> : null}
-    {catalog && (catalog.native?.supported || templates.some((item: any) => item.builtin)) ? <>
-      <div className={ui.grid}>{templates.filter((item: any) => ['teacher', 'project', 'designer'].includes(item.id)).map(template)}</div>
-    </> : null}
     {preview ? <div className={styles.preview} aria-label="安装助手预览">
       <h4>安装「{preview.definition.name}」</h4><p>{preview.definition.description}</p>
       <p>新增一个可选的助手模式，不改默认模式、已有会话和资料。</p>

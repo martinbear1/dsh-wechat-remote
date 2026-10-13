@@ -37,8 +37,8 @@ export class AssistantStore {
   load = () => this.run(current => this.read(current))
   private readyAssistant(presetId: string) {
     const item = this.state.catalog?.drafts?.find((entry: any) => entry.presetId === presetId)
-    if (!item || item.state !== 'installed' || item.nativeState && item.nativeState !== 'installed')
-      throw new Error('此助手已停用或尚未就绪，请核对下方组件开关。')
+    if (!item || item.enabled === false || item.state !== 'installed' || item.nativeState && item.nativeState !== 'installed')
+      throw new Error('此助手已停用或尚未就绪，请刷新并核对助手状态。')
     return item
   }
   start = (presetId: string, signal?: AbortSignal) => this.run(async current => {
@@ -50,6 +50,20 @@ export class AssistantStore {
     this.readyAssistant(presetId)
     if (!this.openSession) throw new Error('当前 DSH 未提供快捷入口，请在新会话中选择此助手模式。')
     await this.openSession(presetId, signal)
+  })
+  setEnabled = (templateId: string, enabled: boolean,
+    change: (templateId: 'teacher' | 'project' | 'designer', enabled: boolean) => Promise<unknown>, signal?: AbortSignal) => this.run(async current => {
+    this.set({ message: '' })
+    await this.read(current)
+    if (!current() || signal?.aborted) return
+    const item = this.state.catalog?.drafts?.find((entry: any) => entry.templateId === templateId && entry.source === 'builtin')
+    if (!['teacher', 'project', 'designer'].includes(templateId) || typeof enabled !== 'boolean' || typeof item?.enabled !== 'boolean')
+      throw new Error('当前插件暂不支持单独启停助手，请更新后重试。')
+    // Old hosts omit enabled. Never turn that absence into an implicit default
+    // or another installation route; only this explicit control writes a choice.
+    this.set({ catalog: null })
+    try { await change(templateId as 'teacher' | 'project' | 'designer', enabled) }
+    finally { if (current() && !signal?.aborted) await this.read(current) }
   })
   dismissPreview = () => { if (!this.state.busy) this.set({ preview: null, message: '' }) }
   choose = (templateId: string) => this.run(async current => {

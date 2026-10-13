@@ -1,6 +1,6 @@
 import { type WorkflowDataStore } from '../human-workflow/data.js';
 import { type AssistantDefinition } from './definition.js';
-import type { NativeAssistantAdapter, NativeAssistantPreview, NativeAssistantInstallation } from './types.js';
+import type { NativeAssistantAdapter, NativeAssistantPreview, NativeAssistantInstallation, ResourceAssistantStatus } from './types.js';
 import { type BuiltinAssistantStatus } from './builtins.js';
 export interface AssistantRef {
     id: string;
@@ -27,6 +27,8 @@ export declare class AssistantRegistry {
     private readonly settle;
     private stopped;
     private builtinStates;
+    private resourceDefinitions;
+    private resourceStates;
     private constructor();
     static open(store: WorkflowDataStore, options: {
         nodeId: string;
@@ -34,6 +36,9 @@ export declare class AssistantRegistry {
         assertIdentity(): void;
         now?: () => number;
     }): Promise<AssistantRegistry>;
+    /** Read immutable local definitions even with the resource component off, so
+     * restoring business notes never depends on loading a native Agent scope. */
+    private readResources;
     private readBuiltins;
     private check;
     private find;
@@ -44,6 +49,7 @@ export declare class AssistantRegistry {
         templates: {
             builtin?: {
                 reason?: string | undefined;
+                enabled?: boolean | undefined;
                 id: string;
                 version: number;
                 presetId: string;
@@ -58,13 +64,14 @@ export declare class AssistantRegistry {
         }[];
         drafts: ({
             reason?: string | undefined;
+            enabled?: boolean | undefined;
             id: string;
             version: number;
             digest: string;
             presetId: string;
             name: string;
             description: string;
-            templateId: "designer" | "teacher" | "project";
+            templateId: "teacher" | "project" | "designer";
             source: "builtin";
             state: "unknown" | "installed";
             nativeState: "unknown" | "installed" | "disabled" | "stale";
@@ -149,7 +156,7 @@ export declare class AssistantRegistry {
     status(ref: {
         id: string;
         version: number;
-    }, signal: AbortSignal): Promise<BuiltinAssistantStatus | {
+    }, signal: AbortSignal): Promise<BuiltinAssistantStatus | ResourceAssistantStatus | {
         presetId: string;
         state: "installed" | "pending-restart" | "unknown";
         nativeState?: "installed" | "uninstalled" | "disabled" | "stale" | "unknown";

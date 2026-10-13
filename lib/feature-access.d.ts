@@ -17,6 +17,7 @@ export interface FeatureLease {
 }
 export type FeatureStatus = FeatureLease & {
     groupEnabled: boolean;
+    groupComponentAvailable?: boolean;
     historyImportEnabled: boolean;
 };
 export interface FeatureAuthorization {
@@ -66,6 +67,7 @@ export declare class FeatureAccess {
     constructor(source: {
         nodeId(): string;
         read(signal: AbortSignal): Promise<unknown>;
+        groupAvailable?(): boolean;
     }, preferenceFile?: string | undefined, monotonic?: () => number);
     subscribe(listener: () => void): () => void;
     private emit;
@@ -73,6 +75,9 @@ export declare class FeatureAccess {
     private clearLease;
     private renewWhileEnabled;
     private live;
+    groupComponentAvailable(): boolean;
+    /** Component lifecycle changes effective access, never the user's saved intent. */
+    componentsChanged(): void;
     groupEnabled(): boolean;
     historyImportEnabled(): boolean;
     grant(feature: AccountFeature, requireEnabled?: boolean): FeatureGrant;
@@ -93,14 +98,16 @@ declare module '@deepseek-ai/cordis' {
     }
 }
 export declare class WechatFeaturesService extends TypertRemoteService {
+    private readonly host;
     readonly access: FeatureAccess;
-    constructor(ctx: Context, config: {
+    constructor(host: Context, config: {
         source: ConstructorParameters<typeof FeatureAccess>[0];
         preferenceFile: string;
     });
     control(request: {
-        action: 'status' | 'group.enabled' | 'historyImport.enabled';
+        action: 'status' | 'group.enabled' | 'assistant.enabled' | 'historyImport.enabled';
         enabled?: boolean;
+        templateId?: 'teacher' | 'project' | 'designer';
     }, signal: AbortSignal): Promise<FeatureControlResult>;
 }
 export declare function hostFeatureAccess(host: {

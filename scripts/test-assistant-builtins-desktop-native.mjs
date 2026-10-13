@@ -9,6 +9,7 @@ import { execFileSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { createHash } from 'node:crypto'
 import { builtinComponent } from '../lib/assistant-presets/builtin-component.js'
+import * as groupAssistantsComponent from '../lib/group-assistants-component.js'
 import { BUILTIN_ASSISTANTS, builtinAssistants } from '../lib/assistant-presets/builtins.js'
 import { assistantGuidance } from '../lib/assistant-presets/definition.js'
 import { AssistantRegistry } from '../lib/assistant-presets/registry.js'
@@ -49,7 +50,7 @@ try {
 }
 } else {
 assert(path.dirname(path.resolve(work)) === path.resolve(os.tmpdir()) && path.basename(work).startsWith('assistant-builtins-native-'))
-let ctx, featureAccess
+let ctx, featureAccess, managedGroup = false
 try {
   const anchor = path.join(work, 'dsh/node_modules/@deepseek-ai/dsh/package.json')
   const require = createRequire(anchor), load = name => import(pathToFileURL(require.resolve(name)).href)
@@ -110,7 +111,7 @@ try {
   assert.equal(nativeSessionPresetSelection({ get: name => name === 'typert' ? { local: { get: id => id === 'session/create' ? createDescriptor : undefined } } : undefined }), true,
     'actual installed native codecs preserve per-session mode selection and acknowledgement')
   ctx = new Context(); ctx.baseUrl = pathToFileURL(path.join(work, 'dsh/')).href
-  featureAccess = new FeatureAccess({nodeId:()=>'builtin-feature-fixture',read:async()=>({schemaVersion:1,nodeId:'builtin-feature-fixture',accountInstance:'synthetic-owner',
+  featureAccess = new FeatureAccess({nodeId:()=>'builtin-feature-fixture',groupAvailable:()=>!managedGroup || ctx.get('wechatGroupAssistants')?.active === true,read:async()=>({schemaVersion:1,nodeId:'builtin-feature-fixture',accountInstance:'synthetic-owner',
     checkedAt:1000,expiresAt:61000,features:{group_assistant:{allowed:true,reason:'allowed',validUntil:61000},clawbot:{allowed:true,reason:'allowed',validUntil:61000}}})})
   await featureAccess.setGroupEnabled(true)
   ctx.provide('wechatFeatures', {access:featureAccess})
@@ -139,11 +140,13 @@ try {
   await ctx.plugin(AgentPresets, { default: 'standard' })
   new SkillRegistry(ctx)
   const capabilityScopes = []
+  let registerWorkingSkill = false
   ctx.provide('humanTools', { async mountCapabilities(owner) {
     capabilityScopes.push(owner)
     const disposers = ['human_capabilities', 'human_assistant_catalog'].map(name => owner.tools.register({ name,
       description: 'Scope contract fixture', parameters: { type: 'object', properties: {} },
       output: { schema: { type: 'object' }, render: () => [] }, async execute() { return {} } }))
+    if (registerWorkingSkill) disposers.push(owner.skills.register(HUMAN_WORKFLOW_SKILL))
     return () => disposers.reverse().forEach(dispose => dispose())
   } })
   const standard = await ctx.agentPresets.register({ id: 'standard', name: 'Standard', plugins: [
@@ -173,6 +176,26 @@ try {
   assert.equal(await registry.verifyPreset('harness-teacher', new AbortController().signal), true)
   const statuses = await Promise.all(BUILTIN_ASSISTANTS.map(identity => ctx.get(identity.service).status()))
   assert(statuses.every(item => item.state === 'installed'), JSON.stringify(statuses.map(item => ({ id: item.id, state: item.state, reason: item.reason }))))
+  // Real Loader transition in ONE update, while the old three declarations
+  // are active. No manual close, empty intermediate tree or old-dispose wait.
+  const oldStatusServices = BUILTIN_ASSISTANTS.map(identity => ctx.get(identity.service))
+  const legacyScopeCount = capabilityScopes.length
+  registerWorkingSkill = true; managedGroup = true
+  ctx.loader.builtins.fixtureGroupAssistants = groupAssistantsComponent
+  await ctx.loader.root.update([{ id: 'fixture-gate', name: 'cordis:fixtureAssistantGate' },
+    { id: 'fixture-group', name: 'cordis:fixtureGroupAssistants' }])
+  await ctx.loader.await()
+  const transitioned = ctx.get('wechatGroupAssistants')
+  assert.equal(transitioned?.active, true, 'one-step native Loader replacement must provide the new group controller')
+  await transitioned.notify()
+  const transitionedStatuses = await Promise.all(BUILTIN_ASSISTANTS.map(identity => ctx.get(identity.service).status()))
+  assert(transitionedStatuses.every(item => item.enabled === true && item.state === 'installed'), JSON.stringify(transitionedStatuses.map(item => ({ id: item.id, state: item.state, reason: item.reason }))))
+  for (const [index, identity] of BUILTIN_ASSISTANTS.entries()) {
+    assert.notEqual(ctx.get(identity.service), oldStatusServices[index], 'the new owner must supply each stable status-service name')
+    assert.equal(ctx.loader.root.tree.store[identity.service], undefined, 'old component row is removed, not left disabled beside the group')
+  }
+  assert.equal(capabilityScopes.length, legacyScopeCount + 3, 'exactly one new native scope per replacement preset, without duplicate activation')
+  assert.equal(featureAccess.groupEnabled(), true, 'research component consolidation does not reset node opt-in')
   const roster = await ctx.agentPresets.list()
   assert.deepEqual(roster.filter(item => item.id !== 'standard').map(item => [item.id, item.name, item.broken]), [
     ['harness-teacher', '教师助理', undefined], ['harness-project', '项目助理', undefined], ['harness-customizer', '定制助手', undefined],
@@ -243,6 +266,28 @@ try {
   } finally {teacher.cancel=originalCancel}
   await ctx.loader.root.update([]); await ctx.loader.await()
   assert.deepEqual((await ctx.agentPresets.list()).map(item => item.id), ['standard'])
+  managedGroup = true
+  const groupRows = [{ id: 'fixture-group', name: 'cordis:fixtureGroupAssistants' }]
+  await ctx.loader.root.update(structuredClone(groupRows)); await ctx.loader.await()
+  await featureAccess.setGroupEnabled(true); await ctx.get('wechatGroupAssistants').notify()
+  assert.equal((await ctx.agentPresets.list()).length, 4)
+  await ctx.get('wechatGroupAssistants').setEnabled('teacher', false)
+  assert.equal((await ctx.get('harnessTeacherAssistant').status()).enabled, false)
+  assert.equal((await ctx.agentPresets.list()).some(item => item.id === 'harness-teacher'), false)
+  const retainedTeacher = ctx.agents.get(created.sessionId)
+  await ctx.loader.root.update([]); await ctx.loader.await()
+  assert.equal(featureAccess.groupEnabled(), false, 'physical group component off closes effective writes')
+  assert.deepEqual((await ctx.agentPresets.list()).map(item => item.id), ['standard'])
+  assert.equal(ctx.agents.get(created.sessionId), retainedTeacher)
+  assert.equal(JSON.stringify(retainedTeacher.session.snapshotEvents()), teacherEvents)
+  await ctx.loader.root.update(structuredClone(groupRows)); await ctx.loader.await(); await ctx.get('wechatGroupAssistants').notify()
+  assert.equal(featureAccess.groupEnabled(), true, 'component reload retains the original node opt-in')
+  assert.equal((await ctx.get('harnessTeacherAssistant').status()).enabled, false, 'card pause survives physical component reload')
+  assert.deepEqual((await ctx.agentPresets.list()).map(item => item.id).sort(), ['harness-customizer', 'harness-project', 'standard'])
+  await ctx.get('wechatGroupAssistants').setEnabled('teacher', true)
+  assert.equal((await ctx.agentPresets.list()).length, 4)
+  assert.equal(JSON.stringify(ctx.agentPresets.config), originalDefaultConfig)
+  await ctx.loader.root.update([]); await ctx.loader.await()
   await standard()
   await registry.close()
   const { PluginPackages, readPluginMeta } = await load('@deepseek-ai/dsh-app-boot')
@@ -269,10 +314,13 @@ try {
       fs.cpSync(path.join(project, 'lib/assistant-presets/locales'), path.join(assetRoot, 'locales'), { recursive: true })
       for (const part of ['teacher', 'project', 'customizer']) fs.copyFileSync(path.join(project, `lib/assistant-presets/builtin-${part}.js`), path.join(assetRoot, `builtin-${part}.js`))
       fs.copyFileSync(path.join(project, 'lib/collaboration.js'), path.join(assetRoot, '../collaboration.js'))
+      fs.copyFileSync(path.join(project, 'lib/group-assistants-component.js'), path.join(assetRoot, '../group-assistants-component.js'))
       const libRoot = path.dirname(assetRoot)
       if (kind === 'installer') fs.copyFileSync(path.join(project, 'package.json'), path.join(directory, 'native/package.json'))
       for (const file of ['assistant-presets/native-adapter.js', 'assistant-presets/definition.js', 'assistant-presets/builtins.js',
-        'assistant-presets/builtin-definitions-v1.js', 'assistant-presets/interaction-guidance.js', 'human-workflow/data.js', 'human-workflow/dsh-skill.js']) {
+        'assistant-presets/builtin-definitions-v1.js', 'assistant-presets/interaction-guidance.js', 'human-workflow/data.js', 'human-workflow/dsh-skill.js',
+        'private-resources/assistant-provider.js', 'private-resources/storage.js', 'private-resources/contract.js',
+        'dsh-host-context.js', 'node-storage.js', 'secure-file.js']) {
         fs.mkdirSync(path.dirname(path.join(libRoot, file)), { recursive: true }); fs.copyFileSync(path.join(project, 'lib', file), path.join(libRoot, file))
       }
     }
@@ -296,6 +344,10 @@ try {
     // or implying permission to use any third-party brand artwork.
     for (const { manifest, owned } of fixtures) {
       const manifestFile = path.join(owned, 'package.json'), parent = pathToFileURL(manifestFile).href
+      const groupSpecifier = manifest.name + '/group-assistants'
+      assert.equal(resolvePluginResource(groupSpecifier, parent), path.join(owned, manifest.name === 'dsh-wechat-remote' ? 'native/lib' : 'lib', 'group-assistants-component.js'))
+      assert.equal(readPluginMeta(groupSpecifier, parent)?.title?.zh, '微信群协作助手')
+      assert(resolvePluginResource(groupSpecifier + '/locale/zh.json', parent).startsWith(owned + path.sep))
       const expectedCollaboration = path.join(owned, manifest.name === 'dsh-wechat-remote' ? 'native/lib/collaboration.js' : 'lib/collaboration.js')
       assert.equal(resolvePluginResource(manifest.name + '/collaboration', parent), expectedCollaboration, 'capability component uses native owner self-reference rather than another same-name package')
       // Metadata may read an inactive package, but runtime authoring executes
@@ -345,6 +397,8 @@ try {
     checks: ['complete shipped standard declaration non-persona rows preserved field-for-field; original preset files byte-identical',
       'native Loader component lifecycle', 'three actual registry modes', 'native acquireScope mount', 'default unchanged', 'owned dispose removes only builtins',
       'account-qualified group pause withdraws only owned presets, preserves both existing native Agents and events, and never cancels tasks',
+      'single group component hot unload/reload preserves individual card intent, node opt-in, existing Agent revisions and native defaults',
+      'one native Loader update replaces three active legacy rows with one group row; all three status services transfer ownership with no duplicate preset or component',
       'cold prompt preflight reads the current native preset projection, rejects retired modes without sending, and permits live retained revisions',
       'actual exported collaboration component mounts only in native preset scopes', 'standard Agent and host have no collaboration tools or skill',
       'scoped readiness cannot be supplied by a global skill', 'core and Desktop authoring choose their actual owning package exports',

@@ -103,13 +103,17 @@ async function verify() {
   const { default: Typert } = await load('@deepseek-ai/dsh-typert-registry')
   const { HumanToolsService } = await product('human-tools/service.js')
   const { default: collaborationComponent } = await product('collaboration.js')
-  const { builtinComponent } = await product('assistant-presets/builtin-component.js')
+  const groupAssistantsComponent = await product('group-assistants-component.js')
+  const { FeatureAccess } = await product('feature-access.js')
   const { BUILTIN_ASSISTANTS, builtinAssistants } = await product('assistant-presets/builtins.js')
   const { nativeAssistantCodec, parseNativeAssistantBase, transformNativeAssistantBase } = await product('assistant-presets/native-adapter.js')
 
   const ctx = new Context(), controllerServices = [], signal = new AbortController().signal
-  ctx.provide('wechatFeatures', (await import('./feature-access-fixture.mjs')).allowedFeatureFixture())
   const checks = [], counts = {}, nodeId = 'native_scope_fixture_' + 'a'.repeat(16)
+  const featureAccess = new FeatureAccess({ nodeId: () => nodeId, groupAvailable: () => ctx.get('wechatGroupAssistants')?.active === true,
+    read: async () => ({ schemaVersion: 1, nodeId, accountInstance: 'synthetic-owner', checkedAt: 1000, expiresAt: 61000,
+      features: { group_assistant: { allowed: true, reason: 'allowed', validUntil: 61000 }, clawbot: { allowed: true, reason: 'allowed', validUntil: 61000 } } }) })
+  ctx.provide('wechatFeatures', { access: featureAccess })
   let backend, skillsFiber, failure, nativeSkillsWereReloaded = false, probeCalls = 0, externalCalls = 0, modelCalls = 0
   const memory = initial => {
     let value = structuredClone(initial)
@@ -266,13 +270,13 @@ async function verify() {
     await cleanOrdinary('before-backend')
     backend = await ctx.plugin(HumanToolsService, config)
     assert.equal(typeof ctx.get('humanTools').mountCapabilities, 'function')
-    await assert.rejects(ctx.get('humanTools').mountCapabilities(ctx), /不能全局装载/)
+    await assert.rejects(ctx.get('humanTools').mountCapabilities(ctx), error => error.reason === 'group_component_disabled')
     await cleanOrdinary('backend-only')
-    const rows = BUILTIN_ASSISTANTS.map(identity => {
-      ctx.loader.builtins[identity.service] = builtinComponent(identity.templateId)
-      return { id: identity.service, name: 'cordis:' + identity.service }
-    })
+    ctx.loader.builtins.fixtureGroupAssistants = groupAssistantsComponent
+    const rows = [{ id: 'fixture-group-assistants', name: 'cordis:fixtureGroupAssistants' }]
     await ctx.loader.root.update(structuredClone(rows)); await ctx.loader.await()
+    await featureAccess.setGroupEnabled(true); await ctx.get('wechatGroupAssistants').notify()
+    await assert.rejects(ctx.get('humanTools').mountCapabilities(ctx), /不能全局装载/)
     for (const identity of BUILTIN_ASSISTANTS) {
       const status = await ctx.get(identity.service).status()
       assert.equal(status.state, 'installed', JSON.stringify(status))
@@ -374,19 +378,32 @@ async function verify() {
     checks.push('unrelated standard native tool is not rejected by collaboration history/provenance checks')
 
     const teacherIdentity = BUILTIN_ASSISTANTS.find(item => item.templateId === 'teacher')
-    await ctx.loader.root.update(structuredClone(rows.filter(row => row.id !== teacherIdentity.service))); await ctx.loader.await()
+    await ctx.get('wechatGroupAssistants').setEnabled('teacher', false)
     assert(!(await ctx.agentPresets.list()).some(row => row.id === teacherIdentity.presetId))
     await assert.rejects(ctx.agentPresets.resolve(teacherIdentity.presetId))
     await present(sessions['harness-project'], 'project-after-teacher-disabled')
     // DSH intentionally retains the composition of already-created Agents.
     await present(sessions['harness-teacher'], 'existing-teacher-generation-retained')
-    await cleanOrdinary('teacher-component-disabled')
-    await ctx.loader.root.update(structuredClone(rows)); await ctx.loader.await()
+    await cleanOrdinary('teacher-card-disabled')
+    await ctx.loader.root.update([]); await ctx.loader.await()
+    assert.equal(featureAccess.groupEnabled(), false)
+    for (const identity of BUILTIN_ASSISTANTS) assert(!(await ctx.agentPresets.list()).some(row => row.id === identity.presetId))
+    const denied = await ctx.tools.execute({ name: 'human_assistant_draft', arguments: { templateId: 'general' }, agent: sessions['harness-teacher'],
+      callId: 'old-agent-group-component-off', signal })
+    assert.equal(denied.isError, true, 'retained native Agent cannot start new group work while its group component is off')
+    assert.match(JSON.stringify(denied), /群协作组件|群协作助手|group_component_disabled/)
+    await present(sessions['harness-teacher'], 'existing-agent-retained-group-component-off')
+    await cleanOrdinary('whole-group-component-disabled')
+    await ctx.loader.root.update(structuredClone(rows)); await ctx.loader.await(); await ctx.get('wechatGroupAssistants').notify()
+    assert.equal(featureAccess.groupEnabled(), true)
+    assert.equal((await ctx.get(teacherIdentity.service).status()).enabled, false)
+    assert(!(await ctx.agentPresets.list()).some(row => row.id === teacherIdentity.presetId), 'physical reload must not reset the card pause')
+    await ctx.get('wechatGroupAssistants').setEnabled('teacher', true)
     assert.equal((await ctx.get(teacherIdentity.service).status()).state, 'installed')
     const replacementTeacher = await create('harness-teacher')
     await present(replacementTeacher, 'new-teacher-generation-after-reenable')
     await cleanOrdinary('teacher-reenabled')
-    checks.push('native component disable removes future selection, retains existing generation, leaves other modes unchanged; reenable works')
+    checks.push('individual card disable retains existing generation; whole group component off denies new work without changing other modes; physical reload preserves card intent and node opt-in')
 
     trace('withdrawing backend')
     await bounded('backend withdrawal', backend.dispose()); backend = undefined
@@ -494,6 +511,7 @@ async function verify() {
       limitation: 'native scope/registry integration with shipped persona/fs/skill/PTC presentation rows and native PTC provider; other full preset components and PTC execution are not exercised; not a full Desktop or WeChat end-to-end run' }))
   } catch (error) { failure = error; throw error }
   finally {
+    featureAccess.close()
     trace('disposing fixture')
     try { await bounded('fixture disposal', ctx.fiber.dispose()) }
     catch (error) { if (!failure) throw error; process.stderr.write(error.message + '\n') }

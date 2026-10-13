@@ -218,7 +218,7 @@ try {
   // This fixture has no real account or beta grant. Component activation must
   // not silently turn into entitlement, so collaboration presets stay absent.
   for (const id of ['harness-teacher', 'harness-project', 'harness-customizer']) assert(!after.presets.some(preset => preset.id === id), `ungranted preset activated: ${id}`)
-  for (const id of ['gate', 'wechat-clawbot', 'harness-assistant-teacher', 'harness-assistant-project', 'harness-assistant-customizer', 'harness-resource-library']) {
+  for (const id of ['gate', 'wechat-clawbot', 'harness-group-assistants', 'harness-resource-library']) {
     const entry = after.entries.find(entry => entry.id === id)
     assert(entry && entry.state === 2, `native component not active: ${id}`)
   }

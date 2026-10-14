@@ -44,6 +44,7 @@ import WechatAttachmentService, {
 import { AgentResourcesService } from './agent-resources.js'
 import { AgentInputsService } from './agent-inputs.js'
 import { WechatImportService } from './history-import/service.js'
+import { WechatSchedulesService } from './scheduled-tasks/service.js'
 import { HumanToolsService } from './human-tools/service.js'
 import { WechatFeaturesService } from './feature-access.js'
 import { PrivateInputNative } from './human-workflow/private-input-native.js'
@@ -649,6 +650,9 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
   if (startup) startup.onRelease(startFeatures)
   else startFeatures()
   mountChild('directory', WechatDirectoryService, { maxEntries: 1000 })
+  // This is a client adapter for the optional native schedule service, not a
+  // scheduler or a controller of the official plugin's enabled state.
+  mountChild('scheduled-tasks', WechatSchedulesService, {})
   mountChild('history-import', WechatImportService, {
     receiptDirectory: path.join(path.dirname(defaultGateStatePath(ctx)), 'history-import-receipts'),
     loadObject: async (descriptor: Record<string, any>, signal: AbortSignal) => {

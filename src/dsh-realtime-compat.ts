@@ -96,6 +96,14 @@ export function legacyHostPayload(frame: JsonRecord): JsonRecord | null {
     case 'llm/adapters-updated':
     case 'settings/document-updated':
       return { type: 'host/remote-event', event: frame.event, args }
+    case 'wechatSchedules/changed': {
+      // Invalidation only. Never transport rule prompts or execution history
+      // in a global event; interested clients reread the native service.
+      const value = recordOf(args[0])
+      return typeof value?.enabled === 'boolean'
+        ? { type: 'host/remote-event', event: frame.event, args: [{ enabled: value.enabled }] }
+        : null
+    }
     default:
       return null
   }
@@ -114,8 +122,18 @@ export class DshRealtimeCompatibility {
   private readonly readonlyConflicts: ReadonlySessionConflict[] = []
   private remoteOwner?: SocketState
   private disposed = false
+  private readonly disposeScheduleEvents?: () => void
 
-  constructor(private readonly ctx: Context) {}
+  constructor(private readonly ctx: Context) {
+    // Native API Remote events use a fixed official allowlist. Our own
+    // invalidation therefore joins the already-authenticated phone downlink
+    // directly; it must not replace the host's global Remote event source.
+    this.disposeScheduleEvents = ctx.on?.('wechatSchedules/changed', value => {
+      if (this.disposed) return
+      const payload = legacyHostPayload({ type: 'emit', event: 'wechatSchedules/changed', args: [value] })
+      if (payload) for (const state of this.sockets) if (state.kind === 'host') this.send(state, payload)
+    })
+  }
 
   /** Scoped to authenticated phone RPCs; never changes native Agent ownership. */
   trackSessionRequest(request: LegacyClientRequest): () => void {
@@ -300,6 +318,7 @@ export class DshRealtimeCompatibility {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    this.disposeScheduleEvents?.()
     for (const state of [...this.sockets]) {
       this.remove(state)
       try { state.socket.close(1001, 'adapter disposed') } catch { /* best effort */ }
@@ -551,6 +570,9 @@ export class DshRealtimeCompatibility {
       if (state.lifetime.signal.aborted) return
       const frame = recordOf(raw)
       if (!frame) continue
+      // This plugin-owned event has one local source above, even if a future
+      // host also starts forwarding it through the official Remote stream.
+      if (frame.type === 'emit' && frame.event === 'wechatSchedules/changed') continue
       if (frame.type === 'emit' && frame.event === 'permission-presets/catalog-changed') {
         // The shipped phone has no catalog listener. Re-present its known
         // selections at their original sequence, with the new live choices.

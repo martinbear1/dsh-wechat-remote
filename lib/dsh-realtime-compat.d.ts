@@ -30,6 +30,7 @@ export declare class DshRealtimeCompatibility {
     private readonly readonlyConflicts;
     private remoteOwner?;
     private disposed;
+    private readonly disposeScheduleEvents?;
     constructor(ctx: Context);
     /** Scoped to authenticated phone RPCs; never changes native Agent ownership. */
     trackSessionRequest(request: LegacyClientRequest): () => void;

@@ -19,6 +19,14 @@ assert.equal(legacyHostPayload({
   type: 'emit', event: 'credentials/reference-updated', args: ['hidden'],
 }), null)
 
+assert.deepEqual(legacyHostPayload({
+  type: 'emit', event: 'wechatSchedules/changed', args: [{ enabled: true, prompt: 'not an event payload' }],
+}), { type: 'host/remote-event', event: 'wechatSchedules/changed', args: [{ enabled: true }] })
+assert.deepEqual(legacyHostPayload({
+  type: 'emit', event: 'wechatSchedules/changed', args: [{ enabled: false }],
+}), { type: 'host/remote-event', event: 'wechatSchedules/changed', args: [{ enabled: false }] })
+assert.equal(legacyHostPayload({ type: 'emit', event: 'wechatSchedules/changed', args: [{ enabled: 'false' }] }), null)
+
 const sources = []
 const remoteSources = []
 function source(signal) {
@@ -54,6 +62,7 @@ const gateway = {
 }
 const responses = []
 let handleResponse = async () => Response.json({ result: { ok: true } })
+const localListeners = new Map()
 const adapter = new DshRealtimeCompatibility({ get(key) {
   if (key === 'typertGateway') return gateway
   if (key === 'connection') return { createSharedFetchHandler() { return {
@@ -62,6 +71,9 @@ const adapter = new DshRealtimeCompatibility({ get(key) {
       return handleResponse()
     },
   } } }
+}, on(event, listener) {
+  localListeners.set(event, listener)
+  return () => localListeners.delete(event)
 } })
 function peer() {
   return {
@@ -84,6 +96,10 @@ const detachFirst = adapter.connect('/api/events.mux', firstMux)
 adapter.connect('/api/events.mux', secondMux)
 adapter.connect('/api/events.host', host)
 assert.equal(remoteSources.length, 1, 'node notifications must have one upstream source')
+localListeners.get('wechatSchedules/changed')({ enabled: false, prompt: 'never broadcast' })
+assert.deepEqual(host.messages.at(-1).payload, { type: 'host/remote-event', event: 'wechatSchedules/changed', args: [{ enabled: false }] })
+assert(!firstMux.messages.some(frame => frame.payload.event === 'wechatSchedules/changed'), 'host invalidations must not duplicate on mux sockets')
+host.messages.length = 0
 remoteSources[0].stream.push({ type: 'emit', event: 'api-session/status', args: ['session-1', true] })
 await until(() => host.messages.length > 0)
 assert.equal(host.messages.filter(frame => frame.payload.type === 'host/session-status').length, 1)
@@ -205,5 +221,6 @@ adapter.connect('/api/events.mux', reconnected)
 await until(() => reconnected.messages.some(frame => frame.payload.type === 'session/subscribed' && frame.payload.sessionId === 'child'))
 assert(!reconnected.messages.some(frame => frame.payload.sessionId === 'deleted'), 'reconnection must not resurrect a failed subscription')
 adapter.dispose()
+assert.equal(localListeners.size, 0, 'plugin-owned event subscriptions are disposed')
 assert.equal(sources.every(value => value.signal.aborted), true)
 console.log('DSH realtime compatibility tests passed')

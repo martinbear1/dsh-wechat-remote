@@ -15,6 +15,7 @@ import type { AssistantDraftRequest, AssistantInstallRequest, AssistantVersionRe
 import type { HumanAckWireRequest, HumanActionRequest } from '@harness-remote/dsh-wechat-remote/human-tools/protocol'
 import type { ResourceRequest, ResourceResult } from '@harness-remote/dsh-wechat-remote/resource-library/protocol'
 import type { ResourceResult as ResourceResult$remote2 } from '@harness-remote/dsh-wechat-remote/resources'
+import type { ScheduledRequest, ScheduledResult } from '@harness-remote/dsh-wechat-remote/scheduled-tasks/protocol'
 
 declare module '@deepseek-ai/dsh-typert-protocol' {
   interface TypertRemoteNamespace$6167656e74496e70757473 {
@@ -87,6 +88,9 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
   interface TypertRemoteNamespace$7765636861745265736f7572636573 {
     control: (request: ResourceRequest, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
   }
+  interface TypertRemoteNamespace$7765636861745363686564756c6573 {
+    control: (request: ScheduledRequest, signal?: AbortSignal) => Promise<RemoteResult<ScheduledResult>>
+  }
   interface TypertRemoteMap {
     'agentInputs/capabilities': (request: { scope: string; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult$remote2>>
     'agentInputs/upload': (request: { scope: string; name: string; data?: string; descriptorJson?: string; }, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult$remote2>>
@@ -136,6 +140,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'wechatHost/otherEndpoint': (request: WechatHostDescribeRequest, signal?: AbortSignal) => Promise<RemoteResult<OtherEndpointInfo>>
     'wechatImport/control': (request: { action: string; inputJson?: string; }, signal?: AbortSignal) => Promise<RemoteResult<HistoryImportResult>>
     'wechatResources/control': (request: ResourceRequest, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
+    'wechatSchedules/control': (request: ScheduledRequest, signal?: AbortSignal) => Promise<RemoteResult<ScheduledResult>>
   }
   interface TypertRemoteNamespaceMap {
     'agentInputs': TypertRemoteNamespace$6167656e74496e70757473
@@ -149,6 +154,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'wechatHost': TypertRemoteNamespace$776563686174486f7374
     'wechatImport': TypertRemoteNamespace$776563686174496d706f7274
     'wechatResources': TypertRemoteNamespace$7765636861745265736f7572636573
+    'wechatSchedules': TypertRemoteNamespace$7765636861745363686564756c6573
   }
 }
 

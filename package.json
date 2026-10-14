@@ -1,6 +1,6 @@
 {
   "name": "@harness-remote/dsh-wechat-remote",
-  "version": "1.7.14-rc.67",
+  "version": "1.7.14-rc.68",
   "description": "连接微信小程序，随时与电脑上的助手协作。",
   "icon": "./lib/assets/wechat.svg",
   "private": true,
@@ -130,7 +130,7 @@
     "test": "npm run test:features && npm run test:clawbot && npm run test:private-updates && npm run test:human-tools && npm run test:notifications && npm run test:lifecycle && npm run test:client && npm run test:attachment && npm run test:directory && npm run test:host-platform && npm run test:history && npm run test:gate-ports && npm run test:dsh-runtime && npm run test:dsh-protocol-compat && npm run test:dsh-realtime-compat && npm run test:dsh-compatibility-api && npm run test:public-relay && npm run test:updates && npm run test:native-update && npm run test:history-import && npm run test:private-resources",
     "test:history-import": "node --test scripts/test-history-import-source.mjs scripts/test-history-import-control.mjs scripts/test-history-import-worker.mjs scripts/test-history-import-search.mjs scripts/test-history-import-native.mjs scripts/test-history-continuation.mjs",
     "test:history-continuation:native": "node scripts/test-history-continuation-native.mjs",
-    "test:features": "node --test scripts/test-feature-access.mjs scripts/test-scheduled-tasks.mjs",
+    "test:features": "node --test scripts/test-feature-access.mjs scripts/test-scheduled-tasks.mjs scripts/test-host-scheduled-bootstrap.mjs",
     "test:schedules:native": "node scripts/test-scheduled-tasks-native.mjs",
     "test:clawbot": "node --test scripts/test-clawbot-ilink.mjs scripts/test-clawbot-media.mjs scripts/test-clawbot-runtime-review.mjs scripts/test-clawbot-dsh-host.mjs scripts/test-clawbot-panel.mjs",
     "test:clawbot:native": "node scripts/test-clawbot-native-boundary.mjs",

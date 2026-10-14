@@ -15,6 +15,18 @@ export interface ScheduledResult {
 export interface ScheduledChanged {
     readonly enabled: boolean;
 }
+/** Lightweight live service state; no task/catalog/history read is needed. */
+export interface ScheduledStatus {
+    readonly supported: boolean;
+    readonly enabled: boolean;
+    readonly historyKind: 'delivery';
+    readonly capabilities: {
+        readonly create: boolean;
+        readonly update: boolean;
+        readonly delete: boolean;
+        readonly pause: false;
+    };
+}
 export interface ScheduledReceipt {
     readonly scheduledAt: string;
     readonly deliveredAt: string;

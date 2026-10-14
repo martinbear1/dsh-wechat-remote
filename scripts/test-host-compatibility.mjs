@@ -8,6 +8,7 @@ import { toolRecordPresentation } from '../lib/tool-record-presentation.js'
 import { historyDetailDocument, historyRecordPreview } from '../lib/history-record-presentation.js'
 import { TurnActivityCompatibility } from '../lib/turn-activity.js'
 import { nativeInstallSessions, quiesceNativeHost } from '../lib/install-control.js'
+import { hostPlatformDescriptor } from '../lib/host-platform.js'
 
 test('final generated manifest exposes identical strict schemas to old and new loaders', () => {
   assert.equal(TYPERT.invocations.filter(i => !['humanTools', 'wechatClawbot', 'wechatFeatures', 'wechatImport', 'wechatResources', 'wechatSchedules'].includes(i.namespace)).length, 18)
@@ -58,6 +59,22 @@ test('all eight host versions select the correct carrier generation', () => {
   for (const v of ['0.1.5-rc.1', '0.1.5-rc.2', '0.1.5-rc.3', '0.1.6-alpha.1', '0.1.6-alpha.2']) assert.equal(usesDuplexEvents(v), false)
   for (const v of ['0.1.7-alpha.1', '0.1.7-alpha.2', '0.1.7-rc.1']) assert.equal(usesDuplexEvents(v), true)
   assert.throws(() => usesDuplexEvents('not-a-version'))
+})
+
+test('generated host metadata preserves optional lightweight schedule bootstrap and old results', () => {
+  const descriptor = TYPERT.invocations.find(i => i.namespace === 'wechatHost' && i.method === 'describe')
+  const schema = descriptor.result.schema
+  const value = { startupDirectory: { path: 'synthetic', usable: true }, computerName: 'synthetic',
+    pluginVersion: 'synthetic', hostArch: 'x64', updateProtocolVersion: 1, descriptorVersion: 1,
+    hostId: 'synthetic-host', agentInstanceId: 'synthetic-node', agentKind: 'deepseek-harness',
+    agentName: 'synthetic', agentVersion: 'synthetic', hostPlatform: hostPlatformDescriptor(), capabilities: [] }
+  assert.deepEqual(schema.parse({ ok: true, value }), { ok: true, value })
+  const schedules = { supported: true, enabled: true, historyKind: 'delivery',
+    capabilities: { create: true, update: true, delete: true, pause: false } }
+  assert.deepEqual(schema.parse({ ok: true, value: { ...value, schedules } }).value.schedules, schedules,
+    'strict response codec must not silently strip the new bootstrap field')
+  assert(!schema.safeParse({ ok: true, value: { ...value, schedules: { ...schedules, enabled: 'true' } } }).success)
+  assert(!schema.safeParse({ ok: true, value: { ...value, schedules: { ...schedules, historyKind: 'model-completion' } } }).success)
 })
 
 test('file arguments follow live descriptors; withdrawn/unknown contracts fail closed', () => {

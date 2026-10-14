@@ -1,7 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { NativeScheduledTasks, ScheduleAdapterError, scheduledError } from './native.js'
-import type { ScheduledChanged, ScheduledRequest, ScheduledResult } from './protocol.js'
+import type { ScheduledChanged, ScheduledRequest, ScheduledResult, ScheduledStatus } from './protocol.js'
 
 declare module '@deepseek-ai/cordis' {
   interface Context { wechatSchedules: WechatSchedulesService }
@@ -33,6 +33,9 @@ export class WechatSchedulesService extends TypertRemoteService {
     })
     ctx.effect(() => () => { this.lifetime.abort(); this.adapter.close() })
   }
+  /** In-process host bootstrap only: synchronous and always live. This is not
+   * another Remote or an eager catalog read on the connection's critical path. */
+  status(): ScheduledStatus { return this.adapter.status() }
   @Remote('control')
   async control(request: ScheduledRequest, signal: AbortSignal): Promise<ScheduledResult> {
     const combined = AbortSignal.any([signal, this.lifetime.signal])

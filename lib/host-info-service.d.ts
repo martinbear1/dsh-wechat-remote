@@ -3,6 +3,7 @@ import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol';
 import { type AgentCapability } from './agent-metadata.js';
 import type { HostPlatformDescriptor } from './host-platform.js';
 import { type OtherEndpointInfo } from './other-endpoint-info.js';
+import type { ScheduledStatus } from './scheduled-tasks/protocol.js';
 export type { OtherEndpointInfo } from './other-endpoint-info.js';
 export interface WechatHostDescribeRequest {
 }
@@ -45,6 +46,9 @@ export interface WechatHostDescribeValue {
     readonly agentVersion: string;
     readonly hostPlatform: HostPlatformDescriptor;
     readonly capabilities: readonly AgentCapability[];
+    /** Optional, synchronous snapshot of the native Schedule service switch.
+     * Omitted on older adapters; clients keep their existing status fallback. */
+    readonly schedules?: ScheduledStatus;
     /** Actual ports selected for this DSH profile; never assume 3092/3093. */
     readonly gate?: WechatGateRuntimeInfo;
 }

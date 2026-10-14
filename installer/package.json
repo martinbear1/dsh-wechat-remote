@@ -1,6 +1,6 @@
 {
   "name": "dsh-wechat-remote",
-  "version": "1.7.14-rc.67",
+  "version": "1.7.14-rc.68",
   "private": false,
   "description": "连接微信小程序，随时与电脑上的助手协作。",
   "icon": "./native/lib/assets/wechat.svg",

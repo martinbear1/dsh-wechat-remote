@@ -1,4 +1,4 @@
-type Row = Record<string, any>;
+import type { ScheduledStatus } from './protocol.js';
 export interface ScheduleHost {
     get(name: string): any;
 }
@@ -15,7 +15,7 @@ export declare class NativeScheduledTasks {
     constructor(host: ScheduleHost);
     close(): void;
     private current;
-    status(): Row;
+    status(): ScheduledStatus;
     private core;
     private same;
     private catalog;
@@ -25,4 +25,3 @@ export declare function scheduledError(error: unknown): {
     code: string;
     message: string;
 };
-export {};

@@ -16,6 +16,7 @@ import { agentDshHome, agentProfileScope, loadAgentDescriptor, startupDirectory,
 import type { HostPlatformDescriptor } from './host-platform.js'
 import { PLUGIN_VERSION } from './plugin-version.js'
 import { readOtherEndpointInfo, type OtherEndpointInfo } from './other-endpoint-info.js'
+import type { ScheduledStatus } from './scheduled-tasks/protocol.js'
 export type { OtherEndpointInfo } from './other-endpoint-info.js'
 
 export interface WechatHostDescribeRequest {}
@@ -59,6 +60,9 @@ export interface WechatHostDescribeValue {
   readonly agentVersion: string
   readonly hostPlatform: HostPlatformDescriptor
   readonly capabilities: readonly AgentCapability[]
+  /** Optional, synchronous snapshot of the native Schedule service switch.
+   * Omitted on older adapters; clients keep their existing status fallback. */
+  readonly schedules?: ScheduledStatus
   /** Actual ports selected for this DSH profile; never assume 3092/3093. */
   readonly gate?: WechatGateRuntimeInfo
 }
@@ -110,6 +114,11 @@ export class WechatHostInfoService extends TypertRemoteService {
     void request
     signal.throwIfAborted()
     const descriptor = loadAgentDescriptor(this.ctx)
+    const schedulesService = this.ctx.get('wechatSchedules')
+    let schedules: ScheduledStatus | undefined
+    // Auxiliary UI metadata must never block an otherwise healthy connection.
+    // This local accessor does not touch tasks, storage or another endpoint.
+    try { schedules = schedulesService?.status?.() } catch { /* fall back to the optional status RPC */ }
     return {
       ok: true,
       value: {
@@ -129,8 +138,9 @@ export class WechatHostInfoService extends TypertRemoteService {
         capabilities: [...descriptor.capabilities, ...(this.privateUpdatesReady?.() ? [{ id: 'human.private-updates', version: 1 }] : []),
           ...((this.ctx.get('wechatClawbot') as { available?: () => boolean } | undefined)?.available?.() ? [{ id: 'wechat.clawbot', version: 1 }] : []),
           // Availability of our client adapter is separate from the native
-          // automation plugin's switch, which is read through schedule status.
-          ...(this.ctx.get('wechatSchedules') ? [{ id: 'dsh.schedules', version: 1 }] : [])],
+          // automation plugin's switch, carried in the lightweight snapshot.
+          ...(schedulesService ? [{ id: 'dsh.schedules', version: 1 }] : [])],
+        ...(schedules ? { schedules } : {}),
         ...(this.gateRuntime ? { gate: this.gateRuntime() } : {}),
       },
     }

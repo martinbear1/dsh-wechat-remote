@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { symbols } from '@deepseek-ai/cordis'
-import type { ScheduledCatalog, ScheduledItem, ScheduledRecord, ScheduledSummary } from './protocol.js'
+import type { ScheduledCatalog, ScheduledItem, ScheduledRecord, ScheduledStatus, ScheduledSummary } from './protocol.js'
 
 type Row = Record<string, any>
 export interface ScheduleHost { get(name: string): any }
@@ -64,7 +64,7 @@ export class NativeScheduledTasks {
     const service = this.host.get('schedule')
     if (service && typeof service.catalog === 'function' && typeof service.history === 'function') return service
   }
-  status(): Row {
+  status(): ScheduledStatus {
     const service = this.current()
     const sessions = this.host.get('sessions'), persistence = this.host.get('sessionPersistence')
     return { supported: true, enabled: !!service, historyKind: 'delivery', capabilities: {

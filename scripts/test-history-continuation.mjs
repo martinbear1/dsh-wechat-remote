@@ -5,32 +5,23 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { build } from 'esbuild'
 import { fileURLToPath } from 'node:url'
+import { readFileSync } from 'node:fs'
 
 async function loadSource(name, options = {}) {
-  const url = new URL(`../src/history-import/${name}.ts`, import.meta.url)
+  const url = new URL(`../src/private-resources/${name}.ts`, import.meta.url)
   const built = await build({ entryPoints: [fileURLToPath(url)], bundle: true,
     platform: 'node', format: 'esm', write: false,
     define: { 'import.meta.url': JSON.stringify(url.href) }, ...options })
   return import('data:text/javascript;base64,' + Buffer.from(built.outputFiles[0].text).toString('base64'))
 }
 
-// The preset lifecycle resolves its sibling module through the installed
-// package. Stub only that resolution and Cordis's lifecycle symbol here;
-// real package export/path resolution belongs to packaging/native tests.
-const lifecycle = Symbol.for('history-continuation-test.init')
-const preset = await loadSource('continuation-preset', { plugins: [{
-  name: 'synthetic-preset-host',
-  setup(builder) {
-    const modules = {
-      '@deepseek-ai/cordis': 'export const Service = {init: Symbol.for("history-continuation-test.init")}',
-      'node:fs': 'export const realpathSync = () => "/fixture/continuation-compaction.js"',
-      'node:module': 'export const createRequire = () => ({resolve: () => "/fixture/continuation-compaction.js"})',
-    }
-    builder.onResolve({ filter: /^(?:@deepseek-ai\/cordis|node:fs|node:module)$/ }, args => ({ path: args.path, namespace: 'fixture' }))
-    builder.onLoad({ filter: /.*/, namespace: 'fixture' }, args => ({ contents: modules[args.path], loader: 'js' }))
-  },
-}] })
-const { createContinuationCompactionPlugin, CONTINUATION_COMPACTION_INSTRUCTION } = await loadSource('continuation-compaction')
+const { resourceChatComposition } = await loadSource('chat-composition')
+const { createChatCompactionPlugin, chatCompactionConfig } = await loadSource('chat-compaction')
+const { parseResourcePreset, resourceAssistant } = await loadSource('contract')
+const { NativeResourceRegistry } = await loadSource('native')
+const chatBytes = readFileSync(new URL('../src/private-resources/bundled/chat-mode.json', import.meta.url))
+const chat = parseResourcePreset(chatBytes)
+const CONTINUATION_COMPACTION_INSTRUCTION = chat.compactionPrompt
 
 function freeze(value) {
   if (value && typeof value === 'object' && !Object.isFrozen(value)) {
@@ -42,25 +33,28 @@ function freeze(value) {
 const text = value => ({ type: 'text', text: value })
 const flattenPlugins = plugins => plugins.flatMap(plugin => [plugin, ...(plugin.group ? flattenPlugins(plugin.config) : [])])
 
-test('continuation composition is standalone and contains only persona, web and native compaction plumbing', () => {
-  const definition = preset.historyContinuationDefinition({ compactionModule: 'fixture/compaction' })
-  assert.equal(definition.id, preset.HISTORY_CONTINUATION_ID)
-  assert.equal(definition.name, '网页会话接续')
-  assert.equal('extends' in definition, false)
-  assert.equal('default' in definition, false)
-  assert.deepEqual(flattenPlugins(definition.plugins).map(plugin => plugin.name), [
-    '@deepseek-ai/dsh-persona', '@deepseek-ai/dsh-tool-web', 'cordis:group',
+test('chat data composes only literal persona, native web and isolated compaction without a base identity', () => {
+  const plugins = resourceChatComposition(chat, { prompt: 'fixture/prompt', compaction: 'fixture/compaction' }, 'fixture_prompt')
+  assert.equal(chat.schemaVersion, 3)
+  assert.equal(chat.runtime, 'chat')
+  assert.equal(chat.name, 'Chat模式')
+  assert.equal('basePreset' in chat, false)
+  assert.equal(resourceAssistant(chat), undefined)
+  assert.deepEqual(flattenPlugins(plugins).map(plugin => plugin.name), [
+    '@deepseek-ai/dsh-persona', 'fixture/prompt', '@deepseek-ai/dsh-tool-web', 'cordis:group',
     'fixture/compaction', '@deepseek-ai/dsh-command-compact',
   ])
   // cordis:group is a native scope, not the WeChat group-assistant toolset.
-  assert.deepEqual(definition.plugins[2].isolate, { compaction: true, toolResultPruner: true })
-  assert.deepEqual(definition.plugins[1].config, { fetch: true, searchTimeoutMs: 60000 })
-  assert.deepEqual(definition.plugins[0].config, { prefix: preset.CONTINUATION_PERSONA, suffix: '', complete: false })
-  assert.doesNotMatch(JSON.stringify(definition.plugins), /dsh-tool-(?:fs|terminal|code)|assistant-teacher|group-tools|wechatFeatures/)
+  assert.deepEqual(plugins[3].isolate, { compaction: true, toolResultPruner: true })
+  assert.deepEqual(plugins[2].config, { fetch: true, searchTimeoutMs: 60000 })
+  assert.deepEqual(plugins[0].config, { prefix: '{{fixture_prompt}}', suffix: '', complete: false })
+  assert.deepEqual(plugins[1].config, { text: chat.systemPrompt })
+  assert.deepEqual(plugins[3].config[0].config, { instruction: chat.compactionPrompt })
+  assert.doesNotMatch(JSON.stringify(plugins), /dsh-tool-(?:fs|terminal|code)|assistant-teacher|group-tools|wechatFeatures/)
 })
 
 test('persona is task-neutral and treats imported reasoning/tool content as historical, not new authority', () => {
-  const persona = preset.CONTINUATION_PERSONA
+  const persona = chat.systemPrompt
   assert.match(persona, /general-purpose conversational assistant/)
   for (const domain of ['research', 'mathematics', 'writing', 'everyday conversation', 'fictional or roleplay']) assert(persona.includes(domain))
   assert.match(persona, /without forcing any one workflow/)
@@ -69,26 +63,70 @@ test('persona is task-neutral and treats imported reasoning/tool content as hist
   assert.match(persona, /Do not claim access to a missing attachment/)
 })
 
-test('preset lifecycle only registers its own definition and yields cleanup; host default stays unchanged', async () => {
-  const defaults = freeze({ preset: 'standard', provider: 'host-provider', model: 'host-model' })
-  const registrations = new Map(), calls = [], cleanup = () => registrations.delete(preset.HISTORY_CONTINUATION_ID)
-  const registry = new Proxy({ register(definition) {
-    calls.push(['register', definition.id]); registrations.set(definition.id, definition); return cleanup
-  } }, { get(target, key) {
-    assert.equal(key, 'register', `unexpected host-registry access: ${String(key)}`)
-    return target[key]
-  }, set() { assert.fail('preset must not write host registry/default settings') } })
-  const ctx = freeze({ get(name) { calls.push(['get', name]); assert.equal(name, 'agentPresets'); return registry } })
-  const component = new preset.default(ctx), init = component[lifecycle]()
-  const yielded = await init.next()
-  assert.equal(yielded.done, false)
-  assert.equal(yielded.value, cleanup)
-  assert.equal(registrations.size, 1)
-  assert.equal((await init.next()).done, true)
-  assert.deepEqual(calls, [['get', 'agentPresets'], ['register', preset.HISTORY_CONTINUATION_ID]])
-  assert.deepEqual(defaults, { preset: 'standard', provider: 'host-provider', model: 'host-model' })
-  yielded.value() // Cordis, not the component, owns invoking yielded cleanup.
-  assert.equal(registrations.size, 0)
+test('schema3 rejects inherited capabilities, arbitrary runtime modules and malformed prompts', () => {
+  for (const patch of [{ basePreset: 'standard' }, { capabilities: [] }, { assistant: {} }, { module: 'evil' },
+    { runtime: 'group' }, { compactionPrompt: '' }, { compactionPrompt: '\ud800' }, { systemPrompt: '\0' }]) {
+    assert.throws(() => parseResourcePreset(Buffer.from(JSON.stringify({ ...chat, ...patch }))), { code: 'resource-preset-invalid' })
+  }
+  for (const key of ['runtime', 'systemPrompt', 'compactionPrompt']) {
+    const resource = { ...chat }; delete resource[key]
+    assert.throws(() => parseResourcePreset(Buffer.from(JSON.stringify(resource))), { code: 'resource-preset-invalid' })
+  }
+})
+
+test('chat resource updates carry both authored prompts literally, not a fixed code fallback', () => {
+  const update = parseResourcePreset(Buffer.from(JSON.stringify({ ...chat, version: '1.1.0',
+    systemPrompt: '更新后的角色 {{model}}，保持原文。', compactionPrompt: '新版摘要 {{bad syntax!}}，只作文本。' })))
+  const plugins = resourceChatComposition(update, { prompt: 'fixture/prompt', compaction: 'fixture/compaction' }, 'fixture_prompt')
+  assert.equal(plugins[1].config.text, update.systemPrompt)
+  assert.equal(plugins[3].config[0].config.instruction, update.compactionPrompt)
+})
+
+test('compaction helper validates its wrapper strictly and leaves native model policy validation to the native engine', () => {
+  for (const config of [null, [], {}, { instruction: '' }, { instruction: '\ud800' },
+    { instruction: 'ok', extra: true }, { instruction: 'ok', native: [] }, { instruction: 'ok', native: null }]) {
+    assert.throws(() => chatCompactionConfig(config), { code: 'resource-prompt-invalid' })
+  }
+  assert.deepEqual(chatCompactionConfig({ instruction: ' literal {{model}} ' }), { instruction: ' literal {{model}} ', native: {} })
+  const native = freeze({ maxTokens: 2048, modelPolicies: [{ provider: 'p', model: 'm', maxTokens: 1024 }] })
+  const result = chatCompactionConfig({ instruction: 'authored', native })
+  assert.deepEqual(result.native, native)
+  assert.notEqual(result.native, native)
+})
+
+test('resource registry owns Chat lifecycle without reading a base or consulting group services', async () => {
+  const definitions = new Map(), events = []
+  const registry = {
+    async list() { return [...definitions.values()] },
+    async readDocument() { assert.fail('Chat must not inherit any base preset') },
+    async resolve(id) { return definitions.get(id) },
+    async register(definition) {
+      events.push(['register', definition.id]); definitions.set(definition.id, definition)
+      return async () => { events.push(['dispose', definition.id]); definitions.delete(definition.id) }
+    },
+  }
+  const owner = new NativeResourceRegistry({ get(name) {
+    assert.equal(name, 'agentPresets', 'Chat must not load group state, a base codec or host defaults')
+    return registry
+  } }, { promptModule: 'fixture/prompt', chatCompactionModule: 'fixture/compaction' })
+  await owner.register(chat)
+  assert.equal(definitions.size, 1)
+  const original = [...definitions.values()][0]
+  await owner.register(chat)
+  assert.equal(events.length, 1, 'same immutable version must not be registered twice')
+  await owner.suspendGroups()
+  assert.equal(definitions.size, 1, 'group switch does not own Chat')
+  const next = { ...chat, version: '1.1.0', systemPrompt: 'next persona', compactionPrompt: 'next checkpoint' }
+  await owner.register(next)
+  assert.equal(definitions.size, 2, 'different resource releases retain separate native session identities')
+  assert.equal(original.plugins[1].config.text, chat.systemPrompt)
+  const updated = [...definitions.values()].find(row => row.id !== original.id)
+  assert.equal(updated.plugins[1].config.text, next.systemPrompt)
+  assert.equal(updated.plugins[3].config[0].config.instruction, next.compactionPrompt)
+  await owner.unregister(next)
+  assert.equal(definitions.size, 1)
+  await owner.close()
+  assert.equal(definitions.size, 0)
 })
 
 class FakeNativeEngine {
@@ -112,9 +150,9 @@ class FakeBlockAssembler {
   }
   blocks() { return this.output }
 }
-const Plugin = createContinuationCompactionPlugin({ BasicCompactionEngine: FakeNativeEngine }, {
+const Plugin = createChatCompactionPlugin({ BasicCompactionEngine: FakeNativeEngine }, {
   BlockAssembler: FakeBlockAssembler, LlmError: FakeLlmError,
-})
+}, CONTINUATION_COMPACTION_INSTRUCTION)
 
 function fixture({ config = {}, chunks = [{ blocks: [text('合成检查点')] }], streamError, afterChunk,
   latest = { provider: 'new-provider', model: 'new-model' }, options = { provider: 'old-provider', model: 'old-model' } } = {}) {
@@ -189,6 +227,17 @@ test('latest complete session route wins over old agent options and is read anew
   const second = await f.instance.summarize({ messages: [] }, f.agent)
   assert.equal(second.provider, 'newer-provider'); assert.equal(second.model, 'newer-model')
   assert.deepEqual(f.agent.options, { provider: 'old-provider', model: 'old-model' })
+})
+
+test('a different resource revision supplies its exact literal summary instruction', async () => {
+  const changed = 'Revised summary rules {{model}} — do not interpret this template.'
+  const Updated = createChatCompactionPlugin({ BasicCompactionEngine: FakeNativeEngine }, {
+    BlockAssembler: FakeBlockAssembler, LlmError: FakeLlmError,
+  }, changed)
+  const f = fixture(), engine = new Updated(f.instance.ctx, f.config)
+  await engine.summarize({ messages: [] }, f.agent)
+  assert.equal(f.calls[0].messages.at(-1).content[0].text, changed)
+  assert.notEqual(f.calls[0].messages.at(-1).content[0].text, CONTINUATION_COMPACTION_INSTRUCTION)
 })
 
 test('missing or partial latest route falls back to the agent route, never mixes providers/models', async () => {

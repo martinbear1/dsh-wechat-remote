@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
 import { pluginFromInstaller } from '../lib/update-download.js'
+import { bundledResourceReleases } from '../lib/private-resources/bundled.js'
 
 const read = file => JSON.parse(fs.readFileSync(file, 'utf8'))
 const manifest = read('installer/package.json'), version = manifest.version
@@ -31,6 +32,14 @@ try {
   for (const file of list(outer)) assert.doesNotMatch(file, /(?:companion-updates|CompanionPanel|CompanionUpdateCard)\.(?:js|d\.ts)$/, 'retired update code must not ship in either entry style')
   assert.doesNotMatch(fs.readFileSync(path.join(native, 'lib/client.js'), 'utf8'), /微信连接 · 联动更新|确认并等待空闲后更新|当前节点可独立使用，不会自动安装另一端/)
   const outerMeta = read(path.join(outer, 'package.json')), nativeMeta = read(path.join(native, 'package.json'))
+  const [chat] = bundledResourceReleases()
+  assert.deepEqual(Buffer.from(JSON.stringify(read(path.join(native, 'lib/private-resources/bundled/chat-mode.json')))), chat.content,
+    'preinstalled and cloud publication resources must have identical canonical bytes')
+  assert.equal(read(path.join(native, 'lib/private-resources/bundled/chat-mode.json')).name, 'Chat模式')
+  for (const stem of ['continuation-preset', 'continuation-compaction']) for (const ext of ['js', 'd.ts'])
+    assert(!fs.existsSync(path.join(native, 'lib/history-import', `${stem}.${ext}`)), 'retired standalone preset must not ship')
+  assert.equal(outerMeta.exports['./history-import/compaction'], undefined)
+  assert.equal(nativeMeta.exports['./history-import/compaction'], undefined)
   const expectedIcon = fs.readFileSync('lib/assets/wechat.svg')
   assert.equal(createHash('sha256').update(expectedIcon).digest('hex'), 'd1c1c296796b3c4cbdce5b896c30815d3376a3766a4254bc1086ab70804f1e72')
   assert.match(expectedIcon.toString(), /viewBox="0 0 40 33"/)
@@ -44,7 +53,7 @@ try {
   assert(fs.readFileSync(path.join(native, 'THIRD-PARTY-NOTICES/wechat-artwork.txt'), 'utf8').includes('https://pc.weixin.qq.com/'))
   const selfResources = createRequire(path.join(outer, 'package.json'))
   assert.equal(read(selfResources.resolve('dsh-wechat-remote/locale/zh.json')).meta.description, outerMeta.description)
-  for (const [entry, file] of [['group-assistants', 'group-assistants-component.js'], ['resource-library', 'resource-library-component.js'], ['private-resource-prompt', 'private-resources/native.js'], ['history-import/compaction', 'history-import/continuation-compaction.js']]) {
+  for (const [entry, file] of [['group-assistants', 'group-assistants-component.js'], ['resource-library', 'resource-library-component.js'], ['private-resource-prompt', 'private-resources/native.js'], ['resource-library/chat-compaction', 'private-resources/chat-compaction.js']]) {
     assert.equal(outerMeta.exports[`./${entry}`], `./native/lib/${file}`)
     assert.equal(nativeMeta.exports[`./${entry}`].default, `./lib/${file}`)
     assert.equal(selfResources.resolve(`dsh-wechat-remote/${entry}`), path.join(native, 'lib', file))

@@ -8,6 +8,7 @@ import { hostFeatureAccess } from '../feature-access.js'
 import { ResourceDeliveryClient, type DeliverySource } from './source.js'
 import { ResourceController } from './controller.js'
 import { ResourceError } from './contract.js'
+import { bundledResourceReleases } from './bundled.js'
 import type { ResourceRequest, ResourceResult } from './protocol.js'
 
 declare module '@deepseek-ai/cordis' { interface Context {
@@ -23,7 +24,8 @@ export class WechatResourcesService extends TypertRemoteService {
   private settled = false
   constructor(ctx: Context) {
     super(ctx, 'wechatResources')
-    const library = new PrivateResourceLibrary(ctx, path.join(nodeStorageDirectory(agentDshHome(ctx), agentProfileScope(ctx)), 'private-resources'))
+    const library = new PrivateResourceLibrary(ctx, path.join(nodeStorageDirectory(agentDshHome(ctx), agentProfileScope(ctx)), 'private-resources'),
+      { preinstalled: bundledResourceReleases })
     // Definitions are local verified data, available before native activation;
     // HumanTools can validate its history without waiting on its own tools.
     void library.prepare()

@@ -112,7 +112,7 @@ export function MyResourcesPanel({ call, onStart }: Props): JSX.Element {
         const otherDelivery = group.delivery.filter(release => release !== group.update)
         const historyErrors = group.local.some(release => itemErrors[resourceKey(release.resourceId, release.version)])
         return <article key={group.resourceId} className={`${ui.card} ${styles.resourceCard}`} data-resource-id={group.resourceId} data-resource-state="local">
-          <div className={styles.versionHeading}><h4>{item.name}</h4><span className={ui.meta}>v{item.version}</span></div>
+          <div className={styles.versionHeading}><h4>{item.name}</h4>{item.access === 'public' ? <span className={ui.meta}>免费</span> : null}<span className={ui.meta}>v{item.version}</span></div>
           {item.description ? <p className={ui.copy}>{item.description}</p> : null}
           <div className={styles.primaryActions}>{status(item)}{item.state === 'installed' && item.enabled && (!onStart || !item.presetId) ? null : controls(item)}</div>{feedback(item)}
           {group.update ? <div className={styles.update}>
@@ -129,7 +129,7 @@ export function MyResourcesPanel({ call, onStart }: Props): JSX.Element {
         </article>
       })}
       {groups.delivery.map(group => <article key={group.resourceId} className={`${ui.card} ${styles.resourceCard}`} data-resource-id={group.resourceId} data-resource-state="delivery">
-          <div className={styles.versionHeading}><h4>{group.primary.name}</h4><span className={ui.meta}>v{group.primary.version}</span></div>
+          <div className={styles.versionHeading}><h4>{group.primary.name}</h4>{group.primary.access === 'public' ? <span className={ui.meta}>免费</span> : null}<span className={ui.meta}>v{group.primary.version}</span></div>
           {group.primary.description ? <p className={ui.copy}>{group.primary.description}</p> : null}{feedback(group.primary)}
           <div className={styles.primaryActions}>
             <StatusLabel state={group.primary.state === 'installing' ? 'ongoing' : group.primary.state === 'unavailable' ? 'warning' : 'off'}>

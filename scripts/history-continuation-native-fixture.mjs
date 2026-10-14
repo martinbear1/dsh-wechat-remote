@@ -15,15 +15,15 @@ export async function verifyHistoryContinuation(work) {
   const packedProduct = process.env.HARNESS_HISTORY_CONTINUATION_PACKAGE
   const productRoot = path.join(work, packedProduct ? 'dsh/node_modules/dsh-wechat-remote/native/lib/history-import'
     : 'dsh/node_modules/@harness-remote/dsh-wechat-remote/lib/history-import')
-  const product = await import(pathToFileURL(path.join(productRoot, 'continuation-preset.js')).href)
-  const definition = product.historyContinuationDefinition({
-    compactionModule: pathToFileURL(path.join(productRoot, 'continuation-compaction.js')).href,
-  })
-  assert.equal(definition.id, product.HISTORY_CONTINUATION_ID)
-  const actualDefinition = product.historyContinuationDefinition()
-  const resolvedCompactionModule = actualDefinition.plugins.find(row => row.id === 'compaction').config[0].name
-  assert.equal(resolvedCompactionModule, packedProduct ? 'dsh-wechat-remote/history-import/compaction'
-    : '@harness-remote/dsh-wechat-remote/history-import/compaction')
+  const libraryRoot = path.resolve(productRoot, '../private-resources')
+  const { parseResourcePreset, resourcePresetId } = await import(pathToFileURL(path.join(libraryRoot, 'contract.js')).href)
+  const { nativeChatCompactionModule } = await import(pathToFileURL(path.join(libraryRoot, 'chat-composition.js')).href)
+  const ResourceComponent = await import(pathToFileURL(path.resolve(productRoot, '../resource-library-component.js')).href)
+  const chat = parseResourcePreset(fs.readFileSync(path.join(libraryRoot, 'bundled/chat-mode.json')))
+  const definition = { id: resourcePresetId(chat) }
+  const resolvedCompactionModule = nativeChatCompactionModule()
+  assert.equal(resolvedCompactionModule, packedProduct ? 'dsh-wechat-remote/resource-library/chat-compaction'
+    : '@harness-remote/dsh-wechat-remote/resource-library/chat-compaction')
   const { Context } = await load('@deepseek-ai/cordis')
   const { default: Loader } = await load('@deepseek-ai/cordis-plugin-loader')
   const { default: Group } = await load('@deepseek-ai/cordis-plugin-group')
@@ -95,6 +95,15 @@ export async function verifyHistoryContinuation(work) {
     }
     return events
   }
+  async function resourceStatus(ctx) {
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const response = await ctx.wechatResources.control({ op: 'status' }, new AbortController().signal)
+      assert.equal(response.ok, true)
+      if (response.value.items.some(row => row.resourceId === chat.resourceId)) return response.value
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    assert.fail('resource service did not finish preparing its bundled Chat resource')
+  }
   async function harness(root, inHistory, withContinuation = true) {
     const ctx = new Context()
     ctx.baseUrl = pathToFileURL(path.join(work, 'dsh/')).href
@@ -112,14 +121,22 @@ export async function verifyHistoryContinuation(work) {
     ctx.provide('workspaceRegistry', { archivedSessionIds: [], list: () => [{ id: 'synthetic-workspace', path: work }],
       get: id => id === 'synthetic-workspace' ? { id, path: work, attachSession: async () => {} } : undefined })
     ctx.provide('fs', { resolve() { assert.fail('no file tools may execute') } })
+    ctx.provide('profileContext', { name: 'fixture', home: path.join(root, 'profile-home'), dir: path.join(root, 'profile-home/profiles/fixture'), installAnchor: anchor })
+    ctx.provide('typertGateway', {})
     await ctx.plugin(AgentLoop, { agents: [] })
     const controller = new SessionController(ctx, {})
     await ctx.plugin(AgentPresets, { default: 'standard' })
     await ctx.plugin(AgentPreset, { id: 'standard', name: 'Synthetic independent native preset', plugins: [
       { id: 'persona', name: '@deepseek-ai/dsh-persona', config: { prefix: 'Independent native mode remains unchanged.' } },
     ] })
-    const continuationOwner = withContinuation ? await ctx.plugin(product.default) : undefined
-    if (withContinuation) assert.equal((await ctx.agentPresets.resolve(definition.id)).broken, undefined)
+    const continuationOwner = withContinuation ? await ctx.plugin(ResourceComponent) : undefined
+    if (withContinuation) {
+      await ctx.loader.await()
+      const status = await resourceStatus(ctx), card = status.items.find(row => row.resourceId === chat.resourceId)
+      assert.equal(card.state, 'installed', card.message)
+      assert.equal(card.enabled, true)
+      assert.equal((await ctx.agentPresets.resolve(definition.id)).broken, undefined)
+    }
     assert.equal(ctx.agentPresets.defaultId, 'standard')
     assert.equal(ctx.get('compaction'), undefined, 'preset compaction must not become the global service')
     assert.deepEqual(ctx.tools.schemas().map(row => row.name), [], 'preset tools must not leak globally')
@@ -268,10 +285,10 @@ export async function verifyHistoryContinuation(work) {
     assert.equal(h.ctx.agentPresets.defaultId, 'standard')
     assert.deepEqual(h.ctx.tools.schemas().map(row => row.name), [])
     assert.equal(h.ctx.get('compaction'), undefined)
-    checks.push({ scenario: 'product-declaration-disposal', nativeRegistrationWithdrawn: true, otherDefaultUnchanged: true })
+    checks.push({ scenario: 'resource-component-disposal', nativeRegistrationWithdrawn: true, otherDefaultUnchanged: true })
   } finally { await h.ctx.fiber.dispose() }
-  // Exercise the public import service's actual constructor/inject ownership,
-  // not merely the standalone declaration's Service.init registration.
+  // Importing is no longer an owner of a second hidden preset. The resource
+  // component exclusively owns local cards, persisted choices and registration.
   h = await harness(path.join(work, 'service-disposal'), false, false)
   try {
     const { WechatImportService } = await import(pathToFileURL(path.join(productRoot, 'service.js')).href)
@@ -281,14 +298,37 @@ export async function verifyHistoryContinuation(work) {
       apply(owner) { new WechatImportService(owner, { receiptDirectory: path.join(work, 'synthetic-receipts') }) },
     })
     await h.ctx.loader.await()
-    assert.equal((await h.ctx.agentPresets.resolve(definition.id)).broken, undefined)
+    await assert.rejects(h.ctx.agentPresets.resolve(definition.id), { code: 'agent-preset/not-found' })
+    await assert.rejects(h.ctx.agentPresets.resolve('harness-web-continuation'), { code: 'agent-preset/not-found' })
     assert.equal(h.ctx.agentPresets.defaultId, 'standard')
     assert.deepEqual(h.ctx.tools.schemas().map(row => row.name), [])
     await serviceOwner.dispose()
     await assert.rejects(h.ctx.agentPresets.resolve(definition.id), { code: 'agent-preset/not-found' })
     assert.equal(fs.existsSync(path.join(work, 'synthetic-receipts')), false, 'registration/unload must not create import data')
-    checks.push({ scenario: 'actual-import-service-parent-disposal', injectedNativePresetRegistered: true,
-      parentUnloadWithdrawsPreset: true, defaultAndGlobalToolsUnchanged: true, receiptsCreated: false })
+    checks.push({ scenario: 'actual-import-service-does-not-register-presets', injectedNativePresetRegistered: false,
+      hiddenBasePresetRegistered: false, defaultAndGlobalToolsUnchanged: true, receiptsCreated: false })
+  } finally { await h.ctx.fiber.dispose() }
+
+  h = await harness(path.join(work, 'resource-disabled-choice'), false)
+  try {
+    const disabled = await h.ctx.wechatResources.control({ op: 'setEnabled', resourceId: chat.resourceId,
+      version: chat.version, enabled: false }, new AbortController().signal)
+    assert.equal(disabled.ok, true)
+    assert.equal(disabled.value.items.find(row => row.resourceId === chat.resourceId).enabled, false)
+    await assert.rejects(h.ctx.agentPresets.resolve(definition.id), { code: 'agent-preset/not-found' })
+    await h.continuationOwner.dispose()
+    h.continuationOwner = await h.ctx.plugin(ResourceComponent)
+    await h.ctx.loader.await()
+    const restored = await resourceStatus(h.ctx)
+    assert.equal(restored.items.find(row => row.resourceId === chat.resourceId).enabled, false,
+      're-enabling the component must not override a user-disabled preinstalled resource')
+    await assert.rejects(h.ctx.agentPresets.resolve(definition.id), { code: 'agent-preset/not-found' })
+    const enabled = await h.ctx.wechatResources.control({ op: 'setEnabled', resourceId: chat.resourceId,
+      version: chat.version, enabled: true }, new AbortController().signal)
+    assert.equal(enabled.ok, true)
+    assert.equal((await h.ctx.agentPresets.resolve(definition.id)).broken, undefined)
+    checks.push({ scenario: 'actual-resource-service-persistent-disabled-choice', localCardRetained: true,
+      nativePresetWithdrawnWhileDisabled: true, componentRestartDoesNotReenable: true, explicitEnableRestores: true })
   } finally { await h.ctx.fiber.dispose() }
 
   // Product importer -> real durable session/controller -> actual DeepSeek

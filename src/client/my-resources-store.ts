@@ -4,6 +4,7 @@ export interface MyResourceItem {
   version: string
   name: string
   description: string
+  access?: 'public' | 'private'
   presetId?: string
   installedVersion?: string
   enabled?: boolean
@@ -103,6 +104,7 @@ function validState(value: MyResourcesState): boolean {
     && value.items.every(item => item && ['resourceId', 'version', 'name', 'description'].every(key => typeof item[key as keyof MyResourceItem] === 'string')
       && item.resourceId && item.version && ['available', 'installing', 'installed', 'unavailable'].includes(item.state)
       && (item.enabled === undefined || typeof item.enabled === 'boolean')
+      && (item.access === undefined || ['public', 'private'].includes(item.access))
       && ['presetId', 'installedVersion', 'message'].every(key => item[key as keyof MyResourceItem] === undefined || typeof item[key as keyof MyResourceItem] === 'string'))
     && new Set(value.items.map(item => resourceKey(item.resourceId, item.version))).size === value.items.length)
 }

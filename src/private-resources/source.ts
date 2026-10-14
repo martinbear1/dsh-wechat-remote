@@ -9,7 +9,10 @@ export interface DeliveryConnection {
   objectOrigins?: readonly string[]
   fetchImpl?: typeof fetch
 }
-export interface DeliveryRelease extends ResourceRelease { kind: 'preset'; name: string; description: string }
+export interface DeliveryRelease extends ResourceRelease {
+  kind: 'preset'; name: string; description: string
+  schemaVersion?: 1 | 2 | 3; access?: 'public' | 'private'
+}
 export interface DeliveryCatalog { schemaVersion: 1; nodeId: string; accountInstance: string; items: DeliveryRelease[] }
 export interface DeliverySource { current(): DeliveryConnection }
 const fail = (code: string, message: string): never => { throw new ResourceError(code, message) }
@@ -22,9 +25,13 @@ function release(value: unknown): DeliveryRelease {
   const item = value as DeliveryRelease
   try { validateResourceRelease(item) } catch { invalid() }
   if (item.kind !== 'preset' || typeof item.name !== 'string' || !item.name.trim() || item.name.length > 120
-    || typeof item.description !== 'string' || item.description.length > 2000) invalid()
+    || typeof item.description !== 'string' || item.description.length > 2000
+    || item.schemaVersion !== undefined && ![1, 2, 3].includes(item.schemaVersion)
+    || item.access !== undefined && !['public', 'private'].includes(item.access)) invalid()
   return { resourceId: item.resourceId, version: item.version, sha256: item.sha256, bytes: item.bytes,
-    kind: 'preset', name: item.name, description: item.description }
+    kind: 'preset', name: item.name, description: item.description,
+    ...(item.schemaVersion !== undefined ? { schemaVersion: item.schemaVersion } : {}),
+    ...(item.access !== undefined ? { access: item.access } : {}) }
 }
 function scope(value: any, nodeId: string): { accountInstance: string } {
   if (value?.schemaVersion !== 1 || value.nodeId !== nodeId || typeof value.accountInstance !== 'string'
@@ -74,7 +81,7 @@ export class ResourceDeliveryClient {
     const body = method === 'POST' ? '{}' : undefined
     const headers = createAgentHttpProof(captured.connection.identity, method, pathname, body)
     const response = await captured.fetch(`${captured.origin}${pathname}`, {
-      method, body, headers: { ...headers, ...(body ? { 'content-type': 'application/json' } : {}) },
+      method, body, headers: { ...headers, 'x-hr-resource-schema': '3', ...(body ? { 'content-type': 'application/json' } : {}) },
       redirect: 'error', signal,
     })
     captured.check(); signal.throwIfAborted()
@@ -110,6 +117,7 @@ export class ResourceDeliveryClient {
     const actual = release(ticket.release)
     for (const key of ['resourceId', 'version', 'sha256', 'bytes', 'name', 'description'] as const)
       if (actual[key] !== expected[key]) invalid()
+    if (expected.schemaVersion !== undefined && actual.schemaVersion !== expected.schemaVersion) invalid()
     let url: URL
     try { url = new URL(ticket.download.url) } catch { return invalid() }
     const origins = captured.connection.objectOrigins ?? DEFAULT_TRUSTED_OBJECT_ORIGINS

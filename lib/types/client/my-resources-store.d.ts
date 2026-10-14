@@ -4,6 +4,7 @@ export interface MyResourceItem {
     version: string;
     name: string;
     description: string;
+    access?: 'public' | 'private';
     presetId?: string;
     installedVersion?: string;
     enabled?: boolean;

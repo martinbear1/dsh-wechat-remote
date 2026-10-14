@@ -10,6 +10,8 @@ export interface DeliveryRelease extends ResourceRelease {
     kind: 'preset';
     name: string;
     description: string;
+    schemaVersion?: 1 | 2 | 3;
+    access?: 'public' | 'private';
 }
 export interface DeliveryCatalog {
     schemaVersion: 1;

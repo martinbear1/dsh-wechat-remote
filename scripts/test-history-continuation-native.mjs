@@ -81,11 +81,12 @@ if (!stage) {
       // Bundle only non-native dependency code into the disposable product copy.
       // Native SDK imports and the actual declaration stay external so this test
       // cannot accidentally exercise this repository's older development SDK.
-      for (const name of ['native', 'service']) await build({
-        entryPoints: [path.join(project, `lib/history-import/${name}.js`)],
-        outfile: path.join(product, `lib/history-import/${name}.js`),
+      for (const name of ['history-import/native', 'history-import/service', 'private-resources/native',
+        'private-resources/service', 'resource-library-component']) await build({
+        entryPoints: [path.join(project, `lib/${name}.js`)],
+        outfile: path.join(product, `lib/${name}.js`),
         bundle: true, platform: 'node', format: 'esm', target: 'node22',
-        external: ['@deepseek-ai/*', './continuation-preset.js'],
+        external: ['@deepseek-ai/*', './private-resources/service.js'],
         banner: { js: "import { createRequire as fixtureRequire } from 'node:module'; const require = fixtureRequire(import.meta.url);" },
       })
     }

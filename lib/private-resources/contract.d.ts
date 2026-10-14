@@ -7,12 +7,13 @@ interface ResourcePresetData {
     version: string;
     name: string;
     description: string;
-    basePreset: string;
     systemPrompt: string;
 }
 /** Capabilities are data, not module specifiers. Only shipped code can map a
  * known capability into a native composition. Historical v1 means ordinary. */
-export type ResourcePreset = ResourcePresetData & ({
+export type ResourcePreset = ResourcePresetData & (({
+    basePreset: string;
+} & ({
     schemaVersion: 1;
 } | {
     schemaVersion: 2;
@@ -21,6 +22,10 @@ export type ResourcePreset = ResourcePresetData & ({
     schemaVersion: 2;
     capabilities: ['wechat-group'];
     assistant: AssistantDefinition;
+})) | {
+    schemaVersion: 3;
+    runtime: 'chat';
+    compactionPrompt: string;
 });
 export declare function resourceAssistant(resource: ResourcePreset): AssistantDefinition | undefined;
 export interface ResourceRelease {
@@ -37,6 +42,7 @@ export declare const resourceError: (code: string, message: string) => ResourceE
 export declare const resourceSha256: (bytes: Uint8Array | string) => string;
 export declare const resourceIdValid: (value: unknown) => value is string;
 export declare function resourceVersionValid(value: unknown): value is string;
+export declare const resourcePromptValid: (value: unknown) => value is string;
 export declare function validateResourceRelease(value: ResourceRelease): ResourceRelease;
 /** Strict data schema. No module names, executable expressions or tool scripts
  * can enter the native composition through this transport. Prompt text is data. */

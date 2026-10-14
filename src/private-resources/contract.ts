@@ -9,14 +9,15 @@ interface ResourcePresetData {
   version: string
   name: string
   description: string
-  basePreset: string
   systemPrompt: string
 }
 /** Capabilities are data, not module specifiers. Only shipped code can map a
  * known capability into a native composition. Historical v1 means ordinary. */
-export type ResourcePreset = ResourcePresetData & ({ schemaVersion: 1 } | {
+export type ResourcePreset = ResourcePresetData & (({ basePreset: string } & ({ schemaVersion: 1 } | {
   schemaVersion: 2; capabilities: []
-} | { schemaVersion: 2; capabilities: ['wechat-group']; assistant: AssistantDefinition })
+} | { schemaVersion: 2; capabilities: ['wechat-group']; assistant: AssistantDefinition })) | {
+  schemaVersion: 3; runtime: 'chat'; compactionPrompt: string
+})
 export function resourceAssistant(resource: ResourcePreset): AssistantDefinition | undefined {
   return resource.schemaVersion === 2 && resource.capabilities[0] === 'wechat-group' && 'assistant' in resource
     ? structuredClone(resource.assistant) : undefined
@@ -34,6 +35,9 @@ export function resourceVersionValid(value: unknown): value is string {
   return !!match && (!match[4] || match[4].split('.').every(part => !/^\d+$/.test(part) || part === '0' || part[0] !== '0'))
 }
 const plain = (value: unknown, max: number): value is string => typeof value === 'string' && value.length <= max && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(value)
+export const resourcePromptValid = (value: unknown): value is string => typeof value === 'string'
+  && !!value.trim() && !value.includes('\0') && !/[\uD800-\uDFFF]/u.test(value)
+  && Buffer.byteLength(value) <= RESOURCE_PROMPT_MAX_BYTES
 export function validateResourceRelease(value: ResourceRelease): ResourceRelease {
   if (!value || !resourceIdValid(value.resourceId) || !resourceVersionValid(value.version)
     || typeof value.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(value.sha256)
@@ -54,7 +58,9 @@ export function parseResourcePreset(bytes: Uint8Array, expected?: ResourceReleas
   let value: any
   try { value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) }
   catch { throw resourceError('resource-json-invalid', '资源不是有效的 UTF-8 JSON 预设。') }
-  const keys = ['schemaVersion', 'kind', 'resourceId', 'version', 'name', 'description', 'basePreset', 'systemPrompt']
+  const keys = ['schemaVersion', 'kind', 'resourceId', 'version', 'name', 'description', 'systemPrompt']
+  if (value?.schemaVersion === 3) keys.push('runtime', 'compactionPrompt')
+  else keys.push('basePreset')
   if (value?.schemaVersion === 2) {
     keys.push('capabilities')
     if (!Array.isArray(value.capabilities) || value.capabilities.length > 1
@@ -70,12 +76,12 @@ export function parseResourcePreset(bytes: Uint8Array, expected?: ResourceReleas
     }
   }
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== keys.length
-    || keys.some(key => !Object.hasOwn(value, key)) || ![1, 2].includes(value.schemaVersion) || value.kind !== 'preset'
+    || keys.some(key => !Object.hasOwn(value, key)) || ![1, 2, 3].includes(value.schemaVersion) || value.kind !== 'preset'
     || !resourceIdValid(value.resourceId) || !resourceVersionValid(value.version)
     || !plain(value.name, 120) || !value.name.trim() || !plain(value.description, 2000)
-    || !plain(value.basePreset, 256) || !value.basePreset.trim() || /[\r\n\t]/.test(value.basePreset)
-    || typeof value.systemPrompt !== 'string' || !value.systemPrompt.trim() || value.systemPrompt.includes('\0')
-    || /[\uD800-\uDFFF]/u.test(value.systemPrompt) || Buffer.byteLength(value.systemPrompt) > RESOURCE_PROMPT_MAX_BYTES
+    || (value.schemaVersion === 3 ? value.runtime !== 'chat' || !resourcePromptValid(value.compactionPrompt)
+      : !plain(value.basePreset, 256) || !value.basePreset.trim() || /[\r\n\t]/.test(value.basePreset))
+    || !resourcePromptValid(value.systemPrompt)
     || expected && (value.resourceId !== expected.resourceId || value.version !== expected.version))
     throw resourceError('resource-preset-invalid', '资源内容不符合预设格式。')
   return value as ResourcePreset

@@ -6,19 +6,31 @@ export interface ResourceLibraryEntry extends ResourceRelease {
     presetId: string;
     name: string;
     description: string;
-    basePreset: string;
+    basePreset?: string;
+    access?: 'public' | 'private';
     enabled: boolean;
     status: 'installed' | 'disabled' | 'unavailable';
     message?: string;
+}
+export interface ResourceLibraryOptions extends NativeResourceOptions {
+    preinstalled?: () => readonly {
+        content: Uint8Array;
+        release: ResourceRelease;
+    }[] | Promise<readonly {
+        content: Uint8Array;
+        release: ResourceRelease;
+    }[]>;
 }
 /** Offline local library. Delivery grants admit downloads outside this class;
  * installed data is retained. Explicit group capabilities separately follow
  * the current feature authority and never grant access merely by installation. */
 export declare class PrivateResourceLibrary {
+    private readonly options;
     private readonly storage;
     private readonly native;
     private readonly entries;
     private readonly records;
+    private readonly publicIds;
     private prepared?;
     private groupSuspended;
     private problems;
@@ -26,9 +38,9 @@ export declare class PrivateResourceLibrary {
     private started;
     private closed;
     private closing?;
-    constructor(host: ResourceHost, directory: string, options?: NativeResourceOptions);
+    constructor(host: ResourceHost, directory: string, options?: ResourceLibraryOptions);
     private queue;
-    /** Only bounded local files are read here. Business history validation may
+    /** Only bounded local files and bundled resource data are used here. Business history validation may
      * await this phase while HumanTools and the native Loader are still starting. */
     prepare(): Promise<void>;
     start(): Promise<void>;

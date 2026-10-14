@@ -28,12 +28,15 @@ await build({
   stdin: { contents: `export { ResourceDeliveryClient } from './private-resources/source.ts';
     export { ResourceController } from './private-resources/controller.ts';
     export { PrivateResourceLibrary } from './private-resources/library.ts';
-    export { MyResourcesStore } from './client/my-resources-store.ts';`,
+    export { bundledResourceReleases } from './private-resources/bundled.ts';
+    export { createAgentHttpProof } from './agent-http-proof.ts';
+    export { MyResourcesStore, groupResources } from './client/my-resources-store.ts';`,
     resolveDir: fileURLToPath(new URL('../src', import.meta.url)), loader: 'ts' },
   bundle: true, platform: 'node', format: 'esm', packages: 'external',
   outfile: path.join(compiled, 'plugin.mjs'), logLevel: 'silent',
 })
-const { ResourceDeliveryClient, ResourceController, PrivateResourceLibrary, MyResourcesStore } = await import(pathToFileURL(path.join(compiled, 'plugin.mjs')).href)
+const { ResourceDeliveryClient, ResourceController, PrivateResourceLibrary, MyResourcesStore,
+  bundledResourceReleases, createAgentHttpProof, groupResources } = await import(pathToFileURL(path.join(compiled, 'plugin.mjs')).href)
 const API = 'https://resource-control.contract.invalid', OSS = 'https://resource-objects.contract.invalid'
 const digest = bytes => createHash('sha256').update(bytes).digest('hex')
 const signal = () => new AbortController().signal
@@ -93,7 +96,7 @@ async function fixture(t) {
   app = createResourceDeliveryServer(config, { registry, store, objects })
   await new Promise((resolve, reject) => { app.server.once('error', reject); app.server.listen(0, '127.0.0.1', resolve) })
   const loopback = `http://127.0.0.1:${app.server.address().port}`
-  function client(who = a, name = 'a') {
+  function client(who = a, name = 'a', libraryOptions = {}) {
     const rows = new Map([['standard', { id: 'standard', name: 'Standard', plugins: [
       { id: 'persona', name: '@deepseek-ai/dsh-persona', config: { prefix: 'Stock persona', suffix: 'Stock suffix', includeRuntimeContext: true } },
       { id: 'fs', name: '@deepseek-ai/dsh-tool-fs' },
@@ -114,7 +117,8 @@ async function fixture(t) {
     const directory = path.join(root, 'plugin-' + name)
     const host = { get(key) { assert.equal(key, 'agentPresets', 'resource delivery may only use the native preset registry'); return native } }
     const newLibrary = () => {
-      const library = new PrivateResourceLibrary(host, directory, { codec: { load: JSON.parse }, promptModule: 'cordis:privateResourcePrompt' })
+      const library = new PrivateResourceLibrary(host, directory, { codec: { load: JSON.parse }, promptModule: 'cordis:privateResourcePrompt',
+        chatCompactionModule: 'cordis:resourceChatCompaction', ...libraryOptions })
       libraries.push(library); return library
     }
     let offline = false, tamper = false, corrupt = false
@@ -148,7 +152,7 @@ async function fixture(t) {
     const delivery = new ResourceDeliveryClient({ current: () => connection }), library = newLibrary()
     const controller = new ResourceController(library, delivery)
     return { connection, delivery, library, controller, directory, rows, native, requests, registrations, removals,
-      offline() { offline = true }, tamperBody(value = true) { tamper = value }, corruptObject() { corrupt = true },
+      offline(value = true) { offline = value }, tamperBody(value = true) { tamper = value }, corruptObject() { corrupt = true },
       failNative(value) { nativeUnavailable = value },
       recreate() { const next = newLibrary(); return { library: next, controller: new ResourceController(next, delivery) } },
     }
@@ -279,4 +283,105 @@ test('UI store retries downloaded-but-unavailable native activation entirely off
   assert.equal(ui.getSnapshot().data.items[0].enabled, true); assert.equal((await p.native.list()).length, 2)
   assert.deepEqual(controlCalls.map(request => request.op), ['status', 'setEnabled', 'setEnabled', 'setEnabled'])
   assert.equal(p.requests.length, networkCount, 'all local retries/activation must remain free of cloud requests')
+})
+
+test('canonical public Chat resource crosses real cloud HTTP to both accounts without public grants; legacy clients stay unchanged', async t => {
+  const f = await fixture(t), bundled = bundledResourceReleases()
+  assert.equal(bundled.length, 1)
+  const first = bundled[0], chat = JSON.parse(Buffer.from(first.content).toString('utf8'))
+  assert.equal(chat.schemaVersion, 3); assert.equal(chat.resourceId, 'chat-mode'); assert.equal(chat.version, '1.0.0')
+  assert.equal(chat.name, 'Chat模式'); assert.equal(chat.runtime, 'chat')
+  assert.equal(first.release.sha256, digest(first.content)); assert.equal(first.release.bytes, first.content.length)
+  await f.app.service.publish(first.content)
+  const privateStory = await f.publish(); f.grant()
+  const a = f.client(), b = f.client(f.b, 'b')
+  assert.deepEqual((await b.controller.control({ op: 'refresh' }, signal())).items, [], 'upload alone never exposes the Chat resource')
+  f.app.service.changeVisibility('make-public', 'chat-mode', '1.0.0')
+  for (const [p, owner] of [[a, true], [b, false]]) {
+    await p.library.start()
+    const catalog = await p.delivery.catalog(signal()), entry = catalog.items.find(row => row.resourceId === 'chat-mode')
+    assert.equal(entry.schemaVersion, 3); assert.equal(entry.access, 'public')
+    assert.equal(catalog.items.some(row => row.resourceId === 'story-helper'), owner)
+    const available = await p.controller.control({ op: 'refresh' }, signal())
+    assert.equal(available.items.find(row => row.resourceId === 'chat-mode').state, 'available')
+    const installed = await p.controller.control({ op: 'install', resourceId: 'chat-mode', version: '1.0.0' }, signal())
+    const item = installed.items.find(row => row.resourceId === 'chat-mode')
+    assert.equal(item.state, 'installed'); assert.equal(item.enabled, true); assert.equal(item.access, 'public')
+    const native = await p.native.resolve(item.presetId)
+    assert.equal(native.plugins.find(row => row.id === 'harness-private-resource-data').config.text, chat.systemPrompt)
+    assert.equal(native.plugins.find(row => row.id === 'compaction').config[0].config.instruction, chat.compactionPrompt)
+    assert.deepEqual(native.plugins.filter(row => row.id.startsWith('tool-')).map(row => row.id), ['tool-web'])
+    assert(!native.plugins.some(row => /tool-fs|collaboration|human-tools/.test(row.name)))
+    assert.deepEqual(await readFile(path.join(p.directory, digest('chat-mode\0' + '1.0.0'), 'resource.json')), first.content)
+    assert(p.requests.filter(row => row.kind === 'control').every(row => row.headers['x-hr-resource-schema'] === '3'))
+  }
+  assert.equal(f.store.db.prepare("SELECT COUNT(*) n FROM rd_grants WHERE resource_id='chat-mode'").get().n, 0)
+  assert.equal(f.store.db.prepare('SELECT COUNT(*) n FROM rd_grants').get().n, 1)
+  await assert.rejects(b.controller.control({ op: 'install', resourceId: 'story-helper', version: '1.0.0' }, signal()), { code: 'resources-forbidden' })
+  await assert.rejects(b.delivery.download(privateStory.release, 'instance-b', signal()), { code: 'resources-unavailable' })
+  const story = await a.controller.control({ op: 'install', resourceId: 'story-helper', version: '1.0.0' }, signal())
+  assert.equal(story.items.find(row => row.resourceId === 'story-helper').state, 'installed')
+  // The actual v2 signer without the new negotiation header is the legacy wire
+  // contract. The old DTO shape and private story remain available to its owner.
+  const legacyPath = `/v1/resources/agents/${f.a.nodeId}/library`
+  const legacyResponse = await fetch(f.loopback + legacyPath, { headers: createAgentHttpProof(f.a, 'GET', legacyPath) })
+  assert.equal(legacyResponse.status, 200)
+  const legacy = await legacyResponse.json()
+  assert.deepEqual(legacy.items, [privateStory.release])
+  const downloadPath = `/v1/resources/agents/${f.a.nodeId}/releases/chat-mode/1.0.0/download`
+  const denied = await fetch(f.loopback + downloadPath, { method: 'POST', body: '{}',
+    headers: { ...createAgentHttpProof(f.a, 'POST', downloadPath, '{}'), 'content-type': 'application/json' } })
+  assert.equal(denied.status, 404); await denied.arrayBuffer()
+})
+
+test('preinstalled Chat starts offline, merges the canonical cloud release and updates one resource card without changing older activation', async t => {
+  const f = await fixture(t), first = bundledResourceReleases()[0]
+  const p = f.client(f.a, 'preinstalled', { preinstalled: bundledResourceReleases })
+  p.offline(); await p.library.start()
+  const before = await p.controller.control({ op: 'status' }, signal())
+  assert.equal(p.requests.length, 0); assert.equal(before.items.length, 1)
+  assert.equal(before.items[0].resourceId, 'chat-mode'); assert.equal(before.items[0].state, 'installed')
+  assert.equal(before.items[0].enabled, true); assert.equal(before.items[0].access, 'public')
+  const firstId = before.items[0].presetId, oldDefinition = await p.native.resolve(firstId)
+  const installedDirectory = version => path.join(p.directory, digest('chat-mode\0' + version))
+  assert.deepEqual(await readFile(path.join(installedDirectory('1.0.0'), 'resource.json')), first.content)
+  await assert.rejects(readFile(path.join(installedDirectory('1.0.0'), 'state.json')), { code: 'ENOENT' })
+  await f.app.service.publish(first.content); f.app.service.changeVisibility('make-public', 'chat-mode', '1.0.0')
+  p.offline(false)
+  const refreshed = await p.controller.control({ op: 'refresh' }, signal()), merged = groupResources(refreshed.items)
+  assert.equal(refreshed.items.length, 1); assert.equal(merged.local.length, 1); assert.equal(merged.delivery.length, 0)
+  assert.equal(merged.local[0].primary.version, '1.0.0'); assert.equal(merged.local[0].update, undefined)
+  assert.equal(p.registrations.length, 1); assert.equal(f.objects.signed.length, 0, 'refresh cannot re-download or reinstall the preloaded version')
+  const next = Buffer.from(JSON.stringify({ ...JSON.parse(Buffer.from(first.content).toString('utf8')), version: '1.1.0',
+    systemPrompt: 'A new authored Chat prompt. Keep literal {{text}}.', compactionPrompt: 'A new authored summary instruction.' }))
+  await f.app.service.publish(next); f.app.service.changeVisibility('make-public', 'chat-mode', '1.1.0')
+  const offer = groupResources((await p.controller.control({ op: 'refresh' }, signal())).items)
+  assert.equal(offer.local.length, 1); assert.equal(offer.delivery.length, 0)
+  assert.equal(offer.local[0].resourceId, 'chat-mode'); assert.equal(offer.local[0].primary.version, '1.0.0')
+  assert.equal(offer.local[0].update.version, '1.1.0'); assert.equal(offer.local[0].update.access, 'public')
+  assert.equal(p.registrations.length, 1); assert.equal(f.objects.signed.length, 0)
+  const updated = await p.controller.control({ op: 'install', resourceId: 'chat-mode', version: '1.1.0' }, signal())
+  const grouped = groupResources(updated.items)
+  assert.equal(grouped.local.length, 1); assert.equal(grouped.delivery.length, 0)
+  assert.equal(grouped.local[0].primary.version, '1.1.0'); assert.equal(grouped.local[0].update, undefined)
+  assert.deepEqual(grouped.local[0].local.map(row => [row.version, row.enabled]), [['1.1.0', true], ['1.0.0', true]])
+  assert.equal(await p.native.resolve(firstId), oldDefinition)
+  assert.notEqual(grouped.local[0].primary.presetId, firstId); assert.equal(p.removals.length, 0)
+  for (const [version, bytes] of [['1.0.0', first.content], ['1.1.0', next]]) {
+    assert.deepEqual(await readFile(path.join(installedDirectory(version), 'resource.json')), bytes)
+    await assert.rejects(readFile(path.join(installedDirectory(version), 'state.json')), { code: 'ENOENT' })
+  }
+  assert.equal(f.store.db.prepare('SELECT COUNT(*) n FROM rd_grants').get().n, 0)
+  // A user's explicit later disable persists through offline component restart;
+  // preinstallation cannot silently turn the newest version back on.
+  await p.controller.control({ op: 'setEnabled', resourceId: 'chat-mode', version: '1.1.0', enabled: false }, signal())
+  const stateBytes = await readFile(path.join(installedDirectory('1.1.0'), 'state.json'))
+  assert.deepEqual(JSON.parse(stateBytes.toString('utf8')), { schemaVersion: 1, enabled: false })
+  const networkCount = p.requests.length; p.offline(); await p.library.close()
+  const restarted = p.recreate(); await restarted.library.start()
+  const afterRestart = groupResources((await restarted.controller.control({ op: 'status' }, signal())).items)
+  assert.equal(afterRestart.local.length, 1); assert.equal(afterRestart.local[0].primary.version, '1.1.0')
+  assert.equal(afterRestart.local[0].primary.enabled, false); assert.equal(afterRestart.local[0].local.length, 2)
+  assert.equal(p.requests.length, networkCount)
+  assert.deepEqual(await readFile(path.join(installedDirectory('1.1.0'), 'state.json')), stateBytes)
 })

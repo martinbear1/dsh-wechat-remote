@@ -8,6 +8,7 @@ export interface NativeResourceOptions {
     codec?: NativePresetCodec;
     promptModule?: string;
     collaborationModule?: string;
+    chatCompactionModule?: string;
 }
 /** Trusted shipped helper, not cloud code. Native interpolation is single-pass:
  * variable values containing {{...}} remain literal rather than being evaluated. */

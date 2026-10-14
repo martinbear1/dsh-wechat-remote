@@ -3,6 +3,7 @@ export interface ResourceItem {
     version: string;
     name: string;
     description: string;
+    access?: 'public' | 'private';
     presetId?: string;
     enabled?: boolean;
     state: 'available' | 'installing' | 'installed' | 'unavailable';

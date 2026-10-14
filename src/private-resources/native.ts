@@ -4,9 +4,10 @@ import { COLLABORATION_COMPONENT_ID, nativeAssistantCapabilitiesReady, nativeAss
 import type { FeatureAccess } from '../feature-access.js'
 import { assistantGuidance, type AssistantDefinition } from '../assistant-presets/definition.js'
 import { resourceAssistant, resourceError, resourcePresetId, RESOURCE_PROMPT_MAX_BYTES, type ResourcePreset } from './contract.js'
+import { nativeChatCompactionModule, resourceChatComposition } from './chat-composition.js'
 
 export interface ResourceHost { get(name: string): any }
-export interface NativeResourceOptions { codec?: NativePresetCodec; promptModule?: string; collaborationModule?: string }
+export interface NativeResourceOptions { codec?: NativePresetCodec; promptModule?: string; collaborationModule?: string; chatCompactionModule?: string }
 const collaborationNames = ['dsh-wechat-remote/collaboration', '@harness-remote/dsh-wechat-remote/collaboration']
 const collaborationId = COLLABORATION_COMPONENT_ID
 const promptVariable = 'harness_private_resource_prompt'
@@ -99,39 +100,49 @@ export class NativeResourceRegistry {
     }
     if ((await wait<any[]>(() => registry.list())).some((entry: any) => entry.id === id))
       throw resourceError('resource-preset-conflict', 'DSH 中已有同名预设身份，未覆盖原内容。')
-    const anchor = this.options.codec ? undefined : this.host.get('profileContext')?.installAnchor
-    const codec = this.options.codec || (typeof anchor === 'string' ? await wait(() => nativeAssistantCodec(anchor)) : undefined)
-    if (!codec) throw resourceError('resource-host-unavailable', '当前 DSH 暂不支持读取基础模式。')
-    let document: unknown
-    try { document = await wait<any>(() => registry.readDocument(resource.basePreset)) }
-    catch { signal.throwIfAborted(); throw resourceError('resource-base-unavailable', '此预设所需的基础模式暂不可用。') }
-    // The selected base can itself have an unavailable group dependency. Read
-    // its declaration, remove our capability contribution, then audit the NEW
-    // composition. A plain resource must not inherit group startup or rights.
-    const withoutCollaboration = (rows: any[]): any[] => rows.filter(row => {
-      if (row.id === collaborationId && !collaborationNames.includes(row.name))
-        throw resourceError('resource-base-unavailable', '基础模式的群协作声明无法核对。')
-      return !collaborationNames.includes(row.name)
-    }).map(row => row.group === true ? { ...row, config: withoutCollaboration(row.config) } : row)
-    const plugins = withoutCollaboration(parseNativeAssistantBase(codec, document, resource.basePreset))
-    const personas: any[] = []
-    const scan = (rows: any[], nested = false) => {
-      for (const row of rows) {
-        if (row.name === '@deepseek-ai/dsh-persona') { if (nested) throw resourceError('resource-base-unavailable', '基础模式的角色配置不支持派生。'); personas.push(row) }
-        if (row.id === 'harness-private-resource-data') throw resourceError('resource-base-unavailable', '请选择不含交付资源的原生基础模式。')
-        if (row.group === true) scan(row.config, true)
+    let plugins: any[]
+    if (resource.schemaVersion === 3) {
+      // Chat is a data-selected trusted runtime, not inheritance from a coding
+      // or group preset. No base document, codec or group service is involved.
+      plugins = resourceChatComposition(resource, {
+        prompt: this.options.promptModule || ownPromptModule(),
+        compaction: this.options.chatCompactionModule || nativeChatCompactionModule(),
+      }, promptVariable)
+    } else {
+      const anchor = this.options.codec ? undefined : this.host.get('profileContext')?.installAnchor
+      const codec = this.options.codec || (typeof anchor === 'string' ? await wait(() => nativeAssistantCodec(anchor)) : undefined)
+      if (!codec) throw resourceError('resource-host-unavailable', '当前 DSH 暂不支持读取基础模式。')
+      let document: unknown
+      try { document = await wait<any>(() => registry.readDocument(resource.basePreset)) }
+      catch { signal.throwIfAborted(); throw resourceError('resource-base-unavailable', '此预设所需的基础模式暂不可用。') }
+      // The selected base can itself have an unavailable group dependency. Read
+      // its declaration, remove our capability contribution, then audit the NEW
+      // composition. A plain resource must not inherit group startup or rights.
+      const withoutCollaboration = (rows: any[]): any[] => rows.filter(row => {
+        if (row.id === collaborationId && !collaborationNames.includes(row.name))
+          throw resourceError('resource-base-unavailable', '基础模式的群协作声明无法核对。')
+        return !collaborationNames.includes(row.name)
+      }).map(row => row.group === true ? { ...row, config: withoutCollaboration(row.config) } : row)
+      plugins = withoutCollaboration(parseNativeAssistantBase(codec, document, resource.basePreset))
+      const personas: any[] = []
+      const scan = (rows: any[], nested = false) => {
+        for (const row of rows) {
+          if (row.name === '@deepseek-ai/dsh-persona') { if (nested) throw resourceError('resource-base-unavailable', '基础模式的角色配置不支持派生。'); personas.push(row) }
+          if (row.id === 'harness-private-resource-data') throw resourceError('resource-base-unavailable', '请选择不含交付资源的原生基础模式。')
+          if (row.group === true) scan(row.config, true)
+        }
       }
+      scan(plugins)
+      const persona = personas[0]
+      if (personas.length !== 1 || !persona.config || typeof persona.config.prefix !== 'string')
+        throw resourceError('resource-base-unavailable', '基础模式需要一个明确的原生角色配置。')
+      // Preserve base tools, policy and suffix. Plain resources use their exact
+      // authored body; only explicitly declared group resources add local guidance.
+      persona.config = { ...persona.config, prefix: `{{${promptVariable}}}` }
+      plugins.push({ id: 'harness-private-resource-data', name: this.options.promptModule || ownPromptModule(),
+        config: { text: resource.systemPrompt, ...(assistant ? { assistant } : {}) } })
+      if (group) plugins.push({ id: collaborationId, name: this.options.collaborationModule || nativeCollaborationModule() })
     }
-    scan(plugins)
-    const persona = personas[0]
-    if (personas.length !== 1 || !persona.config || typeof persona.config.prefix !== 'string')
-      throw resourceError('resource-base-unavailable', '基础模式需要一个明确的原生角色配置。')
-    // Preserve base tools, policy and suffix. Plain resources use their exact
-    // authored body; only explicitly declared group resources add local guidance.
-    persona.config = { ...persona.config, prefix: `{{${promptVariable}}}` }
-    plugins.push({ id: 'harness-private-resource-data', name: this.options.promptModule || ownPromptModule(),
-      config: { text: resource.systemPrompt, ...(assistant ? { assistant } : {}) } })
-    if (group) plugins.push({ id: collaborationId, name: this.options.collaborationModule || nativeCollaborationModule() })
     let dispose: (() => Promise<void>) | undefined
     try {
       if (group) {
@@ -144,7 +155,8 @@ export class NativeResourceRegistry {
       if (typeof dispose !== 'function') throw resourceError('resource-activation-failed', 'DSH 未确认预设加载结果。')
       const loaded = await wait<any>(() => registry.resolve(id))
       signal.throwIfAborted()
-      if (!loaded || loaded.id !== id || loaded.broken !== undefined) throw resourceError('resource-activation-failed', '预设尚未成功加载，请核对基础模式和 DSH 版本。')
+      if (!loaded || loaded.id !== id || loaded.broken !== undefined) throw resourceError('resource-activation-failed',
+        resource.schemaVersion === 3 ? 'Chat 模式尚未成功加载，请核对 DSH 版本。' : '预设尚未成功加载，请核对基础模式和 DSH 版本。')
       this.owned.set(id, dispose)
       this.expected.set(id, nativeAssistantCompositionDigest(plugins))
       if (group) this.groups.add(id)

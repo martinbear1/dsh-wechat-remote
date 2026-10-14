@@ -1,17 +1,20 @@
-/** Native BasicCompactionEngine extension: only the documented summarize hook
- * changes. Region selection, pricing, cancellation, checkpoints, retention,
- * overflow recovery and persistence remain owned by the installed DSH. */
 type Row = Record<string, any>;
 type NativeEngine = new (...args: any[]) => {
     ctx: Row;
     config: Row;
 };
-export declare const CONTINUATION_COMPACTION_INSTRUCTION: string;
+/** Separate authored data from native configuration. Native defaults and
+ * exact-route model policies still go through the installed engine's strict
+ * validator; no unknown resource field is silently accepted by this wrapper. */
+export declare function chatCompactionConfig(value: unknown): {
+    instruction: string;
+    native: Row;
+};
 /** Modules are supplied by the host, not bundled private copies. The factory
  * also allows contract tests without a live model or real session. */
-export declare function createContinuationCompactionPlugin(native: {
+export declare function createChatCompactionPlugin(native: {
     BasicCompactionEngine: NativeEngine;
-}, llm: Row): {
+}, llm: Row, instruction: string): {
     new (...args: any[]): {
         summarize(input: {
             messages: readonly Row[];
@@ -29,5 +32,5 @@ export declare function createContinuationCompactionPlugin(native: {
         config: Row;
     };
 };
-export default function continuationCompaction(ctx: Row, config?: Row): Promise<void>;
+export default function chatCompaction(ctx: Row, config: unknown): Promise<void>;
 export {};

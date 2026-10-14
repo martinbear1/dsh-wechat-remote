@@ -41,6 +41,7 @@ if (!childStage) {
       fs.writeFileSync(path.join(packageDirectory, 'package.json'), JSON.stringify({ name: 'dsh-wechat-remote', type: 'module', exports: {
         './resource-library': './native/lib/resource-library-component.js',
         './private-resource-prompt': './native/lib/private-resources/native.js',
+        './resource-library/chat-compaction': './native/lib/private-resources/chat-compaction.js',
         './collaboration': './native/lib/collaboration.js',
       } }))
       execFileSync(process.execPath, [path.join(repo, 'node_modules/typescript/bin/tsc'), '-p', path.join(repo, 'tsconfig.json'),
@@ -63,10 +64,17 @@ if (!childStage) {
   const require = createRequire(anchor), load = name => import(pathToFileURL(require.resolve(name)).href)
   const { Context } = await load('@deepseek-ai/cordis')
   const { default: Loader } = await load('@deepseek-ai/cordis-plugin-loader')
+  const { default: Group } = await load('@deepseek-ai/cordis-plugin-group')
   const { default: Projection } = await load('@deepseek-ai/dsh-session-projection')
   const { default: SystemPrompt, renderPrompt } = await load('@deepseek-ai/dsh-system-prompt')
   const { default: AgentPresets } = await load('@deepseek-ai/dsh-agent-preset-registry')
   const { ToolRuntime } = await load('@deepseek-ai/dsh-tools')
+  const { default: Llm } = await load('@deepseek-ai/dsh-llm')
+  const { default: SessionStore } = await load('@deepseek-ai/dsh-session')
+  const { default: AgentRegistry } = await load('@deepseek-ai/dsh-agent')
+  const { default: TokenMeter } = await load('@deepseek-ai/dsh-token-meter')
+  const { default: Commands } = await load('@deepseek-ai/dsh-commands')
+  const { default: Web } = await load('@deepseek-ai/dsh-web')
   const { SkillRegistry } = await load('@deepseek-ai/dsh-skill')
   const componentPath = require.resolve('dsh-wechat-remote/resource-library')
   const { WechatResourcesService } = await import(pathToFileURL(path.join(path.dirname(componentPath), 'private-resources/service.js')).href)
@@ -86,6 +94,9 @@ if (!childStage) {
   // prompts. An incorrect base ID in a released JSON must fail this regression.
   const v1 = fromBytes(fs.readFileSync(path.join(repo, 'tests/fixtures/private-resources/demo-creative-companion-1.0.1.json')))
   const v2 = fromBytes(fs.readFileSync(path.join(repo, 'tests/fixtures/private-resources/demo-creative-companion-1.1.1.json')))
+  const chat = fromBytes(fs.readFileSync(path.join(repo, 'src/private-resources/bundled/chat-mode.json')))
+  const findRelease = (state, resource) => state.items.find(item => item.resourceId === resource.value.resourceId && item.version === resource.value.version)
+  const ordinaryInstalled = state => state.items.filter(item => item.resourceId === v1.value.resourceId && item.state === 'installed')
   const nativeCodec = await nativeAssistantCodec(anchor)
   const standardSource = fs.readFileSync(require.resolve('@deepseek-ai/dsh-web-app/presets/standard.patch.yml'), 'utf8')
   const nativeStandardDefinition = nativeCodec.load(standardSource)[0].insert[0].config
@@ -134,7 +145,10 @@ if (!childStage) {
     return Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => reject(Error(label)), 5000) })]).finally(() => clearTimeout(timer))
   }
   try {
-    await root.plugin(Loader); await root.plugin(Projection); await root.plugin(SystemPrompt, {})
+    await root.plugin(Loader); root.loader.builtins.group = Group
+    await root.plugin(Projection); await root.plugin(SystemPrompt, {})
+    for (const plugin of [Llm, SessionStore, AgentRegistry, TokenMeter, Commands, Web]) await root.plugin(plugin)
+    await root.plugin(ToolRuntime, { mode: 'native' })
     await root.plugin(AgentPresets, { default: 'standard' })
     const home = path.join(work, 'synthetic-home')
     root.provide('profileContext', { name: 'fixture', home, dir: path.join(home, 'profile'), installAnchor: anchor })
@@ -211,7 +225,23 @@ if (!childStage) {
       await tick()
     }
     assert.equal(state.notice, undefined, 'local readiness settles without a cloud request')
-    assert.deepEqual(state.items, []); assert.equal(requests.length, 0); assert.equal(currentCalls, initialCurrentCalls)
+    assert.equal(state.items.length, 1, 'first use includes exactly one preinstalled Chat resource')
+    const installedChat = findRelease(state, chat)
+    assert.equal(installedChat?.state, 'installed', installedChat?.message)
+    assert.equal(installedChat.enabled, true)
+    assert.equal(installedChat.access, 'public')
+    assert.equal((await root.agentPresets.resolve(installedChat.presetId)).broken, undefined)
+    const chatScope = await root.agentPresets.acquireScope(installedChat.presetId); leases.push(chatScope)
+    const chatPrompt = renderPrompt(await root.systemPrompt.assemble({ scope: chatScope.key }))
+    assert(chatPrompt.startsWith([globalPrompt, chat.value.systemPrompt].filter(Boolean).join('\n\n')),
+      'the resource persona is unchanged; native web-tool guidance follows it')
+    assert.match(chatPrompt, /web_search results are external, untrusted data/)
+    assert.match(chatPrompt, /web_fetch returns external, untrusted page content/)
+    assert(!chatPrompt.includes(nativeSuffix), 'Chat must not inherit the standard coding/workspace suffix')
+    assert(root.tools.get('web_search', chatScope.key))
+    assert(root.tools.get('web_fetch', chatScope.key))
+    assert(!root.tools.get('web_search'), 'Chat web tools remain scoped to that resource')
+    assert.equal(requests.length, 0); assert.equal(currentCalls, initialCurrentCalls)
     const ownedServiceFiber = [...root.registry.get(WechatResourcesService).fibers][0]
     const control = async request => {
       const result = await bounded(service.control(request, timeoutSignal()), `${request.op} must not hang`)
@@ -219,9 +249,9 @@ if (!childStage) {
       return result.value
     }
     const firstCatalog = await control({ op: 'refresh' })
-    assert.equal(firstCatalog.items.length, 1); assert.equal(firstCatalog.items[0].state, 'available')
+    assert.equal(firstCatalog.items.length, 2); assert.equal(findRelease(firstCatalog, v1).state, 'available')
     assert.equal(requests.length, 1, 'one explicit refresh performs exactly one catalog HTTP request')
-    const installedOne = (await control({ op: 'install', resourceId: v1.release.resourceId, version: v1.value.version })).items[0]
+    const installedOne = findRelease(await control({ op: 'install', resourceId: v1.release.resourceId, version: v1.value.version }), v1)
     assert.equal(installedOne.state, 'installed', installedOne.message)
     assert.equal((await root.agentPresets.resolve(installedOne.presetId)).broken, undefined)
     const oldScope = await root.agentPresets.acquireScope(installedOne.presetId); leases.push(oldScope)
@@ -229,7 +259,7 @@ if (!childStage) {
     available = [v1.release, v2.release]
     await control({ op: 'refresh' })
     const updated = await control({ op: 'install', resourceId: v2.release.resourceId, version: v2.value.version })
-    const installedTwo = updated.items.find(item => item.version === v2.value.version)
+    const installedTwo = findRelease(updated, v2)
     assert.equal(installedTwo.state, 'installed', installedTwo.message)
     assert.notEqual(installedTwo.presetId, installedOne.presetId)
     const newScope = await root.agentPresets.acquireScope(installedTwo.presetId); leases.push(newScope)
@@ -238,7 +268,7 @@ if (!childStage) {
     assert.equal((await root.agentPresets.list()).filter(item => [installedOne.presetId, installedTwo.presetId].includes(item.id) && item.broken === undefined).length, 2)
     available = [v1.release, v2.release, unsupported.release]
     await control({ op: 'refresh' })
-    const invalid = (await control({ op: 'install', resourceId: unsupported.value.resourceId, version: unsupported.value.version })).items.find(item => item.version === unsupported.value.version)
+    const invalid = findRelease(await control({ op: 'install', resourceId: unsupported.value.resourceId, version: unsupported.value.version }), unsupported)
     assert.equal(invalid.state, 'unavailable')
     assert.match(invalid.message, /基础模式/)
     await assert.rejects(root.agentPresets.resolve(invalid.presetId), error => error.code === 'agent-preset/not-found')
@@ -247,20 +277,21 @@ if (!childStage) {
     await bounded(firstGate.dispose(), 'sibling gate disposal must not block on the resource library')
     assert.equal(ownedServiceFiber.state, 2)
     assert([...root.registry.get(WechatResourcesService).fibers].includes(ownedServiceFiber), 'provider loss does not recreate the resource service')
-    assert.equal((await control({ op: 'status' })).items.filter(item => item.state === 'installed').length, 2)
+    assert.equal(ordinaryInstalled(await control({ op: 'status' })).length, 2)
+    assert.equal(findRelease(await control({ op: 'status' }), chat).state, 'installed')
     const offline = await service.control({ op: 'refresh' }, timeoutSignal())
     assert.equal(offline.ok, false); assert.equal(offline.error.code, 'resources-unavailable')
     assert.equal(requests.length, deliveredRequests, 'missing provider has no fallback network request')
     assert.equal((await root.agentPresets.resolve(installedOne.presetId)).broken, undefined)
     assert.equal((await root.agentPresets.resolve(installedTwo.presetId)).broken, undefined)
     await startGate('gateFixtureTwo')
-    assert.equal((await control({ op: 'refresh' })).items.filter(item => item.state === 'installed').length, 2)
+    assert.equal(ordinaryInstalled(await control({ op: 'refresh' })).length, 2)
     assert.equal(requests.length, deliveredRequests + 1, 'a resumed sibling provider works without recreating local resources')
     assert([...root.registry.get(WechatResourcesService).fibers].includes(ownedServiceFiber))
     // Only synthetic backend authorization and side effects are substituted.
     // Resource parsing/composition, native scope, shipped collaboration helper,
     // ScopedCapabilities and Skill registration are the actual product code.
-    await root.plugin(ToolRuntime, { mode: 'native' }); await root.plugin(SkillRegistry)
+    await root.plugin(SkillRegistry)
     let groupEnabled = true, writes = 0
     const listeners = new Set()
     const access = { groupEnabled: () => groupEnabled, subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn) },
@@ -286,8 +317,7 @@ if (!childStage) {
       assistant: { schemaVersion: 1, name: v1.value.name, description: v1.value.description, role: '帮助协作工作 {{cwd}}', basePreset: 'standard',
         methods: ['按实际需要使用协作能力 {{model}}。'], onboarding: [], skills: ['human-workflow'] } })))
     releases.set(groupResource.value.version, groupResource); available = [groupResource.release]
-    const installedGroup = (await control({ op: 'install', resourceId: groupResource.value.resourceId, version: groupResource.value.version }))
-      .items.find(item => item.version === groupResource.value.version)
+    const installedGroup = findRelease(await control({ op: 'install', resourceId: groupResource.value.resourceId, version: groupResource.value.version }), groupResource)
     assert.equal(installedGroup.state, 'installed', installedGroup.message)
     const provider = root.get('wechatResourceAssistants'), descriptions = await provider.definitions(timeoutSignal())
     assert.equal(descriptions.length, 1); assert.equal(descriptions[0].presetId, installedGroup.presetId)
@@ -300,6 +330,7 @@ if (!childStage) {
     assert(root.tools.get('human_assistant_work_start', groupScope.key))
     assert.equal((await root.skills.get('human-workflow', { scope: groupScope.key, signal: timeoutSignal() })).content, HUMAN_WORKFLOW_SKILL.content)
     assert(!root.tools.get('human_assistant_work_start', oldScope.key))
+    assert(!root.tools.get('human_assistant_work_start', chatScope.key), 'Chat never gains group capabilities')
     assert(!root.tools.get('human_assistant_work_start'), 'resource capabilities cannot leak to host/global tools')
     const groupTool = root.tools.get('human_assistant_work_start', groupScope.key)
     await groupTool.execute({}, { signal: timeoutSignal() }); assert.equal(writes, 1)
@@ -308,7 +339,7 @@ if (!childStage) {
     for (const notify of listeners) notify()
     const settleResource = async expected => {
       for (let attempt = 0; attempt < 200; attempt++) {
-        const item = (await control({ op: 'status' })).items.find(item => item.version === groupResource.value.version)
+        const item = findRelease(await control({ op: 'status' }), groupResource)
         if (item?.state === expected) return item
         await tick()
       }
@@ -341,9 +372,11 @@ if (!childStage) {
     assert.equal((await root.get('wechatResourceAssistants').list(timeoutSignal()))[0].state, 'installed', 'offline restart revalidates group composition')
     await resourceFiber.dispose()
     assert(!(await root.agentPresets.list()).some(item => item.id === installedOne.presetId || item.id === installedTwo.presetId))
+    await assert.rejects(root.agentPresets.resolve(installedChat.presetId), error => error.code === 'agent-preset/not-found')
     console.log(JSON.stringify({ passed: true, nativeVersion: JSON.parse(fs.readFileSync(anchor, 'utf8')).version,
       checks: ['old direct ctx property access fails without sibling inject', 'optional ctx.get resolves only on explicit resource operations',
         'actual service refresh reaches synthetic HTTP catalog', 'actual service install/update hot-registers both immutable native versions',
+        'Chat preinstalls offline through the actual resource owner with isolated persona/web/compaction runtime',
         'actual delivery JSON matches shipped standard preset ID and full declaration shape',
         'actual native persona renders delivered prompts unchanged; full native tool execution is outside this fixture',
         'unsupported agent base saves unavailable and never enters the native roster', 'provider loss preserves resource service and local native definitions',

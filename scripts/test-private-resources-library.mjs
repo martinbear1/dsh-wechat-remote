@@ -35,7 +35,7 @@ async function fixture(t, options = {}) {
     },
   }
   const host = { get(name) { if (name === 'agentPresets') return registry; assert.fail(`unexpected host service: ${name}`) } }
-  const create = () => new PrivateResourceLibrary(host, directory, { codec: { load: JSON.parse }, promptModule: 'cordis:privateResourcePrompt' })
+  const create = () => new PrivateResourceLibrary(host, directory, { codec: { load: JSON.parse }, promptModule: 'cordis:privateResourcePrompt', preinstalled: options.preinstalled })
   const libraries = [], library = create(); libraries.push(library)
   t.after(async () => { for (const item of libraries) await item.close(); await rm(root, { recursive: true, force: true }) })
   return { root, directory, definitions, calls, library, create() { const next = create(); libraries.push(next); return next } }
@@ -43,6 +43,55 @@ async function fixture(t, options = {}) {
 test('startup on a new node reads locally and creates no files', async t => {
   const f = await fixture(t); await f.library.start(); assert.deepEqual(f.library.list(), [])
   assert.deepEqual(await readdir(f.root), []); assert.equal(f.calls.length, 0)
+})
+
+test('preinstalled data uses ordinary storage/registry exactly once and a saved disable survives every startup', async t => {
+  const item = pack(), f = await fixture(t, { preinstalled: () => [{ content: item.bytes, release: item.release }] })
+  await f.library.prepare()
+  assert.equal(f.library.list().length, 1); assert.equal(f.calls.length, 0, 'local prepare never joins native startup')
+  await f.library.start(); await f.library.start()
+  assert.equal(f.calls.length, 1); assert.equal(f.library.list()[0].status, 'installed')
+  assert.equal(f.library.list()[0].access, 'public')
+  assert.deepEqual(await readFile(path.join(f.directory, sha('story-helper\0' + '1.0.0'), 'resource.json')), item.bytes)
+  await f.library.setEnabled('story-helper', '1.0.0', false)
+  await f.library.close()
+  const next = f.create(); await next.start()
+  assert.equal(next.list().length, 1); assert.equal(next.list()[0].enabled, false)
+  assert.equal(next.list()[0].status, 'disabled'); assert.equal(f.calls.length, 1)
+  await next.install(item.bytes, item.release)
+  assert.equal(next.list()[0].enabled, false, 're-download of identical content preserves user choice')
+})
+
+test('a newer bundled seed never silently upgrades existing resources or restores a missing older version', async t => {
+  const old = pack(), newer = pack(preset({ version: '2.0.0' }))
+  let seeded = newer
+  const f = await fixture(t, { preinstalled: () => [{ content: seeded.bytes, release: seeded.release }] })
+  await f.library.start(); await f.library.setEnabled('story-helper', '2.0.0', false); await f.library.close()
+  seeded = old
+  const restored = f.create(); await restored.start()
+  assert.deepEqual(restored.list().map(item => [item.version, item.enabled]), [['2.0.0', false]])
+  await restored.close(); seeded = pack(preset({ version: '3.0.0' }))
+  const updatedPackage = f.create(); await updatedPackage.start()
+  assert.deepEqual(updatedPackage.list().map(item => [item.version, item.enabled]), [['2.0.0', false]])
+  assert.equal((await readdir(f.directory)).length, 1)
+})
+
+test('a bad bundled seed never hides or stops valid already installed resources', async t => {
+  let broken = false
+  const f = await fixture(t, { preinstalled: () => { if (broken) throw Error('fixture payload unavailable'); return [] } })
+  const item = pack(); await f.library.install(item.bytes, item.release); await f.library.close(); broken = true
+  const next = f.create(); await next.start()
+  assert.equal(next.list().length, 1); assert.equal(next.list()[0].status, 'installed')
+  assert.equal(next.issues().length, 1)
+})
+
+test('closing while seed preparation is pending cannot install or register after component disposal', async t => {
+  let resume
+  const hold = new Promise(resolve => { resume = resolve }), item = pack()
+  const f = await fixture(t, { preinstalled: async () => { await hold; return [{ content: item.bytes, release: item.release }] } })
+  const preparing = f.library.prepare(), closing = f.library.close(); resume()
+  await Promise.all([preparing, closing])
+  assert.deepEqual(f.library.list(), []); assert.equal(f.calls.length, 0); assert.deepEqual(await readdir(f.root), [])
 })
 test('installs an immutable version without occupational instructions or changing base', async t => {
   const f = await fixture(t), original = structuredClone(f.definitions.get('standard')), item = pack()

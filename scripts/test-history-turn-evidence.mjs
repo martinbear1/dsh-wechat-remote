@@ -68,3 +68,32 @@ test('a prefix page can disclose a now complete turn whose answer was on a previ
   assert.equal(complete.value.facets['agent.turn-details.v1'][0].messageId, 'a')
   assert(complete.value.facets['agent.turn-activity.v1'].some(f => f.process?.complete))
 })
+
+test('cross-page schedule claims retain only bounded inbox identity evidence, never queued prompts', () => {
+  const privateBody='DO-NOT-CACHE-QUEUED-PROMPT'
+  const message={id:'scheduled',source:{kind:'schedule',taskId:'not-needed'},content:[{type:'text',text:privateBody}]}
+  const sequence=[
+    entry(0,'agent/inbox/spliced',{target:'next-turn',start:0,inserted:[message]}),
+    entry(1,'turn/start',{turn:9}),
+    entry(2,'agent/inbox/spliced',{target:'next-turn',start:0,removedCount:1,inserted:[]}),
+    entry(3,'step/start',{turn:9,step:1}),
+    entry(4,'user/message',message),
+    entry(5,'assistant/message',{turn:9,step:1,message:{content:[{type:'text',text:'done'},{type:'reasoning',text:'thought'}]}}),
+    entry(6,'turn/end',{turn:9,reason:{kind:'completed'}}),
+  ]
+  const cache=new HistoryTurnEvidence()
+  assert(!cache.accept('schedule',sequence.slice(4)).activity.some(view=>view.triggerInputSeqs?.length))
+  assert(!cache.accept('schedule',sequence.slice(1,4)).activity.some(view=>view.triggerInputSeqs?.length))
+  const complete=cache.accept('schedule',sequence.slice(0,1))
+  const direct=new TurnActivityCompatibility()
+  assert.deepEqual(complete.activity,sequence.map(value=>direct.accept(value.event)).filter(Boolean))
+  assert.deepEqual(complete.activity.at(-1).triggerInputSeqs,[4])
+  assert.equal(complete.activity.at(-1).process.contextCount,0)
+  const cached=JSON.stringify([...cache.sessions.get('schedule').facts])
+  assert(!cached.includes(privateBody));assert(!cached.includes('not-needed'))
+  assert(cached.includes('scheduled'))
+  cache.clear()
+  cache.accept('schedule',sequence.slice(4))
+  assert(!cache.accept('schedule',sequence.slice(0,3)).activity.some(view=>view.triggerInputSeqs?.length),
+    'a missing intervening event prevents cross-page claim attestation')
+})

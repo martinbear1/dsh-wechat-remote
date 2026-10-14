@@ -45,13 +45,13 @@ for(const e of [
  {type:'turn/start',seq:1,data:{turn:1}},
  {type:'user/message',seq:2,data:{source:{kind:'user'}}},
  {type:'user/message',seq:3,data:{source:{kind:'external-provider'}}},
- {type:'user/message',seq:4,data:{source:{kind:'user'}}},
+ {type:'tool/call',seq:4,data:{turn:1,step:1,callId:'read',name:'read',arguments:'{}'}},
  {type:'step/start',seq:5,data:{turn:1,step:1}},
- {type:'assistant/message',seq:6,data:{turn:1,step:1,message:{content:[{type:'reasoning',text:'reconsider'},{type:'text',text:'answer'}]}}},
+ {type:'user/message',seq:6,data:{source:{kind:'user'}}},
+ {type:'assistant/message',seq:7,data:{turn:1,step:1,message:{content:[{type:'reasoning',text:'reconsider'},{type:'text',text:'answer'}]}}},
 ])steering.accept(e)
-const steered=steering.accept({type:'turn/end',seq:7,data:{turn:1,reason:{kind:'completed'}}})
-assert.deepEqual(steered.process.answerParts,[],'native in-turn steering keeps final reasoning visible')
-assert.equal(steered.process.contextCount,1,'all known non-human producer kinds are context')
+const steered=steering.accept({type:'turn/end',seq:8,data:{turn:1,reason:{kind:'completed'}}})
+assert.equal(steered.process,undefined,'native interleaved input keeps the whole process visible, not only final reasoning')
 
 // Native chat-snapshot-builder ordering is separate from completion. Context
 // can precede an opening input in the log; process evidence excludes context.
@@ -63,7 +63,8 @@ ordering.accept(beforeInput)
 const layout=ordering.accept(openingEvent)
 assert.deepEqual(layout.layout,{startSeq:29,openingInputSeq:34})
 assert.equal(layout.process,undefined,'ordering applies immediately, without hiding a running process')
-assert.equal(ordering.accept({...openingEvent,seq:36}),undefined,'later inputs do not replace the opening anchor')
+assert.deepEqual(ordering.accept({...openingEvent,seq:36}).layout,{startSeq:29,openingInputSeq:36},
+ 'a batch of inputs before any process evidence uses its last opening input, as native snapshot-builder does')
 for(const evidence of [
  {type:'tool/call',data:{callId:'c',name:'read',arguments:'{}'}},
  {type:'tool/result',data:{message:{content:[]}}},
@@ -92,3 +93,35 @@ for(const nonEvidence of [
 }
 assert.equal(new TurnActivityCompatibility().accept(openingEvent),undefined,'partial prefixes cannot attest an opening input')
 console.log('native opening-input projection: running/context/steering/live chunks/replacements passed')
+
+const queued=(id,kind='schedule')=>({id,source:{kind},content:[{type:'text',text:'do not retain this queued body'}]})
+const events=(items)=>items.map(([type,data],seq)=>({type,data,seq,surfaceOp:'append'}))
+const scheduled=events([
+ ['agent/inbox/spliced',{target:'next-turn',start:0,inserted:[queued('scheduled')]}],
+ ['turn/start',{turn:3}],
+ ['agent/inbox/spliced',{target:'next-turn',start:0,removedCount:1,inserted:[]}],
+ ['step/start',{turn:3,step:1}],
+ ['user/message',queued('scheduled')],
+ ['assistant/message',{turn:3,step:1,message:{content:[{type:'reasoning',text:'Think'},{type:'text',text:'Done'}]}}],
+ ['turn/end',{turn:3,reason:{kind:'completed'}}],
+])
+const scheduledActivity=new TurnActivityCompatibility()
+const scheduledViews=scheduled.map(event=>scheduledActivity.accept(event)).filter(Boolean)
+assert.deepEqual(scheduledViews[0].triggerInputSeqs,[4])
+assert.deepEqual(scheduledViews[0].layout,{startSeq:1,openingInputSeq:4})
+assert.equal(scheduledViews.at(-1).process.contextCount,0)
+assert.deepEqual(scheduledViews.at(-1).process.answerParts,['reasoning'])
+assert(!JSON.stringify(scheduledActivity).includes('do not retain this queued body'))
+for(const prefix of [scheduled.slice(1),scheduled.slice(2),scheduled.slice(4)]) {
+ const partial=new TurnActivityCompatibility()
+ assert(!prefix.map(event=>partial.accept(event)).some(view=>view?.triggerInputSeqs?.length),
+  'missing queue/turn prefix cannot fabricate a waking trigger')
+}
+const gapped=new TurnActivityCompatibility()
+assert(!scheduled.filter(event=>event.seq!==3).map(event=>gapped.accept(event)).some(view=>view?.triggerInputSeqs?.length),
+ 'a gap drops old queue proof rather than crossing unseen durable events')
+const overBound=new TurnActivityCompatibility()
+const large=structuredClone(scheduled);large[0].data.inserted=Array.from({length:2049},()=>queued('scheduled'))
+assert(!large.map(event=>overBound.accept(event)).some(view=>view?.triggerInputSeqs?.length))
+assert(!JSON.stringify(overBound).includes('do not retain this queued body'))
+console.log('scheduled input attestation: real claim, retained precision, missing prefixes, gaps and bounded metadata passed')

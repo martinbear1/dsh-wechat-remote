@@ -1,2 +1,2 @@
 /** Build identity stays with loaded code, even after package.json is replaced. */
-export declare const PLUGIN_VERSION = "1.7.14-rc.66";
+export declare const PLUGIN_VERSION = "1.7.14-rc.67";

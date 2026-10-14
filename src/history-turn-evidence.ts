@@ -28,6 +28,14 @@ function factOf(event: Row): Fact {
   })
   const usage = (v: Row) => pick(v, ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'reasoningTokens', 'totalTokens'])
   if (event.type === 'user/message') Object.assign(data, message(d))
+  if (event.type === 'agent/inbox/spliced') Object.assign(data, pick(d, ['target', 'start', 'removedCount', 'outcome']), {
+    // Match turn-activity's bounded claim proof. Retain identities and producer
+    // kinds only, never the queued prompt, attachments or arbitrary metadata.
+    inserted: Array.isArray(d.inserted) && d.inserted.length <= 2048 && d.inserted.every((item: Row) =>
+      typeof item?.id === 'string' && item.id.length > 0 && item.id.length <= 512
+      && typeof item?.source?.kind === 'string' && item.source.kind.length <= 128)
+      ? d.inserted.map((item: Row) => ({ id: item.id, source: { kind: item.source.kind } })) : null,
+  })
   if (d.message) data.message = message(d.message)
   if (d.reason) data.reason = pick(d.reason, ['kind'])
   if (d.error) data.error = true

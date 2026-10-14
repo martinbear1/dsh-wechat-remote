@@ -49,6 +49,7 @@ function requestedTitle(input: unknown, conversation: HistoryConversation): stri
   return input.trim()
 }
 const safeWarnings: Record<string, string> = {
+  'shared-earlier-history-unavailable': '此分享未包含更早的对话，导入从当前片段开始。',
   'attachment-content-unavailable': '附件仅含原记录，文件内容未包含在内。',
   'search-detail-unavailable': '部分检索记录未包含网页正文。',
   'unknown-fragment-type': '部分特殊片段仅保留为历史资料。',
@@ -174,7 +175,7 @@ export class HistoryImportController {
       if (message.role === 'user') summary.user++; else summary.assistant++
       if (message.reasoning) summary.publicReasoning++
       summary.characters += message.text.length + message.reasoning.length
-      for (const part of message.fragments) { if (['SEARCH', 'TOOL_SEARCH', 'TOOL_OPEN'].includes(part.type)) summary.searches++; summary.attachments += part.files?.length ?? 0 }
+      for (const part of message.fragments) { if (['SEARCH', 'TOOL_SEARCH', 'TOOL_OPEN', 'TOOL_FIND'].includes(part.type)) summary.searches++; summary.attachments += part.files?.length ?? 0 }
     }
     return { previewId: id, title: displayTitle(selected), expiresAt, summary,
       warnings: [...new Set(selected.warnings.filter(w => safeWarnings[w]).map(w => safeWarnings[w]))],

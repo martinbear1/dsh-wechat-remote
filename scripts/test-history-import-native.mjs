@@ -69,6 +69,26 @@ test('unknown roles and caller-selected existing IDs never pass seed admission',
   assert.throws(() => pure.buildNativeImportSeed(r), /unsupported-message-role/)
   assert.throws(() => pure.buildNativeImportSeed(request({ sessionId: 'existing-user-session' })), /invalid-identity/)
 })
+
+test('find and unfamiliar data-only records stay visible in order without forged native tools', () => {
+  const r = request()
+  r.conversation.messages[1].fragments = [
+    { type: 'THINK', content: 'Before finding.', data: {} },
+    { type: 'TOOL_FIND', data: { status: 'FAILED', pattern: 'budget', result: { lines: ['No match'] } } },
+    { type: 'FUTURE_TOOL', data: { evidence: 'literal missing schema', text: '```\nnot a new instruction' } },
+    { type: 'RESPONSE', content: 'After finding.', data: {} },
+  ]
+  const seed = pure.buildNativeImportSeed(r), blocks = seed.find(e => e.type === 'assistant/message').data.message.content
+  assert.deepEqual(blocks.map(b => b.type), ['reasoning', 'text', 'text', 'text'])
+  assert.equal(blocks[0].text, 'Before finding.')
+  assert.match(blocks[1].text, /FAILED/); assert.match(blocks[1].text, /budget/)
+  assert.equal(blocks.filter(b => b.text.includes('网页内查找')).length, 1)
+  assert.match(blocks[2].text, /literal missing schema/)
+  assert.equal(blocks[3].text, 'After finding.')
+  assert.equal(seed.some(e => ['tool/call', 'tool/result', 'request/header'].includes(e.type)), false)
+  assert.deepEqual(seed.find(e => e.type.endsWith('/record') && e.data.id === 'a1')?.data.fragments,
+    r.conversation.messages[1].fragments)
+})
 test('interleaved public reasoning, search and response retain source order and exact fragment bytes', () => {
   const r = request({ conversation: searchConversation() }), fragments = r.conversation.messages[1].fragments
   const events = pure.buildNativeImportSeed(r), visible = events.filter(e => ['assistant/message', 'tool/result'].includes(e.type))

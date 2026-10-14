@@ -44,7 +44,7 @@ try {
   assert(fs.readFileSync(path.join(native, 'THIRD-PARTY-NOTICES/wechat-artwork.txt'), 'utf8').includes('https://pc.weixin.qq.com/'))
   const selfResources = createRequire(path.join(outer, 'package.json'))
   assert.equal(read(selfResources.resolve('dsh-wechat-remote/locale/zh.json')).meta.description, outerMeta.description)
-  for (const [entry, file] of [['group-assistants', 'group-assistants-component.js'], ['resource-library', 'resource-library-component.js'], ['private-resource-prompt', 'private-resources/native.js']]) {
+  for (const [entry, file] of [['group-assistants', 'group-assistants-component.js'], ['resource-library', 'resource-library-component.js'], ['private-resource-prompt', 'private-resources/native.js'], ['history-import/compaction', 'history-import/continuation-compaction.js']]) {
     assert.equal(outerMeta.exports[`./${entry}`], `./native/lib/${file}`)
     assert.equal(nativeMeta.exports[`./${entry}`].default, `./lib/${file}`)
     assert.equal(selfResources.resolve(`dsh-wechat-remote/${entry}`), path.join(native, 'lib', file))

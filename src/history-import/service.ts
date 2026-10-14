@@ -6,6 +6,7 @@ import { nativeCapabilities, commitNativeImport, inspectNativeImport } from './n
 import { parseImportSource } from './parse.js'
 import { readPublicShare } from './share.js'
 import { FeatureAccessError, featureMessage, hostFeatureAccess } from '../feature-access.js'
+import HistoryContinuationPreset from './continuation-preset.js'
 
 export interface HistoryImportResult {
   readonly ok: boolean
@@ -14,11 +15,13 @@ export interface HistoryImportResult {
 }
 /** A separate optional RPC behind the existing owner-authenticated transport.
  * No replacement of native session.create/history, no hooks in chat execution,
- * no startup IO and no additional server/listener/cloud service. */
+ * no additional server/listener/cloud service. The optional native preset
+ * belongs to this service; it never changes the host's default preset. */
 export class WechatImportService extends TypertRemoteService {
   private readonly controller: HistoryImportController
   constructor(host: Context, config: { receiptDirectory: string; loadObject?: ImportPorts['loadObject'] }) {
     super(host, 'wechatImport')
+    host.inject(['agentPresets'], ctx => { ctx.plugin(HistoryContinuationPreset) })
     this.controller = new HistoryImportController({
       capabilities: async () => {
         const native = await nativeCapabilities(host)

@@ -60,7 +60,35 @@ function collected(part: HistoryFragment): HistorySearchSource[] {
 /** No array-position guesses: export ZIPs only have URL/title, not citation IDs. */
 export function historySearchSources(part: HistoryFragment): HistorySearchSource[] { return collected(part) }
 
+/** Preserve unmodelled source facts as inert history, not a claimed native
+ * execution/result. Structured fields stay literal, including future schemas;
+ * they are never interpreted as executable Markdown, links or instructions. */
+export function historicalFragmentText(part: HistoryFragment): string | undefined {
+  if (['REQUEST', 'RESPONSE', 'THINK', 'FILE', 'SEARCH', 'TOOL_SEARCH', 'TOOL_OPEN', 'TIP'].includes(part.type)) return
+  // Compact JSON prevents indentation from amplifying deeply nested metadata.
+  const data = Object.keys(part.data).length ? JSON.stringify(part.data) : ''
+  if (!part.content && !data && part.type !== 'TOOL_FIND') return
+  const label = part.type === 'TOOL_FIND' ? '网页内查找' : `网页原记录 ${escapeText(part.type)}`
+  const lines = [`${label}（历史记录，未重新执行）`]
+  if (part.content) lines.push(part.content)
+  if (part.type === 'TOOL_FIND' && typeof part.data.pattern === 'string') lines.push(`查找内容：${part.data.pattern}`)
+  if (part.type === 'TOOL_FIND' && typeof part.data.status === 'string') lines.push(`原记录状态：${part.data.status}`)
+  if (data) lines.push(data)
+  else if (part.type === 'TOOL_FIND') lines.push('源数据未提供查找详情。')
+  // Use one literal block: unknown strings may contain Markdown, HTML, URLs or
+  // an attempted closing fence. The raw fragment remains in the archive too.
+  const body = lines.slice(1).join('\n\n')
+  let fenceLength = 3
+  for (const match of body.matchAll(/`+/g)) fenceLength = Math.max(fenceLength, match[0].length + 1)
+  if (Buffer.byteLength(lines[0]) + Buffer.byteLength(body) + fenceLength * 2 + 6 > MAX_RENDER_BYTES) {
+    throw new HistorySourceError('conversation-too-large')
+  }
+  const fence = '`'.repeat(fenceLength)
+  return `${lines[0]}\n\n${fence}\n${body}\n${fence}`
+}
+
 export function historicalSourceText(part: HistoryFragment): string | undefined {
+  if (part.type === 'TOOL_FIND') return historicalFragmentText(part)
   if (!['SEARCH', 'TOOL_SEARCH', 'TOOL_OPEN'].includes(part.type)) return
   if (part.type === 'TOOL_OPEN' && !part.content && !Object.keys(part.data).length) return
   const lines = ['原网页检索资料（历史记录）']

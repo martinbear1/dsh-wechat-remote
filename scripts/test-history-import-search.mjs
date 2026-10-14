@@ -5,7 +5,7 @@ import { build } from 'esbuild'
 import { fileURLToPath } from 'node:url'
 const built = await build({ entryPoints: [fileURLToPath(new URL('../src/history-import/search.ts', import.meta.url))], bundle: true,
   platform: 'node', format: 'esm', write: false })
-const { historySearchSources, historicalSourceText, renderHistoryResponse } = await import('data:text/javascript;base64,' + Buffer.from(built.outputFiles[0].text).toString('base64'))
+const { historySearchSources, historicalSourceText, historicalFragmentText, renderHistoryResponse } = await import('data:text/javascript;base64,' + Buffer.from(built.outputFiles[0].text).toString('base64'))
 const result = (url = 'https://example.test/source') => ({ url, title: '合成来源', snippet: '合成摘要', cite_index: null })
 const fragment = (type, data = {}, content) => ({ type, data, ...(content === undefined ? {} : { content }) })
 const response = (content, references) => fragment('RESPONSE', { id: 9, references }, content)
@@ -108,6 +108,42 @@ test('empty results, unsupported parts and ZIP open metadata are explicit', () =
   assert.equal(historicalSourceText(fragment('THINK', {}, '思考')), undefined)
   const r = fragment('THINK', { references: [ref()] }, '[reference:0]')
   assert.equal(renderHistoryResponse(message(open(), r), r), r.content)
+})
+
+test('TOOL_FIND keeps supplied pattern, status and unfamiliar result fields as literal history, not a native result', () => {
+  const f = fragment('TOOL_FIND', { id: 4, pattern: 'Blue', status: 'FINISHED', reference: ref(), matches: [{ line: 9, text: 'Blue waits.' }] })
+  const before = JSON.stringify(f), out = historicalSourceText(f)
+  assert.match(out, /网页内查找（历史记录，未重新执行）/)
+  assert.match(out, /查找内容：Blue/)
+  assert(out.includes(JSON.stringify(f.data)))
+  assert.deepEqual(historySearchSources(f), [])
+  assert.equal(JSON.stringify(f), before)
+  const missing = historicalFragmentText(fragment('TOOL_FIND'))
+  assert.match(missing, /源数据未提供查找详情/)
+  assert(!missing.includes('成功'))
+  const failed = historicalFragmentText(fragment('TOOL_FIND', { pattern: 'none', status: 'ERROR' }))
+  assert(failed.includes('ERROR')); assert(!failed.includes('FINISHED'))
+})
+
+test('unknown data-only fragments are visible inert text and cannot close their literal block', () => {
+  const payload = { result: { nested: ['```\n<script>alert(1)</script>', '[download](javascript:x)', 'https://example.test/private'], succeeded: false },
+    status: 'UNKNOWN', arbitrary: null }
+  const f = fragment('TOOL_FUTURE', payload), before = JSON.stringify(f), out = historicalFragmentText(f)
+  assert.match(out, /^网页原记录 TOOL\\_FUTURE（历史记录，未重新执行）/)
+  assert(out.includes(JSON.stringify(payload)))
+  assert(out.includes('\n\n````\n')); assert(out.endsWith('\n````'))
+  assert(!out.includes('](<')); assert(!out.includes('成功'))
+  assert.equal(JSON.stringify(f), before)
+  assert.equal(historicalFragmentText(fragment('TOOL_FUTURE')), undefined)
+  for (const type of ['REQUEST', 'RESPONSE', 'THINK', 'FILE', 'SEARCH', 'TOOL_SEARCH', 'TOOL_OPEN', 'TIP']) {
+    assert.equal(historicalFragmentText(fragment(type, payload, '已有处理路径')), undefined)
+  }
+})
+
+test('generic historical rendering remains bounded rather than dropping oversized metadata', () => {
+  const f = fragment('TOOL_FUTURE', { result: 'x'.repeat(24 * 1024 * 1024) })
+  assert.throws(() => historicalFragmentText(f), error => error.code === 'conversation-too-large')
+  assert.equal(f.data.result.length, 24 * 1024 * 1024)
 })
 test('large source details and expanded links are bounded without editing original data', () => {
   const f = fragment('TOOL_SEARCH', { id: 3, results: Array.from({ length: 257 }, () => result()) })

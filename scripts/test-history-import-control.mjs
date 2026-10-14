@@ -80,6 +80,18 @@ test('one preview represents one selected conversation with real turns and no ge
   assert.equal(preview.summary.turnCount, 1); assert.deepEqual(preview.warnings, [])
   assert.equal(preview.snippets[0].text, '我是测试角色'); assert.equal(f.commits(), 0)
 })
+
+test('share excerpt and page-find appear honestly in preview without synthetic earlier messages', async t => {
+  const payload = JSON.parse(sourceBytes().toString())
+  payload.messages[0].parent_id = 900
+  payload.messages[1].fragments.unshift({ type: 'TOOL_FIND', status: 'FINISHED', pattern: 'abc' })
+  const f = await fixture(t, { share: async () => Buffer.from(JSON.stringify(payload)) })
+  const preview = await f.preview()
+  assert.equal(preview.summary.messages, 2)
+  assert.equal(preview.summary.searches, 1)
+  assert.deepEqual(preview.warnings, ['此分享未包含更早的对话，导入从当前片段开始。'])
+  assert.equal(f.commits(), 0)
+})
 test('exports are catalogued, paginated and searched without creating any conversation', async t => {
   const conversations = Array.from({ length: 65 }, (_, i) => ({ id: 'chat-' + i, title: '测试' + i, mapping: {
     root: { id: 'root', parent: null, children: ['u'], message: null },

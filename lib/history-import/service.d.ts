@@ -11,7 +11,8 @@ export interface HistoryImportResult {
 }
 /** A separate optional RPC behind the existing owner-authenticated transport.
  * No replacement of native session.create/history, no hooks in chat execution,
- * no startup IO and no additional server/listener/cloud service. */
+ * no additional server/listener/cloud service. The optional native preset
+ * belongs to this service; it never changes the host's default preset. */
 export declare class WechatImportService extends TypertRemoteService {
     private readonly controller;
     constructor(host: Context, config: {

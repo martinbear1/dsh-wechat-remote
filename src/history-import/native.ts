@@ -4,7 +4,7 @@
 import { createHash } from 'node:crypto'
 import { HistorySourceError } from './source.js'
 import type { HistoryConversation, HistoryFragment, HistoryMessage } from './source.js'
-import { historicalSourceText, historySearchSources, renderHistoryResponse } from './search.js'
+import { historicalFragmentText, historicalSourceText, historySearchSources, renderHistoryResponse } from './search.js'
 
 type Native = Record<string, any>
 export interface ImportHost { get(name: string): any }
@@ -118,7 +118,7 @@ function content(message: HistoryMessage): Native[] {
   for (const part of message.fragments) {
     if (part.type === 'THINK' && part.content !== undefined) blocks.push({ type: 'reasoning', text: part.content })
     if (['REQUEST', 'RESPONSE'].includes(part.type) && part.content !== undefined) blocks.push({ type: 'text', text: renderHistoryResponse(message, part) })
-    if (['SEARCH', 'TOOL_SEARCH', 'TOOL_OPEN'].includes(part.type)) {
+    if (['SEARCH', 'TOOL_SEARCH', 'TOOL_OPEN', 'TOOL_FIND'].includes(part.type)) {
       const search = message.role === 'assistant' ? historicalTool(part) : undefined
       const text = search ? undefined : historicalSourceText(part)
       if (search) blocks.push(search)
@@ -126,9 +126,8 @@ function content(message: HistoryMessage): Native[] {
     }
     for (const file of part.files ?? []) blocks.push({ type: 'text', text: `\n[原记录附件：${file.name}；源文件未包含在导出数据中]` })
     // TIP is web UI guidance, not an assistant response. It remains archived.
-    if (!['REQUEST', 'RESPONSE', 'THINK', 'SEARCH', 'TOOL_SEARCH', 'TOOL_OPEN', 'FILE', 'TIP'].includes(part.type) && part.content) {
-      blocks.push({ type: 'text', text: `\n[网页原记录 ${part.type}]\n${part.content}` })
-    }
+    const historical = part.type === 'TOOL_FIND' ? undefined : historicalFragmentText(part)
+    if (historical) blocks.push({ type: 'text', text: historical })
   }
   return blocks
 }

@@ -107,6 +107,69 @@ test('multiple alternative branches are preserved and require explicit selection
   assert.throws(() => selectHistoryBranch(c, 'u'), expectCode('invalid-branch'))
 })
 
+test('official share excerpts admit only the leading external ancestor and preserve its exact source id', async () => {
+  for (const [parent, user, assistant] of [[17, 19, 20], [10, 11, 12], ['outside', 'selected-user', 'selected-answer']]) {
+    const input = share([sm(user, parent, 'USER', [fragment('REQUEST', '选段提问')]),
+      sm(assistant, user, 'ASSISTANT', [fragment('THINK', '公开思考'), fragment('RESPONSE', '选段回答')])])
+    const before = JSON.stringify(input), c = selectHistoryBranch((await parseHistorySource(input)).conversations[0])
+    assert.deepEqual(c.messages.map(m => m.id), [String(user), String(assistant)])
+    assert.equal(c.messages[0].parentId, null)
+    assert.equal(c.messages[0].metadata.parent_id, parent, 'original numeric or string parent survives without normalization')
+    assert.equal(c.messages[1].parentId, String(user))
+    assert(c.messages[0].warnings.includes('shared-earlier-history-unavailable'))
+    assert(c.warnings.includes('shared-earlier-history-unavailable'))
+    assert.equal(countHistoryTurns(c.messages), 1)
+    assert.equal(JSON.stringify(input), before)
+  }
+})
+
+test('excerpt boundaries allow an assistant-only selection and connected branches, not disconnected or broken middles', async () => {
+  const one = selectHistoryBranch((await parseHistorySource(share([
+    sm(20, 19, 'ASSISTANT', [fragment('RESPONSE', '单条选中回答')]),
+  ]))).conversations[0])
+  assert.equal(countHistoryTurns(one.messages), 1)
+  assert.equal(one.messages[0].metadata.parent_id, 19)
+  const branching = (await parseHistorySource(share([
+    sm(19, 17, 'USER', [fragment('REQUEST', '问题')]), sm(20, 19, 'ASSISTANT', [fragment('RESPONSE', '一')]),
+    sm(21, 19, 'ASSISTANT', [fragment('RESPONSE', '二')]),
+  ]))).conversations[0]
+  assert.throws(() => selectHistoryBranch(branching), expectCode('branch-required'))
+  assert.deepEqual(selectHistoryBranch(branching, '21').messages.map(m => m.id), ['19', '21'])
+  for (const messages of [
+    [sm(1, null, 'USER', []), sm(3, 2, 'ASSISTANT', [])], // A hole in the middle is not an excerpt boundary.
+    [sm(1, 9, 'USER', []), sm(3, 2, 'ASSISTANT', [])], // Two external parents.
+    [sm(1, 9, 'USER', []), sm(3, null, 'ASSISTANT', [])], // Two disconnected roots.
+    [sm(1, 9, 'USER', []), sm(3, 4, 'ASSISTANT', []), sm(4, 3, 'USER', [])], // Disconnected cycle.
+    [sm(2, 1, 'ASSISTANT', []), sm(1, 9, 'USER', [])], // External ancestor is not the published leading message.
+  ]) await assert.rejects(parseHistorySource(share(messages)), expectCode('missing-parent'))
+  await assert.rejects(parseHistorySource(share([sm(1, 9, 'USER', []), sm(1, 1, 'ASSISTANT', [])])), expectCode('duplicate-message-id'))
+  const complete = (await parseHistorySource(share([sm(1, null, 'USER', [fragment('REQUEST', '完整')])]))).conversations[0]
+  assert(!complete.warnings.includes('shared-earlier-history-unavailable'))
+  assert.equal(complete.messages[0].metadata.parent_id, undefined)
+})
+
+test('full exports never receive the public-share external-ancestor repair', async () => {
+  const input = exported()
+  input[0].mapping.u.parent = 'not-exported'
+  await assert.rejects(parseHistorySource(input), expectCode('invalid-child-link'))
+})
+
+test('TOOL_FIND and unknown data-only tools preserve source facts without inventing text or roles', async () => {
+  const find = { type: 'TOOL_FIND', id: 4, pattern: 'Blue', status: 'FINISHED', reference: { id: 3, type: 'TOOL_OPEN' },
+    matches: [{ line: 9, text: 'Blue waits.' }] }
+  const unknown = { type: 'TOOL_FUTURE', id: 5, result: { value: 'Provided fact only', ok: false } }
+  const input = share([sm(1, null, 'ASSISTANT', [find, unknown])])
+  const c = (await parseHistorySource(input)).conversations[0], m = c.messages[0]
+  assert.equal(m.role, 'assistant'); assert.equal(m.text, '')
+  assert.deepEqual({ ...m.fragments[0], data: { ...m.fragments[0].data } }, { type: 'TOOL_FIND', data: { id: 4, pattern: 'Blue', status: 'FINISHED', reference: { id: 3, type: 'TOOL_OPEN' }, matches: [{ line: 9, text: 'Blue waits.' }] } })
+  assert.deepEqual(m.fragments[1].data.result, unknown.result)
+  assert(m.warnings.includes('unknown-fragment-type'))
+  const full = exported(); full[0].mapping.a.message.fragments = [find]
+  const parsed = selectHistoryBranch((await parseHistorySource(full)).conversations[0])
+  assert.equal(parsed.messages[1].role, 'assistant')
+  assert(!parsed.messages[1].warnings.includes('unknown-fragment-type'))
+})
+
 test('export legacy SEARCH and missing TOOL_OPEN detail are retained with honest warning', async () => {
   const input = exported(); input[0].mapping.a.message.fragments = [{ type: 'SEARCH', results: [{ url: 'https://example.test', title: '仅标题' }] }, { type: 'TOOL_OPEN' }, fragment('THINK', '公开思考'), fragment('RESPONSE', '答复')]
   const c = (await parseHistorySource(input)).conversations[0]
@@ -131,7 +194,7 @@ test('unknown source fragments and TIP contents survive normalization without en
 
 test('malformed parent links, duplicate ids and cycles fail without mutating any host', async () => {
   await assert.rejects(parseHistorySource(share([sm(1, null, 'USER', []), sm(1, null, 'USER', [])])), expectCode('duplicate-message-id'))
-  await assert.rejects(parseHistorySource(share([sm(1, 9, 'USER', [])])), expectCode('missing-parent'))
+  await assert.rejects(parseHistorySource(share([sm(1, null, 'USER', []), sm(3, 9, 'ASSISTANT', [])])), expectCode('missing-parent'))
   await assert.rejects(parseHistorySource(share([sm(1, 2, 'USER', []), sm(2, 1, 'ASSISTANT', [])])), expectCode('cyclic-messages'))
   const bad = exported(); bad[0].mapping.u.children = []
   await assert.rejects(parseHistorySource(bad), expectCode('invalid-parent-link'))

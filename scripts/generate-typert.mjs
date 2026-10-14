@@ -161,6 +161,8 @@ try {
     'dsh-session-export.ts',
     'agent-inputs.ts',
     'history-import/service.ts',
+    'history-import/continuation-preset.ts',
+    'history-import/continuation-compaction.ts',
     'history-import/controller.ts',
     'history-import/receipts.ts',
     'history-import/native.ts',

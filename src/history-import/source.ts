@@ -63,7 +63,7 @@ function validateNesting(value: unknown): void {
     }
   }
 }
-const knownFragments = new Set(['REQUEST', 'RESPONSE', 'THINK', 'FILE', 'SEARCH', 'TOOL_SEARCH', 'TOOL_OPEN', 'TIP'])
+const knownFragments = new Set(['REQUEST', 'RESPONSE', 'THINK', 'FILE', 'SEARCH', 'TOOL_SEARCH', 'TOOL_OPEN', 'TOOL_FIND', 'TIP'])
 function fragments(value: unknown, warnings: Set<string>): HistoryFragment[] {
   if (!Array.isArray(value) || value.length > 10000) return fail('invalid-fragments')
   return value.map(entry => {
@@ -93,7 +93,7 @@ function fragments(value: unknown, warnings: Set<string>): HistoryFragment[] {
 function message(value: Record<string, unknown>, id: string, parentId: string | null, share: boolean): HistoryMessage {
   const warnings = new Set<string>(), parts = fragments(value.fragments, warnings)
   const user = parts.some(part => part.type === 'REQUEST' || part.type === 'FILE')
-  const assistant = parts.some(part => ['RESPONSE', 'THINK', 'SEARCH', 'TOOL_SEARCH', 'TOOL_OPEN'].includes(part.type))
+  const assistant = parts.some(part => ['RESPONSE', 'THINK', 'SEARCH', 'TOOL_SEARCH', 'TOOL_OPEN', 'TOOL_FIND'].includes(part.type))
   const role: HistoryMessage['role'] = share ? value.role === 'USER' ? 'user' : value.role === 'ASSISTANT' ? 'assistant' : 'unknown'
     : user && !assistant ? 'user' : assistant && !user ? 'assistant' : 'unknown'
   if (role === 'unknown') warnings.add('message-role-unavailable')
@@ -169,8 +169,36 @@ function shareConversation(value: Record<string, unknown>): HistoryConversation 
     if (!record(raw)) return fail('invalid-share-message')
     return message(raw, identifier(raw.message_id), raw.parent_id === null ? null : identifier(raw.parent_id), true)
   })
+  const warnings = ['shared-selection-only', 'web-system-prompt-unavailable']
+  // The official share UI can publish a selected excerpt while retaining the
+  // first message's original (unshared) parent. Admit only this one boundary:
+  // every remaining message must belong to its connected, otherwise valid
+  // tree. Never repair a missing link in the middle or relax full ZIP exports.
+  const first = messages[0], ids = new Set(messages.map(item => item.id))
+  if (first?.parentId !== null && first?.parentId !== undefined && !ids.has(first.parentId)) {
+    if (ids.size !== messages.length) return fail('duplicate-message-id')
+    const children = new Map<string, string[]>()
+    for (const item of messages.slice(1)) {
+      if (item.parentId === null || !ids.has(item.parentId)) return fail('missing-parent')
+      const siblings = children.get(item.parentId) ?? []
+      siblings.push(item.id); children.set(item.parentId, siblings)
+    }
+    const connected = new Set<string>(), pending = [first.id]
+    while (pending.length) {
+      const id = pending.pop()!
+      if (connected.has(id)) return fail('cyclic-messages')
+      connected.add(id); pending.push(...(children.get(id) ?? []))
+    }
+    if (connected.size !== messages.length) return fail('missing-parent')
+    // parentId describes the local selected path. The original parent remains
+    // auditable in the per-message metadata copied into the native RECORD.
+    first.metadata.parent_id = (value.messages[0] as JsonObject).parent_id
+    first.parentId = null
+    first.warnings.push('shared-earlier-history-unavailable')
+    warnings.push('shared-earlier-history-unavailable')
+  }
   return graph({ id: 'shared-conversation', title: value.title, modelType: text(value.model_type), messages, leafIds: [],
-    metadata: metadata(value, ['title', 'messages']), warnings: ['shared-selection-only', 'web-system-prompt-unavailable'] })
+    metadata: metadata(value, ['title', 'messages']), warnings })
 }
 
 /** Pure source normalization. No networking, credentials, model calls, filesystem writes or host mutation. */

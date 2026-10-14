@@ -34,6 +34,7 @@ export function supportsNativeUpdates(manager: unknown, scope: string): manager 
 export interface NativeUpdateOptions {
   home: string; scope: string; runningVersion: string
   manager(): Manager | undefined
+  prepareTools?(manager: Manager): Promise<Manager>
   sessions(): { list(request: object, signal: AbortSignal): Promise<{ items: { running: boolean }[] }> } | undefined
   release(): Promise<{ advice: UpdateAdvice; release?: Release; channel: 'stable' | 'preview' }>
 }
@@ -348,12 +349,21 @@ export class NativeUpdateService {
       // One live task check after preparation; there is no install fence and
       // no status lookup in ordinary message/connection paths.
       await this.idle()
+      // An on-demand native config edit may legitimately replace its manager.
+      // Use exactly that returned provider, not a stale proxy or an arbitrary
+      // provider replacement during download/preparation.
+      const beforeTools = await this.inventory()
+      if (managerIdentity(beforeTools.manager) !== managerIdentity(before.manager)) throw Error('安装服务已变化，请重新检查更新')
+      const preparedManager = this.options.prepareTools ? await this.options.prepareTools(beforeTools.manager) : beforeTools.manager
+      // Copying/verifying the optional tools can take time. If a task started
+      // meanwhile, keep it running and do not begin package installation.
+      if (this.options.prepareTools) await this.idle()
       const current = await this.inventory()
       this.lifetime.signal.throwIfAborted()
       // Cordis creates a fresh traceable proxy on each get(). Compare public
       // original identities, retaining the real provider-replacement fence.
       const liveManager = this.options.manager()
-      if (!liveManager || managerIdentity(liveManager) !== managerIdentity(current.manager) || managerIdentity(current.manager) !== managerIdentity(before.manager)
+      if (!liveManager || managerIdentity(liveManager) !== managerIdentity(current.manager) || managerIdentity(current.manager) !== managerIdentity(preparedManager)
           || current.own.name !== plan.bundle || current.own.version !== state.previousVersion) throw Error('安装状态已变化，未执行旧更新请求')
       if (this.isRefused(current.manager, current.own, plan.release)) throw Error(inPlaceUpdateUnsupported)
       this.save({ ...state, phase: 'installing', message: '原生插件管理器正在安装更新。网络较慢时请耐心等待，暂勿退出 DSH 或重复安装。' }, true)

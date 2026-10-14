@@ -26,6 +26,47 @@ const fixture = (t, overrides = {}) => {
 }
 const finish = async service => { for (let i = 0; i < 100 && service.isBusy(); i++) await new Promise(resolve => setTimeout(resolve, 2)); assert.equal(service.isBusy(), false); return service.status() }
 
+test('explicit tool preparation can replace the native manager, but only its returned provider is admitted',async t=>{
+  for(const returnedCurrent of [true,false]){
+    const f=fixture(t,{scope:'web'})
+    const replacement={listBundles:f.manager.listBundles,installBundle:f.manager.installBundle}
+    let preparations=0
+    f.options.prepareTools=async manager=>{
+      preparations++
+      assert.equal(manager,f.manager)
+      f.options.manager=()=>replacement
+      return returnedCurrent?replacement:f.manager
+    }
+    const check=await f.service.check()
+    assert.equal(preparations,0,'read-only check never prepares or configures tools')
+    f.service.start(check.ticket)
+    const status=await finish(f.service)
+    assert.equal(preparations,1)
+    assert.equal(f.state.installs.length,returnedCurrent?1:0)
+    assert.equal(status.phase,returnedCurrent?'restart-required':'failed')
+  }
+})
+
+test('tool setup failure retains original plugin and never submits installation',async t=>{
+  const f=fixture(t,{scope:'web',prepareTools:async()=>{throw Error('fixture tool preparation failed')}})
+  const check=await f.service.check();assert.equal(check.canInstall,true)
+  f.service.start(check.ticket)
+  const status=await finish(f.service)
+  assert.equal(status.phase,'failed')
+  assert.equal(f.state.installs.length,0)
+  assert.equal(f.state.version,'1.7.12')
+})
+
+test('a task beginning during optional tool preparation remains running and prevents installation',async t=>{
+  const f=fixture(t,{scope:'web'})
+  f.options.prepareTools=async manager=>{f.state.running=true;return manager}
+  const check=await f.service.check();f.service.start(check.ticket)
+  const status=await finish(f.service)
+  assert.equal(status.phase,'failed')
+  assert.equal(f.state.installs.length,0)
+  assert.equal(f.state.running,true)
+})
+
 function coreFixture(f, bytes = coreArchive('1.8.0')) {
   f.state.owner = '@harness-remote/dsh-wechat-remote'
   Object.assign(f.releases.release.asset, integrity(bytes))

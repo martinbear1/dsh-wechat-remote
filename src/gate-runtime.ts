@@ -76,6 +76,7 @@ import { prepareNodeStorage } from './node-storage.js'
 import { PluginUpdateService } from './update-service.js'
 import { NativeUpdateService, supportsNativeUpdates } from './native-update-service.js'
 import { PLUGIN_VERSION } from './plugin-version.js'
+import { prepareNativeUpdateTools } from './native-update-tools.js'
 import { runConnectionDiagnostics } from './connection-diagnostics.js'
 import type { LegacyGateStartup } from './update-legacy-handoff.js'
 
@@ -316,6 +317,7 @@ export function mountWechatGate(ctx: Context, startup?: LegacyGateStartup): () =
   const updater = new PluginUpdateService(ctx, { web: UPSTREAM_PORT, gate: PUBLIC_PORT, local: LOCAL_PORT })
   const nativeUpdater = new NativeUpdateService({ home: agentDshHome(ctx), scope: selectedGatePorts.profileScope, runningVersion: PLUGIN_VERSION,
     manager: () => ctx.get('pluginManager') as any, sessions: () => ctx.get('sessionController') as any,
+    prepareTools: manager => prepareNativeUpdateTools(ctx, agentDshHome(ctx), selectedGatePorts.profileScope, manager),
     release: () => updater.nativeRelease() })
   ctx.effect(() => () => nativeUpdater.dispose(), 'wechat native updater')
   const compatibilityApi = new DshCompatibilityApi(ctx, UPSTREAM_PORT)

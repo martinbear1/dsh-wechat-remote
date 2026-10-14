@@ -72,6 +72,7 @@ try {
     'update-legacy-handoff.ts',
     'update-legacy-recovery.ts',
     'native-update-service.ts',
+    'native-update-tools.ts',
     'plugin-version.ts',
     'install-runtime.ts',
     'install-profile.ts',

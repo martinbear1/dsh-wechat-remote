@@ -55,6 +55,7 @@ export interface NativeUpdateOptions {
     scope: string;
     runningVersion: string;
     manager(): Manager | undefined;
+    prepareTools?(manager: Manager): Promise<Manager>;
     sessions(): {
         list(request: object, signal: AbortSignal): Promise<{
             items: {

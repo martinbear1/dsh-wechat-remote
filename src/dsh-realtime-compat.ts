@@ -1,5 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { WebSocket } from 'ws'
+import { randomUUID } from 'node:crypto'
 
 import { resolveTypertGateway, type LegacyClientRequest, type TypertGatewayLike } from './dsh-protocol-compat.js'
 import { resolveDshSessionAddress, isSessionReadError } from './dsh-session-address.js'
@@ -8,6 +9,8 @@ import { AssistantStreamCompatibility, assistantRecordPresentation } from './ass
 import { resourcePresentation } from './agent-resources.js'
 import { TurnActivityCompatibility } from './turn-activity.js'
 import type { WechatHistoryService } from './history-service.js'
+import { acquireNativePeer, type NativePeer, type NativePeerLease } from './dsh-native-peer.js'
+import { openHostEvents } from './dsh-host-contract.js'
 
 type JsonRecord = Record<string, unknown>
 
@@ -20,7 +23,7 @@ export interface LegacyRealtimePeer {
 }
 
 interface ConnectionFetchHandler {
-  fetch(request: Request): Promise<Response>
+  fetch(request: Request, peer?: NativePeer): Promise<Response>
 }
 
 interface ConnectionLike {
@@ -28,6 +31,7 @@ interface ConnectionLike {
 }
 
 interface PendingInteraction {
+  readonly owner: SocketState
   readonly clientId: string
   readonly eventId: string
   readonly event: 'approval/request' | 'user-questions/request'
@@ -43,6 +47,7 @@ interface SocketState {
   readonly sessionLifetimes: Map<string, AbortController>
   readonly permissionProjections: Map<string, JsonRecord>
   clientId?: string
+  nativePeer?: NativePeerLease
 }
 
 const MAX_BUFFERED_BYTES = 4 * 1024 * 1024
@@ -291,7 +296,7 @@ export class DshRealtimeCompatibility {
     }
     this.responding.add(target)
     try {
-      const reply = await this.dispatchRemoteEventResult({
+      const reply = await this.dispatchRemoteEventResult(target.owner, {
         clientId: target.clientId,
         eventId: target.eventId,
         outcome,
@@ -563,9 +568,12 @@ export class DshRealtimeCompatibility {
   }
 
   private async followRemoteEvents(state: SocketState): Promise<void> {
-    const wire = this.gateway().wireStream
-    if (!wire) throw new Error('DSH Remote Event stream is unavailable')
-    const iterable = await wire.open('$events', { args: {} }, state.lifetime.signal)
+    const gateway = this.ctx.get('typertGateway') as Record<string, any> | undefined
+    if (!gateway?.wireStream) throw new Error('DSH Remote Event stream is unavailable')
+    const lease = acquireNativePeer(this.ctx, 'answer', state.lifetime.signal)
+    state.nativePeer = lease
+    try {
+    const iterable = await openHostEvents(gateway, '$events', { args: {} }, state.lifetime.signal, this.ctx, lease.peer)
     for await (const raw of iterable) {
       if (state.lifetime.signal.aborted) return
       const frame = recordOf(raw)
@@ -611,8 +619,13 @@ export class DshRealtimeCompatibility {
         continue
       }
       if (frame.type === 'waterfall') this.pendingWaterfall(state, frame)
-      else if (frame.type === 'cancel') this.settlePending(stringOf(frame.eventId))
+      else if (frame.type === 'cancel') {
+        for (const [rpcId, values] of this.pending) {
+          if (values.some(value => value.owner === state && value.eventId === frame.eventId)) this.settlePending(rpcId)
+        }
+      }
     }
+    } finally { await lease.dispose() }
   }
 
   private pendingWaterfall(state: SocketState, frame: JsonRecord): void {
@@ -633,16 +646,20 @@ export class DshRealtimeCompatibility {
       }
       : { type: 'question/requested', sessionId, questions: request.questions }
     const pending: PendingInteraction = {
-      clientId, eventId, event, sessionId,
+      owner: state, clientId, eventId, event, sessionId,
       payload,
       ...(approvalId ? { approvalId } : {}),
     }
-    const values = this.pending.get(eventId) ?? []
-    if (values.some(value => value.clientId === clientId)) return
+    if ([...this.pending.values()].some(values => values.some(value => value.clientId === clientId && value.eventId === eventId))) return
+    // A native waterfall may be offered again after reconnect. Its eventId is
+    // not a delivery identity: an old phone reply must not answer through a new
+    // Peer. The existing opaque rpcId carries this local delivery generation.
+    const rpcId = state.nativePeer?.peer ? randomUUID() : eventId
+    const values = this.pending.get(rpcId) ?? []
     values.push(pending)
-    this.pending.set(eventId, values)
+    this.pending.set(rpcId, values)
     for (const target of this.sockets) {
-      if (target.kind === 'mux') this.send(target, payload, eventId)
+      if (target.kind === 'mux') this.send(target, payload, rpcId)
     }
   }
 
@@ -664,21 +681,25 @@ export class DshRealtimeCompatibility {
     }
   }
 
-  private async dispatchRemoteEventResult(args: JsonRecord): Promise<{
+  private async dispatchRemoteEventResult(owner: SocketState, args: JsonRecord): Promise<{
     readonly ok: boolean
     readonly message?: string
   }> {
+    owner.lifetime.signal.throwIfAborted()
+    owner.nativePeer?.peer?.signal.throwIfAborted()
+    if (!this.sockets.has(owner) || owner !== this.remoteOwner) throw new Error('DSH interaction delivery expired')
     const connection = this.ctx.get('connection') as ConnectionLike | undefined
     const handler = connection?.createSharedFetchHandler?.('/api')
     if (!handler) throw new Error('DSH Connection RPC bridge is unavailable')
     const rpcId = `wechat-response-${Date.now().toString(36)}`
     const response = await handler.fetch(new Request('http://dsh.local/api/$events/result', {
       method: 'POST',
+      signal: owner.lifetime.signal,
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         type: 'client-request', rpcId, method: '$events/result', payload: { args },
       }),
-    }))
+    }), owner.nativePeer?.peer)
     if (response.status !== 200) return { ok: false, message: `DSH response HTTP ${response.status}` }
     const body = recordOf(await response.json())
     const result = recordOf(body?.result)

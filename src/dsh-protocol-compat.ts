@@ -3,6 +3,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { resolveDshSessionAddress } from './dsh-session-address.js'
 import { withPresentationProjections } from './session-presentation.js'
 import { openHostEvents, invokeHostRemote } from './dsh-host-contract.js'
+import { withNativePeerStream } from './dsh-native-peer.js'
 import { modelIdentityFormat, presentModelCatalog, needsModelAliasResolution, resolveModelAlias, legacyModelSelection } from './legacy-model-identity.js'
 
 type JsonRecord = Record<string, unknown>
@@ -325,7 +326,8 @@ export function resolveTypertGateway(ctx: Context): TypertGatewayLike | null {
       }
       return invokeHostRemote(ctx, candidate, request)
     },
-    stream: request => candidate.stream!(request),
+    stream: request => withNativePeerStream(ctx, request.signal, lease => candidate.stream!(
+      lease.peer ? { ...request, ...{ peer: lease.peer }, signal: lease.signal } : request)),
     commandAttachmentField: () => {
       const registry = ctx.get('typert') as { local?: { get(endpoint: string): {parameters?: readonly {wire?: string}[]} | undefined; hasSeen?(endpoint: string): boolean } } | undefined
       const descriptor = registry?.local?.get('commands/execute')

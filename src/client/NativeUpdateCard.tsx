@@ -1,5 +1,5 @@
 import { useEffect, useState, useSyncExternalStore } from 'react'
-import type { NativeUpdateStore, RestartNotice } from './native-update-store.js'
+import { nativeUpdateFailed, nativeUpdatePending, type NativeUpdateStore, type RestartNotice } from './native-update-store.js'
 import type { NativeUpdateStatus } from '../native-update-service.js'
 import styles from './HarnessRemoteSettings.module.css'
 import { manualRestartInstruction } from './installation-state.js'
@@ -23,26 +23,32 @@ export function NativeUpdateCard({ store, scope = 'desktop', embedded = false, i
   const desktop = scope === 'desktop'
   const label = desktop ? 'Desktop' : 'Web'
   const { check, status, checking, starting, error } = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
-  const busy = starting || status?.phase === 'preparing' || status?.phase === 'installing'
-  const pending = status && ['preparing', 'installing', 'restart-required', 'unknown'].includes(status.phase)
-  const installed = status?.phase === 'restart-required' || status?.phase === 'complete'
-  const versions = check?.advice.current ?? current
-  const phaseLabel = status?.phase === 'restart-required' ? desktop ? '已安装，待重新打开 Desktop' : '已安装，待重启 Web 服务'
+  const failed = nativeUpdateFailed(status)
+  const busy = starting || !failed && (status?.phase === 'preparing' || status?.phase === 'installing')
+  const pending = nativeUpdatePending(status, check)
+  const canStart = !pending && check?.canInstall
+  const installed = !failed && (status?.phase === 'restart-required' || status?.phase === 'complete')
+  const knownVersions = check?.advice.current ?? current
+  // complete is the service's positive runtime confirmation, unlike merely
+  // installed files. Keep that fact visible while its advice refresh settles.
+  const versions = !failed && status?.phase === 'complete' && status.targetVersion
+    ? { ...knownVersions, pluginVersion: status.targetVersion } : knownVersions
+  const phaseLabel = failed ? '更新未完成'
+    : status?.phase === 'restart-required' ? desktop ? '已安装，待重新打开 Desktop' : '已安装，待重启 Web 服务'
     : status?.phase === 'unknown' ? '更新结果待核对'
-    : status?.phase === 'failed' ? '更新未完成'
     : busy ? `正在更新 ${label} 插件` : status?.phase === 'complete' ? '更新已生效' : ''
   return <div className={embedded ? styles.updateEndpoint : styles.updateCard}>
     {status?.phase !== 'restart-required' && installation ? <InstallationRestartNotice {...installation} /> : null}
     <div className={styles.updateRow}><div className={styles.updateCopy}><strong>{label} <span className={styles.updateScope}>当前端</span></strong>
       {versions ? <div className={styles.updateVersions}><span>DSH <strong>{versions.agentVersion || '未确认'}</strong></span><span>插件运行 <strong>{versions.pluginVersion || '未确认'}</strong></span>{installed && status.targetVersion && status.targetVersion !== versions.pluginVersion ? <span>已安装 <strong>{status.targetVersion}</strong></span> : null}{check?.channel === 'preview' ? <span>预览通道</span> : null}</div> : null}</div>
       <div className={styles.updateControl}><button type="button" className={styles.secondaryButton} disabled={checking || busy} onClick={() => void store.refresh()}>{checking ? '检查中…' : '检查更新'}</button>
-        {check ? <strong className={styles.updateLabel} data-severity={status?.phase === 'failed' ? 'required' : status?.phase === 'complete' ? 'none' : pending ? status?.phase === 'unknown' ? 'unknown' : 'info' : check.advice.severity}>{phaseLabel || check.advice.label}</strong> : null}
+        {check ? <strong className={styles.updateLabel} data-severity={failed ? 'required' : status?.phase === 'complete' ? 'none' : status?.phase === 'unknown' ? 'unknown' : pending ? 'info' : check.advice.severity}>{phaseLabel || check.advice.label}</strong> : null}
         </div></div>
     {check ? <>
       {!installed && !pending && check.advice.targetVersion ? <p>可更新至 {check.advice.targetVersion}</p> : null}
       {!pending && check.reason ? <p>{check.reason}</p> : null}
-      {!pending && check.canInstall ? <><div className={styles.updateActions}><button type="button" className={styles.primaryButton} disabled={busy || checking} onClick={() => void store.install()}>更新 {label} 插件</button></div>
-        <small className={styles.updateChecked}>仅更新当前端，保留配对与会话；{desktop ? '完成后需退出并重新打开。' : '完成后需正常重启此 Web 服务，仅刷新网页不会生效。'}</small></> : null}
+      {canStart ? <><div className={styles.updateActions}><button type="button" className={styles.primaryButton} disabled={busy || checking} onClick={() => void store.install()}>更新 {label} 插件</button></div>
+        <small className={styles.updateChecked}>仅更新当前端，保留配对与会话；{desktop ? '若提示需要重启，再正常退出并重新打开当前 DSH。' : '若提示需要重启，再正常重启当前 DSH Web 服务；刷新网页不能替代服务重启。'}</small></> : null}
     </> : null}
     {status?.phase !== 'idle' && status ? <div role="status" aria-live="polite">{busy ? <progress className={styles.updateProgress} aria-label={`${label} 插件更新中`} /> : null}
       {status.phase === 'restart-required' ? <p className={styles.updateNote}>{manualRestartInstruction(scope)} 无需重新配对。</p>

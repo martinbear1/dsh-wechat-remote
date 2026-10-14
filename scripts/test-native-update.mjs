@@ -4,18 +4,16 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import vm from 'node:vm'
-import { gzipSync } from 'node:zlib'
-import { createHash } from 'node:crypto'
 import ts from 'typescript'
-import { NativeUpdateService, supportsNativeUpdates } from '../lib/native-update-service.js'
+import { NativeUpdateService, supportsNativeUpdates, coreArchive, integrity, nativeReleaseFixture, mockArtifactFetch } from './native-update-fixture.mjs'
 import { Context, Service } from '@deepseek-ai/cordis'
 
 const fixture = (t, overrides = {}) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-native-update-'))
-  t.after(() => fs.rmSync(home, { recursive: true, force: true }))
-  const releases = { advice: { revision: 'test', component: 'plugin', targetVersion: '1.8.0', current: { pluginVersion: '1.7.12' } }, channel: 'stable', release: {
-    version: '1.8.0', asset: { url: 'https://github.com/martinbear1/dsh-wechat-remote/releases/download/v1.8.0/plugin.tgz', bytes: 1, sha256: 'a'.repeat(64) },
-    npmInstaller: { version: '1.8.0', url: 'https://registry.npmjs.org/dsh-wechat-remote/-/dsh-wechat-remote-1.8.0.tgz', bytes: 1, sha256: 'b'.repeat(64) } } }
+  t.after(() => { assert.equal(path.dirname(home), os.tmpdir()); assert(path.basename(home).startsWith('wechat-native-update-')); fs.rmSync(home, { recursive: true, force: true }) })
+  const artifacts = nativeReleaseFixture()
+  const releases = { advice: { revision: 'test', component: 'plugin', targetVersion: '1.8.0', current: { pluginVersion: '1.7.12' } }, channel: 'stable', release: artifacts.release }
+  const downloads = mockArtifactFetch(t, artifacts)
   const state = { owner: 'dsh-wechat-remote', version: '1.7.12', running: false, enabled: true, installs: [] }
   const manager = { listBundles: async () => [{ name: state.owner, version: state.version, enabled: state.enabled, installed: true }],
     installBundle: async (spec, options) => { state.installs.push({ spec, options }); state.version = '1.8.0'; return { application: 'restart-required', bundle: state.owner } } }
@@ -24,25 +22,14 @@ const fixture = (t, overrides = {}) => {
     release: async () => structuredClone(releases), ...overrides }
   const service = new NativeUpdateService(options)
   t.after(() => service.dispose())
-  return { home, state, manager, service, options, releases }
+  return { home, state, manager, service, options, releases, artifacts, downloads }
 }
 const finish = async service => { for (let i = 0; i < 100 && service.isBusy(); i++) await new Promise(resolve => setTimeout(resolve, 2)); assert.equal(service.isBusy(), false); return service.status() }
 
-function coreArchive(version, name = '@harness-remote/dsh-wechat-remote') {
-  const chunks = []
-  const files = [['package/package.json', JSON.stringify({ name, version, dsh: { bundle: { patch: './cordis.patch.yml' } } })],
-    ['package/lib/index.js', ''], ['package/lib/client.js', ''], ['package/cordis.patch.yml', '[]']]
-  for (const [entry, content] of files) {
-    const data = Buffer.from(content), header = Buffer.alloc(512)
-    header.write(entry); header.write(data.length.toString(8).padStart(11, '0') + '\0', 124); header.write('0', 156)
-    header.fill(32, 148, 156); header.write([...header].reduce((sum, byte) => sum + byte, 0).toString(8).padStart(6, '0') + '\0 ', 148)
-    chunks.push(header, data, Buffer.alloc((512 - data.length % 512) % 512))
-  }
-  return gzipSync(Buffer.concat([...chunks, Buffer.alloc(1024)]))
-}
 function coreFixture(f, bytes = coreArchive('1.8.0')) {
   f.state.owner = '@harness-remote/dsh-wechat-remote'
-  Object.assign(f.releases.release.asset, { bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') })
+  Object.assign(f.releases.release.asset, integrity(bytes))
+  f.artifacts.core = bytes
   return bytes
 }
 
@@ -59,9 +46,11 @@ test('native capability requires the actual manager methods and supported scope,
 })
 
 test('actual gate snapshot only advertises native updates with authenticated management and a live capable manager', () => {
-  // Execute the compiled snapshot closure without mounting unrelated gate
+  // Execute the current source snapshot closure without mounting unrelated gate
   // listeners, credentials, or a real user's profile.
-  const source = ts.createSourceFile('gate-runtime.js', fs.readFileSync(new URL('../lib/gate-runtime.js', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.JS)
+  const source = ts.createSourceFile('gate-runtime.js', ts.transpileModule(fs.readFileSync(new URL('../src/gate-runtime.ts', import.meta.url), 'utf8'), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
+  }).outputText, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS)
   let snapshot
   const visit = node => { if (ts.isFunctionDeclaration(node) && node.name?.text === 'gateRuntimeSnapshot') snapshot = node; ts.forEachChild(node, visit) }
   visit(source)
@@ -140,19 +129,23 @@ test('real Cordis traceable proxies do not veto same native provider; actual pro
   }
 })
 test('check is read-only; exact single-use confirmation installs once through the native owner, then restart proof', async t => {
-  t.mock.method(globalThis, 'fetch', () => assert.fail('Desktop must not pre-download outside the native manager'))
   const f = fixture(t)
   const [first, same] = await Promise.all([f.service.check(), f.service.check()])
   assert.equal(first.ticket, same.ticket); assert.equal(first.canInstall, true)
   assert.equal(f.state.installs.length, 0)
+  assert.equal(f.downloads.length, 0, 'checking alone never downloads')
   assert.throws(() => f.service.start('b'.repeat(48)), /过期/)
   const accepted = f.service.start(first.ticket)
   assert.equal(accepted.phase, 'preparing'); assert.throws(() => f.service.start(first.ticket))
   assert.equal((await finish(f.service)).phase, 'restart-required')
   assert.equal(f.state.installs.length, 1)
   const installation = f.state.installs[0]
-  assert.equal(installation.spec, 'dsh-wechat-remote@1.8.0')
-  assert.deepEqual(fs.readdirSync(path.join(f.home, 'harness-remote-updates', 'native-desktop')), ['status.json'], 'no plugin-owned archive or profile edits')
+  const expectedName = `bundle-1.8.0-${f.releases.release.npmInstaller.sha256}`
+  assert.equal(installation.spec, path.join(f.home, 'harness-remote-updates', 'native-desktop', expectedName, 'release.tgz'))
+  assert.deepEqual(fs.readFileSync(installation.spec), f.artifacts.outer)
+  assert.deepEqual(fs.readdirSync(path.dirname(installation.spec)), ['release.tgz'], 'immutable archive directory contains only its verified release')
+  assert.deepEqual(fs.readdirSync(path.dirname(path.dirname(installation.spec))).sort(), [expectedName, 'status.json'].sort(), 'only immutable verified archive and update journal are retained')
+  assert.deepEqual(f.downloads, [f.releases.release.npmInstaller.url])
   assert.deepEqual(installation.options, { enabled: true, requestId: accepted.jobId })
   assert.equal((await f.service.check()).canInstall, false)
   f.service.dispose()
@@ -191,8 +184,7 @@ test('native updates ignore peer data refreshes and keep each profile result ind
       fs.writeFileSync(facts, JSON.stringify({ asOf: 1000, records: [] }))
       const peerJournal = JSON.stringify({ phase: 'installing', jobId: 'a'.repeat(32), targetVersion: '2.0.0' })
       fs.writeFileSync(journal, peerJournal)
-      const bytes = owner.startsWith('@') ? coreFixture(f) : null
-      t.mock.method(globalThis, 'fetch', async () => { assert(bytes); return new Response(bytes) })
+      if (owner.startsWith('@')) coreFixture(f)
       const nativeInstall = f.manager.installBundle
       f.manager.installBundle = async (...args) => {
         fs.writeFileSync(facts, JSON.stringify({ asOf: 2000, records: [] }))
@@ -256,10 +248,9 @@ test('Web and Desktop update each single native owner in place from 1.7.10 and 1
       const f = fixture(t, { scope, runningVersion: previous })
       f.state.version = previous
       let downloadCount = 0, taskChecks = 0
-      const bytes = owner.startsWith('@') ? coreFixture(f) : null
+      const bytes = owner.startsWith('@') ? coreFixture(f) : f.artifacts.outer
       t.mock.method(globalThis, 'fetch', async url => {
-        assert(bytes, 'outer updates delegate downloads to the native manager')
-        assert.equal(url, f.releases.release.asset.url)
+        assert.equal(url, owner.startsWith('@') ? f.releases.release.asset.url : f.releases.release.npmInstaller.url)
         downloadCount++
         return new Response(bytes)
       })
@@ -272,11 +263,10 @@ test('Web and Desktop update each single native owner in place from 1.7.10 and 1
       assert.equal(taskChecks, 1, 'one final live task check, not two identical serial reads')
       assert.equal(f.state.installs.length, 1)
       const installation = f.state.installs[0]
-      if (bytes) {
-        assert.equal(downloadCount, 1)
-        assert.equal(path.dirname(installation.spec), path.join(f.home, 'harness-remote-updates', `native-${scope}`))
-        assert.deepEqual(fs.readFileSync(installation.spec), bytes, 'retain immutable file referenced by native pnpm')
-      } else assert.equal(installation.spec, 'dsh-wechat-remote@1.8.0')
+      assert.equal(downloadCount, 1)
+      assert.equal(path.basename(installation.spec), 'release.tgz')
+      assert.equal(path.dirname(path.dirname(installation.spec)), path.join(f.home, 'harness-remote-updates', `native-${scope}`))
+      assert.deepEqual(fs.readFileSync(installation.spec), bytes, 'retain immutable file referenced by native pnpm')
       assert.equal((await f.manager.listBundles()).length, 1)
       assert.equal((await f.manager.listBundles())[0].name, owner)
       const restarted = new NativeUpdateService({ ...f.options, runningVersion: '1.8.0' })
@@ -310,36 +300,170 @@ test('core download checks hash, identity and version before native installation
   }
 })
 
-test('core task check occurs after download; activity starting during preparation is preserved', async t => {
-  const f = fixture(t, { scope: 'web' }), bytes = coreFixture(f)
-  t.mock.method(globalThis, 'fetch', async () => { f.state.running = true; return new Response(bytes) })
-  f.service.start((await f.service.check()).ticket)
-  assert.equal((await finish(f.service)).phase, 'failed')
-  assert.equal(f.state.installs.length, 0)
-  assert.equal(f.state.running, true)
+test('both owners check live tasks after download; activity starting during preparation is preserved', async t => {
+  for (const owner of ['outer', 'core']) await t.test(owner, async t => {
+    const f = fixture(t, { scope: 'web' }), bytes = owner === 'core' ? coreFixture(f) : f.artifacts.outer
+    let downloads = 0
+    t.mock.method(globalThis, 'fetch', async () => { downloads++; f.state.running = true; return new Response(bytes) })
+    f.service.start((await f.service.check()).ticket)
+    assert.equal((await finish(f.service)).phase, 'failed')
+    assert.equal(downloads, 1)
+    assert.equal(f.state.installs.length, 0)
+    assert.equal(f.state.running, true)
+  })
 })
 
-test('core cache is immutable and reusable after a native refusal; other bundle results remain unknown', async t => {
-  const f = fixture(t, { scope: 'web' }), bytes = coreFixture(f)
-  let downloads = 0
-  t.mock.method(globalThis, 'fetch', async () => { downloads++; return new Response(bytes) })
-  f.manager.installBundle = async (spec, options) => {
-    f.state.installs.push({ spec, options })
-    return { application: 'failed', error: { code: 'incompatible-version' } }
+test('both owners reuse audited immutable cache only after a fresh confirmation; other bundle results stay unknown', async t => {
+  for (const owner of ['outer', 'core']) await t.test(owner, async t => {
+    const f = fixture(t, { scope: 'web' }), bytes = owner === 'core' ? coreFixture(f) : f.artifacts.outer
+    let downloads = 0
+    t.mock.method(globalThis, 'fetch', async () => { downloads++; return new Response(bytes) })
+    f.manager.installBundle = async (spec, options) => {
+      f.state.installs.push({ spec, options })
+      return { application: 'failed', error: { code: 'incompatible-version' } }
+    }
+    f.service.start((await f.service.check()).ticket)
+    assert.equal((await finish(f.service)).phase, 'failed')
+    const archive = f.state.installs[0].spec
+    f.manager.installBundle = async (spec, options) => {
+      f.state.installs.push({ spec, options }); f.state.version = '1.8.0'
+      return { application: 'restart-required', bundle: 'other' }
+    }
+    f.service.start((await f.service.check()).ticket)
+    assert.equal((await finish(f.service)).phase, 'unknown')
+    assert.equal(f.state.installs[1].spec, archive)
+    assert.deepEqual(fs.readFileSync(archive), bytes)
+    assert.equal(downloads, 1, 'retry revalidates the retained artifact without downloading again')
+    assert.equal((await f.service.check()).canInstall, false)
+  })
+})
+
+test('outer download validates catalog hashes, both package identities and the native bundle structure before installation', async t => {
+  for (const kind of ['hash', 'size', 'identity', 'version', 'install-script', 'native-entry', 'embedded-catalog', 'external-core-hash', 'core-identity', 'core-version', 'untrusted']) {
+    await t.test(kind, async t => {
+      const f = fixture(t)
+      const options = kind === 'identity' ? { manifest: { name: 'other' } }
+        : kind === 'version' ? { manifest: { version: '1.9.0' } }
+        : kind === 'install-script' ? { manifest: { scripts: { postinstall: 'never execute this synthetic marker' } } }
+        : kind === 'native-entry' ? { omit: 'package/native/lib/client.js' }
+        : kind === 'embedded-catalog' ? { metadata: { version: '1.8.0', catalog: { releases: [] } } }
+        : kind === 'core-identity' ? { core: coreArchive('1.8.0', 'other') }
+        : kind === 'core-version' ? { core: coreArchive('1.9.0') } : {}
+      Object.assign(f.artifacts, nativeReleaseFixture('1.8.0', options))
+      f.releases.release = f.artifacts.release
+      if (kind === 'hash') f.releases.release.npmInstaller.sha256 = 'c'.repeat(64)
+      if (kind === 'size') f.releases.release.npmInstaller.bytes++
+      if (kind === 'external-core-hash') f.releases.release.asset.sha256 = 'c'.repeat(64)
+      if (kind === 'untrusted') f.releases.release.npmInstaller.url = 'https://example.com/package.tgz'
+      const checked = await f.service.check()
+      const rejectedBeforeDownload = kind === 'untrusted'
+      if (rejectedBeforeDownload) assert.equal(checked.canInstall, false)
+      else {
+        assert.equal(checked.canInstall, true)
+        f.service.start(checked.ticket)
+        assert.equal((await finish(f.service)).phase, 'failed')
+      }
+      assert.equal(f.downloads.length, rejectedBeforeDownload ? 0 : 1, 'integrity failure never falls back to an unchecked source')
+      assert.equal(f.state.installs.length, 0)
+      assert.equal(f.state.version, '1.7.12')
+    })
   }
-  f.service.start((await f.service.check()).ticket)
-  assert.equal((await finish(f.service)).phase, 'failed')
-  const archive = f.state.installs[0].spec
+})
+
+test('outer verifier accepts its trusted hash and complete embedded catalog without requiring duplicate core metadata', async t => {
+  // Direct service contract only: production cloud catalog schema is unchanged.
+  const f = fixture(t)
+  f.releases.release.asset = undefined
+  const check = await f.service.check()
+  assert.equal(check.canInstall, true)
+  f.service.start(check.ticket)
+  assert.equal((await finish(f.service)).phase, 'restart-required')
+  assert.deepEqual(f.downloads, [f.releases.release.npmInstaller.url])
+  assert.deepEqual(fs.readFileSync(f.state.installs[0].spec), f.artifacts.outer)
+})
+
+test('retained archives are revalidated and a corrupt cache is neither overwritten nor installed', async t => {
+  for (const owner of ['outer', 'core']) await t.test(owner, async t => {
+    const f = fixture(t), bytes = owner === 'core' ? coreFixture(f) : f.artifacts.outer
+    f.manager.installBundle = async (spec, options) => {
+      f.state.installs.push({ spec, options })
+      return { application: 'failed', error: { code: 'incompatible-version' } }
+    }
+    f.service.start((await f.service.check()).ticket)
+    assert.equal((await finish(f.service)).phase, 'failed')
+    assert.equal(f.downloads.length, 1)
+    const file = f.state.installs[0].spec
+    assert.deepEqual(fs.readFileSync(file), bytes)
+    const damaged = Buffer.from(bytes)
+    damaged[damaged.length - 1] ^= 0xff
+    fs.writeFileSync(file, damaged)
+    f.service.start((await f.service.check()).ticket)
+    assert.equal((await finish(f.service)).phase, 'failed')
+    assert.equal(f.state.installs.length, 1, 'corrupt cache must never reach the native manager')
+    assert.equal(f.downloads.length, 1, 'do not silently overwrite a retained native dependency')
+    assert.deepEqual(fs.readFileSync(file), damaged)
+    assert.equal(f.state.version, '1.7.12')
+  })
+})
+
+test('cancelled native operation and changed-on-failure receipts do not imply activation or permit blind retry', async t => {
+  for (const outcome of [
+    { application: 'cancelled', changed: false },
+    { application: 'cancelled', changed: true },
+    { application: 'failed', changed: true, error: { code: 'already-installed' } },
+    { application: 'failed', changed: true, error: { code: 'package-failed' } },
+  ]) await t.test(JSON.stringify(outcome), async t => {
+    const f = fixture(t)
+    f.manager.installBundle = async (spec, options) => {
+      f.state.installs.push({ spec, options })
+      if (outcome.changed) f.state.version = '1.8.0'
+      return outcome
+    }
+    f.service.start((await f.service.check()).ticket)
+    const status = await finish(f.service)
+    assert.equal(status.phase, 'failed')
+    assert.equal(status.nativeResult.application, outcome.application)
+    assert.equal(status.nativeResult.changed, outcome.changed)
+    assert.equal((await f.service.check()).canInstall, !outcome.changed)
+    assert.equal(f.state.installs.length, 1)
+    if (outcome.changed) assert.doesNotMatch(status.message, /现有插件未改动/)
+    f.service.dispose()
+    const reopened = new NativeUpdateService(f.options)
+    t.after(() => reopened.dispose())
+    assert.equal((await reopened.status()).phase, 'failed')
+    assert.equal((await reopened.check()).canInstall, !outcome.changed)
+    assert.equal(f.state.installs.length, 1, 'journal recovery only observes, never retries or rolls back')
+  })
+})
+
+test('recorded changed-on-failure permits a later explicit upgrade after target runtime is loaded, never repeats the failed target', async t => {
+  const f = fixture(t, { runningVersion: '1.8.0' })
+  f.state.version = '1.8.0'
+  const directory = path.join(f.home, 'harness-remote-updates', 'native-desktop')
+  fs.mkdirSync(directory, { recursive: true })
+  const receipt = { phase: 'unknown', jobId: 'e'.repeat(32), bundle: 'dsh-wechat-remote', targetVersion: '1.8.0', previousVersion: '1.7.12',
+    nativeResult: { application: 'failed', changed: true, bundle: 'dsh-wechat-remote', errorCode: 'package-failed' },
+    message: '安装文件已改变，但新版启用未完成；未自动回退或重复安装。' }
+  fs.writeFileSync(path.join(directory, 'status.json'), JSON.stringify(receipt))
+  assert.equal((await f.service.status()).phase, 'failed', 'old unknown with definite failed native receipt is terminal failure')
+  assert.equal((await f.service.check()).canInstall, false, 'the failed target is not retried')
+  Object.assign(f.artifacts, nativeReleaseFixture('1.8.1'))
+  f.releases.release = f.artifacts.release
+  f.releases.advice.targetVersion = '1.8.1'
+  const checked = await f.service.check()
+  assert.equal(checked.canInstall, true, JSON.stringify(checked))
+  assert.equal(f.state.installs.length, 0, 'reading a future release never installs it')
+  assert.equal(f.downloads.length, 0)
+  assert.equal((await f.service.status()).nativeResult.changed, true)
   f.manager.installBundle = async (spec, options) => {
-    f.state.installs.push({ spec, options }); f.state.version = '1.8.0'
-    return { application: 'restart-required', bundle: 'other' }
+    f.state.installs.push({ spec, options }); f.state.version = '1.8.1'
+    return { application: 'restart-required', bundle: f.state.owner }
   }
-  f.service.start((await f.service.check()).ticket)
-  assert.equal((await finish(f.service)).phase, 'unknown')
-  assert.equal(f.state.installs[1].spec, archive)
-  assert.deepEqual(fs.readFileSync(archive), bytes)
-  assert.equal(downloads, 1, 'retry revalidates the retained artifact without downloading again')
-  assert.equal((await f.service.check()).canInstall, false)
+  f.service.start(checked.ticket)
+  assert.equal((await finish(f.service)).phase, 'restart-required')
+  assert.equal(f.state.installs.length, 1)
+  assert.equal(f.downloads.length, 1)
+  assert.equal((await f.service.status()).targetVersion, '1.8.1')
 })
 
 test('profile journals are isolated and old Desktop outer-owner records still recover', async t => {
@@ -413,9 +537,7 @@ test('disposal during preparation and missing wrapper release never invoke the n
   assert.equal(g.state.installs.length, 0)
 })
 
-test('native transport can outlast sixty seconds; no plugin timeout, fetch, forced retry or registry override', async t => {
-  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] })
-  t.mock.method(globalThis, 'fetch', () => assert.fail('native transport owns download'))
+test('native applying can outlast ten minutes after verified download; no forced retry or registry override', async t => {
   const f = fixture(t)
   let finishNative, began
   const started = new Promise(resolve => { began = resolve })
@@ -427,9 +549,12 @@ test('native transport can outlast sixty seconds; no plugin timeout, fetch, forc
   }
   f.service.start((await f.service.check()).ticket)
   await started
+  assert.deepEqual(f.downloads, [f.releases.release.npmInstaller.url])
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] })
   t.mock.timers.tick(610000)
   assert.equal((await f.service.status()).phase, 'installing')
   assert.equal(f.state.installs.length, 1)
+  assert.equal(f.downloads.length, 1, 'no second download or competing install while native applying')
   assert.deepEqual(Object.keys(f.state.installs[0].options).sort(), ['enabled', 'requestId'])
   finishNative()
   for (let i = 0; i < 20 && f.service.isBusy(); i++) await Promise.resolve()
@@ -454,18 +579,22 @@ test('native download failure stays failed and installed version mismatch stays 
   }
 })
 
-test('exact preview targets remain preview specs; malformed, different-package and mutable sources are refused', async t => {
+test('exact preview targets use verified immutable preview archives; malformed, different-package and mutable sources are refused', async t => {
   const f = fixture(t)
   const target = '1.8.0-rc.9'
-  f.releases.advice.targetVersion = f.releases.release.version = f.releases.release.npmInstaller.version = target
-  f.releases.release.npmInstaller.url = `https://registry.npmjs.org/dsh-wechat-remote/-/dsh-wechat-remote-${target}.tgz`
+  Object.assign(f.artifacts, nativeReleaseFixture(target))
+  f.releases.release = f.artifacts.release
+  f.releases.advice.targetVersion = target
+  f.releases.channel = 'preview'
   f.manager.installBundle = async (spec, options) => {
     f.state.installs.push({ spec, options }); f.state.version = target
     return { application: 'restart-required', bundle: 'dsh-wechat-remote' }
   }
   f.service.start((await f.service.check()).ticket)
   assert.equal((await finish(f.service)).phase, 'restart-required')
-  assert.equal(f.state.installs[0].spec, `dsh-wechat-remote@${target}`)
+  assert.equal(path.basename(f.state.installs[0].spec), 'release.tgz')
+  assert.equal(path.basename(path.dirname(f.state.installs[0].spec)), `bundle-${target}-${f.releases.release.npmInstaller.sha256}`)
+  assert.deepEqual(fs.readFileSync(f.state.installs[0].spec), f.artifacts.outer)
   for (const version of ['latest', '^1.8.0', '1.8.0 --unsafe']) {
     const g = fixture(t)
     g.releases.advice.targetVersion = g.releases.release.version = g.releases.release.npmInstaller.version = version

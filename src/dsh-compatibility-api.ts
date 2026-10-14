@@ -20,6 +20,8 @@ export interface CompatibilityHttpResponse {
 
 /** Available only after the caller has authenticated its LAN or E2EE client. */
 export interface DshCompatibilityTransport {
+  /** Called once AFTER authentication; never share interaction ownership across tunnels. */
+  createConnection?(): DshCompatibilityTransport & { dispose(): void }
   /** Older Hosts retain native endpoints/events except for legacy prompt commands. */
   handlesPath?(path: string): boolean
   request(request: CompatibilityHttpRequest): Promise<CompatibilityHttpResponse>
@@ -41,13 +43,24 @@ export class DshCompatibilityApi implements DshCompatibilityTransport {
   /** Owned by the gate; credentials are removed before any native dispatch. */
   privateInput?: PrivateInputNative
   readonly realtime: DshRealtimeCompatibility
-  constructor(private readonly ctx: Context, private readonly dshPort?: number) {
+  private readonly connections = new Set<DshCompatibilityApi>()
+  private disposed = false
+  constructor(private readonly ctx: Context, private readonly dshPort?: number, private readonly owner?: DshCompatibilityApi) {
     this.realtime = new DshRealtimeCompatibility(ctx)
   }
 
+  createConnection(): DshCompatibilityApi {
+    if (this.disposed) throw new Error('DSH compatibility adapter is stopping')
+    const connection = new DshCompatibilityApi(this.ctx, this.dshPort, this)
+    this.connections.add(connection)
+    return connection
+  }
+
+  private get configuration(): DshCompatibilityApi { return this.owner?.configuration ?? this }
+
   handlesPath(path: string): boolean {
-    if (this.privateInput && path === '/api/wechatPrivateUpdates') return true
-    if (this.taskNotificationRequest && path === '/api/wechatTaskNotifications') return true
+    if (this.configuration.privateInput && path === '/api/wechatPrivateUpdates') return true
+    if (this.configuration.taskNotificationRequest && path === '/api/wechatTaskNotifications') return true
     if (resolveTypertGateway(this.ctx)) return true
     const invoker = this.ctx.get('typertGateway') as Partial<TypertGatewayLike> | undefined
     return typeof invoker?.invoke === 'function' && Boolean(this.dshPort)
@@ -77,6 +90,7 @@ export class DshCompatibilityApi implements DshCompatibilityTransport {
   }
 
   async request(request: CompatibilityHttpRequest): Promise<CompatibilityHttpResponse> {
+    if (this.disposed) throw new Error('DSH compatibility connection is closed')
     return this.dispatch(request)
   }
 
@@ -93,13 +107,14 @@ export class DshCompatibilityApi implements DshCompatibilityTransport {
         return response(404, { error: 'Unknown DSH API path' })
       }
       const body = JSON.parse(Buffer.from(request.body).toString('utf8'))
-      if (url.pathname === '/api/wechatPrivateUpdates' && this.privateInput) {
+      const { privateInput, taskNotificationRequest } = this.configuration
+      if (url.pathname === '/api/wechatPrivateUpdates' && privateInput) {
         return response(200, { type: 'server-response', rpcId: body.rpcId,
-          result: { ok: true, value: await this.privateInput.describe(body.payload, request.signal) } })
+          result: { ok: true, value: await privateInput.describe(body.payload, request.signal) } })
       }
-      if (url.pathname === '/api/wechatTaskNotifications' && this.taskNotificationRequest) {
+      if (url.pathname === '/api/wechatTaskNotifications' && taskNotificationRequest) {
         return response(200, { type: 'server-response', rpcId: body.rpcId,
-          result: { ok: true, value: await this.taskNotificationRequest(body.payload) } })
+          result: { ok: true, value: await taskNotificationRequest(body.payload) } })
       }
       if (url.pathname === '/api/respond') {
         return response(200, await this.realtime.respond(body))
@@ -141,8 +156,8 @@ export class DshCompatibilityApi implements DshCompatibilityTransport {
           describeHost: () => ({ cwd: process.cwd() }),
           flushPermission: sessionId => this.flushPermission(sessionId),
         })
-        reply = legacy.method === 'session.prompt' && this.privateInput
-          ? await this.privateInput.run(legacy.payload, ownerInput, invoke, legacy.rpcId) : await invoke()
+        reply = legacy.method === 'session.prompt' && privateInput
+          ? await privateInput.run(legacy.payload, ownerInput, invoke, legacy.rpcId) : await invoke()
       } finally { releaseRequest() }
       if (legacy.method === 'session.create' && reply.result.ok) {
         const value = reply.result.value as { readonly sessionId?: unknown } | null
@@ -164,6 +179,11 @@ export class DshCompatibilityApi implements DshCompatibilityTransport {
   }
 
   dispose(): void {
+    if (this.disposed) return
+    this.disposed = true
+    for (const connection of this.connections) connection.dispose()
+    this.connections.clear()
+    this.owner?.connections.delete(this)
     this.realtime.dispose()
   }
 }

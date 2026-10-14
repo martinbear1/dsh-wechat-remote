@@ -1,7 +1,8 @@
 import type { Context } from '@deepseek-ai/cordis'
+import { withNativePeer, type NativePeer } from './dsh-native-peer.js'
 
 interface ConnectionLike {
-  createSharedFetchHandler?(channel: '/api'): {fetch(request: Request): Promise<Response>}
+  createSharedFetchHandler?(channel: '/api'): {fetch(request: Request, peer?: NativePeer): Promise<Response>}
 }
 
 export function sessionExportAvailable(ctx: Context): boolean {
@@ -14,13 +15,17 @@ export function sessionExportAvailable(ctx: Context): boolean {
 export async function exportSessionArchive(ctx: Context, scope: string, signal: AbortSignal, maxBytes: number): Promise<{data: Buffer; name: string}> {
   if (typeof scope !== 'string' || !scope || scope.length > 256) throw new Error('会话无效')
   signal.throwIfAborted()
+  return withNativePeer(ctx, signal, lease => readSessionArchive(ctx, scope, lease.signal!, maxBytes, lease.peer))
+}
+
+async function readSessionArchive(ctx: Context, scope: string, signal: AbortSignal, maxBytes: number, peer?: NativePeer): Promise<{data: Buffer; name: string}> {
   const connection = ctx.get('connection') as ConnectionLike | undefined
   const handler = connection?.createSharedFetchHandler?.('/api')
   if (!handler) throw new Error('此节点尚不支持手机导出，请在电脑端导出或更新 DSH')
   const url = new URL('http://dsh.local/api/session.export')
   url.searchParams.set('sessionId', scope)
   url.searchParams.set('includeDescendants', 'true')
-  const response = await handler.fetch(new Request(url, {method:'GET', signal}))
+  const response = await handler.fetch(new Request(url, {method:'GET', signal}), peer)
   if (!response.ok || !response.headers.get('content-type')?.toLowerCase().startsWith('application/zip') || !response.body) {
     await response.body?.cancel()
     signal.throwIfAborted()

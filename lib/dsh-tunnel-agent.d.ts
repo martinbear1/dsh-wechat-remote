@@ -27,6 +27,7 @@ export declare class DshTunnelAgent {
     private readonly dshPort;
     private readonly maxStreams;
     private readonly compatibilityApi?;
+    private readonly disposeCompatibility?;
     private readonly issueLanCredential?;
     private readonly materializeAttachment?;
     private readonly streams;

@@ -1,5 +1,6 @@
 type Row = Record<string, any>;
 export declare function mutationPath(name: string, raw: string): string | null;
+export declare function mutationResultPath(argumentPath: string | null, meta: unknown): string | null;
 export declare class TurnActivityCompatibility {
     private state;
     private nextTurn;

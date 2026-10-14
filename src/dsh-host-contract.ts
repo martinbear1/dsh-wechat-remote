@@ -1,5 +1,7 @@
 /** Host-only contract differences. No network probing or per-request retries. */
 import { hostRuntimeVersion, type HostContext } from './dsh-host-context.js'
+import { withNativePeer, withNativePeerStream, type NativePeer } from './dsh-native-peer.js'
+import { resolveSubagentCatalogProjection } from './dsh-subagent-projection.js'
 export type { HostContext } from './dsh-host-context.js'
 type Row = Record<string, any>
 const contracts = new WeakMap<object, { duplex: boolean }>()
@@ -17,16 +19,16 @@ export function usesDuplexEvents(version: string | undefined): boolean {
   const [, major, minor, patch] = match.map(Number)
   return major > 0 || minor > 1 || minor === 1 && patch >= 7
 }
-export function openHostEvents(gateway: Row, endpoint: string, payload: unknown, signal: AbortSignal, ctx?: HostContext): Promise<AsyncIterable<unknown>> {
+export function openHostEvents(gateway: Row, endpoint: string, payload: unknown, signal: AbortSignal, ctx?: HostContext, peer?: NativePeer): Promise<AsyncIterable<unknown>> {
   let contract = contracts.get(gateway)
   if (!contract) { contract = { duplex: usesDuplexEvents(hostRuntimeVersion(ctx)) }; contracts.set(gateway, contract) }
   signal.throwIfAborted()
   // Same in-process operator identity as before. No new network authority,
   // buffered uplink, background task or duplicate subscription.
   const empty = { async *[Symbol.asyncIterator]() {} }
-  return contract.duplex
-    ? gateway.wireStream.open(endpoint, payload, empty, undefined, signal)
-    : gateway.wireStream.open(endpoint, payload, signal)
+  return withNativePeerStream(ctx, signal, lease => contract!.duplex
+    ? gateway.wireStream.open(endpoint, payload, empty, lease.peer, lease.signal)
+    : gateway.wireStream.open(endpoint, payload, lease.signal), peer)
 }
 export function workspaceReadArguments(ctx: HostContext, args: Row): Row {
   const registry = ctx.get('typert') as Row | undefined
@@ -124,6 +126,11 @@ export async function assertColdSessionPresetAvailable(ctx: HostContext, session
 }
 
 export async function invokeHostRemote(ctx: HostContext, gateway: Row, request: Row): Promise<unknown> {
+  return withNativePeer(ctx, request.signal, lease => invokeAdmittedHostRemote(ctx, gateway,
+    lease.peer ? { ...request, peer: lease.peer, signal: lease.signal } : request), request.peer)
+}
+
+async function invokeAdmittedHostRemote(ctx: HostContext, gateway: Row, request: Row): Promise<unknown> {
   if (request.namespace === 'session' && request.method === 'prompt' && typeof request.args?.request?.sessionId === 'string') {
     await assertColdSessionPresetAvailable(ctx, request.args.request.sessionId, request.signal)
     request.signal?.throwIfAborted()
@@ -152,7 +159,7 @@ export async function invokeHostRemote(ctx: HostContext, gateway: Row, request: 
     // The shipped phone names the old form. Discover the live native form
     // before ONE mutation: version guesses and write-then-retry are unsafe.
     request.signal?.throwIfAborted()
-    const description = await gateway.invoke({ namespace: 'settings', method: 'describe', args: {}, signal: request.signal })
+    const description = await gateway.invoke({ ...request, namespace: 'settings', method: 'describe', args: {} })
     request.signal?.throwIfAborted()
     const rows = description?.namespaces
     if (!Array.isArray(rows)) throw new Error('DSH 预设配置暂不可读取，未修改默认预设')
@@ -179,9 +186,12 @@ export async function invokeHostRemote(ctx: HostContext, gateway: Row, request: 
   if (typeof parent !== 'string' || !parent || parent.length > 256) throw new Error('父会话标识无效')
   request.signal?.throwIfAborted()
   const [projection, listing] = await Promise.all([
-    gateway.invoke({ namespace: 'session', method: 'projections', args: { request: { sessionId: parent } }, signal: request.signal }),
-    gateway.invoke({ namespace: 'session', method: 'list', args: { _request: {} }, signal: request.signal }),
+    gateway.invoke({ ...request, namespace: 'session', method: 'projections', args: { request: { sessionId: parent } } }),
+    gateway.invoke({ ...request, namespace: 'session', method: 'list', args: { _request: {} } }),
   ])
   request.signal?.throwIfAborted()
-  return projectedSubagentCatalog(parent, projection, listing?.items)
+  // The observation fallback is read-only and only follows BOTH admitted native
+  // reads. It cannot replace admission or the actual parent/child list check.
+  const resolved = await resolveSubagentCatalogProjection(ctx, parent, projection, request.signal)
+  return projectedSubagentCatalog(parent, resolved, listing?.items)
 }

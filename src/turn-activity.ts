@@ -60,6 +60,18 @@ export function mutationPath(name:string,raw:string):string|null {
     ||a.command==='insert'&&Number.isInteger(a.insert_line)&&a.insert_line>=0&&typeof a.new_str==='string'
   return valid?pathValue(a.path):null
 }
+// Native ui-deliverables mutationResultPath: successful operation-time path
+// is canonical. Old hosts without meta retain the original argument; malformed
+// metadata cannot turn an ambiguous relative argument into a deliverable.
+export function mutationResultPath(argumentPath:string|null,meta:unknown):string|null {
+  if(!argumentPath)return null
+  const absolute=(path:unknown):path is string=>typeof path==='string'
+    &&(path.startsWith('/')||/^[A-Za-z]:[/\\]/.test(path)||path.startsWith('\\\\'))
+  const value=record(meta)
+  if(!Object.hasOwn(value,'path'))return argumentPath
+  if(absolute(value.path))return pathValue(value.path)
+  return absolute(argumentPath)?argumentPath:null
+}
 export class TurnActivityCompatibility {
   private state:Row|undefined
   private nextTurn=inboxClaim()
@@ -114,7 +126,7 @@ export class TurnActivityCompatibility {
     if(event.type==='tool/result'&&(event.surfaceOp===undefined||event.surfaceOp==='append')) {
       const callId=d.message?.source?.callId ?? d.message?.callId
       const result=d.message?.content?.[0]
-      const path=s.calls.get(callId)
+      const path=mutationResultPath(s.calls.get(callId),d.meta)
       if(path && result && !toolResultFailed(d.message) && !d.error && !s.results.has(callId)) {
         s.results.add(callId);s.changes.push({seq,path})
         return {schema:'agent.activity.v1',turn:s.turn,changedFiles:[{reference:path}]}

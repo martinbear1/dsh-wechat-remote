@@ -21,7 +21,7 @@ export function toolRecordPresentation<T extends Row>(entry: T): T {
   if (entry.event?.type !== 'tool/result') return entry
   const data = entry.event.data, meta = data?.meta
   if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return entry
-  const selected = fields(meta, ['path', 'offset', 'lines', 'totalLines', 'lang', 'diffs',
+  const selected = fields(meta, ['path', 'cwd', 'offset', 'lines', 'totalLines', 'lang', 'diffs',
     'shape', 'files', 'paths', 'truncated', 'total', 'answer', 'sources', 'url', 'statusCode',
     'pluginId', 'packageId', 'pluginRunId']) as Row
   const surface = humanSurface(meta.humanSurface)

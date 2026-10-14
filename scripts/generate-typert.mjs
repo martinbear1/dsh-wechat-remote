@@ -193,6 +193,8 @@ try {
     'dsh-runtime.ts',
     'dsh-host-contract.ts',
     'dsh-host-context.ts',
+    'dsh-native-peer.ts',
+    'dsh-subagent-projection.ts',
     'typert-schema-compat.ts',
     'dsh-protocol-compat.ts',
     'legacy-model-identity.ts',

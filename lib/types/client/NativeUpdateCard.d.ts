@@ -1,4 +1,4 @@
-import type { NativeUpdateStore } from './native-update-store.js';
+import { type NativeUpdateStore } from './native-update-store.js';
 import { type InstallationRestartProps } from './InstallationRestartNotice.js';
 export declare function NativeUpdateCard({ store, scope, embedded, installation, current }: {
     store: NativeUpdateStore;

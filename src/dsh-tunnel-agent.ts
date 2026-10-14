@@ -234,6 +234,7 @@ export class DshTunnelAgent {
   private readonly dshPort: number
   private readonly maxStreams: number
   private readonly compatibilityApi?: DshCompatibilityTransport
+  private readonly disposeCompatibility?: () => void
   private readonly issueLanCredential?: DshTunnelAgentOptions['issueLanCredential']
   private readonly materializeAttachment?: DshTunnelAgentOptions['materializeAttachment']
   private readonly streams = new Map<number, Stream>()
@@ -245,7 +246,9 @@ export class DshTunnelAgent {
     this.sendCallback = options.send
     this.dshPort = options.dshPort || 3080
     this.maxStreams = options.maxStreams || 128
-    this.compatibilityApi = options.compatibilityApi
+    const connection = options.compatibilityApi?.createConnection?.()
+    this.compatibilityApi = connection ?? options.compatibilityApi
+    this.disposeCompatibility = connection ? () => connection.dispose() : undefined
     this.issueLanCredential = options.issueLanCredential
     this.materializeAttachment = options.materializeAttachment
     this.sendQueue = new TunnelSendQueue({
@@ -285,9 +288,11 @@ export class DshTunnelAgent {
   }
 
   close(): void {
+    if (this.closed) return
     this.closed = true
     this.sendQueue.close()
     for (const [id, stream] of this.streams) this.cancel(stream, id)
+    this.disposeCompatibility?.()
   }
 
   private open(streamId: number, value: Record<string, unknown>): void {

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { gunzipSync } from 'node:zlib'
+import { setTimeout as delay } from 'node:timers/promises'
 import { trustedReleaseAsset, trustedNpmInstaller, type Release } from './update-policy.js'
 
 /** Only availability failures permit changing source or using an eligible bundle.
@@ -20,7 +21,8 @@ const githubHosts = ['github.com', 'release-assets.githubusercontent.com', 'obje
 // Web/CLI compatibility downloads still verify catalog hashes locally. Give
 // active slow links ten minutes per source, not the former sixty seconds;
 // redirects and source fallback do not reset the bounded shared budget.
-// Desktop self-update delegates transport to its native manager instead.
+// Live self-update verifies its immutable archive here, then delegates all
+// package/profile mutations and activation to the native manager.
 const artifactSourceTimeoutMs = 10 * 60 * 1000
 function artifactOptions(options: DownloadOptions): DownloadOptions {
   return { ...options, responseTimeoutMs: options.responseTimeoutMs ?? 30000,
@@ -173,6 +175,21 @@ export function pluginFromInstaller(archive: Buffer, release: Release): Buffer {
   return plugin
 }
 
+/** Verify an outer native bundle against the external catalog, not only its
+ * self-declared embedded metadata. Also used when reusing a retained archive. */
+export function auditNativeRelease(archive: Buffer, release: Release): void {
+  if (!trustedNpmInstaller(release.npmInstaller)
+      || release.npmInstaller!.version !== release.version) throw new Error('没有可核验的原生更新包')
+  verifyBytes(archive, release.npmInstaller)
+  auditNativeArchive(archive, release.version)
+  // The externally trusted outer hash covers ALL embedded bytes. A separate
+  // core artifact is useful cross-check metadata, not an outer-install prerequisite.
+  if (release.asset !== undefined) {
+    if (!trustedReleaseAsset(release.asset, release.version)) throw new Error('内置插件的更新来源不受信任')
+    pluginFromInstaller(archive, release)
+  }
+}
+
 /** Structural audit of a local native bundle before handing it to the owning
  * host's package manager. Integrity/origin is established separately. */
 export function auditNativeArchive(archive: Buffer, version: string): void {
@@ -204,26 +221,37 @@ export async function downloadNpmRelease(release: Release, fetcher = fetch, opti
   return pluginFromInstaller(body, release)
 }
 
-/** Legacy archive-verification helper retained for packaging/diagnostics.
- * Desktop self-update no longer calls this: its native manager owns transport. */
+/** Prepare a verified immutable native bundle. The caller still delegates
+ * installation, script approval, compatibility and activation to DSH. */
 export async function downloadNativeRelease(release: Release, fetcher = fetch, options: DownloadOptions = {}): Promise<Buffer> {
   options = artifactOptions(options)
-  if (!trustedReleaseAsset(release.asset, release.version) || !trustedNpmInstaller(release.npmInstaller)
+  if (!trustedNpmInstaller(release.npmInstaller)
       || release.npmInstaller!.version !== release.version) throw new Error('没有可核验的 Desktop 更新包')
   const source = release.npmInstaller!
   // RC7 -> RC8 real-device preflight: the audited 21 MB native bundle was still
   // making progress (~5.8 MB/minute), but the old 60s absolute limit aborted it.
-  // Offline/diagnostic callers get the shared artifact budget (10 minutes,
+  // Native updates and offline callers share the artifact budget (10 minutes,
   // 30s response, 60s no-progress). Cancellation and all integrity/source checks
   // still apply; redirects share the deadline and do not extend it.
   // This only helps hosts after they load this code. It cannot repair an old
   // RC7 downloader remotely, and must not be claimed as an RC7 upgrade success.
-  const body = await fetchBytes(source.url, source.bytes, fetcher, ['registry.npmjs.org'], Date.now() + (options.timeoutMs ?? artifactSourceTimeoutMs), options)
+  const deadline = Date.now() + (options.timeoutMs ?? artifactSourceTimeoutMs)
+  let body: Buffer
+  try {
+    body = await fetchBytes(source.url, source.bytes, fetcher, ['registry.npmjs.org'], deadline, options)
+  } catch (error) {
+    options.signal?.throwIfAborted()
+    // One transient download interruption should not force another user click.
+    // This retries bytes ONLY, before any install, against the same exact URL
+    // and shared deadline. Never retry integrity/policy failures or cancellation.
+    if (!(error instanceof DownloadUnavailableError) || deadline - Date.now() <= 1000) throw error
+    await delay(1000, undefined, { signal: options.signal })
+    body = await fetchBytes(source.url, source.bytes, fetcher, ['registry.npmjs.org'], deadline, options)
+  }
   options.signal?.throwIfAborted()
   // Verify both the outer bytes and the embedded core against the catalog, not
   // merely against a manifest inside the downloaded archive.
-  pluginFromInstaller(body, release)
-  auditNativeArchive(body, release.version)
+  auditNativeRelease(body, release)
   return body
 }
 

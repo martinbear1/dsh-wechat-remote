@@ -1,5 +1,6 @@
 /** Host-only contract differences. No network probing or per-request retries. */
 import { type HostContext } from './dsh-host-context.js';
+import { type NativePeer } from './dsh-native-peer.js';
 export type { HostContext } from './dsh-host-context.js';
 type Row = Record<string, any>;
 /** Inspect only the RUNNING CLI, never another global/npm cache install. */
@@ -8,7 +9,7 @@ export declare function runningDshVersion(entry?: string, ctx?: HostContext): st
  * boundary centrally, not Function.length or trial calls. Retire the legacy
  * branch once pre-0.1.7 hosts leave the support matrix. */
 export declare function usesDuplexEvents(version: string | undefined): boolean;
-export declare function openHostEvents(gateway: Row, endpoint: string, payload: unknown, signal: AbortSignal, ctx?: HostContext): Promise<AsyncIterable<unknown>>;
+export declare function openHostEvents(gateway: Row, endpoint: string, payload: unknown, signal: AbortSignal, ctx?: HostContext, peer?: NativePeer): Promise<AsyncIterable<unknown>>;
 export declare function workspaceReadArguments(ctx: HostContext, args: Row): Row;
 export declare function nativeFileBytes(value: unknown): Buffer;
 /** DSH 0.1.7 moved the browser child catalog to parent projections. Keep the

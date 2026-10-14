@@ -14,12 +14,15 @@ export declare function boundedFetch(url: string, maxBytes: number, fetcher?: ty
 /** Audit the plugin BEFORE any package manager sees it. */
 export declare function auditArchive(archive: Buffer, release: Release): void;
 export declare function pluginFromInstaller(archive: Buffer, release: Release): Buffer;
+/** Verify an outer native bundle against the external catalog, not only its
+ * self-declared embedded metadata. Also used when reusing a retained archive. */
+export declare function auditNativeRelease(archive: Buffer, release: Release): void;
 /** Structural audit of a local native bundle before handing it to the owning
  * host's package manager. Integrity/origin is established separately. */
 export declare function auditNativeArchive(archive: Buffer, version: string): void;
 /** Also used by the publication gate to verify the alternate independently. */
 export declare function downloadNpmRelease(release: Release, fetcher?: typeof fetch, options?: DownloadOptions): Promise<Buffer>;
-/** Legacy archive-verification helper retained for packaging/diagnostics.
- * Desktop self-update no longer calls this: its native manager owns transport. */
+/** Prepare a verified immutable native bundle. The caller still delegates
+ * installation, script approval, compatibility and activation to DSH. */
 export declare function downloadNativeRelease(release: Release, fetcher?: typeof fetch, options?: DownloadOptions): Promise<Buffer>;
 export declare function downloadRelease(release: Release, fetcher?: typeof fetch, options?: DownloadOptions): Promise<Buffer>;

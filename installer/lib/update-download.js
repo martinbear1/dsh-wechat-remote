@@ -3,6 +3,7 @@
 // src/update-download.ts
 import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
+import { setTimeout as delay } from "node:timers/promises";
 
 // src/update-policy.ts
 var versionPattern = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z.-]+)?$/;
@@ -191,6 +192,15 @@ function pluginFromInstaller(archive, release) {
   auditArchive(plugin, release);
   return plugin;
 }
+function auditNativeRelease(archive, release) {
+  if (!trustedNpmInstaller(release.npmInstaller) || release.npmInstaller.version !== release.version) throw new Error("\u6CA1\u6709\u53EF\u6838\u9A8C\u7684\u539F\u751F\u66F4\u65B0\u5305");
+  verifyBytes(archive, release.npmInstaller);
+  auditNativeArchive(archive, release.version);
+  if (release.asset !== void 0) {
+    if (!trustedReleaseAsset(release.asset, release.version)) throw new Error("\u5185\u7F6E\u63D2\u4EF6\u7684\u66F4\u65B0\u6765\u6E90\u4E0D\u53D7\u4FE1\u4EFB");
+    pluginFromInstaller(archive, release);
+  }
+}
 function auditNativeArchive(archive, version) {
   let manifest, metadata, plugin;
   const files = visitArchive(archive, (name, data) => {
@@ -215,12 +225,20 @@ async function downloadNpmRelease(release, fetcher = fetch, options = {}) {
 }
 async function downloadNativeRelease(release, fetcher = fetch, options = {}) {
   options = artifactOptions(options);
-  if (!trustedReleaseAsset(release.asset, release.version) || !trustedNpmInstaller(release.npmInstaller) || release.npmInstaller.version !== release.version) throw new Error("\u6CA1\u6709\u53EF\u6838\u9A8C\u7684 Desktop \u66F4\u65B0\u5305");
+  if (!trustedNpmInstaller(release.npmInstaller) || release.npmInstaller.version !== release.version) throw new Error("\u6CA1\u6709\u53EF\u6838\u9A8C\u7684 Desktop \u66F4\u65B0\u5305");
   const source = release.npmInstaller;
-  const body = await fetchBytes(source.url, source.bytes, fetcher, ["registry.npmjs.org"], Date.now() + (options.timeoutMs ?? artifactSourceTimeoutMs), options);
+  const deadline = Date.now() + (options.timeoutMs ?? artifactSourceTimeoutMs);
+  let body;
+  try {
+    body = await fetchBytes(source.url, source.bytes, fetcher, ["registry.npmjs.org"], deadline, options);
+  } catch (error) {
+    options.signal?.throwIfAborted();
+    if (!(error instanceof DownloadUnavailableError) || deadline - Date.now() <= 1e3) throw error;
+    await delay(1e3, void 0, { signal: options.signal });
+    body = await fetchBytes(source.url, source.bytes, fetcher, ["registry.npmjs.org"], deadline, options);
+  }
   options.signal?.throwIfAborted();
-  pluginFromInstaller(body, release);
-  auditNativeArchive(body, release.version);
+  auditNativeRelease(body, release);
   return body;
 }
 async function downloadRelease(release, fetcher = fetch, options = {}) {
@@ -252,6 +270,7 @@ export {
   DownloadUnavailableError,
   auditArchive,
   auditNativeArchive,
+  auditNativeRelease,
   boundedFetch,
   downloadNativeRelease,
   downloadNpmRelease,

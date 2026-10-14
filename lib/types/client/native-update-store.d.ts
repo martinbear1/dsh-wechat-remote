@@ -21,6 +21,10 @@ interface Snapshot {
     status: NativeUpdateStatus | null;
     error: string | null;
 }
+export declare function nativeUpdateFailed(status: NativeUpdateStatus | null): boolean;
+/** Permission belongs to the exact checked snapshot, never stale update advice. */
+export declare function nativeUpdateCanStart(status: NativeUpdateStatus | null, check: NativeCheck | null): boolean;
+export declare function nativeUpdatePending(status: NativeUpdateStatus | null, check: NativeCheck | null): boolean;
 /** Same-node shared state: one check, one deliberate submission, no blind retry. */
 export declare class NativeUpdateStore {
     private call;
@@ -29,6 +33,7 @@ export declare class NativeUpdateStore {
     private reading?;
     private timer?;
     private disposed;
+    private completedCheck?;
     private noticeIntent?;
     private restartNotice?;
     constructor(call: CallPairingManagement);
@@ -39,6 +44,13 @@ export declare class NativeUpdateStore {
     takeRestartNotice: () => RestartNotice | undefined;
     private observeRestart;
     refresh: () => Promise<void>;
+    private readCheck;
+    /** One read-only refresh per confirmed completion, never an installation retry. */
+    private refreshCompleted;
+    private normalizeStatus;
+    private readStatus;
+    /** Another tab may own the accepted job. Only observe it; do not obtain a new ticket. */
+    private recoverRejectedStart;
     install: () => Promise<void>;
     private poll;
     dispose(): void;

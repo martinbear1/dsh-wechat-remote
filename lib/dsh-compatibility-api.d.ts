@@ -14,6 +14,10 @@ export interface CompatibilityHttpResponse {
 }
 /** Available only after the caller has authenticated its LAN or E2EE client. */
 export interface DshCompatibilityTransport {
+    /** Called once AFTER authentication; never share interaction ownership across tunnels. */
+    createConnection?(): DshCompatibilityTransport & {
+        dispose(): void;
+    };
     /** Older Hosts retain native endpoints/events except for legacy prompt commands. */
     handlesPath?(path: string): boolean;
     request(request: CompatibilityHttpRequest): Promise<CompatibilityHttpResponse>;
@@ -23,12 +27,17 @@ export interface DshCompatibilityTransport {
 export declare class DshCompatibilityApi implements DshCompatibilityTransport {
     private readonly ctx;
     private readonly dshPort?;
+    private readonly owner?;
     /** Optional observer owned by the authenticated gate; no native host API replacement. */
     taskNotificationRequest?: (args: unknown) => Promise<unknown>;
     /** Owned by the gate; credentials are removed before any native dispatch. */
     privateInput?: PrivateInputNative;
     readonly realtime: DshRealtimeCompatibility;
-    constructor(ctx: Context, dshPort?: number | undefined);
+    private readonly connections;
+    private disposed;
+    constructor(ctx: Context, dshPort?: number | undefined, owner?: DshCompatibilityApi | undefined);
+    createConnection(): DshCompatibilityApi;
+    private get configuration();
     handlesPath(path: string): boolean;
     private flushPermission;
     private nativeRequest;

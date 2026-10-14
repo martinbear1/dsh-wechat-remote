@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { ClawbotError, type ClawbotAttachment, type ClawbotAttention, type ClawbotHost, type ClawbotInput, type ClawbotResult, type ClawbotSession } from './contracts.js'
 import { assertColdSessionPresetAvailable } from '../dsh-host-contract.js'
+import { withNativePeer } from '../dsh-native-peer.js'
 import { REPLY_TEXT_MAX_BYTES } from './reply-text.js'
 
 type Row = Record<string, any>
@@ -60,7 +61,8 @@ export class DshClawbotHost implements ClawbotHost {
   private gateway(): Row {
     const gateway = this.ctx.get('typertGateway')
     if (typeof gateway?.invoke !== 'function') throw fail('unavailable', '当前节点的原生会话接口尚未就绪。')
-    return gateway
+    return { invoke: (request: Row) => withNativePeer(this.ctx, request.signal, lease => gateway.invoke(
+      lease.peer ? { ...request, peer: lease.peer, signal: lease.signal } : request)) }
   }
 
   private archived(): Set<string> {

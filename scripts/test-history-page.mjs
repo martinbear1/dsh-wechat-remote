@@ -49,7 +49,7 @@ test('ordinary 40 KiB inline tool body uses the page budget, not the detail chun
 test('hidden tool metadata cannot force short output into a preview, known central-card metadata stays intact', async () => {
   const source = event(3, 'tool/result', { message: { id: 'r', source: { kind: 'tool', callId: 'c' },
     content: [{ type: 'text', text: 'visible' }] }, meta: {
-      internalTrace: 'x'.repeat(200000), path: '/w/a', offset: 1, totalLines: 1,
+      internalTrace: 'x'.repeat(200000), path: '/w/a', cwd: '/w/sub', offset: 1, totalLines: 1,
       lines: [{ number: 1, text: 'visible', internal: 'x'.repeat(200000) }],
   } })
   const original = JSON.stringify(source)
@@ -57,7 +57,7 @@ test('hidden tool metadata cannot force short output into a preview, known centr
   assert(built.ok)
   const rendered = built.value.events[0]
   assert.equal(rendered.detail, undefined)
-  assert.deepEqual(rendered.event.data.meta, { path: '/w/a', offset: 1, totalLines: 1, lines: [{ number: 1, text: 'visible' }] })
+  assert.deepEqual(rendered.event.data.meta, { path: '/w/a', cwd: '/w/sub', offset: 1, totalLines: 1, lines: [{ number: 1, text: 'visible' }] })
   assert.equal(JSON.stringify(source), original)
 })
 

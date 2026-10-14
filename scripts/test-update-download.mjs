@@ -70,7 +70,7 @@ test('Desktop active transfer budget exceeds a minute but stays bounded across r
   assert.equal(calls, 1)
 })
 
-test('Desktop longer total budget still rejects stalled bodies promptly without retrying', async () => {
+test('native stalled body cannot reset an explicit short total deadline', async () => {
   const { native } = nativeFixture()
   let calls = 0
   await assert.rejects(downloadNativeRelease(native, async (url, { signal }) => {
@@ -78,8 +78,41 @@ test('Desktop longer total budget still rejects stalled bodies promptly without 
     return new Response(new ReadableStream({ start(controller) {
       signal.addEventListener('abort', () => controller.error(signal.reason), { once: true })
     } }))
-  }, { idleTimeoutMs: 20 }), error => error instanceof DownloadUnavailableError && /没有进展/.test(error.cause?.message))
+  }, { idleTimeoutMs: 20, timeoutMs: 100 }), error => error instanceof DownloadUnavailableError && /没有进展/.test(error.cause?.message))
   assert.equal(calls, 1)
+})
+
+test('native download retries one transport interruption before installation, keeping exact source and audit', async () => {
+  const { archive, native } = nativeFixture()
+  for (const first of [() => { throw Error('connection reset') }, () => new Response(null, { status: 503 }),
+    () => new Response(new ReadableStream({ start(c) { c.error(Error('body interrupted')) } }))]) {
+    const calls = []
+    assert.deepEqual(await downloadNativeRelease(native, async url => {
+      calls.push(url)
+      return calls.length === 1 ? first() : new Response(archive)
+    }), archive)
+    assert.deepEqual(calls, [native.npmInstaller.url, native.npmInstaller.url])
+  }
+})
+
+test('native availability retry is bounded, and no retry follows cancellation or integrity/policy errors', async () => {
+  const { archive, native } = nativeFixture()
+  let calls = 0
+  await assert.rejects(downloadNativeRelease(native, async () => { calls++; throw Error('offline') }), DownloadUnavailableError)
+  assert.equal(calls, 2)
+  for (const response of [() => new Response(Buffer.alloc(archive.length)),
+    () => new Response(Buffer.alloc(archive.length + 1)),
+    () => new Response(null, { status: 302, headers: { location: 'http://localhost/private' } })]) {
+    calls = 0
+    await assert.rejects(downloadNativeRelease(native, async () => { calls++; return response() }))
+    assert.equal(calls, 1)
+  }
+  calls = 0
+  const controller = new AbortController()
+  const task = downloadNativeRelease(native, async () => { calls++; throw Error('offline') }, { signal: controller.signal })
+  setTimeout(() => controller.abort(), 20)
+  await assert.rejects(task, { name: 'AbortError' })
+  assert.equal(calls, 1, 'disposing a gate also cancels the retry delay')
 })
 
 test('GitHub succeeds without requesting npm; installer hotfix version may differ', async () => {

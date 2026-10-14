@@ -111,8 +111,9 @@ if (process.argv[2] === '--identity-worker') {
     const home = fixture(t), signal = new AbortController().signal
     for (const [version, count] of [['0.1.5-rc.1', 3], ['0.1.5-rc.2', 3], ['0.1.6-alpha.2', 3], ['0.1.7-rc.1', 5], ['0.1.7-rc.2', 5]]) {
       const ctx = context(home, 'desktop', version), calls = []
-      const gateway = { wireStream: { open: (...args) => { calls.push(args); return Promise.resolve([]) } } }
-      await openHostEvents(gateway, 'events', {}, signal, ctx)
+      const gateway = { wireStream: { open: (...args) => { calls.push(args); return Promise.resolve({ async *[Symbol.asyncIterator]() {} }) } } }
+      const events = await openHostEvents(gateway, 'events', {}, signal, ctx)
+      await events[Symbol.asyncIterator]().return()
       assert.equal(calls.length, 1)
       assert.equal(calls[0].length, count)
       assert.equal(calls[0].at(-1), signal)

@@ -183,6 +183,7 @@ async function installProfile(job) {
   if (![PLUGIN_PACKAGE, NATIVE_PLUGIN_PACKAGE].includes(packageName)) throw new Error("\u65E0\u6548\u7684\u5B89\u88C5\u5305\u540D\u79F0\u3002");
   const owner = webInstallOwner(job.profile);
   if (owner && owner !== packageName) throw new ProfileOwnershipError("\u5F53\u524D\u63D2\u4EF6\u5B89\u88C5\u5F52\u5C5E\u5DF2\u53D8\u5316\uFF0C\u672A\u6DFB\u52A0\u7B2C\u4E8C\u4EFD\u63D2\u4EF6\u3002\u8BF7\u5728\u539F\u751F\u63D2\u4EF6\u7BA1\u7406\u9875\u6838\u5BF9\u3002");
+  const expectedEnabled = owner === void 0 || JSON.parse(fs.readFileSync(path.join(job.profile, "package.json"), "utf8")).dsh?.profile?.bundles?.includes(packageName) === true;
   fs.mkdirSync(job.profile, { recursive: true, mode: 448 });
   const archive = path.join(job.directory, "release.tgz");
   const digest = createHash("sha256").update(fs.readFileSync(archive)).digest("hex");
@@ -206,7 +207,8 @@ async function installProfile(job) {
   const installed = path.join(job.profile, "node_modules", packageName);
   if (JSON.parse(fs.readFileSync(path.join(installed, "package.json"), "utf8")).version !== job.targetVersion) throw new Error("\u5B89\u88C5\u540E\u63D2\u4EF6\u7248\u672C\u4E0D\u5339\u914D\u3002");
   const after = JSON.parse(fs.readFileSync(path.join(job.profile, "package.json"), "utf8"));
-  if (webInstallOwner(job.profile) !== packageName || !after.dsh?.profile?.bundles?.includes(packageName)) throw new Error("DSH \u5C1A\u672A\u5C06\u63D2\u4EF6\u6CE8\u518C\u4E3A\u552F\u4E00\u7684\u539F\u751F\u5B89\u88C5\u3002");
+  if (webInstallOwner(job.profile) !== packageName) throw new Error("DSH \u5C1A\u672A\u5C06\u63D2\u4EF6\u6CE8\u518C\u4E3A\u552F\u4E00\u7684\u539F\u751F\u5B89\u88C5\u3002");
+  if (after.dsh?.profile?.bundles?.includes(packageName) === true !== expectedEnabled) throw new Error("DSH \u5B89\u88C5\u540E\u63D2\u4EF6\u542F\u7528\u72B6\u6001\u4E0E\u539F\u8BBE\u7F6E\u4E0D\u4E00\u81F4\u3002");
 }
 export {
   NATIVE_PLUGIN_PACKAGE,

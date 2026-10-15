@@ -5,8 +5,10 @@
 在 DSH 的 **插件 → 添加插件** 中输入：
 
 ```text
-dsh-wechat-remote@latest
+dsh-wechat-remote@1.7.14
 ```
+
+明确版本号用于安装本版。`@latest` 在刚发布时可能受安装环境的新包策略影响而仍选中旧版；也可从本版 Release 下载完整包 `dsh-wechat-remote-1.7.14.tgz`，通过原生插件管理器选择本地文件安装。如有安全策略提示，请按提示处理。
 
 Web 和 Desktop 使用相同包名。安装并启用后，打开 **设置 → 微信连接** 或本插件详情，扫码配对。
 

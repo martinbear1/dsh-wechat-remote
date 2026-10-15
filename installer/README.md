@@ -1,6 +1,6 @@
 # Agent远程管理助手 · DSH 插件安装器
 
-通常在 DSH 的 **插件 → 添加插件** 输入 `dsh-wechat-remote@latest` 即可。已有安装使用插件内的检查更新，不要卸载或叠加安装。Web、Desktop 的安装包名相同。
+安装本版可在 DSH 的 **插件 → 添加插件** 输入 `dsh-wechat-remote@1.7.14`。`@latest` 在刚发布时可能仍被安装环境选成旧版，请核对安装后的实际版本。已有安装使用插件内的检查更新，不要卸载或叠加安装。Web、Desktop 的安装包名相同。
 
 本版提供 Web 保底替换升级，包括通过原生插件管理器安装、旧更新按钮不能升级的 `1.7.13`。不需要先卸载旧插件，见 [安装与更新说明](https://github.com/martinbear1/dsh-wechat-remote/blob/main/docs/NATIVE-INSTALL.md)。
 
@@ -22,6 +22,6 @@ npx -y dsh-wechat-remote@latest
 
 停止 Web 后可用 `--repair` 主动重装，不会自动降级。旧的更新记录、备份和锁不会被自动删除或用来恢复宿主；结果不明时先核对记录，勿重复安装。
 
-Desktop 新装请在原生插件管理器中添加 `dsh-wechat-remote@latest`，已有安装使用插件内检查更新。本命令不安装、更新或停止 Desktop，也不支持 `--profile desktop`。提示待生效时，任务结束后完全退出并重新打开，无需重新配对。
+Desktop 新装请在原生插件管理器中添加 `dsh-wechat-remote@1.7.14`，已有安装使用插件内检查更新。本命令不安装、更新或停止 Desktop，也不支持 `--profile desktop`。提示待生效时，任务结束后完全退出并重新打开，无需重新配对。
 
 Web 和 Desktop 分别管理各自的插件更新。若安装后提示需要重启，请先等待任务结束：Desktop 完整退出后重新打开；Web 重启实际服务，仅刷新网页不会生效。无需重新配对。

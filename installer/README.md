@@ -2,7 +2,7 @@
 
 通常在 DSH 的 **插件 → 添加插件** 输入 `dsh-wechat-remote@latest` 即可。已有安装使用插件内的检查更新，不要卸载或叠加安装。Web、Desktop 的安装包名相同。
 
-本候选版提供 Web 保底替换升级，包括通过原生插件管理器安装、旧更新按钮不能升级的 `1.7.13`。不需要先卸载旧插件，见 [安装与更新说明](../docs/NATIVE-INSTALL.md)。本版尚未公开发布，当前公共 `@latest` 仍是 `1.7.13`。
+本版提供 Web 保底替换升级，包括通过原生插件管理器安装、旧更新按钮不能升级的 `1.7.13`。不需要先卸载旧插件，见 [安装与更新说明](https://github.com/martinbear1/dsh-wechat-remote/blob/main/docs/NATIVE-INSTALL.md)。
 
 Web 新装或保底升级使用同一行命令：
 

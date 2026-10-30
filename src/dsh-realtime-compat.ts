@@ -99,6 +99,7 @@ export function legacyHostPayload(frame: JsonRecord): JsonRecord | null {
     case 'commands/change':
     case 'agent-preset/selected':
     case 'llm/adapters-updated':
+    case 'llm/models-updated':
     case 'settings/document-updated':
       return { type: 'host/remote-event', event: frame.event, args }
     case 'wechatSchedules/changed': {
@@ -108,6 +109,11 @@ export function legacyHostPayload(frame: JsonRecord): JsonRecord | null {
       return typeof value?.enabled === 'boolean'
         ? { type: 'host/remote-event', event: frame.event, args: [{ enabled: value.enabled }] }
         : null
+    }
+    case 'wechatAccount/changed': {
+      const value = recordOf(args[0])
+      return typeof value?.supported === 'boolean'
+        ? { type: 'host/remote-event', event: frame.event, args: [{ supported: value.supported }] } : null
     }
     default:
       return null
@@ -128,6 +134,7 @@ export class DshRealtimeCompatibility {
   private remoteOwner?: SocketState
   private disposed = false
   private readonly disposeScheduleEvents?: () => void
+  private readonly disposeAccountEvents?: () => void
 
   constructor(private readonly ctx: Context) {
     // Native API Remote events use a fixed official allowlist. Our own
@@ -136,6 +143,11 @@ export class DshRealtimeCompatibility {
     this.disposeScheduleEvents = ctx.on?.('wechatSchedules/changed', value => {
       if (this.disposed) return
       const payload = legacyHostPayload({ type: 'emit', event: 'wechatSchedules/changed', args: [value] })
+      if (payload) for (const state of this.sockets) if (state.kind === 'host') this.send(state, payload)
+    })
+    this.disposeAccountEvents = ctx.on?.('wechatAccount/changed', value => {
+      if (this.disposed) return
+      const payload = legacyHostPayload({ type: 'emit', event: 'wechatAccount/changed', args: [value] })
       if (payload) for (const state of this.sockets) if (state.kind === 'host') this.send(state, payload)
     })
   }
@@ -233,7 +245,7 @@ export class DshRealtimeCompatibility {
     if (state.kind === 'host') this.run(state, () => this.followWorkspace(state))
     else {
       this.run(state, () => this.followControl(state))
-      for (const sessionId of this.knownSessions.keys()) this.startSession(state, sessionId)
+      this.restoreSessions(state)
       for (const [eventId, values] of this.pending) {
         const pending = values[0]
         if (pending) this.send(state, pending.payload, eventId)
@@ -284,12 +296,18 @@ export class DshRealtimeCompatibility {
         : { kind: 'result', value: valueForHost }
     } else {
       const failure = recordOf(result?.error)
+      const questionCancelled = target.event === 'user-questions/request' && failure?.code === 'cancelled'
+      // Native named questions remain answerable when their panel is hidden.
+      // An older phone must not turn that local UI action into ASK_CANCELLED.
+      if (questionCancelled && target.payload.nativeQuestion) {
+        return { accepted: false, reason: '此问答关闭面板后仍可回答，请收起面板或在电脑端操作。' }
+      }
       outcome = {
         kind: 'rejected',
         error: {
-          name: 'Error',
+          name: questionCancelled ? 'UserQuestionError' : 'Error',
           message: stringOf(failure?.message) || 'client cancelled',
-          ...(stringOf(failure?.code) ? { code: failure?.code } : {}),
+          ...(questionCancelled ? { code: 'ASK_CANCELLED' } : stringOf(failure?.code) ? { code: failure?.code } : {}),
           ...failure && Object.hasOwn(failure, 'details') ? { details: failure.details } : {},
         },
       }
@@ -324,6 +342,7 @@ export class DshRealtimeCompatibility {
     if (this.disposed) return
     this.disposed = true
     this.disposeScheduleEvents?.()
+    this.disposeAccountEvents?.()
     for (const state of [...this.sockets]) {
       this.remove(state)
       try { state.socket.close(1001, 'adapter disposed') } catch { /* best effort */ }
@@ -475,7 +494,31 @@ export class DshRealtimeCompatibility {
     }
   }
 
-  private startSession(state: SocketState, sessionId: string): void {
+  /** One synchronous recovery round, not a reusable directory cache. */
+  private restoreSessions(state: SocketState): void {
+    let listFlight: Promise<unknown> | undefined
+    const lookup: Pick<TypertGatewayLike, 'invoke'> = {
+      invoke: request => {
+        const gateway = this.gateway()
+        if (request.namespace !== 'session' || request.method !== 'list') {
+          return gateway.invoke(request)
+        }
+        state.lifetime.signal.throwIfAborted()
+        // A single evicted Session cannot cancel its siblings' shared read.
+        // Each resolver still checks its own combined signal after the read.
+        // The owning socket cancels this request; another socket/round cannot
+        // reuse it. Subagent catalogs and native follow validation stay intact.
+        if (!listFlight) {
+          const flight = gateway.invoke({ ...request, signal: state.lifetime.signal })
+          listFlight = flight.finally(() => { listFlight = undefined })
+        }
+        return listFlight
+      },
+    }
+    for (const id of this.knownSessions.keys()) this.startSession(state, id, lookup)
+  }
+
+  private startSession(state: SocketState, sessionId: string, lookup?: Pick<TypertGatewayLike, 'invoke'>): void {
     if (state.sessionLifetimes.has(sessionId)) return
     if (this.gateway().canFollowSession?.(sessionId) === false) return
     const controller = new AbortController()
@@ -484,7 +527,7 @@ export class DshRealtimeCompatibility {
     const follow = async () => {
       try {
         const gateway = this.gateway()
-        const address = await resolveDshSessionAddress(gateway, sessionId, combined)
+        const address = await resolveDshSessionAddress(lookup ?? gateway, sessionId, combined)
         if (gateway.canFollowSession?.(sessionId) === false) return
         const iterable = await gateway.stream({
           namespace: 'session',
@@ -580,7 +623,7 @@ export class DshRealtimeCompatibility {
       if (!frame) continue
       // This plugin-owned event has one local source above, even if a future
       // host also starts forwarding it through the official Remote stream.
-      if (frame.type === 'emit' && frame.event === 'wechatSchedules/changed') continue
+      if (frame.type === 'emit' && ['wechatSchedules/changed', 'wechatAccount/changed'].includes(String(frame.event))) continue
       if (frame.type === 'emit' && frame.event === 'permission-presets/catalog-changed') {
         // The shipped phone has no catalog listener. Re-present its known
         // selections at their original sequence, with the new live choices.
@@ -610,7 +653,7 @@ export class DshRealtimeCompatibility {
         // activated it (e.g. accepted a prompt), attach the interested peers.
         if (frame.event === 'api-session/status' || frame.event === 'api-session/added') {
           for (const target of this.sockets) if (target.kind === 'mux') {
-            for (const id of this.knownSessions.keys()) this.startSession(target, id)
+            this.restoreSessions(target)
           }
         }
         for (const target of this.sockets) {
@@ -645,6 +688,14 @@ export class DshRealtimeCompatibility {
         toolName: request.toolName, reason: request.reason,
       }
       : { type: 'question/requested', sessionId, questions: request.questions }
+    // Preserve the native call identity separately from this delivery's rpcId.
+    // Metadata does NOT claim attachWait, implement a timer or promise late RPC
+    // answers. Host cancellation still ends only the forwarded delivery.
+    const wait = recordOf(request.wait)
+    if (event === 'user-questions/request' && wait && stringOf(wait.callId)
+      && (wait?.timed === undefined || typeof wait.timed === 'boolean')) {
+      payload.nativeQuestion = { version: 1, callId: wait.callId, timed: wait.timed === true, channel: 'waterfall' }
+    }
     const pending: PendingInteraction = {
       owner: state, clientId, eventId, event, sessionId,
       payload,

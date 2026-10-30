@@ -19,6 +19,7 @@ export interface NativeUpdateStatus {
     previousVersion?: string;
     bundle?: Owner;
     nativeResult?: NativeReceipt;
+    connectionWarning?: 'address-in-use';
 }
 interface Bundle {
     name: string;
@@ -56,6 +57,8 @@ export interface NativeUpdateOptions {
     runningVersion: string;
     manager(): Manager | undefined;
     prepareTools?(manager: Manager): Promise<Manager>;
+    /** Read existing local listener state only; never a network/entitlement gate. */
+    connectionConflict?(): boolean;
     sessions(): {
         list(request: object, signal: AbortSignal): Promise<{
             items: {
@@ -91,6 +94,7 @@ export declare class NativeUpdateService {
     private updateTarget;
     private isRefused;
     status: () => Promise<NativeUpdateStatus>;
+    private installationStatus;
     check: () => Promise<unknown>;
     start: (ticket: string) => NativeUpdateStatus;
     private idle;

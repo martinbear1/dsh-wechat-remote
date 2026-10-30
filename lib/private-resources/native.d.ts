@@ -9,6 +9,7 @@ export interface NativeResourceOptions {
     promptModule?: string;
     collaborationModule?: string;
     chatCompactionModule?: string;
+    chatMemoryModule?: string;
 }
 /** Trusted shipped helper, not cloud code. Native interpolation is single-pass:
  * variable values containing {{...}} remain literal rather than being evaluated. */

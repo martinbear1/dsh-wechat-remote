@@ -90,6 +90,7 @@ async function verify() {
   const { default: Loader, EntryTree } = await load('@deepseek-ai/cordis-plugin-loader')
   const { scopeOf } = await load('@deepseek-ai/dsh-scope')
   const { default: Projection } = await load('@deepseek-ai/dsh-session-projection')
+  const { default: WorkingDirectory } = await load('@deepseek-ai/dsh-working-directory')
   const { default: SystemPrompt, renderContextSections } = await load('@deepseek-ai/dsh-system-prompt')
   const { default: AgentPresets } = await load('@deepseek-ai/dsh-agent-preset-registry')
   const { SkillRegistry } = await load('@deepseek-ai/dsh-skill')
@@ -149,7 +150,15 @@ async function verify() {
     ctx.provide('fileUploads', { registerAgentResolver: () => () => {} })
     ctx.provide('workspaceRegistry', { archivedSessionIds: [], list: () => [{ id: 'scope-workspace', path: work }],
       get: id => id === 'scope-workspace' ? { id, path: work, attachSession: async id => controllerServices.push(id) } : undefined })
-    ctx.provide('fs', { resolve: forbidden('native filesystem must not execute in scope inspection') })
+    // Native tool-fs/tool-skill now depend on WorkingDirectory. Mount that
+    // actual service; its read-only directory checks stay inside this fixture.
+    // Do not remove its injection requirement or replace the tool definitions.
+    ctx.provide('fs', {
+      async resolve(value) { assert.equal(value, work); return value },
+      async stat(value) { assert.equal(value, work); return { type: 'directory' } },
+      processPath(value) { assert.equal(value, work); return value },
+    })
+    await ctx.plugin(WorkingDirectory, { defaultDirectory: work })
     // The real PTC provider is lazy: construction and schema projection never
     // execute code. Its effectful seams deliberately fail if inspection ever
     // regresses into starting a child process, sandbox, or filesystem action.

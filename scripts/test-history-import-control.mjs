@@ -18,12 +18,25 @@ async function module(name) {
 const { HistoryImportController, NativeImportPreflightError } = await module('controller')
 const { ImportReceipts } = await module('receipts')
 const { parseHistorySource } = await module('source')
-const { readPublicShare, shareIdentifier, IMPORT_CHUNK_BYTES, MAX_IMPORT_BYTES } = await module('share')
+const { readPublicShare, shareIdentifier, IMPORT_CHUNK_BYTES, MAX_IMPORT_BYTES, MAX_SHARE_BYTES } = await module('share')
 const signal = () => new AbortController().signal
 const sourceBytes = (suffix = '') => Buffer.from(JSON.stringify({ title: '合成网页会话' + suffix, messages: [
   { message_id: 1, parent_id: null, role: 'USER', fragments: [{ type: 'REQUEST', content: '我是测试角色' }] },
   { message_id: 2, parent_id: 1, role: 'ASSISTANT', fragments: [{ type: 'THINK', content: '公开思考' }, { type: 'RESPONSE', content: '测试答复' }] },
 ] }))
+function exportBytes(messages) {
+  const mapping = { root: { id: 'root', parent: null, children: messages.filter(m => m.parent_id === null).map(m => String(m.message_id)), message: null } }
+  for (const m of messages) mapping[String(m.message_id)] = { id: String(m.message_id), parent: m.parent_id === null ? 'root' : String(m.parent_id),
+    children: messages.filter(child => child.parent_id === m.message_id).map(child => String(child.message_id)), message: { model: 'synthetic', fragments: m.fragments } }
+  return Buffer.from(JSON.stringify([{ id: 'synthetic-export', title: 'Synthetic export', mapping }]))
+}
+async function uploadSource(f, data) {
+  const started = await f.call('upload.start', { name: 'history.json', size: data.length })
+  for (let offset = 0; offset < data.length; offset += IMPORT_CHUNK_BYTES) {
+    await f.call('upload.chunk', { uploadId: started.uploadId, offset, data: data.subarray(offset, offset + IMPORT_CHUNK_BYTES).toString('base64') })
+  }
+  return f.call('upload.finish', { uploadId: started.uploadId })
+}
 async function fixture(t, overrides = {}) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-import-control-'))
   let commits = 0, inspections = 0, clock = Date.now()
@@ -32,7 +45,7 @@ async function fixture(t, overrides = {}) {
     capabilities: async () => ({ supported: true }),
     authorize: async () => ({ owner: 'fixture-owner', assertCurrent() {} }),
     owner: async () => 'fixture-owner',
-    parse: async data => { const source = await parseHistorySource(data); return { source, bytes: Buffer.byteLength(JSON.stringify(source)) } },
+    parse: async (data, _signal, kind) => { const source = await parseHistorySource(data, kind); return { source, bytes: Buffer.byteLength(JSON.stringify(source)) } },
     share: async () => sourceBytes(), receipts,
     commit: async () => { commits++ },
     inspect: async identity => { inspections++; return { ...identity, state: 'succeeded' } },
@@ -70,7 +83,7 @@ test('share reader cancels oversize and already aborted reads', async () => {
   await assert.rejects(readPublicShare('https://chat.deepseek.com/share/abcdefgh', abort.signal, async () => { fetched++ }))
   assert.equal(fetched, 0)
   await assert.rejects(readPublicShare('https://chat.deepseek.com/share/abcdefgh', signal(), async () => new Response(new ReadableStream({
-    start(controller) { controller.enqueue(new Uint8Array(MAX_IMPORT_BYTES + 1)) }, cancel() { cancelled = true },
+    start(controller) { controller.enqueue(new Uint8Array(MAX_SHARE_BYTES + 1)) }, cancel() { cancelled = true },
   }))))
   assert.equal(cancelled, true)
 })
@@ -97,8 +110,8 @@ test('exports are catalogued, paginated and searched without creating any conver
     root: { id: 'root', parent: null, children: ['u'], message: null },
     u: { id: 'u', parent: 'root', children: [], message: { fragments: [{ type: 'REQUEST', content: 'test ' + i }] } },
   } }))
-  const f = await fixture(t, { share: async () => Buffer.from(JSON.stringify(conversations)) })
-  const a = await f.call('share.preview', {})
+  const f = await fixture(t)
+  const a = await uploadSource(f, Buffer.from(JSON.stringify(conversations)))
   assert.equal(a.total, 65); assert.equal(a.entries.length, 40); assert.equal(a.nextCursor, 40)
   assert.equal(a.entries[0].turnCount, 1)
   const b = await f.call('source.list', { sourceId: a.sourceId, cursor: 40 })
@@ -109,10 +122,10 @@ test('exports are catalogued, paginated and searched without creating any conver
   const preview = await f.call('preview', { sourceId: a.sourceId, conversationId: c.entries[0].id })
   assert.equal(preview.summary.messages, 1); assert.equal(preview.snippets[0].text, 'test 64'); assert.equal(f.commits(), 0)
 })
-test('multiple branches require explicit choice; no implicit flattening or batch import', async t => {
+test('full-export branches still require explicit choice; no implicit flattening or batch import', async t => {
   const data = JSON.parse(sourceBytes()); data.messages.push({ message_id: 3, parent_id: 1, role: 'ASSISTANT', fragments: [{ type: 'RESPONSE', content: '另一分支' }] })
-  const f = await fixture(t, { share: async () => Buffer.from(JSON.stringify(data)) })
-  const source = await f.call('share.preview', {}), args = { sourceId: source.sourceId, conversationId: source.entries[0].id }
+  const f = await fixture(t)
+  const source = await uploadSource(f, exportBytes(data.messages)), args = { sourceId: source.sourceId, conversationId: source.entries[0].id }
   assert.equal(source.entries[0].turnCount, undefined)
   const branch = await f.call('preview', args)
   assert.equal(branch.selectionRequired, true); assert.equal(branch.previewId, undefined); assert.equal(branch.branches.length, 2)
@@ -134,12 +147,12 @@ test('partial and split assistant messages count source turns, never half the me
   assert.equal(preview.summary.turnCount, 3)
 })
 
-test('only actual selected-path data losses are short visible warnings', async t => {
+test('only actual selected full-export path data losses are short visible warnings', async t => {
   const data = JSON.parse(sourceBytes())
   data.messages.push({ message_id: 3, parent_id: 1, role: 'USER', fragments: [{ type: 'FILE', files: [{ file_name: 'missing.png', file_size: 10 }] }] },
     { message_id: 4, parent_id: 3, role: 'ASSISTANT', fragments: [{ type: 'TOOL_OPEN' }] })
-  const f = await fixture(t, { share: async () => Buffer.from(JSON.stringify(data)) })
-  const catalog = await f.call('share.preview', {}), args = { sourceId: catalog.sourceId, conversationId: catalog.entries[0].id }
+  const f = await fixture(t)
+  const catalog = await uploadSource(f, exportBytes(data.messages)), args = { sourceId: catalog.sourceId, conversationId: catalog.entries[0].id }
   assert.deepEqual((await f.call('preview', { ...args, branchId: '2' })).warnings, [])
   const loss = await f.call('preview', { ...args, branchId: '4' })
   assert.equal(loss.summary.attachments, 1)
@@ -451,6 +464,9 @@ test('object import rechecks long-read authority before parsing and again before
 test('pending object download reserves source/decrypt/worker data before costly IO and releases after failure', async t => {
   let rejectRead, loads = 0
   const f = await fixture(t, { loadObject: async () => { loads++; return new Promise((_yes, no) => { rejectRead = no }) } })
+  const existing = await f.call('share.preview')
+  // Isolate byte-accounting from allocation: model a retained 40 MiB source.
+  f.controller.sources.get(existing.sourceId).bytes = 40 * 1024 * 1024
   const args = { name: 'large.zip', descriptor: objectDescriptor(MAX_IMPORT_BYTES) }
   const pending = f.call('source.object', args)
   await new Promise(resolve => setImmediate(resolve))

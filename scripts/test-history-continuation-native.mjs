@@ -15,8 +15,9 @@ import { build } from 'esbuild'
 import { gunzipSync } from 'node:zlib'
 
 const archive = process.env.HARNESS_DSH_ASAR
+const pinnedRuntime = process.env.HARNESS_DSH_RUNTIME
 const packedProduct = process.env.HARNESS_HISTORY_CONTINUATION_PACKAGE
-assert(archive, 'HARNESS_DSH_ASAR must name installed app.asar; native verification cannot silently skip')
+assert(archive || pinnedRuntime, 'Provide HARNESS_DSH_ASAR or a pinned HARNESS_DSH_RUNTIME; never silently skip')
 const stage = process.env.HARNESS_HISTORY_CONTINUATION_STAGE
 const work = stage || fs.mkdtempSync(path.join(os.tmpdir(), 'history-continuation-native-'))
 const project = fileURLToPath(new URL('../', import.meta.url))
@@ -24,8 +25,10 @@ assert(path.dirname(path.resolve(work)) === path.resolve(os.tmpdir()))
 assert(path.basename(work).startsWith('history-continuation-native-'))
 
 if (!stage) {
-  const fd = fs.openSync(archive, 'r')
+  const fd = pinnedRuntime ? undefined : fs.openSync(archive, 'r')
   try {
+    if (pinnedRuntime) fs.cpSync(path.resolve(pinnedRuntime), path.join(work, 'dsh'), { recursive: true })
+    else {
     const prefix = Buffer.alloc(16)
     fs.readSync(fd, prefix, 0, prefix.length, 0)
     const bytes = Buffer.alloc(prefix.readUInt32LE(12))
@@ -49,6 +52,7 @@ if (!stage) {
       }
     }
     extract(tree.files.dsh, 'dsh')
+    }
     const product = path.join(work, packedProduct ? 'dsh/node_modules/dsh-wechat-remote' : 'dsh/node_modules/@harness-remote/dsh-wechat-remote')
     fs.mkdirSync(product, { recursive: true })
     if (packedProduct) {
@@ -95,7 +99,7 @@ if (!stage) {
       windowsHide: true, timeout: 60000,
     }))
   } finally {
-    fs.closeSync(fd)
+    if (fd !== undefined) fs.closeSync(fd)
     assert(path.dirname(path.resolve(work)) === path.resolve(os.tmpdir()))
     assert(path.basename(work).startsWith('history-continuation-native-'))
     fs.rmSync(work, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })

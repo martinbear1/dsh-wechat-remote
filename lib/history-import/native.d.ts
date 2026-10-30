@@ -23,7 +23,9 @@ export interface NativeImportInspection {
 }
 export declare class NativeImportError extends Error {
     readonly code: string;
-    constructor(code: string);
+    readonly actualBytes?: number | undefined;
+    readonly limitBytes?: number | undefined;
+    constructor(code: string, actualBytes?: number | undefined, limitBytes?: number | undefined);
 }
 /** Only thrown before the native factory has been called. Later failures must
  * remain uncertain: the caller must never retry a possibly persisted import. */
@@ -34,9 +36,10 @@ export declare function nativeCapabilities(ctx: ImportHost): Promise<{
     supported: boolean;
     reason?: string;
 }>;
-/** Canonical, plugin-independent visible messages plus ignorable archival facts.
- * No original web system prompt is assumed or elevated into host authority. */
+/** Retain the pure synchronous builder for callers inspecting generated data.
+ * The actual importer always uses the cancellable scheduled builder below. */
 export declare function buildNativeImportSeed(request: NativeImportRequest, now?: number): Native[];
+export declare function buildNativeImportSeedScheduled(request: NativeImportRequest, signal?: AbortSignal, now?: number): Promise<Native[]>;
 export declare function inspectNativeImport(ctx: ImportHost, request: NativeImportIdentity, signal?: AbortSignal): Promise<NativeImportInspection>;
 export declare function commitNativeImport(ctx: ImportHost, request: NativeImportRequest, signal?: AbortSignal, beforeCreate?: () => void): Promise<{
     sessionId: string;

@@ -35,10 +35,11 @@ export async function verifyHistoryContinuation(work) {
   const { default: Tools } = await load('@deepseek-ai/dsh-tools')
   const { default: Agents } = await load('@deepseek-ai/dsh-agent')
   const { default: AgentLoop } = await load('@deepseek-ai/dsh-agent-loop')
-  const { default: AgentPresets, serviceForAgent } = await load('@deepseek-ai/dsh-agent-preset-registry')
+  const { default: AgentPresets } = await load('@deepseek-ai/dsh-agent-preset-registry')
+  const serviceForAgent = (ctx, agent, name) => ctx.agentPresets.serviceFor(agent, name)
   const { default: AgentPreset } = await load('@deepseek-ai/dsh-agent-preset')
-  const { default: JsonlPersistence } = await load('@deepseek-ai/dsh-session-persistence-jsonl')
-  const { default: SessionQuery } = await load('@deepseek-ai/dsh-session-query')
+  const JsonlPersistence = await load('@deepseek-ai/dsh-session-persistence-jsonl')
+  const { SqliteSessionQueryEngine: SessionQuery } = await load('@deepseek-ai/dsh-session-query-sqlite')
   const { default: TokenMeter } = await load('@deepseek-ai/dsh-token-meter')
   const { default: Commands } = await load('@deepseek-ai/dsh-commands')
   const { default: Web } = await load('@deepseek-ai/dsh-web')
@@ -61,6 +62,14 @@ export async function verifyHistoryContinuation(work) {
     }
     async *stream(request) {
       this.requests.push({ ...request, messages: structuredClone(request.messages), tools: structuredClone(request.tools ?? []) })
+      if (this.nextTool && request.purpose !== 'compaction') {
+        const block = { type: 'tool-call', id: `fixture-call-${randomUUID()}`, ...this.nextTool }
+        this.nextTool = undefined
+        yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+        yield { type: 'block-end', index: 0, block }
+        yield { type: 'finish', reason: { kind: 'tool-use' } }
+        return
+      }
       if (this.summaryFailure && request.purpose === 'compaction')
         throw new LlmError('Synthetic summary stream failure', 'SYNTHETIC_SUMMARY_FAILURE')
       if (this.overflowNext && request.purpose !== 'compaction') {
@@ -109,8 +118,8 @@ export async function verifyHistoryContinuation(work) {
     ctx.baseUrl = pathToFileURL(path.join(work, 'dsh/')).href
     await ctx.plugin(Loader); ctx.loader.builtins.group = Group
     for (const plugin of [Llm, SessionStore, Projection, SystemPrompt, Tools, Agents, TokenMeter, Commands, Web, Typert]) await ctx.plugin(plugin)
-    await ctx.plugin(JsonlPersistence, { root, compression: 'none' })
-    await ctx.plugin(SessionQuery)
+    await ctx.plugin(JsonlPersistence.default ?? JsonlPersistence, { root, compression: 'none' })
+    await ctx.plugin(SessionQuery, { path: ':memory:', openAt: 'never' })
     const adapter = new CaptureAdapter(inHistory)
     ctx.llm.registerAdapter(['fixture'], adapter)
     ctx.provide('agentDefaultModel', { currentSelection: () => model })
@@ -118,8 +127,10 @@ export async function verifyHistoryContinuation(work) {
       imageLimits: { maxImageBytes: 1, maxImagesPerMessage: 1, maxMessageImageBytes: 1,
         maxImagePixels: 1, maxImageDimension: 1, mediaTypes: [] } })
     ctx.provide('fileUploads', { registerAgentResolver: () => () => {} })
-    ctx.provide('workspaceRegistry', { archivedSessionIds: [], list: () => [{ id: 'synthetic-workspace', path: work }],
-      get: id => id === 'synthetic-workspace' ? { id, path: work, attachSession: async () => {} } : undefined })
+    const workspace = { id: 'synthetic-workspace', path: work, sessionIds: [],
+      async attachSession(id) { if (!this.sessionIds.includes(id)) this.sessionIds.push(id) } }
+    ctx.provide('workspaceRegistry', { archivedSessionIds: [], list: () => [workspace],
+      get: id => id === workspace.id ? workspace : undefined })
     ctx.provide('fs', { resolve() { assert.fail('no file tools may execute') } })
     ctx.provide('profileContext', { name: 'fixture', home: path.join(root, 'profile-home'), dir: path.join(root, 'profile-home/profiles/fixture'), installAnchor: anchor })
     ctx.provide('typertGateway', {})
@@ -151,10 +162,19 @@ export async function verifyHistoryContinuation(work) {
     const prompt = renderPrompt(await h.ctx.systemPrompt.assemble({ scope: handle.agent }))
     assert(!/coding agent|software engineer|Your working directory is/i.test(prompt), 'preset must not inherit coding persona/cwd')
     assert(!prompt.includes(firstUser), 'source user settings are not root system instructions')
-    assert.deepEqual(h.ctx.tools.schemas(handle.agent).map(row => row.name).sort(), ['web_fetch', 'web_search'])
+    assert.deepEqual(h.ctx.tools.schemas(handle.agent).map(row => row.name).sort(), ['chat_history_read', 'chat_history_search', 'web_fetch', 'web_search'])
     assert(serviceForAgent(h.ctx, handle.agent, 'compaction'), 'real isolated native compaction must mount')
     await handle.agent.whenIdle()
     await handle.dispose()
+  }
+  async function resumeImported(h, id) {
+    // session.create only reuses blank sessions in current hosts. Resolve the
+    // existing session through the native controller without choosing a preset;
+    // its durable preset must be restored by the host itself.
+    const found = await h.controller.resolveAgent(id)
+    if ('error' in found) throw found.error
+    assert.equal(found.agent.id, id, 'resume must not create a replacement session')
+    return { sessionId: found.agent.id, agentPreset: h.ctx.agentPresets.composedPreset(found.agent.ctx) }
   }
   for (const inHistory of [false, true]) {
     const root = path.join(work, `sessions-${inHistory}`), id = `continuation-${inHistory}`, seed = seedHistory()
@@ -163,12 +183,14 @@ export async function verifyHistoryContinuation(work) {
     h = await harness(root, inHistory)
     try {
       assert.equal(h.ctx.agents.get(id), undefined, 'cold restore starts with no loaded agent')
-      const result = await h.controller.create({ sessionId: id, workspaceId: 'synthetic-workspace' })
+      const result = await resumeImported(h, id)
       const agent = h.ctx.agents.get(result.sessionId)
       assert.equal(result.agentPreset, definition.id)
       assert.equal(h.ctx.agentPresets.composedPreset(agent.ctx), definition.id, 'controller must remount durable preset')
       assert.deepEqual(agent.session.snapshotEvents().slice(0, seed.length), seed, 'cold restore preserves imported event identity/order')
       agent.followup(user('第一次继续：列出下一步。')); await agent.whenIdle()
+      assert.equal(agent.session.snapshotEvents().findLast(e => e.type === 'turn/end')?.data.reason.kind, 'completed',
+        JSON.stringify(agent.session.snapshotEvents().findLast(e => e.type === 'turn/end')?.data.reason))
       assert.equal(h.adapter.requests.length, 1)
       const first = h.adapter.requests[0]
       assert(requestText(first).includes(firstUser)); assert(requestText(first).includes(reasoning))
@@ -195,7 +217,7 @@ export async function verifyHistoryContinuation(work) {
   try { await createImported(h, id, longSeed) } finally { await h.ctx.fiber.dispose() }
   h = await harness(root, true)
   try {
-    await h.controller.create({ sessionId: id, workspaceId: 'synthetic-workspace' })
+    await resumeImported(h, id)
     const agent = h.ctx.agents.get(id)
     agent.followup(user('继续讨论，遵守修正后的预算和时间约定。')); await agent.whenIdle()
     const engine = serviceForAgent(h.ctx, agent, 'compaction')
@@ -222,7 +244,7 @@ export async function verifyHistoryContinuation(work) {
   } finally { await h.ctx.fiber.dispose() }
   h = await harness(root, true)
   try {
-    await h.controller.create({ sessionId: id, workspaceId: 'synthetic-workspace' })
+    await resumeImported(h, id)
     const agent = h.ctx.agents.get(id)
     assert.equal(h.ctx.agentPresets.composedPreset(agent.ctx), definition.id)
     agent.followup(user('重新打开后继续讨论。')); await agent.whenIdle()
@@ -237,7 +259,7 @@ export async function verifyHistoryContinuation(work) {
     try {
       const sessionId = `continuation-automatic-${scenario}`
       await createImported(h, sessionId, seedHistory(true))
-      await h.controller.create({ sessionId, workspaceId: 'synthetic-workspace' })
+      await resumeImported(h, sessionId)
       const agent = h.ctx.agents.get(sessionId)
       if (scenario === 'pressure') {
         agent.followup(user('先继续，建立该会话的原生请求路由。')); await agent.whenIdle()
@@ -262,7 +284,7 @@ export async function verifyHistoryContinuation(work) {
   try {
     const sessionId = 'continuation-failed-compaction', seed = seedHistory(true)
     await createImported(h, sessionId, seed)
-    await h.controller.create({ sessionId, workspaceId: 'synthetic-workspace' })
+    await resumeImported(h, sessionId)
     const agent = h.ctx.agents.get(sessionId)
     agent.followup(user('继续，准备合成摘要失败测试。')); await agent.whenIdle()
     const originalSurface = structuredClone(agent.session.deriveMessages())
@@ -335,6 +357,58 @@ export async function verifyHistoryContinuation(work) {
   // Anthropic-compatible serializer. fetch is captured and immediately fails;
   // this verifies the request envelope, not remote API acceptance/semantics.
   const { buildNativeImportSeed } = await import(pathToFileURL(path.join(productRoot, 'native.js')).href)
+  {
+    const root = path.join(work, 'large-actual-preset'), sessionId = `session-dsimport-${randomUUID()}`
+    const messages = Array.from({ length: 7000 }, (_, i) => ({ id: `m-${i}`, parentId: i ? `m-${i-1}` : null,
+      role: i % 2 ? 'assistant' : 'user', text: `${i === 0 ? firstUser : i === 2 ? correction : '合成历史。'}${'保留的原始段落。'.repeat(30)}`,
+      reasoning: i % 2 ? '公开的合成思考。' : '', fragments: [], metadata: {}, warnings: [] }))
+    const seed = buildNativeImportSeed({ sessionId, workspaceId: 'synthetic-workspace', sourceHash: 'b'.repeat(64), presetId: definition.id,
+      conversation: { id: 'large-synthetic', title: 'Large synthetic', messages, leafIds: [messages.at(-1).id], warnings: [] } }, 1000)
+    h = await harness(root, true)
+    try {
+      await createImported(h, sessionId, seed)
+      await resumeImported(h, sessionId)
+      const agent = h.ctx.agents.get(sessionId)
+      const standardBefore = await h.ctx.agentPresets.readDocument('standard')
+      const background = await h.ctx.agents.create({ sessionId: `background-${randomUUID()}`, agentOptions: model,
+        setup: async agentCtx => { await h.ctx.agentPresets.mount(agentCtx, 'standard') } })
+      agent.followup(user('继续刚才的讨论。'))
+      background.agent.followup(user('Independent background task.'))
+      await Promise.all([agent.whenIdle(), background.agent.whenIdle()])
+      assert.equal(background.agent.session.snapshotEvents().findLast(e => e.type === 'turn/end').data.reason.kind, 'completed')
+      const backgroundRequests = h.adapter.requests.filter(r => r.sessionId === background.agent.id)
+      assert.equal(backgroundRequests.length, 1)
+      assert.deepEqual(backgroundRequests[0].tools, [])
+      assert(!requestText(backgroundRequests[0]).includes('chat-history-evidence'))
+      assert(!requestText(backgroundRequests[0]).includes('BEFORE answering from memory'))
+      assert.equal(serviceForAgent(h.ctx, background.agent, 'compaction'), undefined)
+      assert.deepEqual(await h.ctx.agentPresets.readDocument('standard'), standardBefore)
+      await background.dispose()
+      checks.push({ scenario: 'parallel-independent-native-mode', completedWhileImportedChatCompacts: true,
+        nativePresetDocumentUnchanged: true, noAddedToolsPromptOrCompaction: true })
+      const ownRequests = h.adapter.requests.filter(r => r.sessionId === sessionId)
+      assert.equal(agent.session.snapshotEvents().findLast(e => e.type === 'turn/end').data.reason.kind, 'completed')
+      assert.equal(ownRequests[0].purpose, 'compaction', 'actual preset must compact before its first conversation call')
+      assert(h.adapter.requests.filter(r => r.purpose === 'compaction').length > 1)
+      assert.deepEqual(agent.session.snapshotEvents().slice(0, seed.length), seed)
+      assert.equal(h.ctx.get('compaction'), undefined)
+      assert.deepEqual(h.ctx.tools.schemas(), [])
+      const conversationRequest = ownRequests.find(r => r.purpose !== 'compaction')
+      assert(conversationRequest.tools.some(t => t.name === 'chat_history_search'))
+      checks.push({ scenario: 'actual-preset-large-first-continuation', rounds: 3500,
+        nativeSummaries: h.adapter.requests.filter(r => r.purpose === 'compaction').length,
+        originalEventsUnchanged: true, scopedOnly: true, syntheticProvider: true })
+      h.adapter.nextTool = { name: 'chat_history_search', arguments: JSON.stringify({ query: '预算改为2300' }) }
+      agent.followup(user('阳台园艺的预算后来改为多少了？')); await agent.whenIdle()
+      assert.equal(agent.session.snapshotEvents().findLast(e => e.type === 'turn/end').data.reason.kind, 'completed')
+      const result = agent.session.snapshotEvents().findLast(e => e.type === 'tool/result')
+      assert(messageText(result.data.message).includes('2300'))
+      assert(h.adapter.requests.at(-1).messages.some(m => m.source?.kind === 'runtime-context' && messageText(m).includes('chat-history-evidence')))
+      assert.deepEqual(agent.session.snapshotEvents().slice(0, seed.length), seed)
+      checks.push({ scenario: 'actual-preset-native-recall-execution', namespaceInjectionAndToolRuntime: true,
+        originalEventsUnchanged: true, currentConversationOnly: true, syntheticProvider: true })
+    } finally { await h.ctx.fiber.dispose() }
+  }
   const { DeepSeekAdapter, resolveAdapterOptions } = await load('@deepseek-ai/dsh-llm-deepseek')
   const sourceMessages = [
     { id: 'u1', parentId: null, role: 'user', text: firstUser, reasoning: '', fragments: [], metadata: {}, warnings: [] },
@@ -358,7 +432,7 @@ export async function verifyHistoryContinuation(work) {
     try { await createImported(h, sessionId, seed) } finally { await h.ctx.fiber.dispose() }
     h = await harness(root, inHistory)
     try {
-      await h.controller.create({ sessionId, workspaceId: 'synthetic-workspace' })
+      await resumeImported(h, sessionId)
       const agent = h.ctx.agents.get(sessionId)
       agent.followup(user('继续这个网页讨论。')); await agent.whenIdle()
       assert.equal(h.adapter.requests.length, 1)
@@ -382,7 +456,7 @@ export async function verifyHistoryContinuation(work) {
         })
       } finally { globalThis.fetch = forbidNetwork }
       assert(wire, 'actual native adapter must reach the captured request boundary')
-      assert.deepEqual(wire.tools.map(row => row.name).sort(), ['web_fetch', 'web_search'])
+      assert.deepEqual(wire.tools.map(row => row.name).sort(), ['chat_history_read', 'chat_history_search', 'web_fetch', 'web_search'])
       const sequence = wire.messages.flatMap(message => message.content.map(block => ({ role: message.role, ...block })))
       const before = sequence.findIndex(block => block.type === 'thinking' && block.thinking === 'THINK BEFORE SEARCH\n')
       const search = sequence.findIndex(block => block.type === 'tool_use' && block.name === 'web_search')

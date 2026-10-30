@@ -41,7 +41,10 @@ try {
   assert.equal(outerMeta.exports['./history-import/compaction'], undefined)
   assert.equal(nativeMeta.exports['./history-import/compaction'], undefined)
   const expectedIcon = fs.readFileSync('lib/assets/wechat.svg')
-  assert.equal(createHash('sha256').update(expectedIcon).digest('hex'), 'd1c1c296796b3c4cbdce5b896c30815d3376a3766a4254bc1086ab70804f1e72')
+  // Git may check out this text asset with CRLF on Windows. Check its
+  // canonical artwork here; the package/source byte comparisons below stay exact.
+  const canonicalIcon = expectedIcon.toString('utf8').replace(/\r\n/g, '\n')
+  assert.equal(createHash('sha256').update(canonicalIcon).digest('hex'), 'd1c1c296796b3c4cbdce5b896c30815d3376a3766a4254bc1086ab70804f1e72')
   assert.match(expectedIcon.toString(), /viewBox="0 0 40 33"/)
   assert.doesNotMatch(expectedIcon.toString(), /<(?:rect|image|script|foreignObject)\b|stroke=|background|(?:href|style)=/i, 'transparent native artwork has no background, border, remote content or active markup')
   for (const [directory, meta] of [[outer, outerMeta], [native, nativeMeta]]) {
@@ -53,7 +56,7 @@ try {
   assert(fs.readFileSync(path.join(native, 'THIRD-PARTY-NOTICES/wechat-artwork.txt'), 'utf8').includes('https://pc.weixin.qq.com/'))
   const selfResources = createRequire(path.join(outer, 'package.json'))
   assert.equal(read(selfResources.resolve('dsh-wechat-remote/locale/zh.json')).meta.description, outerMeta.description)
-  for (const [entry, file] of [['group-assistants', 'group-assistants-component.js'], ['resource-library', 'resource-library-component.js'], ['private-resource-prompt', 'private-resources/native.js'], ['resource-library/chat-compaction', 'private-resources/chat-compaction.js']]) {
+  for (const [entry, file] of [['group-assistants', 'group-assistants-component.js'], ['resource-library', 'resource-library-component.js'], ['private-resource-prompt', 'private-resources/native.js'], ['resource-library/chat-compaction', 'private-resources/chat-compaction.js'], ['resource-library/chat-memory', 'private-resources/chat-memory.js']]) {
     assert.equal(outerMeta.exports[`./${entry}`], `./native/lib/${file}`)
     assert.equal(nativeMeta.exports[`./${entry}`].default, `./lib/${file}`)
     assert.equal(selfResources.resolve(`dsh-wechat-remote/${entry}`), path.join(native, 'lib', file))

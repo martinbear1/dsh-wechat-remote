@@ -63,6 +63,25 @@ test('persona is task-neutral and treats imported reasoning/tool content as hist
   assert.match(persona, /Do not claim access to a missing attachment/)
 })
 
+test('imported continuation and recall preserve general context without assigning a character or promoting preferences', async () => {
+  const continuation = readFileSync(new URL('../src/history-import/continuation.ts', import.meta.url), 'utf8')
+  const memorySource = readFileSync(new URL('../src/private-resources/chat-memory.ts', import.meta.url), 'utf8')
+  assert.match(continuation, /通用会话的接续摘要/)
+  assert.match(continuation, /不升格为系统指令/)
+  assert.match(continuation, /没有依据的类别不要补造/)
+  assert.match(continuation, /不因导入、压缩或缺少单独的角色声明而取消角色/)
+  assert.doesNotMatch(continuation, /保留人物身份、关系、称呼、世界设定/)
+  const { MEMORY_GUIDANCE } = await loadSource('chat-memory')
+  assert.match(MEMORY_GUIDANCE, /general conversation continuity, not a role or identity assignment/)
+  assert.match(MEMORY_GUIDANCE, /explicit requests OR sustained prior interaction/)
+  assert.match(MEMORY_GUIDANCE, /Existing settings remain user-level conversation context/)
+  assert.doesNotMatch(MEMORY_GUIDANCE, /speak in character|do not break character/)
+  assert.doesNotMatch(memorySource, /installChatCard|chat-character-card|storageDomain|commands\.register/)
+  const plugins = resourceChatComposition(chat, { prompt: 'fixture/prompt', compaction: 'fixture/compaction', memory: 'fixture/memory' }, 'fixture_prompt')
+  assert.equal(resourceAssistant(chat), undefined)
+  assert.doesNotMatch(JSON.stringify(plugins), /chat-card|character-card/)
+})
+
 test('schema3 rejects inherited capabilities, arbitrary runtime modules and malformed prompts', () => {
   for (const patch of [{ basePreset: 'standard' }, { capabilities: [] }, { assistant: {} }, { module: 'evil' },
     { runtime: 'group' }, { compactionPrompt: '' }, { compactionPrompt: '\ud800' }, { systemPrompt: '\0' }]) {
@@ -108,7 +127,7 @@ test('resource registry owns Chat lifecycle without reading a base or consulting
   const owner = new NativeResourceRegistry({ get(name) {
     assert.equal(name, 'agentPresets', 'Chat must not load group state, a base codec or host defaults')
     return registry
-  } }, { promptModule: 'fixture/prompt', chatCompactionModule: 'fixture/compaction' })
+  } }, { promptModule: 'fixture/prompt', chatCompactionModule: 'fixture/compaction', chatMemoryModule: 'fixture/memory' })
   await owner.register(chat)
   assert.equal(definitions.size, 1)
   const original = [...definitions.values()][0]
@@ -122,7 +141,8 @@ test('resource registry owns Chat lifecycle without reading a base or consulting
   assert.equal(original.plugins[1].config.text, chat.systemPrompt)
   const updated = [...definitions.values()].find(row => row.id !== original.id)
   assert.equal(updated.plugins[1].config.text, next.systemPrompt)
-  assert.equal(updated.plugins[3].config[0].config.instruction, next.compactionPrompt)
+  assert.equal(updated.plugins.find(row => row.id === 'compaction').config[0].config.instruction, next.compactionPrompt)
+  assert.equal(updated.plugins.find(row => row.id === 'tool-chat-history').name, 'fixture/memory')
   await owner.unregister(next)
   assert.equal(definitions.size, 1)
   await owner.close()
@@ -170,10 +190,10 @@ function fixture({ config = {}, chunks = [{ blocks: [text('合成检查点')] }]
   return { instance: new Plugin(ctx, resolved), calls, agent, toolHistory, config: resolved }
 }
 
-test('factory inherits native lifecycle/region/persistence and overrides only summarize', () => {
+test('factory inherits native transactions and customizes only public pressure/summarize hooks', () => {
   const f = fixture()
   assert(f.instance instanceof FakeNativeEngine)
-  assert.deepEqual(Object.getOwnPropertyNames(Plugin.prototype).sort(), ['constructor', 'summarize'])
+  assert.deepEqual(Object.getOwnPropertyNames(Plugin.prototype).sort(), ['compactIfNeeded', 'constructor', 'summarize'])
   assert.equal(f.instance.selectRegion(), 'native-region-selection')
   assert.equal(f.instance.persistCheckpoint(), 'native-persistence')
   assert.equal(f.instance.config, f.config)

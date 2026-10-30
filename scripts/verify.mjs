@@ -77,6 +77,9 @@ const agentMetadata = readFileSync(path.join(root, 'lib/agent-metadata.js'), 'ut
 const secureFileArtifact = readFileSync(path.join(root, 'lib/secure-file.js'), 'utf8')
 check(entry.includes('export const apply ='), 'lib/index.js 缺少函数式 apply 导出（宿主插件不会加载）')
 check(!entry.includes('export function apply'), 'lib/index.js 不应使用会被 Cordis 识别为构造器的普通 function apply')
+const nativeEntry = readFileSync(path.join(root, 'installer/native-entry.mjs'), 'utf8')
+check(nativeEntry.includes('export const apply =') && !nativeEntry.includes('export function apply'),
+  'npm 外层入口必须保留函数式 apply，确保原生宿主执行退出清理')
 check(entry.includes("export const name = 'gate'"), 'lib/index.js 缺少 gate name 导出')
 check(entry.includes("from './gate-runtime.js'"), 'lib/index.js 不是无副作用的薄入口')
 for (const forbidden of ['createServer(', 'loadAgentDescriptor()', 'loadState()', 'new PublicRelayGateway']) {

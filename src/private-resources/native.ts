@@ -4,10 +4,10 @@ import { COLLABORATION_COMPONENT_ID, nativeAssistantCapabilitiesReady, nativeAss
 import type { FeatureAccess } from '../feature-access.js'
 import { assistantGuidance, type AssistantDefinition } from '../assistant-presets/definition.js'
 import { resourceAssistant, resourceError, resourcePresetId, RESOURCE_PROMPT_MAX_BYTES, type ResourcePreset } from './contract.js'
-import { nativeChatCompactionModule, resourceChatComposition } from './chat-composition.js'
+import { nativeChatCompactionModule, nativeChatMemoryModule, resourceChatComposition } from './chat-composition.js'
 
 export interface ResourceHost { get(name: string): any }
-export interface NativeResourceOptions { codec?: NativePresetCodec; promptModule?: string; collaborationModule?: string; chatCompactionModule?: string }
+export interface NativeResourceOptions { codec?: NativePresetCodec; promptModule?: string; collaborationModule?: string; chatCompactionModule?: string; chatMemoryModule?: string }
 const collaborationNames = ['dsh-wechat-remote/collaboration', '@harness-remote/dsh-wechat-remote/collaboration']
 const collaborationId = COLLABORATION_COMPONENT_ID
 const promptVariable = 'harness_private_resource_prompt'
@@ -107,6 +107,7 @@ export class NativeResourceRegistry {
       plugins = resourceChatComposition(resource, {
         prompt: this.options.promptModule || ownPromptModule(),
         compaction: this.options.chatCompactionModule || nativeChatCompactionModule(),
+        memory: this.options.chatMemoryModule || nativeChatMemoryModule(),
       }, promptVariable)
     } else {
       const anchor = this.options.codec ? undefined : this.host.get('profileContext')?.installAnchor

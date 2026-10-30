@@ -16,6 +16,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { resolveTypertGateway } from './dsh-protocol-compat.js'
 import { OBJECT_PREPARE_BUDGET_MS } from './object-transfer-budget.js'
+import { imageReference, type DurableImageReference } from './attachment-native.js'
 
 const MAX_BATCH_ATTACHMENTS = 6
 const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
@@ -30,6 +31,7 @@ export interface WechatAttachmentInput {
   readonly attachmentId: string
   readonly mediaType?: string
   readonly name?: string
+  readonly attachment?: DurableImageReference
 }
 
 export interface WechatAttachmentBatchRequest {
@@ -182,7 +184,7 @@ export class WechatAttachmentService extends TypertRemoteService {
     requested: WechatAttachmentInput,
     signal: AbortSignal,
   ): Promise<PreparedWechatAttachment> {
-    const cacheKey = `${sessionId}\0${requested.attachmentId}`
+    const cacheKey = attachmentCacheKey(sessionId, requested)
     const cached = this.cache.get(cacheKey)
     if (cached && cached.expiresAt > Date.now() + DESCRIPTOR_REFRESH_MARGIN_MS) {
       return { attachmentId: requested.attachmentId, descriptor: cached.descriptor }
@@ -208,7 +210,7 @@ export class WechatAttachmentService extends TypertRemoteService {
   ): Promise<PreparedWechatAttachment> {
     const response = this.readAttachmentOverride
       ? await this.readAttachmentOverride(sessionId, requested.attachmentId, signal)
-      : await this.fetchNativeAttachment(sessionId, requested.attachmentId, signal)
+      : await this.fetchNativeAttachment(sessionId, requested.attachmentId, signal, requested.attachment)
     if (!response.ok || !response.value) {
       throw new Error(typeof response.error?.message === 'string'
         ? response.error.message
@@ -225,7 +227,7 @@ export class WechatAttachmentService extends TypertRemoteService {
     if (!Number.isSafeInteger(expiresAt) || Number(expiresAt) <= Date.now()) {
       throw new ObjectTransportUnavailable('公网对象服务返回了无效的到期时间')
     }
-    const cacheKey = `${sessionId}\0${requested.attachmentId}`
+    const cacheKey = attachmentCacheKey(sessionId, requested)
     this.cache.set(cacheKey, { descriptor, expiresAt: Number(expiresAt) })
     while (this.cache.size > MAX_DESCRIPTOR_CACHE) {
       const oldest = this.cache.keys().next().value as string | undefined
@@ -239,13 +241,14 @@ export class WechatAttachmentService extends TypertRemoteService {
     sessionId: string,
     attachmentId: string,
     signal: AbortSignal,
+    attachment?: DurableImageReference,
   ): Promise<NativeAttachmentResponse> {
     const gateway = resolveTypertGateway(this.hostContext)
     if (gateway) {
       return gateway.invoke({
         namespace: 'session',
         method: 'attachment',
-        args: { request: { sessionId, attachmentId } },
+        args: { request: { sessionId, attachmentId, ...(attachment ? { attachment } : {}) } },
         signal,
       }).then(
         value => ({ ok: true, value }) as NativeAttachmentResponse,
@@ -368,9 +371,16 @@ function validateRequest(request: WechatAttachmentBatchRequest): WechatAttachmen
       || (item.name !== undefined && (typeof item.name !== 'string' || item.name.length > 255))) {
       return { code: 'invalid-attachment-request', message: '附件批次参数无效' }
     }
+    if (item.attachment !== undefined && (!imageReference(item.attachment) || item.attachment.attachmentId !== item.attachmentId)) {
+      return { code: 'invalid-attachment-request', message: '完整图片引用无效' }
+    }
     seen.add(item.attachmentId)
   }
   return null
+}
+
+function attachmentCacheKey(sessionId: string, requested: WechatAttachmentInput): string {
+  return `${sessionId}\0${requested.attachmentId}` + (requested.attachment ? `\0${JSON.stringify(imageReference(requested.attachment))}` : '')
 }
 
 function safeIdentifier(value: unknown): value is string {

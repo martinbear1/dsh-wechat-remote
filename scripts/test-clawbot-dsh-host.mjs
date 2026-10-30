@@ -670,6 +670,12 @@ test('installed native prompt schema, SessionController and AgentLoop preserve r
       ctx = new Context()
       new SystemPrompt(ctx, {}); new SessionStore(ctx); new Projections(ctx); new AgentRegistry(ctx)
       new ToolRuntime(ctx, { mode: 'native' }); new Typert(ctx)
+      // New hosts require their native access service even for the fixture's
+      // direct internal calls. Do not replace it with an always-allow mock.
+      let accessEntry
+      try { accessEntry = require.resolve('@deepseek-ai/dsh-api-remote-access') }
+      catch (error) { if (error.code !== 'MODULE_NOT_FOUND') throw error }
+      if (accessEntry) await ctx.plugin((await import(pathToFileURL(accessEntry).href)).default)
       const model = { provider: 'fixture', model: 'no-network' }
       let modelCalls = 0, nativePrompts = 0
       const oldTurnStarted = deferred(), releaseOldTurn = deferred()

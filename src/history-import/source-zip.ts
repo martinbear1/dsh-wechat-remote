@@ -1,6 +1,7 @@
 import { inflateRaw } from 'node:zlib'
+import { MAX_FILE_BYTES } from './limits.js'
 
-export const MAX_SOURCE_BYTES = 20 * 1024 * 1024
+export const MAX_SOURCE_BYTES = MAX_FILE_BYTES
 export const MAX_EXPANDED_BYTES = 64 * 1024 * 1024
 
 function invalid(): never { throw new Error('history-import/invalid-zip') }

@@ -118,7 +118,7 @@ async function fixture(t) {
     const host = { get(key) { assert.equal(key, 'agentPresets', 'resource delivery may only use the native preset registry'); return native } }
     const newLibrary = () => {
       const library = new PrivateResourceLibrary(host, directory, { codec: { load: JSON.parse }, promptModule: 'cordis:privateResourcePrompt',
-        chatCompactionModule: 'cordis:resourceChatCompaction', ...libraryOptions })
+        chatCompactionModule: 'cordis:resourceChatCompaction', chatMemoryModule: 'cordis:resourceChatMemory', ...libraryOptions })
       libraries.push(library); return library
     }
     let offline = false, tamper = false, corrupt = false
@@ -310,7 +310,8 @@ test('canonical public Chat resource crosses real cloud HTTP to both accounts wi
     const native = await p.native.resolve(item.presetId)
     assert.equal(native.plugins.find(row => row.id === 'harness-private-resource-data').config.text, chat.systemPrompt)
     assert.equal(native.plugins.find(row => row.id === 'compaction').config[0].config.instruction, chat.compactionPrompt)
-    assert.deepEqual(native.plugins.filter(row => row.id.startsWith('tool-')).map(row => row.id), ['tool-web'])
+    assert.deepEqual(native.plugins.filter(row => row.id.startsWith('tool-')).map(row => row.id), ['tool-web', 'tool-chat-history'])
+    assert.equal(native.plugins.find(row => row.id === 'tool-chat-history').name, 'cordis:resourceChatMemory')
     assert(!native.plugins.some(row => /tool-fs|collaboration|human-tools/.test(row.name)))
     assert.deepEqual(await readFile(path.join(p.directory, digest('chat-mode\0' + '1.0.0'), 'resource.json')), first.content)
     assert(p.requests.filter(row => row.kind === 'control').every(row => row.headers['x-hr-resource-schema'] === '3'))
@@ -321,6 +322,8 @@ test('canonical public Chat resource crosses real cloud HTTP to both accounts wi
   await assert.rejects(b.delivery.download(privateStory.release, 'instance-b', signal()), { code: 'resources-unavailable' })
   const story = await a.controller.control({ op: 'install', resourceId: 'story-helper', version: '1.0.0' }, signal())
   assert.equal(story.items.find(row => row.resourceId === 'story-helper').state, 'installed')
+  const storyPreset = await a.native.resolve(story.items.find(row => row.resourceId === 'story-helper').presetId)
+  assert(!storyPreset.plugins.some(row => row.id === 'tool-chat-history'), 'ordinary resource composition must not acquire Chat recall')
   // The actual v2 signer without the new negotiation header is the legacy wire
   // contract. The old DTO shape and private story remain available to its owner.
   const legacyPath = `/v1/resources/agents/${f.a.nodeId}/library`

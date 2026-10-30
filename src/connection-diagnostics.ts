@@ -130,6 +130,7 @@ export async function runConnectionDiagnostics(options: ConnectionDiagnosticOpti
     pluginRunningVersion: context.pluginVersion, dshVersion: context.dshVersion,
     platform: context.platform, profileKind: context.profileKind, relayEnabled: context.relayEnabled,
     relayState: context.relayState,
+    pairingObservation: context.pairingObservation,
     checks: [
       { id: 'local-plugin', status: 'pass' },
       { id: 'relay-health', status: 'not-tested' },

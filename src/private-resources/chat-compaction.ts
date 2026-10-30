@@ -1,10 +1,14 @@
-/** Native BasicCompactionEngine extension: only the documented summarize hook
- * changes. Region selection, pricing, cancellation, checkpoints, retention,
- * overflow recovery and persistence remain owned by the installed DSH. */
+/** Native summarize hook plus imported-only admission through public hooks.
+ * The installed DSH still owns every compaction transaction and checkpoint. */
 import { resourceError, resourcePromptValid } from './contract.js'
+import { installImportedContinuation } from '../history-import/continuation.js'
+import { importedSession } from '../history-import/chat-session.js'
 
 type Row = Record<string, any>
-type NativeEngine = new (...args: any[]) => { ctx: Row; config: Row }
+type NativeEngine = {
+  new (...args: any[]): { ctx: Row; config: Row; compactIfNeeded(agent: Row, trigger: string, signal?: AbortSignal): Promise<any> }
+  inject?: string[]
+}
 
 /** Separate authored data from native configuration. Native defaults and
  * exact-route model policies still go through the installed engine's strict
@@ -23,6 +27,19 @@ export function chatCompactionConfig(value: unknown): { instruction: string; nat
 export function createChatCompactionPlugin(native: { BasicCompactionEngine: NativeEngine }, llm: Row, instruction: string) {
   if (!resourcePromptValid(instruction)) throw resourceError('resource-prompt-invalid', 'Chat 摘要正文无效。')
   return class ChatCompaction extends native.BasicCompactionEngine {
+    static inject = [...new Set([...(native.BasicCompactionEngine.inject ?? []), 'agents', 'sessionQuery'])]
+    readonly imported: ReturnType<typeof installImportedContinuation>
+    constructor(ctx: Row, config: Row = {}) {
+      super(ctx, config)
+      this.imported = installImportedContinuation(ctx, this, instruction)
+    }
+    // The native engine deliberately dispatches this public method virtually.
+    // Defer imported pressure to the resolved request route, leaving ordinary
+    // Chat and the host's transaction/manual-compaction implementation intact.
+    async compactIfNeeded(agent: Row, trigger: string, signal?: AbortSignal) {
+      if (this.config.auto && trigger === 'pressure' && await importedSession(this.ctx, agent, signal)) return null
+      return super.compactIfNeeded(agent, trigger, signal)
+    }
     async summarize(input: { messages: readonly Row[]; tools?: readonly Row[] }, agent: Row, signal?: AbortSignal) {
       signal?.throwIfAborted()
       const latest = agent.session.requestHeader()?.config
@@ -32,11 +49,12 @@ export function createChatCompactionPlugin(native: { BasicCompactionEngine: Nati
       // resolved and validated all defaults and model-specific overrides.
       const provider = override?.summarizationProvider ?? this.config.summarizationProvider
       const model = override?.summarizationModel ?? this.config.summarizationModel
-      const maxTokens = override?.maxTokens ?? this.config.maxTokens
-      const target = provider ? { provider, model } : routed
+      const bounded = this.imported.get(agent)
+      const maxTokens = bounded?.maxTokens ?? override?.maxTokens ?? this.config.maxTokens
+      const target = bounded?.target ?? (provider ? { provider, model } : routed)
       if (!target?.provider || !target?.model) throw new Error('No provider/model available for conversation compaction')
       const checkpointRequest = Object.freeze({ role: 'user', content: Object.freeze([
-        Object.freeze({ type: 'text', text: instruction }),
+        Object.freeze({ type: 'text', text: bounded?.instruction ?? instruction }),
       ]) })
       const options = {
         provider: target.provider, model: target.model,

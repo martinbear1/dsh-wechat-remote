@@ -5,6 +5,8 @@ import * as NativeMessages from '@deepseek-ai/dsh-llm'
 import { canonicalSubmission, sha256 } from './submission-crypto.js'
 import { fail, plain, revision, row, type WorkflowScope } from './data.js'
 import type { AutomationInspection, AutomationPolicy, AutomationRun, AutomationRunRequest, AutomationRunResult, NativeAutomationAdapter } from './automation-types.js'
+import { nativeSessionReadSupported, readNativeSession } from './session-read-native.js'
+import { nativeAutomationToolsSupported, prepareAutomationTools } from './automation-tools-native.js'
 
 type Native = Record<string, any>
 interface Host { get(name: string): any; on(name: string, listener: (...args: any[]) => any, options?: unknown): () => void }
@@ -268,11 +270,11 @@ class DshAutomationAdapter implements NativeAutomationAdapter {
     const checks: [string, () => boolean][] = [
       ['tools.guard', () => typeof this.host.get('tools')?.guard === 'function'],
       ['tools.register', () => typeof this.host.get('tools')?.register === 'function'],
-      ['tools.presentAs', () => typeof this.host.get('tools')?.presentAs === 'function'],
+      ['tools.presentation', () => nativeAutomationToolsSupported(this.host.get('tools'), this.host.get('systemPrompt'))],
       ['messages.createUserMessage', () => typeof NativeMessages.createUserMessage === 'function'],
       ['messages.freezeMessage', () => typeof NativeMessages.freezeMessage === 'function'],
       ['agents.get', () => typeof this.host.get('agents')?.get === 'function'],
-      ['sessionController.inspect', () => typeof this.host.get('sessionController')?.inspect === 'function'],
+      ['session.read', () => nativeSessionReadSupported(this.host)],
       ['sessionController.resolveAgent', () => typeof this.host.get('sessionController')?.resolveAgent === 'function'],
       ['sessions.flush', () => typeof this.host.get('sessions')?.flush === 'function'],
       ['agentPresets.readDocument', () => typeof this.host.get('agentPresets')?.readDocument === 'function'],
@@ -286,7 +288,7 @@ class DshAutomationAdapter implements NativeAutomationAdapter {
   async inspect(scope: WorkflowScope, signal: AbortSignal): Promise<AutomationInspection> {
     signal.throwIfAborted(); const capability = this.probe()
     if (!capability.supported) throw fail('automation-unsupported', capability.reason!)
-    const inspection = await this.host.get('sessionController').inspect(scope.sessionId, signal)
+    const inspection = await readNativeSession(this.host, scope.sessionId, signal)
     if (!row(inspection) || !row(inspection.meta)) throw fail('automation-native-history', '原生会话读取结果无效')
     generation(inspection.meta, scope); const log = events(inspection.events), status = boundary(log)
     const agent = this.host.get('agents')?.get(scope.sessionId)
@@ -361,9 +363,6 @@ class DshAutomationAdapter implements NativeAutomationAdapter {
       if (inspection.busy || inspection.processor.fingerprint !== policy.processor.fingerprint) return { state: 'cancelled', reason: '原生会话配置或忙碌状态已变化；未调用模型' }
       const target = agent!, scopedTools = target.ctx.get('tools')
       if (typeof scopedTools?.guard !== 'function' || !request.tools.length || request.tools.some(t => !AUTOMATION_TOOLS.includes(t.name as any))) throw fail('automation-unsupported', '缺少精确工具门控')
-      // Native presentation removes executable Code/PTC transport. We do not
-      // force-overwrite another local presentation declaration if it exists.
-      scopedDisposers.push(scopedTools.presentAs('native'))
       const guard = (exec: Native) => !owned() || exec.agent !== target || signal.aborted || exec.parent !== undefined || !AUTOMATION_TOOLS.includes(exec.name)
         ? '此后台回合只允许读取当前提交并保存待审核结果' : undefined
       scopedDisposers.push(scopedTools.guard((exec: Native) => dispatched && (ownTurn === undefined || currentTurn === ownTurn) ? guard(exec) : undefined))
@@ -378,6 +377,9 @@ class DshAutomationAdapter implements NativeAutomationAdapter {
         if (tool.name === 'human_automation_save') outputSaved = true
         return value
       } }))
+      scopedDisposers.push(await prepareAutomationTools(target, request.tools.map(tool => tool.name),
+        { provider: policy.processor.provider, model: policy.processor.model,
+          ...(policy.processor.reasoningEffort === undefined ? {} : { reasoningEffort: policy.processor.reasoningEffort }) }, signal))
       disposers.push(target.ctx.on('agent/inbox/claimed', (payload: Native) => {
         if (payload.agent === target && payload.message?.id === run.messageId) { ownTurn = payload.turn; currentTurn = payload.turn; if (lease) lease.turn = payload.turn; claimed = request.claimed(payload.turn) }
       }))
@@ -439,8 +441,10 @@ class DshAutomationAdapter implements NativeAutomationAdapter {
       const result = await Promise.race([ended, target.whenIdle().then(() => settlement(readEvents(target.session), { ...run, turn: ownTurn }))])
       await claimed.catch(() => {}); if (!await this.host.get('sessions').flush(target.session)) return { state: 'unknown', reason: '原生执行回执尚未可靠持久化' }
       return result
-    } catch {
+    } catch (error) {
       abort(); if (agent && dispatched) await agent.whenIdle().catch(() => {})
+      if (!dispatched && error instanceof Error && (error as Error & { code?: string }).code === 'automation-executor-unsupported')
+        return { state: 'failed', reason: '当前会话的原生工具执行器不支持受限自动处理；未发送任务、未修改执行器，手动群任务仍可使用' }
       return { state: dispatched ? 'unknown' : 'failed', reason: dispatched ? '原生执行结果未知；不会重新调用模型' : '原生入场条件不满足，未调用模型' }
     } finally {
       if (lease) gates.get(this.host)?.leases.delete(lease)
@@ -448,7 +452,7 @@ class DshAutomationAdapter implements NativeAutomationAdapter {
     }
   }
   async reconcile(run: AutomationRun, signal: AbortSignal): Promise<AutomationRunResult> {
-    try { const value = await this.host.get('sessionController').inspect(run.scope.sessionId, signal); generation(value.meta, run.scope); return settlement(events(value.events), run) }
+    try { const value = await readNativeSession(this.host, run.scope.sessionId, signal); generation(value.meta, run.scope); return settlement(events(value.events), run) }
     catch { signal.throwIfAborted(); return { state: 'unknown', reason: '无法核对原生历史；不会重新调用模型' } }
   }
   async close() { this.stopped = true; this.lifetime.abort(); await Promise.allSettled([...this.runs]); for (const off of this.unregister.splice(0)) off(); this.stops.clear() }

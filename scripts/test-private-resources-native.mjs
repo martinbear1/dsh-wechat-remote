@@ -63,7 +63,7 @@ if (!childStage) {
   const { ToolRuntime } = await load('@deepseek-ai/dsh-tools')
   const { SessionController } = await load('@deepseek-ai/dsh-api-session-controller')
   const { default: Typert } = await load('@deepseek-ai/dsh-typert-registry')
-  const { default: JsonlPersistence } = await load('@deepseek-ai/dsh-session-persistence-jsonl')
+  const persistenceModule = await load('@deepseek-ai/dsh-session-persistence-jsonl')
   const { default: SessionQuery } = await load('@deepseek-ai/dsh-session-query')
   const codec = await nativeAssistantCodec(anchor), directory = path.join(work, 'local-library')
   const libraries = [], leases = []
@@ -73,7 +73,10 @@ if (!childStage) {
     await ctx.plugin(Loader); await ctx.plugin(Projection); await ctx.plugin(SystemPrompt, {})
     ctx.loader.builtins.privateResourcePrompt = ResourcePromptData
     new SessionStore(ctx); new AgentRegistry(ctx); new ToolRuntime(ctx, { mode: 'native' }); new Typert(ctx)
-    new JsonlPersistence(ctx, { root: path.join(work, 'synthetic-sessions'), compression: 'none' }); new SessionQuery(ctx)
+    // Cordis accepts both the older default service class and the current
+    // native { apply, Config } plugin; do not bypass provider lifecycle.
+    await ctx.plugin(persistenceModule.default ?? persistenceModule, { root: path.join(work, 'synthetic-sessions'), compression: 'none' })
+    new SessionQuery(ctx)
     const model = { provider: 'fixture', model: 'no-network' }
     ctx.provide('agentDefaultModel', { currentSelection: () => model })
     ctx.provide('llm', { listProviders: () => [{ id: 'fixture' }], resolveCallConfig: async value => value,
@@ -81,11 +84,20 @@ if (!childStage) {
     ctx.provide('attachments', { admitPromptContent: async content => structuredClone(content),
       imageLimits: { maxImageBytes: 1, maxImagesPerMessage: 1, maxMessageImageBytes: 1, maxImagePixels: 1, maxImageDimension: 1, mediaTypes: [] } })
     ctx.provide('fileUploads', { registerAgentResolver: () => () => {} })
-    ctx.provide('workspaceRegistry', { archivedSessionIds: [], list: () => [], get: id => id === 'fixture-workspace'
-      ? { id, path: work, attachSession: async () => {} } : undefined })
+    const workspace = { id: 'fixture-workspace', path: work, sessionIds: [],
+      async attachSession(id) { if (!this.sessionIds.includes(id)) this.sessionIds.push(id) } }
+    ctx.provide('workspaceRegistry', { archivedSessionIds: [], list: () => [workspace],
+      get: id => id === workspace.id ? workspace : undefined })
     ctx.provide('fs', { resolve() { throw Error('no filesystem tool in fixture') } })
     await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 10 })
     const controller = new SessionController(ctx)
+    // Native session.create is a new/blank-session operation, not cold resume.
+    // Use the same host resolver used by ordinary session activation.
+    const resume = async id => {
+      const found = await controller.resolveAgent(id)
+      if (found.error) throw found.error
+      return found.agent
+    }
     await ctx.plugin(AgentPresets, { default: 'standard' })
     const baseline = [{ id: 'persona', name: '@deepseek-ai/dsh-persona', config: {
       prefix: 'Stock role.', suffix: 'Native suffix.', complete: false, includeRuntimeContext: true,
@@ -129,6 +141,7 @@ if (!childStage) {
         meta: { cwd: work, delegationDepth: 0, agentPreset: row.presetId }, setup: async owner => { await ctx.agentPresets.mount(owner, row.presetId) } })
       handle.agent.session.append('agent-preset/selected', { agentPreset: row.presetId })
       await handle.agent.whenIdle(); const header = structuredClone(handle.agent.session.header)
+      await workspace.attachSession(header.id)
       const history = structuredClone(handle.agent.session.snapshotEvents())
       assert(history.length > 0)
       await handle.dispose()
@@ -152,8 +165,10 @@ if (!childStage) {
     const restored = createLibrary(); await restored.start()
     assert.equal(restored.list().find(row => row.version === '1.0.0').status, 'disabled')
     assert.equal(restored.list().find(row => row.version === '1.1.0').status, 'installed')
-    await assert.rejects(controller.create({ sessionId: coldIds[0].header.id, workspaceId: 'fixture-workspace' }),
-      error => error.code === 'agent-preset/not-found', 'cold resume does not have a saved definition snapshot when its preset is disabled')
+    await assert.rejects(resume(coldIds[0].header.id),
+      error => error.code === 'agent-preset/not-found' ||
+        (error.code === 'gateway/internal' && error.message.includes(`Unknown agent preset: ${installed.presetId}`)),
+      'cold resume does not have a saved definition snapshot when its preset is disabled')
     assert.equal(ctx.agents.get(coldIds[0].header.id), undefined)
     const reader = await ctx.sessionPersistence.open(coldIds[0].header.id, 'read')
     try {
@@ -162,9 +177,10 @@ if (!childStage) {
     } finally { await reader.close() }
     assert.equal((await restored.setEnabled('story-helper', '1.0.0', true)).status, 'installed')
     for (const saved of coldIds) {
-      const resumed = await controller.create({ sessionId: saved.header.id, workspaceId: 'fixture-workspace' })
-      const coldAgent = ctx.agents.get(resumed.sessionId)
-      assert.equal(resumed.agentPreset, saved.row.presetId)
+      const coldAgent = await resume(saved.header.id)
+      assert.equal(coldAgent.id, saved.header.id)
+      assert.equal(ctx.agents.get(saved.header.id), coldAgent)
+      assert.equal(coldAgent.session.header.agentPreset, saved.row.presetId)
       assert.deepEqual(coldAgent.session.header, saved.header)
       const resumedEvents = coldAgent.session.snapshotEvents()
       assert.deepEqual(resumedEvents.slice(0, saved.history.length), saved.history)

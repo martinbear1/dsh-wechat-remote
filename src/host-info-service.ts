@@ -17,6 +17,8 @@ import type { HostPlatformDescriptor } from './host-platform.js'
 import { PLUGIN_VERSION } from './plugin-version.js'
 import { readOtherEndpointInfo, type OtherEndpointInfo } from './other-endpoint-info.js'
 import type { ScheduledStatus } from './scheduled-tasks/protocol.js'
+import { ACCOUNT_CAPABILITY } from './account-balance.js'
+import { resolveTypertGateway } from './dsh-protocol-compat.js'
 export type { OtherEndpointInfo } from './other-endpoint-info.js'
 
 export interface WechatHostDescribeRequest {}
@@ -116,6 +118,8 @@ export class WechatHostInfoService extends TypertRemoteService {
     const descriptor = loadAgentDescriptor(this.ctx)
     const schedulesService = this.ctx.get('wechatSchedules')
     let schedules: ScheduledStatus | undefined
+    let accountAvailable = false
+    try { accountAvailable = this.ctx.get('wechatAccount')?.available() === true } catch { /* optional only */ }
     // Auxiliary UI metadata must never block an otherwise healthy connection.
     // This local accessor does not touch tasks, storage or another endpoint.
     try { schedules = schedulesService?.status?.() } catch { /* fall back to the optional status RPC */ }
@@ -136,10 +140,12 @@ export class WechatHostInfoService extends TypertRemoteService {
         agentVersion: descriptor.agentVersion,
         hostPlatform: descriptor.hostPlatform,
         capabilities: [...descriptor.capabilities, ...(this.privateUpdatesReady?.() ? [{ id: 'human.private-updates', version: 1 }] : []),
+          ...(resolveTypertGateway(this.ctx) ? [{ id: 'wechat.attachment-reference', version: 1 }] : []),
           ...((this.ctx.get('wechatClawbot') as { available?: () => boolean } | undefined)?.available?.() ? [{ id: 'wechat.clawbot', version: 1 }] : []),
           // Availability of our client adapter is separate from the native
           // automation plugin's switch, carried in the lightweight snapshot.
-          ...(schedulesService ? [{ id: 'dsh.schedules', version: 1 }] : [])],
+          ...(schedulesService ? [{ id: 'dsh.schedules', version: 1 }] : []),
+          ...(accountAvailable ? [{ id: ACCOUNT_CAPABILITY, version: 1 }] : [])],
         ...(schedules ? { schedules } : {}),
         ...(this.gateRuntime ? { gate: this.gateRuntime() } : {}),
       },

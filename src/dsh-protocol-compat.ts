@@ -4,6 +4,7 @@ import { resolveDshSessionAddress } from './dsh-session-address.js'
 import { withPresentationProjections } from './session-presentation.js'
 import { openHostEvents, invokeHostRemote } from './dsh-host-contract.js'
 import { withNativePeerStream } from './dsh-native-peer.js'
+import { nativeAttachmentRequest } from './attachment-native.js'
 import { modelIdentityFormat, presentModelCatalog, needsModelAliasResolution, resolveModelAlias, legacyModelSelection } from './legacy-model-identity.js'
 
 type JsonRecord = Record<string, unknown>
@@ -317,12 +318,16 @@ export function resolveTypertGateway(ctx: Context): TypertGatewayLike | null {
       } finally { observation[Symbol.dispose]() }
     } } : {}),
     wireStream: candidate.wireStream ? { open: (endpoint, payload, signal) => openHostEvents(candidate, endpoint, payload, signal, ctx) } : undefined,
-    invoke: request => {
+    invoke: async request => {
       // The generated commands/list Agent parameter can resume a cold Agent.
       // Reading composer suggestions is not consent to acquire a writer.
       if (request.namespace === 'commands' && request.method === 'list' && typeof agents?.get === 'function'
           && !agents.get(String(request.args.agentId))) {
         return Promise.reject(Object.assign(new Error('此会话尚未在当前节点激活，暂不加载命令建议；历史仍可查看'), { code: 'session/agent-unavailable' }))
+      }
+      if (request.namespace === 'session' && request.method === 'attachment') {
+        const payload = await nativeAttachmentRequest(ctx, recordOf(request.args.request) ?? {}, request.signal)
+        return invokeHostRemote(ctx, candidate, { ...request, args: { request: payload } })
       }
       return invokeHostRemote(ctx, candidate, request)
     },

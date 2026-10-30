@@ -216,7 +216,7 @@ test('phone capability discovery projects live readiness within its RPC budget w
 test('real Cordis late optional dependencies recover discovery without remount, approval, timers or Agent wake', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   const host = await setup(t), before = await automationCapability(host), service = host.service, ledger = service.automation
-  assert.equal(before.status, 'blocked'); assert(before.reason.includes('sessionController.inspect'))
+  assert.equal(before.status, 'blocked'); assert(before.reason.includes('session.read'))
   assert(host.tools.get('human_automation_propose', host.agent), 'draft proposal stays distinct from executable automatic capability')
   const started = deferred(), ready = deferred()
   const mounting = host.ctx.plugin(async child => { provideAutomationServices(child); started.resolve(); await ready.promise })

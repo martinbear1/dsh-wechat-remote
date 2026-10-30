@@ -26,6 +26,30 @@ const fixture = (t, overrides = {}) => {
 }
 const finish = async service => { for (let i = 0; i < 100 && service.isBusy(); i++) await new Promise(resolve => setTimeout(resolve, 2)); assert.equal(service.isBusy(), false); return service.status() }
 
+test('a recovered native fallback keeps the next explicit one-click upgrade and restart verification intact', async t => {
+  for (const scope of ['web', 'desktop']) {
+    const f = fixture(t, { scope })
+    const journal = path.join(f.home, `harness-remote-updates/native-${scope}/status.json`)
+    const failed = { phase: 'failed', jobId: 'c'.repeat(32), bundle: f.state.owner,
+      previousVersion: '1.7.10', targetVersion: '1.7.12', message: 'historical failure' }
+    fs.mkdirSync(path.dirname(journal), { recursive: true })
+    fs.writeFileSync(journal, JSON.stringify(failed))
+    const check = await f.service.check()
+    assert.equal(check.status.phase, 'idle')
+    assert.equal(check.canInstall, true)
+    assert.deepEqual(JSON.parse(fs.readFileSync(journal)), failed, 'checking preserves the old receipt')
+    f.service.start(check.ticket)
+    assert.equal((await finish(f.service)).phase, 'restart-required')
+    assert.equal(f.state.installs.length, 1, 'one explicit click submits one native install')
+    assert.equal(JSON.parse(fs.readFileSync(journal)).previousVersion, '1.7.12')
+    const restarted = new NativeUpdateService({ ...f.options, runningVersion: '1.8.0' })
+    t.after(() => restarted.dispose())
+    assert.equal((await restarted.status()).phase, 'complete')
+    assert.equal((await restarted.check()).canInstall, false, 'installed target is not offered again')
+    assert.equal(f.state.installs.length, 1)
+  }
+})
+
 test('explicit tool preparation can replace the native manager, but only its returned provider is admitted',async t=>{
   for(const returnedCurrent of [true,false]){
     const f=fixture(t,{scope:'web'})

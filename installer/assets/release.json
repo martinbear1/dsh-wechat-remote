@@ -1,44 +1,52 @@
 {
-  "version": "1.7.14",
+  "version": "1.7.15",
   "catalog": {
     "schemaVersion": 1,
-    "revision": "installer-1.7.14",
-    "issuedAt": 1792077770482,
-    "expiresAt": 1794496970482,
+    "revision": "installer-1.7.15",
+    "issuedAt": 1793376840218,
+    "expiresAt": 1795796040218,
     "releases": [
       {
-        "version": "1.7.14",
+        "version": "1.7.15",
         "channel": "stable",
         "dsh": [
-          "0.1.7-rc.2",
-          "0.2.0-rc.1",
-          "0.2.0-rc.2",
-          "0.2.1-alpha.1",
-          "0.2.1-alpha.2",
-          "0.2.1-alpha.3"
+          "0.2.1-rc.5",
+          "0.2.1-rc.4",
+          "0.2.2-alpha.2"
         ],
         "platforms": [
-          "windows"
+          "windows",
+          "macos",
+          "linux"
         ],
         "architectures": [
           "x64"
         ],
         "asset": {
-          "url": "https://github.com/martinbear1/dsh-wechat-remote/releases/download/v1.7.14/harness-remote-dsh-wechat-remote-1.7.14.tgz",
-          "sha256": "5d8025b1798769611c1cf99a0097c3acd38f491c09f37998d9039e35a3cd0536",
-          "bytes": 7261247
+          "url": "https://github.com/martinbear1/dsh-wechat-remote/releases/download/v1.7.15/harness-remote-dsh-wechat-remote-1.7.15.tgz",
+          "sha256": "9d35868fb1700d87e47f1cfefa5ed8811a9094852d787b5dd2e25446b9b4b40e",
+          "bytes": 7301705
         },
         "targets": [
           {
             "platform": "windows",
             "arch": "x64",
             "dsh": [
-              "0.1.7-rc.2",
-              "0.2.0-rc.1",
-              "0.2.0-rc.2",
-              "0.2.1-alpha.1",
-              "0.2.1-alpha.2",
-              "0.2.1-alpha.3"
+              "0.2.1-rc.5"
+            ]
+          },
+          {
+            "platform": "macos",
+            "arch": "x64",
+            "dsh": [
+              "0.2.1-rc.4"
+            ]
+          },
+          {
+            "platform": "linux",
+            "arch": "x64",
+            "dsh": [
+              "0.2.2-alpha.2"
             ]
           }
         ]

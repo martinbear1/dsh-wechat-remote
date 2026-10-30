@@ -102,6 +102,20 @@ test('confirmed completion rechecks once, updates running snapshot, shares read 
   assert(tree(b).includes('更新已生效')); assert(!tree(b).includes(`"children":"${OLD}"`))
 })
 
+test('loaded new code with a local port conflict does not display unqualified update success', () => {
+  for (const scope of ['desktop', 'web']) {
+    const checked = completed()
+    const status = { ...checked.status, connectionWarning: 'address-in-use', message: '连接端口被占用' }
+    const store = { getSnapshot: () => ({ check: checked, status, checking: false, starting: false, error: null }) }
+    const text = childrenText(cardModule.exports.NativeUpdateCard({ store, scope }))
+    assert(!text.includes('更新已生效'))
+    assert(text.includes('连接待恢复'))
+    assert(text.includes('端口被占用'))
+    assert(text.includes('无需重新配对'))
+    assert.match(text, scope === 'desktop' ? /应用.*退出/ : /停止并重新启动 DSH Web 服务/)
+  }
+})
+
 test('failed completion recheck preserves confirmed terminal and rendered runtime, with manual recovery only', async t => {
   let reads = 0, fail = true
   const gate = deferred()

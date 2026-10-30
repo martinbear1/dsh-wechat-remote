@@ -1,4 +1,5 @@
 {
+  "files": ["src/private-resources/chat-memory.ts"],
   "compilerOptions": {
     "target": "ES2022",
     "module": "ESNext",

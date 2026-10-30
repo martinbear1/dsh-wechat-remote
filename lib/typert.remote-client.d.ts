@@ -3,6 +3,7 @@ import type {
   RemoteResult,
   TypertRemoteContribution,
 } from '@deepseek-ai/dsh-typert-protocol'
+import type { AccountReadRequest, AccountReadResult } from '@harness-remote/dsh-wechat-remote/account-balance'
 import type { WechatAttachmentBatchRequest, WechatAttachmentBatchResult } from '@harness-remote/dsh-wechat-remote/attachment'
 import type { ClawbotRequest } from '@harness-remote/dsh-wechat-remote/clawbot/protocol'
 import type { ClawbotControlResult } from '@harness-remote/dsh-wechat-remote/clawbot/service'
@@ -58,6 +59,9 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     workflowDraft: (request: HumanActionRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     workflowReceiptRetry: (request: AutomationTaskRequest & { submissionId: string; submissionVersion: number; expectedRevision: number; }, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     workflowReceiptStatus: (request: AutomationTaskRequest & { offset?: number; }, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
+  }
+  interface TypertRemoteNamespace$7765636861744163636f756e74 {
+    read: (request: AccountReadRequest, signal?: AbortSignal) => Promise<RemoteResult<AccountReadResult>>
   }
   interface TypertRemoteNamespace$7765636861744174746163686d656e74 {
     prepareBatch: (request: WechatAttachmentBatchRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatAttachmentBatchResult>>
@@ -127,6 +131,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'humanTools/workflowDraft': (request: HumanActionRequest, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     'humanTools/workflowReceiptRetry': (request: AutomationTaskRequest & { submissionId: string; submissionVersion: number; expectedRevision: number; }, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
     'humanTools/workflowReceiptStatus': (request: AutomationTaskRequest & { offset?: number; }, signal?: AbortSignal) => Promise<RemoteResult<HumanResult>>
+    'wechatAccount/read': (request: AccountReadRequest, signal?: AbortSignal) => Promise<RemoteResult<AccountReadResult>>
     'wechatAttachment/prepareBatch': (request: WechatAttachmentBatchRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatAttachmentBatchResult>>
     'wechatClawbot/control': (request: ClawbotRequest, signal?: AbortSignal) => Promise<RemoteResult<ClawbotControlResult>>
     'wechatDirectory/create': (request: WechatDirectoryCreateRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatDirectoryCreateResult>>
@@ -146,6 +151,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'agentInputs': TypertRemoteNamespace$6167656e74496e70757473
     'agentResources': TypertRemoteNamespace$6167656e745265736f7572636573
     'humanTools': TypertRemoteNamespace$68756d616e546f6f6c73
+    'wechatAccount': TypertRemoteNamespace$7765636861744163636f756e74
     'wechatAttachment': TypertRemoteNamespace$7765636861744174746163686d656e74
     'wechatClawbot': TypertRemoteNamespace$776563686174436c6177626f74
     'wechatDirectory': TypertRemoteNamespace$7765636861744469726563746f7279

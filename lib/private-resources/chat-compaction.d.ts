@@ -1,7 +1,12 @@
+import { installImportedContinuation } from '../history-import/continuation.js';
 type Row = Record<string, any>;
-type NativeEngine = new (...args: any[]) => {
-    ctx: Row;
-    config: Row;
+type NativeEngine = {
+    new (...args: any[]): {
+        ctx: Row;
+        config: Row;
+        compactIfNeeded(agent: Row, trigger: string, signal?: AbortSignal): Promise<any>;
+    };
+    inject?: string[];
 };
 /** Separate authored data from native configuration. Native defaults and
  * exact-route model policies still go through the installed engine's strict
@@ -15,7 +20,9 @@ export declare function chatCompactionConfig(value: unknown): {
 export declare function createChatCompactionPlugin(native: {
     BasicCompactionEngine: NativeEngine;
 }, llm: Row, instruction: string): {
-    new (...args: any[]): {
+    new (ctx: Row, config?: Row): {
+        readonly imported: ReturnType<typeof installImportedContinuation>;
+        compactIfNeeded(agent: Row, trigger: string, signal?: AbortSignal): Promise<any>;
         summarize(input: {
             messages: readonly Row[];
             tools?: readonly Row[];
@@ -31,6 +38,7 @@ export declare function createChatCompactionPlugin(native: {
         ctx: Row;
         config: Row;
     };
+    inject: string[];
 };
 export default function chatCompaction(ctx: Row, config: unknown): Promise<void>;
 export {};

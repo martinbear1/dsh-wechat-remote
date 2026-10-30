@@ -1,5 +1,6 @@
 import { type HistorySource } from './source.js';
 import { ImportReceipts } from './receipts.js';
+export { importError } from './errors.js';
 import { type NativeImportRequest, type NativeImportIdentity, type NativeImportInspection } from './native.js';
 import type { FeatureAuthorization, FeatureGrant } from '../feature-access.js';
 import { type EncryptedCloudObjectDescriptor } from '../object-crypto.js';
@@ -13,7 +14,7 @@ export interface ImportPorts {
     }>;
     authorize(signal: AbortSignal): Promise<FeatureAuthorization>;
     owner(signal: AbortSignal): Promise<string | undefined>;
-    parse(data: Buffer, signal: AbortSignal): Promise<{
+    parse(data: Buffer, signal: AbortSignal, sourceKind?: 'share'): Promise<{
         source: HistorySource;
         bytes: number;
     }>;
@@ -24,10 +25,6 @@ export interface ImportPorts {
     receipts: ImportReceipts;
     now?: () => number;
 }
-export declare function importError(error: unknown): {
-    code: string;
-    message: string;
-};
 /** Entirely demand-driven. Constructing this controller never reads native
  * sessions, starts a timer, connects to the web, or writes any file. */
 export declare class HistoryImportController {
@@ -59,4 +56,3 @@ export declare class HistoryImportController {
     private run;
     control(action: string, input: unknown, signal: AbortSignal): Promise<Row>;
 }
-export {};

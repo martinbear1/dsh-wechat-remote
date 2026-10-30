@@ -249,7 +249,7 @@ test('diagnosis never adopts host descriptions, creates update stores or publish
 })
 
 // Handler-level fake hooks: explicit copy/collapse behavior, not a React error-boundary mounting test.
-test('help is collapsed and inert until explicit check; report requires preview and explicit copy', async () => {
+test('help is inert; pairing failure offers direct safe copy and clipboard failure stays local', async () => {
   const state = [], effects = [], copies = [], subscriptions = []; let cursor = 0, effectCursor = 0, subscriptionCursor = 0
   const react = {
     Component: class { constructor(props) { this.props = props } },
@@ -257,7 +257,8 @@ test('help is collapsed and inert until explicit check; report requires preview 
     useState(value) { const index = cursor++; if (!(index in state)) state[index] = value; return [state[index], next => { state[index] = next }] },
     useEffect(effect, deps) { const index = effectCursor++, old = effects[index]; if (!old || deps.some((value, i) => old.deps[i] !== value)) { old?.cleanup?.(); effects[index] = { deps, cleanup: effect() } } },
   }
-  const ui = await load('ConnectionDiagnostics.tsx', { navigator: { clipboard: { writeText: async text => { copies.push(text) } } },
+  let clipboardFails = false
+  const ui = await load('ConnectionDiagnostics.tsx', { navigator: { clipboard: { writeText: async text => { if (clipboardFails) throw Error('permission denied'); copies.push(text) } } },
     require(id) { if (id === 'react') return react; if (id === 'react/jsx-runtime') return { Fragment: 'fragment', jsx: (type, props) => ({ type, props }), jsxs: (type, props) => ({ type, props }) }; if (id.endsWith('.css')) return {}; throw Error(id) } })
   const f = fixture()
   let contentMounted = false
@@ -299,6 +300,27 @@ test('help is collapsed and inert until explicit check; report requires preview 
       assert.equal(JSON.stringify(tree).includes('private-token-and-QR'), false)
       assert.equal(copies.length, 1, 'error/unsupported must not copy anything')
     }
+    const pairingObservation = { status: 'failed', startedAt: '2026-10-22T02:17:17.380Z', finishedAt: '2026-10-22T02:17:27.380Z',
+      code: 'tls-validation', systemCode: 'SELF_SIGNED_CERT_IN_CHAIN', message: 'PRIVATE-TICKET', ticket: 'PRIVATE-TICKET' }
+    f.diagnose(async () => ({ ...report(), pairingObservation })); await f.diagnostics.diagnose()
+    render(); tree = render()
+    assert.equal(all(tree).some(node => node.type === 'pre'), false, 'direct copy requires no preview step')
+    assert.ok(button(tree, '复制报错')); assert.equal(JSON.stringify(tree).includes('PRIVATE-TICKET'), false)
+    const callsBeforeCopy = f.calls.length
+    button(tree, '复制报错').props.onClick(); await tick()
+    assert.equal(f.calls.length, callsBeforeCopy, 'copy sends no RPC, health or pairing requests')
+    assert.equal(copies.length, 2); assert.equal(copies[1].includes('PRIVATE-TICKET'), false)
+    assert.equal(JSON.parse(copies[1]).pairingObservation.systemCode, 'SELF_SIGNED_CERT_IN_CHAIN')
+    assert.ok(button(render(), '已复制报错'))
+    clipboardFails = true
+    button(render(), '已复制报错').props.onClick(); await tick(); tree = render()
+    assert.equal(f.calls.length, callsBeforeCopy); assert.equal(copies.length, 2)
+    assert.ok(all(tree).find(node => node.type === 'pre'), 'clipboard rejection offers manual copy within same disclosure')
+    assert.match(JSON.stringify(tree), /复制未成功/)
+    await f.store.generateQr(); assert.equal(f.store.getSnapshot().qrState, 'ready', 'clipboard denial never blocks pairing')
+    f.diagnose(async () => ({ ...report(), pairingObservation: { ...pairingObservation, status: 'issued' } })); await f.diagnostics.diagnose()
+    render(); tree = render(); assert.equal(button(tree, '复制报错'), undefined); assert.equal(button(tree, '已复制报错'), undefined)
+    assert.equal(JSON.stringify(tree).includes('SELF_SIGNED_CERT_IN_CHAIN'), false, 'a newer successful observation does not keep stale errors')
     f.diagnose(async () => report()); await f.diagnostics.diagnose()
     render().props.onToggle({ currentTarget: { open: false } }); tree = render()
     assert.equal(button(tree, '检查连接'), undefined)

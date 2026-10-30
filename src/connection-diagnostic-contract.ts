@@ -3,6 +3,39 @@ export type SafeFailureCode = 'dns' | 'connection-refused' | 'connection-reset' 
   | 'timeout' | 'tls-validation' | 'proxy-auth-required' | 'request-rejected' | 'rate-limited'
   | 'server-error' | 'invalid-response' | 'cancelled' | 'unknown'
 export interface SafeFailure { code: SafeFailureCode; systemCode?: string; httpStatus?: number }
+/** Observation of QR credential issuance only, never a phone-claim/connection verdict. */
+export interface PairingObservation extends Partial<SafeFailure> {
+  status: 'running' | 'issued' | 'failed'
+  startedAt: string
+  finishedAt?: string
+  serverCode?: string
+  reason?: string
+}
+export const PAIRING_SERVER_CODES: Readonly<Record<string, string>> = Object.freeze({
+  invalid_agent_proof: '云端未通过电脑身份校验',
+  invalid_agent_key: '云端无法识别电脑身份公钥',
+  agent_identity_unavailable: '云端暂时无法登记电脑身份',
+  agent_revoked: '云端报告电脑身份已撤销',
+  invalid_request: '云端认为申请内容不符合要求',
+  unsupported_agent_proof: '云端不支持此身份校验版本',
+  rate_limited: '配对凭据申请过于频繁',
+  internal_error: '云端处理申请时发生异常',
+})
+export const PAIRING_PROOF_MESSAGES: Readonly<Record<string, string>> = Object.freeze({
+  'Agent identity does not match proof': 'identity-mismatch',
+  'Agent identity proof is expired or replayed': 'proof-expired-or-replayed',
+  'Agent identity proof is invalid': 'proof-invalid',
+  'Agent identity proof is replayed': 'proof-replayed',
+})
+const pairingReasonText: Readonly<Record<string, string>> = Object.freeze({
+  'service-not-ready': '电脑端配对服务尚未就绪',
+  'ticket-missing': '此次申请未取得首次配对凭据',
+  'fetch-failed': '网络请求失败，底层未提供可识别的具体错误码',
+  'identity-mismatch': '云端报告电脑身份与签名不一致',
+  'proof-expired-or-replayed': '云端报告身份校验请求已过期或重复；请先核对电脑时间',
+  'proof-invalid': '云端报告电脑身份签名校验未通过',
+  'proof-replayed': '云端报告身份校验请求重复',
+})
 export type DiagnosticCheckId = 'local-plugin' | 'relay-health' | 'agent-connection'
 export type DiagnosticCheckStatus = 'pass' | 'fail' | 'not-tested' | 'cancelled'
 export interface ConnectionDiagnosticCheck extends Partial<SafeFailure> {
@@ -17,6 +50,7 @@ export interface ConnectionDiagnosticContext {
   profileKind?: 'desktop' | 'web' | 'unknown'
   relayEnabled?: boolean
   relayState?: string
+  pairingObservation?: PairingObservation
 }
 export interface ConnectionDiagnosticReport {
   schema: 1
@@ -29,6 +63,7 @@ export interface ConnectionDiagnosticReport {
   relayEnabled: boolean
   relayState: 'disabled' | 'enrolling' | 'connecting' | 'online' | 'offline' | 'unknown'
   checks: ConnectionDiagnosticCheck[]
+  pairingObservation?: PairingObservation
 }
 
 export const DIAGNOSTIC_CHECK_IDS: readonly DiagnosticCheckId[] = ['local-plugin', 'relay-health', 'agent-connection']
@@ -88,6 +123,29 @@ export function sanitizeConnectionFailure(value: unknown): SafeFailure {
   if (typeof httpStatus === 'number' && Number.isInteger(httpStatus) && httpStatus >= 100 && httpStatus <= 599) result.httpStatus = httpStatus
   return result
 }
+export function sanitizePairingObservation(value: unknown): PairingObservation | undefined {
+  try {
+    const status = diagnosticField(value, 'status'), startedAt = safeTime(diagnosticField(value, 'startedAt'))
+    if (!startedAt || !['running', 'issued', 'failed'].includes(status as string)) return undefined
+    const result: PairingObservation = { status: status as PairingObservation['status'], startedAt }
+    if (status === 'running') return result
+    const finishedAt = safeTime(diagnosticField(value, 'finishedAt'))
+    if (!finishedAt) return undefined
+    result.finishedAt = finishedAt
+    if (status === 'failed') {
+      Object.assign(result, sanitizeConnectionFailure(value))
+      const serverCode = diagnosticField(value, 'serverCode'), reason = diagnosticField(value, 'reason')
+      if (typeof serverCode === 'string' && Object.hasOwn(PAIRING_SERVER_CODES, serverCode)) result.serverCode = serverCode
+      if (typeof reason === 'string' && Object.hasOwn(pairingReasonText, reason)) result.reason = reason
+    }
+    return result
+  } catch { return undefined }
+}
+export function pairingFailureDescription(value: PairingObservation): string {
+  const safe = sanitizePairingObservation(value)
+  return (safe?.reason && pairingReasonText[safe.reason]) || (safe?.serverCode && PAIRING_SERVER_CODES[safe.serverCode])
+    || (safe?.code === 'timeout' ? '申请配对凭据超时' : failureDescription(safe?.code))
+}
 function projectConnectionReport(value: unknown): ConnectionDiagnosticReport | null {
   if (diagnosticField(value, 'schema') !== 1 || diagnosticField(value, 'source') !== 'plugin') return null
   const startedAt = safeTime(diagnosticField(value, 'startedAt')), inputChecks = diagnosticField(value, 'checks')
@@ -103,6 +161,7 @@ function projectConnectionReport(value: unknown): ConnectionDiagnosticReport | n
     checks.push(check)
   }
   const dshVersion = safeVersion(diagnosticField(value, 'dshVersion'))
+  const pairingObservation = sanitizePairingObservation(diagnosticField(value, 'pairingObservation'))
   return {
     schema: 1, source: 'plugin', startedAt,
     pluginRunningVersion: safeVersion(diagnosticField(value, 'pluginRunningVersion')) || 'unknown',
@@ -112,6 +171,7 @@ function projectConnectionReport(value: unknown): ConnectionDiagnosticReport | n
     relayEnabled: diagnosticField(value, 'relayEnabled') === true,
     relayState: choice(diagnosticField(value, 'relayState'), ['disabled', 'enrolling', 'connecting', 'online', 'offline', 'unknown'], 'unknown'),
     checks,
+    ...(pairingObservation ? { pairingObservation } : {}),
   }
 }
 export function sanitizeConnectionReport(value: unknown): ConnectionDiagnosticReport | null {

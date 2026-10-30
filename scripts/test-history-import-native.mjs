@@ -13,6 +13,8 @@ import { pathToFileURL, fileURLToPath } from 'node:url'
 import { createHash, randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { build } from 'esbuild'
+import { largeShareFixture, fragmentedShareFixture } from './history-import-large-fixture.mjs'
+import { MAX_SEED_BYTES, MAX_SHARE_BYTES, MAX_MESSAGES } from '../lib/history-import/limits.js'
 
 const entry = fileURLToPath(new URL('../src/history-import/native.ts', import.meta.url))
 const compiled = await build({ entryPoints: [entry], bundle: true, write: false, platform: 'node', format: 'esm', target: 'node22' })
@@ -135,14 +137,14 @@ test('web UI tips are archived, not impersonated as assistant response content',
   assert.deepEqual(events.find(event => event.type.endsWith('/record') && event.data.index === 1).data.fragments[0], tip)
 })
 
-test('native seed byte limit accepts exactly 24 MiB and rejects one extra byte without truncating', () => {
+test('native seed byte limit accepts the exact configured boundary and rejects one extra byte without truncating', () => {
   const r = request(); r.conversation = conversation([{ ...r.conversation.messages[0], text: 'a' }])
-  const limit = 24 * 1024 * 1024, base = pure.buildNativeImportSeed(r, 1000)
+  const limit = MAX_SEED_BYTES, base = pure.buildNativeImportSeed(r, 1000)
   const length = limit - Buffer.byteLength(JSON.stringify(base)) + 1
   r.conversation.messages[0].text = 'a'.repeat(length)
   assert.equal(Buffer.byteLength(JSON.stringify(pure.buildNativeImportSeed(r, 1000))), limit)
   r.conversation.messages[0].text += 'a'
-  assert.throws(() => pure.buildNativeImportSeed(r, 1000), /conversation-too-large/)
+  assert.throws(() => pure.buildNativeImportSeed(r, 1000), /seed-too-large/)
   assert.equal(r.conversation.messages[0].text.length, length + 1)
 })
 test('display title limits do not discard the original title or timestamp metadata', () => {
@@ -232,7 +234,7 @@ test('installed native factory, cold reader, actual continuation, isolation and 
     const { Context } = await load('cordis'), { SessionStore, Session } = await load('dsh-session')
     const { default: Agents } = await load('dsh-agent'), { AgentLoop } = await load('dsh-agent-loop')
     const { default: Projections } = await load('dsh-session-projection'), { SystemPrompt } = await load('dsh-system-prompt')
-    const { ToolRuntime } = await load('dsh-tools'), { default: Persistence } = await load('dsh-session-persistence-jsonl')
+    const { ToolRuntime } = await load('dsh-tools'), persistenceModule = await load('dsh-session-persistence-jsonl')
     const { sessionFormatCatalog: catalog } = await load('dsh-session-format-catalog'), { createUserMessage } = await load('dsh-llm')
     const { PluginPackages, createRuntimeResolution } = await load('dsh-app-boot')
     const { presentSearchResult, presentFetchResult } = await load('dsh-tool-web')
@@ -284,7 +286,7 @@ test('installed native factory, cold reader, actual continuation, isolation and 
     new SessionStore(ctx); new Projections(ctx); new Agents(ctx); new ToolRuntime(ctx, { mode: 'native' })
     const execute = ctx.tools.execute.bind(ctx.tools)
     ctx.tools.execute = (...args) => { toolExecutions++; return execute(...args) }
-    new Persistence(ctx, { root: path.join(work, 'synthetic-sessions') })
+    await ctx.plugin(persistenceModule.default ?? persistenceModule, { root: path.join(work, 'synthetic-sessions') })
     const model = { provider: 'fixture', model: 'never-network' }
     let observedRequest, inHistory = false
     ctx.provide('llm', { listProviders: () => [{ id: 'fixture' }], resolveCallConfig: async value => value,
@@ -342,10 +344,10 @@ test('installed native factory, cold reader, actual continuation, isolation and 
     }
     await assert.rejects(adapter.commitNativeImport(wrapped, request({ workspaceId: 'missing' })), rejectedBeforeCreate('workspace-unavailable'))
     assert.equal(createCalls, 1)
-    const oversized = request(), oversizedBody = 'x'.repeat(13 * 1024 * 1024)
+    const oversized = request(), oversizedBody = 'x'.repeat(Math.ceil(MAX_SEED_BYTES / 2) + 1024)
     oversized.conversation.messages[0].text = oversizedBody
     oversized.conversation.messages[0].fragments = [{ type: 'REQUEST', content: oversizedBody, data: {} }]
-    await assert.rejects(adapter.commitNativeImport(wrapped, oversized), rejectedBeforeCreate('conversation-too-large'))
+    await assert.rejects(adapter.commitNativeImport(wrapped, oversized), rejectedBeforeCreate('seed-too-large'))
     assert.equal(createCalls, 1, 'expanded seed limit is checked before any native write')
     await assert.rejects(adapter.commitNativeImport(wrapped, request(), AbortSignal.abort()), rejectedBeforeCreate('aborted'))
     assert.equal(createCalls, 1)
@@ -419,16 +421,36 @@ test('installed native factory, cold reader, actual continuation, isolation and 
       } }
     } }
     assert.equal((await adapter.inspectNativeImport(corrupted, r)).state, 'uncertain')
-    const longRequest = request({ conversation: longConversation() })
+    const { parseHistorySource } = await import('../lib/history-import/source.js')
+    const longMiB = Number(process.env.HARNESS_IMPORT_TEST_MIB || 13)
+    assert(Number.isFinite(longMiB) && longMiB > 0 && longMiB < MAX_SHARE_BYTES / 1024 / 1024)
+    const longRounds = Number(process.env.HARNESS_IMPORT_TEST_ROUNDS || 1386)
+    assert(Number.isSafeInteger(longRounds) && longRounds > 0 && longRounds * 2 <= MAX_MESSAGES)
+    const fragmented = process.env.HARNESS_IMPORT_TEST_FRAGMENTED === '1'
+    const longInput = (fragmented ? fragmentedShareFixture : largeShareFixture)(longMiB, longRounds), longSource = await parseHistorySource(longInput, 'share')
+    const originalParents = JSON.parse(longInput).data.biz_data.messages.map(message => message.parent_id)
+    const longRequest = request({ conversation: longSource.conversations[0], sourceHash: longSource.sourceHash })
     const longReceipt = await adapter.commitNativeImport(wrapped, longRequest)
-    assert.equal(longReceipt.messageCount, 2000); assert.equal(modelCalls, 0)
+    assert.equal(longReceipt.messageCount, longRounds * 2); assert.equal(modelCalls, 0)
     const longReader = await ctx.sessionPersistence.open(longRequest.sessionId, 'read')
     try {
       const { events: longEvents } = await longReader.read()
       validate(longReader.header, longEvents)
       const messages = longEvents.filter(e => ['user/message', 'assistant/message'].includes(e.type)).map(e => e.type === 'user/message' ? e.data : e.data.message)
-      assert.equal(messages.length, 2000)
-      messages.forEach((message, index) => assert.equal(message.content[0].text, longRequest.conversation.messages[index].text))
+      assert.equal(messages.length, longRounds * 2)
+      messages.forEach((message, index) => {
+        assert.equal(message.content.filter(b => b.type === 'text').map(b => b.text).join('\n\n'), longRequest.conversation.messages[index].text)
+        assert.equal(message.content.filter(b => b.type === 'reasoning').map(b => b.text).join('\n\n'), longRequest.conversation.messages[index].reasoning)
+      })
+      const records = longEvents.filter(e => e.type.endsWith('/record'))
+      for (const [index, original] of longRequest.conversation.messages.entries()) {
+        // JSON persistence deliberately restores plain objects, not the pure
+        // parser's null-prototype metadata containers. Compare serialized facts.
+        assert.deepEqual(records[index].data.fragments, JSON.parse(JSON.stringify(original.fragments)))
+        assert.equal(records[index].data.metadata.parent_id, originalParents[index])
+      }
+      assert.deepEqual(longEvents[0].data.publishedOrder, longRequest.conversation.publishedOrder)
+      assert.equal(longEvents.filter(e => e.type === 'turn/start').length, longRounds)
     } finally { await longReader.close() }
     // Fresh native owner, after importer has released its handle. Only this
     // explicit synthetic test now starts a turn; production adapter never does.
@@ -516,7 +538,10 @@ test('installed native factory, cold reader, actual continuation, isolation and 
     assert.deepEqual(unrelated.agent.session.snapshotEvents(), unrelatedEvents)
     assert.equal(networkCalls, 0); await unrelated.dispose()
     console.log(JSON.stringify({ installedNativeImport: true, nativeVersion: JSON.parse(fs.readFileSync(anchor)).version,
-      modelCalls, networkCalls, toolExecutions, importedMessages: receipt.messageCount, officialProfileModuleResolution: true,
+      modelCalls, networkCalls, toolExecutions, importedMessages: receipt.messageCount,
+      longImport: { rawBytes: longInput.length, turns: longRounds, messages: longReceipt.messageCount, exactBodyReasoningAndFragments: true,
+        publishedOrder: longRequest.conversation.publishedOrder, originalParentsColdReadVerified: true, fragmented },
+      officialProfileModuleResolution: true,
       scopedWritesOnly: true, cancellationBeforeAttach: true, simultaneousCollisionSafe: true,
       coldReadAfterContinue: true, coldReadAfterSecondContinue: true, nativeSearchCard: true,
       exactHistoryInBothRequests: true, inHistorySystemAppend: true, emptySystemHeadReplaced: true, existingSessionUntouched: true }))

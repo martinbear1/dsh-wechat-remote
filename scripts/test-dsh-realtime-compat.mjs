@@ -99,6 +99,12 @@ assert.equal(remoteSources.length, 1, 'node notifications must have one upstream
 localListeners.get('wechatSchedules/changed')({ enabled: false, prompt: 'never broadcast' })
 assert.deepEqual(host.messages.at(-1).payload, { type: 'host/remote-event', event: 'wechatSchedules/changed', args: [{ enabled: false }] })
 assert(!firstMux.messages.some(frame => frame.payload.event === 'wechatSchedules/changed'), 'host invalidations must not duplicate on mux sockets')
+localListeners.get('wechatAccount/changed')({ supported: true, name: 'never broadcast', balance: '99' })
+assert.deepEqual(host.messages.at(-1).payload, { type: 'host/remote-event', event: 'wechatAccount/changed', args: [{ supported: true }] })
+assert(!firstMux.messages.some(frame => frame.payload.event === 'wechatAccount/changed'), 'account invalidations belong only on authenticated host sockets')
+remoteSources[0].stream.push({ type: 'emit', event: 'wechatAccount/changed', args: [{ supported: true }] })
+await new Promise(resolve => setTimeout(resolve, 20))
+assert.equal(host.messages.filter(frame => frame.payload.event === 'wechatAccount/changed').length, 1, 'native remote echo must not duplicate the local invalidation')
 host.messages.length = 0
 remoteSources[0].stream.push({ type: 'emit', event: 'api-session/status', args: ['session-1', true] })
 await until(() => host.messages.length > 0)

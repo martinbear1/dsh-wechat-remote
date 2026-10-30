@@ -5,6 +5,7 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import { createHash, randomBytes } from 'node:crypto'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { hostRuntimeVersion } from '../dsh-host-context.js'
+import { nativeSessionReadSupported, readNativeSession } from './session-read-native.js'
 import { exact, fail, plain, row } from './data.js'
 import type { PrivatePublishInput, NodeBinding } from './lifecycle.js'
 import type { HumanTaskRef, HumanWorkflowDraftRef } from '../human-tools/protocol.js'
@@ -64,7 +65,7 @@ function proofOf(value: unknown, nodeId: string, scope: string, digest: string |
 function headerOf(session: Native): string {
   const h = session?.header
   if (!h || h.id !== session.id || !Number.isSafeInteger(h.createdAt) || h.createdAt < 0
-    || h.origin === 'subagent' || h.parentSessionId) throw unavailable()
+    || h.origin === 'subagent' || h.parentSessionId !== undefined || h.parentSession !== undefined) throw unavailable()
   return hash([h.id, h.createdAt, h.cwd ?? null, h.origin ?? null, h.parentSessionId ?? null])
 }
 function logOf(session: Native): Native[] {
@@ -79,6 +80,7 @@ export class PrivateInputNative {
   private readonly leases = new Map<string, Lease>()
   private readonly epochs = new WeakMap<object, number>()
   private readonly offs: (() => void)[] = []
+  private readonly lifetime = new AbortController()
   private stopped = false
   constructor(private readonly host: Host, readonly nodeId: string, private readonly assertIdentity: () => void,
     private readonly now: () => number = Date.now, private readonly options: PrivateInputOptions = {}) {
@@ -166,17 +168,18 @@ export class PrivateInputNative {
       const match = /^(\d+)\.(\d+)\./.exec(hostRuntimeVersion(this.host) ?? '')
       return !this.stopped && !!match && (Number(match[1]) > 0 || Number(match[2]) >= 2)
         && typeof this.host.get('agents')?.get === 'function' && typeof this.host.get('sessions')?.get === 'function'
-        && typeof this.host.get('sessionController')?.inspect === 'function'
+        && nativeSessionReadSupported(this.host)
         && typeof this.host.get('tools')?.guard === 'function'
     } catch { return false }
   }
   async describe(value: unknown, signal: AbortSignal): Promise<unknown> {
     if (!this.supported() || !row(value) || !exact(value, ['sessionId']) || !plain(value.sessionId, 256)) throw unavailable()
-    signal.throwIfAborted()
-    const inspected = await this.host.get('sessionController').inspect(value.sessionId, signal)
+    const active = AbortSignal.any([signal, this.lifetime.signal])
+    active.throwIfAborted()
+    const inspected = await readNativeSession(this.host, value.sessionId, active, { includeEvents: false })
     const meta = inspected?.meta
     const virtual = { id: value.sessionId, header: meta }; headerOf(virtual)
-    signal.throwIfAborted(); this.assertIdentity()
+    active.throwIfAborted(); this.assertIdentity()
     const live = this.host.get('sessions')?.get(value.sessionId)
     if (live && headerOf(live) !== headerOf(virtual)) throw unavailable()
     return { nodeId: this.nodeId, scope: value.sessionId, sessionGeneration: String(meta.createdAt), supported: true,
@@ -355,7 +358,7 @@ export class PrivateInputNative {
   }
   close(): void {
     if (this.stopped) return
-    this.stopped = true; for (const lease of this.leases.values()) this.release(lease)
+    this.stopped = true; this.lifetime.abort(); for (const lease of this.leases.values()) this.release(lease)
     for (const off of this.offs.splice(0).reverse()) off()
     this.admissions.disable(); this.dispatches.disable()
   }

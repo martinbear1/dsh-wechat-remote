@@ -41,6 +41,43 @@ test('new gate does not declare completion while native activation is still pend
   assert.equal(JSON.parse(fs.readFileSync(f.journal)).nativeResult.application, 'applied')
 })
 
+test('local port conflict warns separately from native installation and does not veto future updates', async t => {
+  const f = fixture(t, { ...pending, phase: 'restart-required', nativeResult: { application: 'applied', bundle } })
+  let conflict = true
+  f.options.connectionConflict = () => conflict
+  const before = fs.readFileSync(f.journal)
+  const status = await f.service.status()
+  assert.equal(status.phase, 'complete', 'native install receipt is retained, not invented as failed')
+  assert.equal(status.connectionWarning, 'address-in-use')
+  assert.doesNotMatch(status.message, /已更新并生效/)
+  assert.equal((await f.service.check()).canInstall, true, 'warning must not become an extra install gate')
+  assert.deepEqual(fs.readFileSync(f.journal), before, 'warning is not persisted as a new job result')
+  conflict = false
+  assert.equal((await f.service.status()).connectionWarning, undefined, 'a healthy restarted runtime clears the warning')
+  assert.equal((await f.service.status()).phase, 'complete')
+})
+
+test('connection warning cannot turn pending or failed native results into completion', async t => {
+  for (const phase of ['installing', 'failed']) {
+    const f = fixture(t, { ...pending, phase,
+      ...(phase === 'failed' ? { nativeResult: { application: 'failed', bundle, changed: true } } : {}) })
+    f.options.connectionConflict = () => true
+    const status = await f.service.status()
+    assert.equal(status.phase, phase)
+    assert.equal(status.connectionWarning, 'address-in-use')
+  }
+})
+
+test('absent or failed auxiliary connection observation does not add an update dependency', async t => {
+  const f = fixture(t, { ...pending, phase: 'complete' })
+  for (const observation of [undefined, () => false, () => { throw Error('auxiliary fixture') }]) {
+    f.options.connectionConflict = observation
+    assert.equal((await f.service.status()).connectionWarning, undefined)
+    assert.equal((await f.service.status()).phase, 'complete')
+    assert.equal((await f.service.check()).canInstall, true)
+  }
+})
+
 test('new gate alive + later sibling activation failure stays partial, not complete or automatic rollback', async t => {
   const f = fixture(t)
   await f.service.status()
@@ -170,6 +207,65 @@ test('a historical native failure does not allow a second install of the same al
   const f = fixture(t, { ...pending, phase: 'unknown', nativeResult: { application: 'failed', changed: true, bundle } }, '1.9.0')
   f.version('1.9.0')
   const result = await f.service.check()
-  assert.equal(result.status.phase, 'failed')
+  assert.equal(result.status.phase, 'idle', 'a later healthy version supersedes the failed target, not its recorded outcome')
   assert.equal(result.canInstall, false)
+})
+
+test('native fallback supersedes a legacy failed banner without changing the old journal or installing', async t => {
+  const f = fixture(t, { ...pending, phase: 'failed' })
+  const before = fs.readFileSync(f.journal)
+  for (let i = 0; i < 3; i++) {
+    const status = await f.service.status()
+    assert.equal(status.phase, 'idle')
+    assert.equal(status.jobId, undefined, 'do not claim that the failed job completed')
+    assert.equal(status.nativeResult, undefined)
+    assert.equal((await f.service.check()).canInstall, true, 'explicit future upgrades remain available')
+  }
+  const reopened = new NativeUpdateService(f.options)
+  t.after(() => reopened.dispose())
+  assert.equal((await reopened.status()).phase, 'idle', 'read-only reconciliation survives reopening')
+  assert.deepEqual(fs.readFileSync(f.journal), before)
+  assert.equal(f.waits(), 0, 'terminal history must not start background install observation')
+})
+
+test('a refused or cancelled unchanged transaction can be superseded by a healthy same-target native fallback', async t => {
+  for (const application of ['failed', 'cancelled']) {
+    const f = fixture(t, { ...pending, phase: 'failed', nativeResult: { application, changed: false, bundle } })
+    const before = fs.readFileSync(f.journal)
+    assert.equal((await f.service.status()).phase, 'idle')
+    assert.deepEqual(fs.readFileSync(f.journal), before)
+  }
+})
+
+test('partial or unspecified native activation failures at the same target remain failures', async t => {
+  for (const changed of [true, undefined]) {
+    const f = fixture(t, { ...pending, phase: 'failed', nativeResult: { application: 'failed', changed, bundle } })
+    const before = fs.readFileSync(f.journal)
+    assert.equal((await f.service.status()).phase, 'failed')
+    assert.deepEqual(fs.readFileSync(f.journal), before)
+  }
+})
+
+test('failed banner reconciliation requires a single healthy original owner and a changed running version', async t => {
+  for (const variant of ['unchanged', 'not-restarted', 'downgrade', 'other-owner', 'two-owners', 'disabled', 'error', 'read-only', 'missing', 'unavailable', 'wrong-receipt-owner']) {
+    const f = fixture(t, { ...pending, phase: 'failed' })
+    const row = { name: bundle, installed: true, enabled: true, version: target }
+    if (variant === 'unchanged') { row.version = previous; f.options.runningVersion = previous }
+    if (variant === 'not-restarted') f.options.runningVersion = previous
+    if (variant === 'downgrade') { row.version = '1.7.12'; f.options.runningVersion = row.version }
+    if (variant === 'other-owner') row.name = '@harness-remote/dsh-wechat-remote'
+    if (variant === 'disabled') row.enabled = false
+    if (variant === 'error') row.error = 'sibling failed'
+    if (variant === 'read-only') row.readOnlyReason = 'shipped'
+    if (variant === 'wrong-receipt-owner') fs.writeFileSync(f.journal, JSON.stringify({ ...pending, phase: 'failed', nativeResult: { application: 'failed', changed: false, bundle: 'other' } }))
+    f.manager.listBundles = async () => {
+      if (variant === 'unavailable') throw Error('fixture unavailable')
+      if (variant === 'missing') return []
+      if (variant === 'two-owners') return [row, { ...row, name: '@harness-remote/dsh-wechat-remote' }]
+      return [row]
+    }
+    const before = fs.readFileSync(f.journal)
+    assert.equal((await f.service.status()).phase, 'failed', variant)
+    assert.deepEqual(fs.readFileSync(f.journal), before, variant)
+  }
 })

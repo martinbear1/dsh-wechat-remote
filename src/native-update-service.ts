@@ -15,7 +15,7 @@ const inPlaceUpdateUnsupported = '当前 DSH 不支持通过此方式覆盖更�
 type Owner = typeof bundleName | typeof coreName
 type Phase = 'idle' | 'preparing' | 'installing' | 'restart-required' | 'complete' | 'failed' | 'unknown'
 interface NativeReceipt { application: string; changed?: boolean; errorCode?: string; bundle?: string; needsApproval?: boolean; packageKind?: string }
-export interface NativeUpdateStatus { phase: Phase; message: string; jobId?: string; targetVersion?: string; previousVersion?: string; bundle?: Owner; nativeResult?: NativeReceipt }
+export interface NativeUpdateStatus { phase: Phase; message: string; jobId?: string; targetVersion?: string; previousVersion?: string; bundle?: Owner; nativeResult?: NativeReceipt; connectionWarning?: 'address-in-use' }
 interface Bundle { name: string; version?: string; installed: boolean; enabled: boolean; error?: unknown; readOnlyReason?: unknown }
 interface NativeOutcome { application: string; changed?: boolean; bundle?: string; error?: { code?: string }; pendingBuilds?: string[]; packageResult?: { kind?: string } }
 interface Manager {
@@ -35,6 +35,8 @@ export interface NativeUpdateOptions {
   home: string; scope: string; runningVersion: string
   manager(): Manager | undefined
   prepareTools?(manager: Manager): Promise<Manager>
+  /** Read existing local listener state only; never a network/entitlement gate. */
+  connectionConflict?(): boolean
   sessions(): { list(request: object, signal: AbortSignal): Promise<{ items: { running: boolean }[] }> } | undefined
   release(): Promise<{ advice: UpdateAdvice; release?: Release; channel: 'stable' | 'preview' }>
 }
@@ -153,6 +155,17 @@ export class NativeUpdateService {
     return refusal.target === this.updateTarget(own.name, release)
   }
   status = async (): Promise<NativeUpdateStatus> => {
+    const status = await this.installationStatus()
+    // A loaded module is not proof that it replaced the previous listeners.
+    // Keep this transient warning separate from the native installation result:
+    // do not rewrite its journal, retry, or veto a later explicit update.
+    try {
+      if (this.options.connectionConflict?.()) return { ...status, connectionWarning: 'address-in-use',
+        ...(status.phase === 'complete' ? { message: '插件代码已加载，但本机连接端口被占用，连接入口尚未就绪。' } : {}) }
+    } catch { /* Auxiliary observations must not interrupt update processing. */ }
+    return status
+  }
+  private installationStatus = async (): Promise<NativeUpdateStatus> => {
     if (this.operation) return { ...this.state }
     // A new gate can mount before the old instance receives DSH's final reply.
     // Re-read that instance's receipt, rather than keeping a startup snapshot.
@@ -183,6 +196,23 @@ export class NativeUpdateService {
       return { ...this.state, phase: pending ? 'installing' : 'unknown',
         message: pending ? 'DSH 仍在处理这次更新，正在等待最终结果；未重复安装。'
           : '上次更新结果尚未确认，请在 DSH 插件管理器核对；未自动重试。' }
+    }
+    if (this.state.phase === 'failed') {
+      // A later native/manual installation can supersede a terminal failure.
+      // Report current state, not success for that old job; leave its journal
+      // untouched. In-flight/unknown jobs never enter this branch. A failed
+      // activation of the SAME target may have started only part of a bundle,
+      // so matching versions alone cannot clear its partial-write receipt.
+      try {
+        const { own } = await this.inventory()
+        const receipt = this.state.nativeResult
+        if (own.name === this.state.bundle && (!receipt?.bundle || receipt.bundle === own.name)
+            && own.version === this.options.runningVersion
+            && compareVersions(own.version!, this.state.previousVersion!) > 0
+            && (!receipt || receipt.changed === false || compareVersions(own.version!, this.state.targetVersion!) > 0)) {
+          return { phase: 'idle', message: '' }
+        }
+      } catch { /* Unavailable or unhealthy inventory does not prove recovery. */ }
     }
     if (this.state.nativeResult && !['applied', 'restart-required'].includes(this.state.nativeResult.application)) return { ...this.state }
     // A definite refusal (or failure before calling the manager) is not an

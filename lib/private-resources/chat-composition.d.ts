@@ -2,6 +2,7 @@ import { type ResourcePreset } from './contract.js';
 /** Only shipped local code can supply native runtime capabilities. A resource
  * supplies literal authored prompts, never executable modules or templates. */
 export declare function nativeChatCompactionModule(): string;
+export declare function nativeChatMemoryModule(): string;
 /** No standalone preset or base identity: the resource library owns the whole
  * composition and its lifecycle, exactly as it owns every delivered preset. */
 export declare function resourceChatComposition(resource: Extract<ResourcePreset, {
@@ -9,6 +10,7 @@ export declare function resourceChatComposition(resource: Extract<ResourcePreset
 }>, modules: {
     prompt: string;
     compaction: string;
+    memory?: string;
 }, promptVariable: string): ({
     id: string;
     name: string;
@@ -46,6 +48,12 @@ export declare function resourceChatComposition(resource: Extract<ResourcePreset
         complete?: undefined;
         text?: undefined;
     };
+    group?: undefined;
+    isolate?: undefined;
+} | {
+    id: string;
+    name: string;
+    config?: undefined;
     group?: undefined;
     isolate?: undefined;
 } | {

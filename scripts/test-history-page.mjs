@@ -19,6 +19,47 @@ const builder = (records, entries, extra = {}) => buildBoundedHistoryWindow({ se
   async () => ({ ok: true, value: { events: entries, hasMore: false, ...extra.value } }), signal,
   undefined, (original, displayed, call) => records.present('s', original, displayed, call))
 
+test('page byte accounting serializes native JSON bodies linearly, not once per growing prefix', async () => {
+  const entries = Array.from({ length: 256 }, (_, seq) => event(seq, 'custom/json', { text: 'x'.repeat(384) }))
+  const stringify = JSON.stringify
+  let serializedBytes = 0, reads = 0
+  JSON.stringify = (...args) => {
+    const value = stringify(...args)
+    if (typeof value === 'string') serializedBytes += Buffer.byteLength(value)
+    return value
+  }
+  let result
+  try {
+    result = await buildBoundedHistoryWindow({ sessionId: 's' }, async () => {
+      reads++; return { ok: true, value: { events: entries, hasMore: false } }
+    }, signal)
+  } finally { JSON.stringify = stringify }
+  assert(result.ok); assert.equal(reads, 1); assert.equal(result.value.events.length, 256)
+  const outputBytes = Buffer.byteLength(stringify(result.value))
+  assert(outputBytes <= 128 * 1024)
+  assert(serializedBytes < outputBytes * 3, 'budget checks must not repeatedly serialize retained event bodies')
+})
+
+test('page byte boundary includes UTF-8 facets, array punctuation and JSON-normalized optional values', async () => {
+  const entries = [event(0, 'custom/json', { turn: 0, text: '' }),
+    event(1, 'custom/json', { turn: 1, text: '汉🙂\\\"\n'.repeat(3000), values: [undefined, NaN, Infinity], omitted: undefined })]
+  const value = { events: entries, hasMore: false, futureMetadata: { notice: '保留未知字段🙂', omitted: undefined } }
+  const metadata = () => ({ details: [{ turnId: '0', label: '旧轮次' }, { turnId: '1', label: '新轮次🙂' }], activity: [] })
+  const run = pageBytes => buildBoundedHistoryWindow({ sessionId: 's', pageBytes }, async () => ({ ok: true, value }),
+    signal, undefined, (_original, displayed) => displayed, metadata)
+  const complete = await run(2 * 1024 * 1024)
+  assert(complete.ok)
+  entries[0].event.data.text = 'x'.repeat(128 * 1024 - Buffer.byteLength(JSON.stringify(complete.value)))
+  const exact = await run(128 * 1024)
+  assert(exact.ok); assert.equal(exact.value.events.length, 2)
+  assert.equal(Buffer.byteLength(JSON.stringify(exact.value)), 128 * 1024)
+  entries[0].event.data.text += 'x'
+  const overflow = await run(128 * 1024)
+  assert(overflow.ok); assert.deepEqual(overflow.value.events, [entries[1]])
+  assert.equal(overflow.value.hasMore, true); assert.equal(overflow.value.coverage.fromSeq, 1)
+  assert.equal(overflow.value.facets['agent.turn-details.v1'].length, 1)
+})
+
 test('short visible replies stay complete even when retained native token samples are large', async () => {
   const text = '完整正文，不能按隐藏数据大小截断。'.repeat(180)
   const source = event(3, 'assistant/message', { turn: 1, step: 1,

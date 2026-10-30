@@ -1,9 +1,11 @@
 import type { Context } from '@deepseek-ai/cordis';
 import { TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol';
+import { type DurableImageReference } from './attachment-native.js';
 export interface WechatAttachmentInput {
     readonly attachmentId: string;
     readonly mediaType?: string;
     readonly name?: string;
+    readonly attachment?: DurableImageReference;
 }
 export interface WechatAttachmentBatchRequest {
     readonly sessionId: string;

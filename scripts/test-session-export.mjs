@@ -95,24 +95,26 @@ test('actual installed DSH Connection + native exporter preserve logs, descendan
   const {Context:NativeContext}=await load('@deepseek-ai/cordis')
   const {HostConnectionService}=await load('@deepseek-ai/dsh-client-connection')
   const native=await load('@deepseek-ai/dsh-session-log-export')
+  const {SESSION_FORMAT_VERSION}=await load('@deepseek-ai/dsh-session-format')
   const {unzipSync}=await load('fflate')
   const {SessionPersistenceNotFoundError}=await load('@deepseek-ai/dsh-session-persistence')
   const ctx=new NativeContext(), opened=[], closed=[], flushed=[]
   const image={attachmentId:'image-1',mediaType:'image/png'}, attachment={attachmentId:'sha256:abcdef1234',name:'测试.txt'}
-  const event={seq:1,time:1,type:'message/add',data:{content:[{type:'image',attachment:image},{type:'file',attachment}]}}
+  // Native export scans declared content carriers, not arbitrary event data.
+  const event={seq:1,time:1,type:'user/message',data:{turn:1,source:{kind:'user',rpcId:'fixture-request'},content:[{type:'image',attachment:image},{type:'file',attachment}]}}
   const records=new Map([['root & 中文',[event]],['child',[]]])
   for(const [name,service] of Object.entries({
     commands:{register(){return ()=>{}}},
     sessions:{get:id=>records.has(id)?{id}:undefined,flush:async s=>{flushed.push(s.id)}},
     sessionQuery:{traceSession:async()=>({descendants:[{session:{header:{id:'child'}},descendants:[]}]})},
-    sessionPersistence:{async open(id,mode){assert.equal(mode,'read');if(!records.has(id))throw new SessionPersistenceNotFoundError(id);opened.push(id);return {header:{id,version:2,createdAt:1,isSeeded:false},read:async()=>({events:records.get(id)}),close:async()=>{closed.push(id)}}}},
+    sessionPersistence:{async open(id,mode){assert.equal(mode,'read');if(!records.has(id))throw new SessionPersistenceNotFoundError(id);opened.push(id);return {header:{id,version:SESSION_FORMAT_VERSION,createdAt:1,isSeeded:false},read:async()=>({events:records.get(id)}),close:async()=>{closed.push(id)}}}},
     attachments:{readImage:async()=>({data:Buffer.from('image-bytes')}),async *readFileStream(){yield Buffer.from('file-bytes')}},
   })) {ctx.provide(name);ctx.set(name,service)}
   new HostConnectionService(ctx,[],{})
   native.apply(ctx)
   const archive=await exportSessionArchive(ctx,'root & 中文',signal(),20*1024*1024)
   const files=unzipSync(archive.data)
-  assert.equal(Buffer.from(files[native.SESSION_LOG_FILENAME]).toString(),native.serializeSessionLog({id:'root & 中文',version:2,createdAt:1,isSeeded:false},[event]))
+  assert.equal(Buffer.from(files[native.SESSION_LOG_FILENAME]).toString(),native.serializeSessionLog({id:'root & 中文',version:SESSION_FORMAT_VERSION,createdAt:1,isSeeded:false},[event]))
   assert(files['subagents/child/'+native.SESSION_LOG_FILENAME])
   assert.equal(Buffer.from(files['media/image-1.png']).toString(),'image-bytes')
   assert.equal(Buffer.from(files['files/ab/abcdef1234/测试.txt']).toString(),'file-bytes')

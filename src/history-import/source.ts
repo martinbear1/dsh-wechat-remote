@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { MAX_SOURCE_BYTES, readExportZip } from './source-zip.js'
+import { MAX_SHARE_BYTES, MAX_MESSAGES } from './limits.js'
 
 export type JsonValue = string | number | boolean | null | JsonValue[] | JsonObject
 export interface JsonObject { [key: string]: JsonValue }
@@ -33,16 +34,23 @@ export interface HistoryConversation {
   leafIds: string[]
   warnings: string[]
   metadata?: JsonObject
+  publishedOrder?: { schema: 1; missingParents: number; nonAdjacentParents: number; unavailableParents: number; roots: number }
 }
 export interface HistorySource { kind: 'share' | 'export'; sourceHash: string; conversations: HistoryConversation[] }
 export class HistorySourceError extends Error {
-  constructor(readonly code: string) { super(`history-import/${code}`); this.name = 'HistorySourceError' }
+  diagnostic?: { messagePosition: number; messageCount: number; field: 'message' | 'message_id' | 'parent_id' | 'fragments' }
+  constructor(readonly code: string, readonly actualBytes?: number, readonly limitBytes?: number) { super(`history-import/${code}`); this.name = 'HistorySourceError' }
 }
 const fail = (code = 'invalid-source'): never => { throw new HistorySourceError(code) }
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value)
 const text = (value: unknown): string | undefined => typeof value === 'string' ? value : undefined
 const identifier = (value: unknown): string => typeof value === 'string' && value.length > 0 && value.length <= 512 ? value
   : typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? String(value) : fail('invalid-message-id')
+// Parent annotations are not identity or ordering authority for a published
+// share. Keep unknown/omitted values as archival data, not a new rejection.
+const shareParent = (value: unknown): string | null | undefined => value === null ? null
+  : typeof value === 'string' && value.length > 0 && value.length <= 512 ? value
+    : typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? String(value) : undefined
 const timestamp = (value: unknown): string | undefined => {
   const time = typeof value === 'number' ? value * 1000 : typeof value === 'string' ? Date.parse(value) : NaN
   return Number.isFinite(time) && Math.abs(time) <= 8640000000000000 ? new Date(time).toISOString() : undefined
@@ -134,7 +142,7 @@ function graph(conversation: HistoryConversation): HistoryConversation {
 function exportConversation(value: unknown): HistoryConversation {
   if (!record(value) || typeof value.title !== 'string' || !record(value.mapping)) return fail('invalid-export-conversation')
   const nodes = Object.entries(value.mapping)
-  if (nodes.length > 10001) return fail('conversation-too-large')
+  if (nodes.length > 10001) return fail('message-limit')
   const roots = new Set<string>()
   for (const [id, raw] of nodes) {
     if (!record(raw) || identifier(raw.id) !== id || !Array.isArray(raw.children)) return fail('invalid-export-node')
@@ -164,56 +172,69 @@ function exportConversation(value: unknown): HistoryConversation {
 }
 function shareConversation(value: Record<string, unknown>): HistoryConversation {
   if (!Array.isArray(value.messages) || typeof value.title !== 'string') return fail('invalid-share')
-  if (value.messages.length > 10000) return fail('conversation-too-large')
-  const messages = value.messages.map(raw => {
-    if (!record(raw)) return fail('invalid-share-message')
-    return message(raw, identifier(raw.message_id), raw.parent_id === null ? null : identifier(raw.parent_id), true)
+  if (value.messages.length > MAX_MESSAGES) return fail('message-limit')
+  const rawMessages = value.messages
+  const messages = rawMessages.map((raw, index) => {
+    let field: NonNullable<HistorySourceError['diagnostic']>['field'] = 'message'
+    try {
+      if (!record(raw)) return fail('invalid-share-message')
+      field = 'message_id'; const id = identifier(raw.message_id)
+      const parent = shareParent(raw.parent_id) ?? null
+      field = 'fragments'; return message(raw, id, parent, true)
+    } catch (error) {
+      if (error instanceof HistorySourceError) error.diagnostic = { messagePosition: index + 1, messageCount: rawMessages.length, field }
+      throw error
+    }
   })
   const warnings = ['shared-selection-only', 'web-system-prompt-unavailable']
-  // The official share UI can publish a selected excerpt while retaining the
-  // first message's original (unshared) parent. Admit only this one boundary:
-  // every remaining message must belong to its connected, otherwise valid
-  // tree. Never repair a missing link in the middle or relax full ZIP exports.
   const first = messages[0], ids = new Set(messages.map(item => item.id))
-  if (first?.parentId !== null && first?.parentId !== undefined && !ids.has(first.parentId)) {
-    if (ids.size !== messages.length) return fail('duplicate-message-id')
-    const children = new Map<string, string[]>()
-    for (const item of messages.slice(1)) {
-      if (item.parentId === null || !ids.has(item.parentId)) return fail('missing-parent')
-      const siblings = children.get(item.parentId) ?? []
-      siblings.push(item.id); children.set(item.parentId, siblings)
-    }
-    const connected = new Set<string>(), pending = [first.id]
-    while (pending.length) {
-      const id = pending.pop()!
-      if (connected.has(id)) return fail('cyclic-messages')
-      connected.add(id); pending.push(...(children.get(id) ?? []))
-    }
-    if (connected.size !== messages.length) return fail('missing-parent')
-    // parentId describes the local selected path. The original parent remains
-    // auditable in the per-message metadata copied into the native RECORD.
-    first.metadata.parent_id = (value.messages[0] as JsonObject).parent_id
-    first.parentId = null
+  if (ids.size !== messages.length) return fail('duplicate-message-id')
+  // DeepSeek's public share page renders biz_data.messages.map(...) directly,
+  // rather than deriving a complete parent-linked path (official frontend
+  // main.a34f79a498.js, fetchShareContent + yS, observed 2026-10-21). A share
+  // is a published selection, not the full account export's conversation tree.
+  // Keep its exact display order and every returned message. Local parentId
+  // indexes that display sequence; preserve EVERY original parent in metadata.
+  // Never sort IDs/times, guess an omitted ancestor, drop an alternative, or
+  // relax exportConversation's separate graph validation.
+  const earlierMissing = !!first && first.parentId !== null && !ids.has(first.parentId)
+  const publishedOrder = { schema: 1 as const, missingParents: 0, nonAdjacentParents: 0, unavailableParents: 0, roots: 0 }
+  for (const [index, item] of messages.entries()) {
+    const original = item.parentId, previous = index ? messages[index - 1].id : null
+    const raw = rawMessages[index] as JsonObject
+    const unavailable = shareParent(raw.parent_id) === undefined
+    if (unavailable) publishedOrder.unavailableParents++
+    else if (original === null) publishedOrder.roots++
+    else if (!ids.has(original)) publishedOrder.missingParents++
+    if (original !== previous && !(index === 0 && earlierMissing)) publishedOrder.nonAdjacentParents++
+    if (Object.hasOwn(raw, 'parent_id')) item.metadata.parent_id = raw.parent_id
+    item.parentId = previous
+  }
+  if (earlierMissing) {
     first.warnings.push('shared-earlier-history-unavailable')
     warnings.push('shared-earlier-history-unavailable')
   }
+  if (publishedOrder.nonAdjacentParents || publishedOrder.unavailableParents) warnings.push('shared-published-order')
   return graph({ id: 'shared-conversation', title: value.title, modelType: text(value.model_type), messages, leafIds: [],
-    metadata: metadata(value, ['title', 'messages']), warnings })
+    metadata: metadata(value, ['title', 'messages']), publishedOrder, warnings })
 }
 
 /** Pure source normalization. No networking, credentials, model calls, filesystem writes or host mutation. */
-export async function parseHistorySource(input: Buffer | string | unknown): Promise<HistorySource> {
+export async function parseHistorySource(input: Buffer | string | unknown, sourceKind?: 'share'): Promise<HistorySource> {
   let bytes: Buffer
   try { bytes = Buffer.isBuffer(input) ? input : Buffer.from(typeof input === 'string' ? input : JSON.stringify(input), 'utf8') } catch { return fail('invalid-json') }
-  if (bytes.length > MAX_SOURCE_BYTES) return fail('source-too-large')
+  const limit = sourceKind === 'share' ? MAX_SHARE_BYTES : MAX_SOURCE_BYTES
+  if (bytes.length > limit) throw new HistorySourceError('source-too-large', bytes.length, limit)
   const sourceHash = createHash('sha256').update(bytes).digest('hex')
   if (bytes.length >= 4 && bytes.readUInt32LE(0) === 0x04034b50) {
+    if (sourceKind === 'share') return fail('invalid-share')
     try { bytes = await readExportZip(bytes) } catch { return fail('invalid-zip') }
   }
   let value: unknown
   try { value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes).replace(/^\uFEFF/, '')) } catch { return fail('invalid-json') }
   validateNesting(value)
   if (Array.isArray(value)) {
+    if (sourceKind === 'share') return fail('invalid-share')
     if (value.length > 10000) return fail('too-many-conversations')
     const conversations = value.map(exportConversation), ids = new Set(conversations.map(item => item.id))
     if (ids.size !== conversations.length) return fail('duplicate-conversation-id')
@@ -223,6 +244,8 @@ export async function parseHistorySource(input: Buffer | string | unknown): Prom
   if (record(value) && value.code === 0 && record(value.data) && value.data.biz_code === 0 && record(value.data.biz_data)) {
     return { kind: 'share', sourceHash, conversations: [shareConversation(value.data.biz_data)] }
   }
+  if (record(value) && typeof value.code === 'number' && (value.code !== 0
+    || record(value.data) && typeof value.data.biz_code === 'number' && value.data.biz_code !== 0)) return fail('share-response-unavailable')
   return fail('unsupported-source')
 }
 

@@ -13,6 +13,7 @@ import { registerHumanContext, dshHumanToolsAvailable, humanShareTool, humanMemb
 import { object, humanTaskRef, type HumanTaskRef, type HumanAckWireRequest, type HumanActionRequest, type HumanSurface } from './protocol.js'
 import { createCapabilityManifest } from '../human-workflow/capabilities.js'
 import { WorkflowFileStore } from '../human-workflow/persistence.js'
+import { nativeSessionReadSupported, readNativeSession } from '../human-workflow/session-read-native.js'
 import { WorkflowArchiveStore, WORKFLOW_LONG_TERM_BYTES } from '../human-workflow/archive-store.js'
 import { ModeRegistry } from '../human-workflow/mode-package.js'
 import { WorkflowRecords } from '../human-workflow/workflow-records.js'
@@ -333,9 +334,9 @@ export class HumanToolsService extends TypertRemoteService {
                     const resolved = await presets.resolve(presetId)
                     return row(resolved) && resolved.id === presetId && resolved.broken === undefined && presets.defaultId === presetId
                   },
-                  supported: () => typeof get('sessionController')?.inspect === 'function' && typeof get('sessionController')?.create === 'function'
+                  supported: () => nativeSessionReadSupported(this.host) && typeof get('sessionController')?.create === 'function'
                     && typeof get('agentPresets')?.readDocument === 'function',
-                  inspect: (id, signal) => get('sessionController').inspect(id, signal), workspace: id => get('workspaceRegistry')?.get(id) })
+                  inspect: (id, signal) => readNativeSession(this.host, id, signal), workspace: id => get('workspaceRegistry')?.get(id) })
               } catch { /* Never fall back to unjournaled automatic creation. */ }
               this.lifetime.signal.throwIfAborted(); transport.assertIdentity()
               const assistantOptions = { nodeId: transport.nodeId, registry, business, assertIdentity: () => transport.assertIdentity(),

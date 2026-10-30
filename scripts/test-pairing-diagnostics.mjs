@@ -8,7 +8,7 @@ import { pairingHttpHandler } from '../lib/pairing-http.js'
 
 const tick = () => new Promise(resolve => setImmediate(resolve))
 
-test('diagnostics have no passive enrollment hooks and the only runner call is the explicit management operation', () => {
+test('relay lifecycle stays untouched; QR observation is fail-open and only explicit management runs probes', () => {
   const agent = readFileSync(new URL('../src/public-relay-agent.ts', import.meta.url), 'utf8')
   assert.doesNotMatch(agent, /diagnostic|lastPairingAttempt|qrKind/i)
   const source = readFileSync(new URL('../src/gate-runtime.ts', import.meta.url), 'utf8')
@@ -16,8 +16,13 @@ test('diagnostics have no passive enrollment hooks and the only runner call is t
   const calls = []
   function visit(node) {
     if (ts.isCallExpression(node) && node.expression.getText(tree) === 'runConnectionDiagnostics') calls.push(node)
-    if (ts.isFunctionDeclaration(node) && ['makePairEntry', 'pairCodeValue', 'gateStatusValue'].includes(node.name?.text))
+    if (ts.isFunctionDeclaration(node) && ['pairCodeValue', 'gateStatusValue'].includes(node.name?.text))
       assert.doesNotMatch(node.getText(tree), /diagnostic|lastPairingAttempt|qrKind/i)
+    if (ts.isCallExpression(node) && node.expression.getText(tree).startsWith('pairingDiagnostics.')) {
+      assert(ts.isArrowFunction(node.parent), 'every observation operation must have an exception boundary')
+      assert(ts.isCallExpression(node.parent.parent))
+      assert.equal(node.parent.parent.expression.getText(tree), 'observePairingDiagnostic')
+    }
     ts.forEachChild(node, visit)
   }
   visit(tree)
@@ -26,7 +31,7 @@ test('diagnostics have no passive enrollment hooks and the only runner call is t
   assert(ts.isArrowFunction(callback))
   assert(ts.isPropertyAssignment(callback.parent))
   assert.equal(callback.parent.name.getText(tree), 'connectionDiagnostics')
-  assert.doesNotMatch(source, /lastPairingAttempt|qrKind/, 'no diagnostic-only bookkeeping in business lifecycle')
+  assert.doesNotMatch(source, /await observePairingDiagnostic|if\s*\(.*pairingDiagnostics/, 'no waiting or business decisions from diagnosis')
 })
 
 const ops = extra => ({ unavailable: () => false, status: () => ({}),

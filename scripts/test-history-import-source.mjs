@@ -4,6 +4,8 @@ import assert from 'node:assert/strict'
 import { deflateRawSync } from 'node:zlib'
 import { fileURLToPath } from 'node:url'
 import { build } from 'esbuild'
+import { parseImportSource } from '../lib/history-import/parse.js'
+import { MAX_FILE_BYTES, MAX_FILE_NORMALIZED_BYTES, MAX_NORMALIZED_BYTES } from '../lib/history-import/limits.js'
 
 const compiled = await build({ entryPoints: [fileURLToPath(new URL('../src/history-import/source.ts', import.meta.url))], bundle: true,
   platform: 'node', format: 'esm', write: false })
@@ -123,7 +125,7 @@ test('official share excerpts admit only the leading external ancestor and prese
   }
 })
 
-test('excerpt boundaries allow an assistant-only selection and connected branches, not disconnected or broken middles', async () => {
+test('published shares preserve all displayed selections even when original parents are absent or non-adjacent', async () => {
   const one = selectHistoryBranch((await parseHistorySource(share([
     sm(20, 19, 'ASSISTANT', [fragment('RESPONSE', '单条选中回答')]),
   ]))).conversations[0])
@@ -133,25 +135,47 @@ test('excerpt boundaries allow an assistant-only selection and connected branche
     sm(19, 17, 'USER', [fragment('REQUEST', '问题')]), sm(20, 19, 'ASSISTANT', [fragment('RESPONSE', '一')]),
     sm(21, 19, 'ASSISTANT', [fragment('RESPONSE', '二')]),
   ]))).conversations[0]
-  assert.throws(() => selectHistoryBranch(branching), expectCode('branch-required'))
-  assert.deepEqual(selectHistoryBranch(branching, '21').messages.map(m => m.id), ['19', '21'])
+  assert.deepEqual(selectHistoryBranch(branching).messages.map(m => m.id), ['19', '20', '21'])
+  assert(branching.warnings.includes('shared-published-order'))
   for (const messages of [
-    [sm(1, null, 'USER', []), sm(3, 2, 'ASSISTANT', [])], // A hole in the middle is not an excerpt boundary.
+    [sm(1, null, 'USER', []), sm(3, 2, 'ASSISTANT', [])], // Selection skips a middle message.
     [sm(1, 9, 'USER', []), sm(3, 2, 'ASSISTANT', [])], // Two external parents.
     [sm(1, 9, 'USER', []), sm(3, null, 'ASSISTANT', [])], // Two disconnected roots.
     [sm(1, 9, 'USER', []), sm(3, 4, 'ASSISTANT', []), sm(4, 3, 'USER', [])], // Disconnected cycle.
-    [sm(2, 1, 'ASSISTANT', []), sm(1, 9, 'USER', [])], // External ancestor is not the published leading message.
-  ]) await assert.rejects(parseHistorySource(share(messages)), expectCode('missing-parent'))
+    [sm(2, 1, 'ASSISTANT', []), sm(1, 9, 'USER', [])], // Preserve the published order, not ID/parent sorting.
+  ]) {
+    const input = share(messages), before = JSON.stringify(input)
+    const selected = selectHistoryBranch((await parseHistorySource(input)).conversations[0])
+    assert.deepEqual(selected.messages.map(m => m.id), messages.map(m => String(m.message_id)))
+    assert.deepEqual(selected.messages.map(m => m.metadata.parent_id), messages.map(m => m.parent_id))
+    assert.deepEqual(selected.messages.map(m => m.parentId), messages.map((_, index) => index ? String(messages[index - 1].message_id) : null))
+    assert(selected.warnings.includes('shared-published-order'))
+    assert.equal(selected.messages.length, messages.length)
+    assert.equal(JSON.stringify(input), before)
+  }
   await assert.rejects(parseHistorySource(share([sm(1, 9, 'USER', []), sm(1, 1, 'ASSISTANT', [])])), expectCode('duplicate-message-id'))
   const complete = (await parseHistorySource(share([sm(1, null, 'USER', [fragment('REQUEST', '完整')])]))).conversations[0]
   assert(!complete.warnings.includes('shared-earlier-history-unavailable'))
-  assert.equal(complete.messages[0].metadata.parent_id, undefined)
+  assert.equal(complete.messages[0].metadata.parent_id, null)
 })
 
 test('full exports never receive the public-share external-ancestor repair', async () => {
   const input = exported()
   input[0].mapping.u.parent = 'not-exported'
   await assert.rejects(parseHistorySource(input), expectCode('invalid-child-link'))
+})
+
+test('omitted or unfamiliar share parent annotations do not block a valid published display sequence', async () => {
+  for (const parent of [undefined, '', { original: 'annotation-only' }]) {
+    const raw = sm(1, parent, 'USER', [fragment('REQUEST', 'Published content')])
+    if (parent === undefined) delete raw.parent_id
+    const c = selectHistoryBranch((await parseHistorySource(share([raw]))).conversations[0])
+    assert.equal(c.messages[0].text, 'Published content')
+    assert.deepEqual(c.messages[0].metadata.parent_id, parent)
+    assert.equal(Object.hasOwn(c.messages[0].metadata, 'parent_id'), parent !== undefined)
+    assert.equal(c.publishedOrder.unavailableParents, 1)
+    assert(c.warnings.includes('shared-published-order'))
+  }
 })
 
 test('TOOL_FIND and unknown data-only tools preserve source facts without inventing text or roles', async () => {
@@ -192,22 +216,23 @@ test('unknown source fragments and TIP contents survive normalization without en
   assert(m.warnings.includes('unknown-fragment-type'))
 })
 
-test('malformed parent links, duplicate ids and cycles fail without mutating any host', async () => {
+test('duplicate published IDs and malformed full-export graphs still fail without mutating any host', async () => {
   await assert.rejects(parseHistorySource(share([sm(1, null, 'USER', []), sm(1, null, 'USER', [])])), expectCode('duplicate-message-id'))
-  await assert.rejects(parseHistorySource(share([sm(1, null, 'USER', []), sm(3, 9, 'ASSISTANT', [])])), expectCode('missing-parent'))
-  await assert.rejects(parseHistorySource(share([sm(1, 2, 'USER', []), sm(2, 1, 'ASSISTANT', [])])), expectCode('cyclic-messages'))
   const bad = exported(); bad[0].mapping.u.children = []
   await assert.rejects(parseHistorySource(bad), expectCode('invalid-parent-link'))
+  const cycle = exported(); delete cycle[0].mapping.root
+  cycle[0].mapping.u.parent = 'a'; cycle[0].mapping.a.children = ['u']
+  await assert.rejects(parseHistorySource(cycle), expectCode('cyclic-messages'))
 })
 
 test('invalid source format, malformed JSON and invalid UTF8 are clear source-local failures', async () => {
   await assert.rejects(parseHistorySource('{bad'), expectCode('invalid-json'))
   await assert.rejects(parseHistorySource(Buffer.from([0xff])), expectCode('invalid-json'))
   await assert.rejects(parseHistorySource({ messages: [] }), expectCode('invalid-share'))
-  await assert.rejects(parseHistorySource({ code: 0, data: { biz_code: 403 } }), expectCode('unsupported-source'))
+  await assert.rejects(parseHistorySource({ code: 0, data: { biz_code: 403 } }), expectCode('share-response-unavailable'))
   await assert.rejects(parseHistorySource(Buffer.alloc(20 * 1024 * 1024 + 1)), expectCode('source-too-large'))
   const tooMany = share(Array.from({ length: 10001 }, (_, i) => sm(i, i ? i - 1 : null, i % 2 ? 'ASSISTANT' : 'USER', [])))
-  await assert.rejects(parseHistorySource(tooMany), expectCode('conversation-too-large'))
+  await assert.rejects(parseHistorySource(tooMany), expectCode('message-limit'))
 })
 
 test('official-shape ZIP and JSON produce equivalent conversation catalogs without reading account metadata', async () => {
@@ -216,6 +241,22 @@ test('official-shape ZIP and JSON produce equivalent conversation catalogs witho
   assert.deepEqual(packed.conversations, raw.conversations); assert.notEqual(packed.sourceHash, raw.sourceHash)
   assert(!JSON.stringify(packed).includes('do-not-read'))
   assert.deepEqual((await parseHistorySource(zip([['conversations.json', input]], { method: 0 }))).conversations, raw.conversations)
+})
+
+test('larger share budget does not relax the file worker normalized-data limit', async () => {
+  const MiB = 1024 * 1024, input = exported()
+  // Public fragments and visible text are retained separately. This compressed
+  // export fits the old upload/ZIP limits but expands past the old file budget.
+  input[0].mapping.u.message.fragments[0].content = 'x'.repeat(33 * MiB)
+  const archive = zip([['conversations.json', JSON.stringify(input)]])
+  assert(archive.length < MAX_FILE_BYTES)
+  await assert.rejects(parseImportSource(archive, new AbortController().signal), error => {
+    assert.equal(error.message, 'source-too-large')
+    assert.equal(error.limitBytes, MAX_FILE_NORMALIZED_BYTES)
+    assert(error.actualBytes > MAX_FILE_NORMALIZED_BYTES)
+    assert(error.actualBytes < MAX_NORMALIZED_BYTES)
+    return true
+  })
 })
 
 test('ZIP rejects unsafe names, duplicates, encrypted entries and missing known source', async () => {

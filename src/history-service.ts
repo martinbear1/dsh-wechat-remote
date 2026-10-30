@@ -600,6 +600,7 @@ export async function buildBoundedHistoryWindow(
   const facets = metadata?.(entries) ?? { details: turnDetails(entries, usageFold), activity: [] }
   const to = Number.isSafeInteger(value.historyEndSeq) ? Number(value.historyEndSeq) : eventSeqOf(entries.at(-1))
   let selected: HistoryEntry[] = [], accepted: WechatHistoryWindowValue | undefined
+  let selectedBytes = 2 // JSON array brackets, including the initial empty array.
   // Add one complete transcript source group at a time, newest to oldest. Final JSON
   // size (including views/projections/facets/references) owns the wire budget.
   for (let end = projected.length; end > 0;) {
@@ -620,7 +621,8 @@ export async function buildBoundedHistoryWindow(
         }
       }
     }
-    const next = projected.slice(start, end).map(row).concat(selected)
+    const group = projected.slice(start, end).map(row)
+    const next = group.concat(selected)
     const coverageFrom = start === 0 ? eventSeqOf(entries[0]) : from
     const visibleTurns = new Set(next.map(entry => String(entry.event?.data?.turn)))
     const candidate: WechatHistoryWindowValue = {
@@ -631,8 +633,14 @@ export async function buildBoundedHistoryWindow(
       pages: 1, rawEvents: entries.length,
       coverage: { schema: 'wechat.history-page.v1', fromSeq: coverageFrom, throughSeq: to },
     }
-    if (next.length > BOUNDED_PAGE_EVENTS || Buffer.byteLength(JSON.stringify(candidate)) > pageBytes) break
-    accepted = candidate; selected = next; end = start
+    if (next.length > BOUNDED_PAGE_EVENTS) break
+    // Native records are JSON data. Serialize each indivisible source group
+    // once, not the growing page again for every older record. The envelope
+    // (including filtered facets and changing coverage) still owns its exact
+    // UTF-8 cost; replace its empty-array brackets with the accumulated array.
+    const nextBytes = selectedBytes + Buffer.byteLength(JSON.stringify(group)) - 2 + (selected.length ? 1 : 0)
+    if (Buffer.byteLength(JSON.stringify({ ...candidate, events: [] })) + nextBytes - 2 > pageBytes) break
+    accepted = candidate; selected = next; selectedBytes = nextBytes; end = start
     signal.throwIfAborted()
   }
   if (!projected.length) {

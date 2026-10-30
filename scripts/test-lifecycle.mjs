@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
 import {
-  existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from 'node:fs'
@@ -13,24 +13,25 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const home = mkdtempSync(path.join(tmpdir(), 'harness-remote-lifecycle-'))
-const dshHome = path.join(home, '.dsh')
-mkdirSync(dshHome, { recursive: true })
-writeFileSync(
-  path.join(dshHome, 'harness-remote-public.json'),
-  JSON.stringify({ enabled: false }),
-  'utf8',
-)
-
-const entryUrl = pathToFileURL(path.join(root, 'lib', 'index.js')).href
+const coreUrl = pathToFileURL(path.join(root, 'lib', 'index.js')).href
+// Exercise the npm bundle's real entry as well as the standalone core. Only
+// relocate its imports; preserve apply's function shape and returned disposer.
+const wrapperPath = path.join(home, 'npm-entry.mjs')
+writeFileSync(wrapperPath, readFileSync(process.env.HARNESS_LIFECYCLE_ENTRY_TEMPLATE || path.join(root, 'installer/native-entry.mjs'), 'utf8')
+  .replace("'./lib/index.js'", JSON.stringify(coreUrl))
+  .replace("'./lib/typert.host.js'", JSON.stringify(pathToFileURL(path.join(root, 'lib/typert.host.js')).href)))
+const cordisUrl = process.env.HARNESS_LIFECYCLE_CORDIS_ENTRY
+  ? pathToFileURL(path.resolve(process.env.HARNESS_LIFECYCLE_CORDIS_ENTRY)).href : '@deepseek-ai/cordis'
 const childSource = `
   import assert from 'node:assert/strict'
   import net from 'node:net'
   import { existsSync, readFileSync } from 'node:fs'
   import path from 'node:path'
-  import { Context } from '@deepseek-ai/cordis'
+  import { Context } from ${JSON.stringify(cordisUrl)}
 
-  const entry = await import(${JSON.stringify(entryUrl)})
-  assert.deepEqual(entry.inject, ['webServer'])
+  const entry = await import(process.env.LIFECYCLE_ENTRY)
+  const isWrapper = process.env.LIFECYCLE_WRAPPER === '1'
+  assert.deepEqual(entry.inject, isWrapper ? ['webServer', 'typert'] : ['webServer'])
   const stateFile = path.join(process.env.USERPROFILE || process.env.HOME, '.dsh', 'gate-wechat-state.json')
   assert.equal(existsSync(stateFile), false, 'importing the plugin must not create credentials')
 
@@ -49,6 +50,10 @@ const childSource = `
   process.env.DSH_PORT = '1'
 
   const ctx = new Context()
+  let registrations = 0
+  // Registry integration is covered separately; this test checks the real
+  // entry's lifecycle and actual gate listeners, with no host login or relay.
+  ctx.provide('typert', { register() { registrations++ } })
   // Exercise apply/dispose directly with the explicit DSH_PORT fallback. The
   // shipped entry's webServer dependency is asserted above and covered by the
   // real DSH compatibility smoke test.
@@ -109,32 +114,62 @@ const childSource = `
     }
   }
   assert.equal(closed, true, 'disposing the Cordis fiber must close listening ports')
+  const before = readFileSync(stateFile)
+  const next = await ctx.plugin({ name: entry.name, apply: entry.apply }, {})
+  let nextStatus
+  for (let attempt = 0; attempt < 100; attempt++) {
+    try {
+      nextStatus = await (await fetch('http://127.0.0.1:' + localPort + '/gate/status')).json()
+      if (nextStatus.gate?.publicDoor?.state === 'listening'
+        && nextStatus.gate?.localDoor?.state === 'listening') break
+    } catch {}
+    await new Promise(resolve => setTimeout(resolve, 20))
+  }
+  assert.equal(nextStatus?.gate?.publicDoor?.state, 'listening', 'replacement must own the same public port')
+  assert.equal(nextStatus?.gate?.localDoor?.state, 'listening', 'replacement must own the same local port')
+  assert.deepEqual(readFileSync(stateFile), before, 'reloading must retain pairing credentials')
+  assert.equal(registrations, isWrapper ? 2 : 0)
+  await next.dispose()
+  for (const port of [publicPort, localPort]) {
+    const probe = net.createServer()
+    await new Promise((resolve, reject) => { probe.once('error', reject); probe.listen(port, '127.0.0.1', resolve) })
+    await new Promise(resolve => probe.close(resolve))
+  }
+  await ctx.fiber.dispose()
   console.log('plugin lifecycle child passed')
 `
 
 try {
-  const result = spawnSync(
-    process.execPath,
-    ['--input-type=module', '--eval', childSource],
-    {
-      cwd: root,
-      env: {
-        ...process.env,
-        HOME: home,
-        USERPROFILE: home,
-        HOMEDRIVE: path.parse(home).root.replace(/[\\/]$/, ''),
-        HOMEPATH: home.slice(path.parse(home).root.length - 1),
+  for (const [kind, entryUrl] of [['core', coreUrl], ['npm-wrapper', pathToFileURL(wrapperPath).href]]) {
+    const caseHome = path.join(home, kind)
+    mkdirSync(path.join(caseHome, '.dsh'), { recursive: true })
+    writeFileSync(path.join(caseHome, '.dsh/harness-remote-public.json'), JSON.stringify({ enabled: false }))
+    const result = spawnSync(
+      process.execPath,
+      ['--input-type=module', '--eval', childSource],
+      {
+        cwd: root,
+        env: {
+          ...process.env,
+          HOME: caseHome,
+          USERPROFILE: caseHome,
+          DSH_HOME: path.join(caseHome, '.dsh'),
+          HOMEDRIVE: path.parse(caseHome).root.replace(/[\\/]$/, ''),
+          HOMEPATH: caseHome.slice(path.parse(caseHome).root.length - 1),
+          LIFECYCLE_ENTRY: entryUrl,
+          LIFECYCLE_WRAPPER: kind === 'npm-wrapper' ? '1' : '0',
+        },
+        encoding: 'utf8',
+        timeout: 15_000,
       },
-      encoding: 'utf8',
-      timeout: 15_000,
-    },
-  )
-  assert.equal(
-    result.status,
-    0,
-    `lifecycle child failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
-  )
-  console.log('plugin import/apply/dispose lifecycle tests passed')
+    )
+    assert.equal(
+      result.status,
+      0,
+      `${kind} lifecycle child failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+    )
+    console.log(kind + ' import/apply/dispose/reload lifecycle tests passed')
+  }
 } finally {
   rmSync(home, { recursive: true, force: true })
 }

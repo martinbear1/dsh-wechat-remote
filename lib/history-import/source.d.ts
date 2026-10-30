@@ -37,6 +37,13 @@ export interface HistoryConversation {
     leafIds: string[];
     warnings: string[];
     metadata?: JsonObject;
+    publishedOrder?: {
+        schema: 1;
+        missingParents: number;
+        nonAdjacentParents: number;
+        unavailableParents: number;
+        roots: number;
+    };
 }
 export interface HistorySource {
     kind: 'share' | 'export';
@@ -45,10 +52,17 @@ export interface HistorySource {
 }
 export declare class HistorySourceError extends Error {
     readonly code: string;
-    constructor(code: string);
+    readonly actualBytes?: number | undefined;
+    readonly limitBytes?: number | undefined;
+    diagnostic?: {
+        messagePosition: number;
+        messageCount: number;
+        field: 'message' | 'message_id' | 'parent_id' | 'fragments';
+    };
+    constructor(code: string, actualBytes?: number | undefined, limitBytes?: number | undefined);
 }
 /** Pure source normalization. No networking, credentials, model calls, filesystem writes or host mutation. */
-export declare function parseHistorySource(input: Buffer | string | unknown): Promise<HistorySource>;
+export declare function parseHistorySource(input: Buffer | string | unknown, sourceKind?: 'share'): Promise<HistorySource>;
 /** Count one selected path, independent of export mapping order. Each user
  * message starts a turn; a leading assistant-only group is retained as a turn.
  * Unknown roles have no trustworthy count and must never be guessed from size. */

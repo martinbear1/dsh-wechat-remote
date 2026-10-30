@@ -97,7 +97,7 @@ if (process.env.HARNESS_OFFICIAL_UPDATE_RECOVERY || process.env.HARNESS_OFFICIAL
       HARNESS_DSH_ROOT: path.join(stage, 'dsh/node_modules/@deepseek-ai/dsh') }, stdio: 'inherit', windowsHide: true, timeout: 240000 })
   } finally { fs.closeSync(fd); cleanup() }
 } else {
-  let server, current, updater
+  let server, current, updater, previousFetch
   try {
     assert(process.env.HARNESS_DSH_ROOT, 'set HARNESS_DSH_ROOT or HARNESS_DSH_ASAR; no silent skip')
     const oldArchive = path.resolve(process.env.HARNESS_UPDATE_OLD_ARCHIVE || '')
@@ -185,6 +185,15 @@ if (process.env.HARNESS_OFFICIAL_UPDATE_RECOVERY || process.env.HARNESS_OFFICIAL
       ...(() => { const bytes = entry(targetBytes, 'package/assets/plugin.tgz'); return { bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') } })(),
     }, npmInstaller: { version: targetManifest.version, url: `https://registry.npmjs.org/${outer}/-/${outer}-${targetManifest.version}.tgz`,
       bytes: targetBytes.length, sha256: createHash('sha256').update(targetBytes).digest('hex') } }
+    // Local candidate bytes may differ from a published package with the same
+    // development version. Keep the updater's URL/hash/size checks intact, but
+    // route its exact admitted request to this fixture's loopback registry.
+    // Never silently download an unrelated published candidate during a test.
+    previousFetch = globalThis.fetch
+    globalThis.fetch = (url, options) => {
+      assert.equal(String(url), release.npmInstaller.url, 'unexpected external update request')
+      return previousFetch(`${origin}/${outer}/-/${outer}-${targetManifest.version}.tgz`, options)
+    }
     const core = '@harness-remote/dsh-wechat-remote'
     const targetCore = entry(targetBytes, 'package/assets/plugin.tgz')
     for (const [name, scope, Updater, owner] of [
@@ -196,7 +205,7 @@ if (process.env.HARNESS_OFFICIAL_UPDATE_RECOVERY || process.env.HARNESS_OFFICIAL
       const home = path.join(stage, name), dir = path.join(home, 'profiles', scope)
       fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(path.join(dir, 'package.json'), '{"private":true,"dependencies":{},"dsh":{"profile":{"bundles":[]}}}\n')
       const npmConfig = path.join(home, '.npmrc'); fs.writeFileSync(npmConfig, `registry=${origin}\nstore-dir=${path.join(stage, 'pnpm-store').replace(/\\/g, '/')}\n`)
-      const profile = { name: scope, dir, home, cwd: dir, installAnchor, patchPath: path.join(dir, 'cordis.patch.yml'), startedBundles: [],
+      const profile = { name: scope, dir, home, cwd: dir, installAnchor, patchPath: path.join(dir, 'cordis.patch.yml'), startedBundles: [], overlays: [],
         packageManager: { command: process.execPath, args: [pnpm], env: { npm_config_userconfig: npmConfig,
           npm_config_cache: path.join(stage, 'npm-cache'), PNPM_HOME: path.join(stage, 'pnpm-home'), XDG_CACHE_HOME: path.join(stage, 'xdg-cache') } } }
       current = await boot('native-update-test', config, [], async ctx => { ctx.provide('profileContext', profile) })
@@ -305,6 +314,7 @@ if (process.env.HARNESS_OFFICIAL_UPDATE_RECOVERY || process.env.HARNESS_OFFICIAL
       realProfileWrite: false, tests: transitionArchive ? 7 : 5, isolatedColdRecoveries: transitionArchive ? 6 : 5,
       fixtureRegistryRequests: requests.length, applicationRestart: false }))
   } finally {
+    if (previousFetch) globalThis.fetch = previousFetch
     updater?.dispose(); await current?.fiber.dispose()
     await new Promise(resolve => server ? server.close(resolve) : resolve())
     if (!process.env.HARNESS_OFFICIAL_UPDATE_STAGE) cleanup()

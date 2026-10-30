@@ -166,7 +166,7 @@ test('missing native guard/controller/preset capabilities never downgrade to unr
 })
 test('native capability is current, bounded, non-sensitive and never restores or runs an Agent', async t => {
   const h = await setup(t), originals = { ...h.services }
-  for (const [name, expected] of [['sessionController', 'sessionController.inspect'], ['agentPresets', 'agentPresets.readDocument'],
+  for (const [name, expected] of [['sessionController', 'session.read'], ['agentPresets', 'agentPresets.readDocument'],
     ['permissionPresets', 'permissionPresets.resolve'], ['workspaceRegistry', 'workspaceRegistry.archivedSessionIds']]) {
     delete h.services[name]
     assert.equal(h.adapter.probe().supported, false); assert(h.adapter.probe().reason.includes(expected))

@@ -31,6 +31,7 @@ export declare class DshRealtimeCompatibility {
     private remoteOwner?;
     private disposed;
     private readonly disposeScheduleEvents?;
+    private readonly disposeAccountEvents?;
     constructor(ctx: Context);
     /** Scoped to authenticated phone RPCs; never changes native Agent ownership. */
     trackSessionRequest(request: LegacyClientRequest): () => void;
@@ -74,6 +75,8 @@ export declare class DshRealtimeCompatibility {
     private followWorkspace;
     private followControl;
     private controlFrame;
+    /** One synchronous recovery round, not a reusable directory cache. */
+    private restoreSessions;
     private startSession;
     private followRemoteEvents;
     private pendingWaterfall;

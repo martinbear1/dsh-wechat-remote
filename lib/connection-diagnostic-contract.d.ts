@@ -5,6 +5,16 @@ export interface SafeFailure {
     systemCode?: string;
     httpStatus?: number;
 }
+/** Observation of QR credential issuance only, never a phone-claim/connection verdict. */
+export interface PairingObservation extends Partial<SafeFailure> {
+    status: 'running' | 'issued' | 'failed';
+    startedAt: string;
+    finishedAt?: string;
+    serverCode?: string;
+    reason?: string;
+}
+export declare const PAIRING_SERVER_CODES: Readonly<Record<string, string>>;
+export declare const PAIRING_PROOF_MESSAGES: Readonly<Record<string, string>>;
 export type DiagnosticCheckId = 'local-plugin' | 'relay-health' | 'agent-connection';
 export type DiagnosticCheckStatus = 'pass' | 'fail' | 'not-tested' | 'cancelled';
 export interface ConnectionDiagnosticCheck extends Partial<SafeFailure> {
@@ -19,6 +29,7 @@ export interface ConnectionDiagnosticContext {
     profileKind?: 'desktop' | 'web' | 'unknown';
     relayEnabled?: boolean;
     relayState?: string;
+    pairingObservation?: PairingObservation;
 }
 export interface ConnectionDiagnosticReport {
     schema: 1;
@@ -31,12 +42,15 @@ export interface ConnectionDiagnosticReport {
     relayEnabled: boolean;
     relayState: 'disabled' | 'enrolling' | 'connecting' | 'online' | 'offline' | 'unknown';
     checks: ConnectionDiagnosticCheck[];
+    pairingObservation?: PairingObservation;
 }
 export declare const DIAGNOSTIC_CHECK_IDS: readonly DiagnosticCheckId[];
 export declare const CONNECTION_SYSTEM_CODES: Readonly<Record<string, SafeFailureCode>>;
 /** Also handles hostile getters supplied by unexpected transport/error objects. */
 export declare function diagnosticField(value: unknown, key: string): unknown;
 export declare function sanitizeConnectionFailure(value: unknown): SafeFailure;
+export declare function sanitizePairingObservation(value: unknown): PairingObservation | undefined;
+export declare function pairingFailureDescription(value: PairingObservation): string;
 export declare function sanitizeConnectionReport(value: unknown): ConnectionDiagnosticReport | null;
 export declare function failureDescription(code: unknown): string;
 export declare function failureAdvice(code: unknown): string;

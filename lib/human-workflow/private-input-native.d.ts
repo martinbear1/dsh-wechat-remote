@@ -26,6 +26,7 @@ export declare class PrivateInputNative {
     private readonly leases;
     private readonly epochs;
     private readonly offs;
+    private readonly lifetime;
     private stopped;
     constructor(host: Host, nodeId: string, assertIdentity: () => void, now?: () => number, options?: PrivateInputOptions);
     supported(): boolean;

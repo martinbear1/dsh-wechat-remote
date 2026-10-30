@@ -1,7 +1,7 @@
 /** Read-only operator diagnostics. Reports stay in this host's memory. */
 import { Component, useEffect, useState, useSyncExternalStore, type ReactNode } from 'react'
 import styles from './HarnessRemoteSettings.module.css'
-import { diagnosticCheckLabel, failureAdvice, failureDescription, formatConnectionDiagnosticReport } from '../connection-diagnostic-contract.js'
+import { diagnosticCheckLabel, failureAdvice, failureDescription, formatConnectionDiagnosticReport, pairingFailureDescription } from '../connection-diagnostic-contract.js'
 import type { ConnectionDiagnosticStore } from './connection-diagnostic-store.js'
 
 const statusLabel = { pass: '通过', fail: '失败', 'not-tested': '未检测', cancelled: '已取消' }
@@ -31,13 +31,14 @@ function DiagnosticContent({ store }: { store: ConnectionDiagnosticStore }): JSX
   useEffect(() => { setPreview(false); setCopied('idle') }, [diagnosticReport])
   const running = diagnosticState === 'running'
   const text = diagnosticReport ? formatConnectionDiagnosticReport(diagnosticReport) : ''
+  const pairing = diagnosticReport?.pairingObservation
   const copyReport = async () => {
-    if (!preview || !diagnosticReport || !text) return
+    if (!diagnosticReport || !text) return
     try {
       await navigator.clipboard.writeText(text)
       if (store.getSnapshot().diagnosticReport === diagnosticReport) setCopied('copied')
     } catch {
-      if (store.getSnapshot().diagnosticReport === diagnosticReport) setCopied('failed')
+      if (store.getSnapshot().diagnosticReport === diagnosticReport) { setCopied('failed'); setPreview(true) }
     }
   }
   return <section aria-label="连接诊断">
@@ -62,6 +63,23 @@ function DiagnosticContent({ store }: { store: ConnectionDiagnosticStore }): JSX
           {check.systemCode ? ` · ${check.systemCode}` : null}
           {check.status === 'fail' ? <p className={styles.helpText}>{failureAdvice(check.code ?? 'unknown')}</p> : null}
         </li>)}</ul>
+        <div aria-label="最近一次配对凭据申请">
+          <p><strong>最近一次配对凭据申请</strong></p>
+          {!pairing ? <p className={styles.helpText}>暂无记录。可先在配对区域生成或刷新二维码，再点击“检查连接”；检查本身不会申请配对凭据。</p> : <>
+            <p className={styles.helpText}>申请于 {new Date(pairing.startedAt).toLocaleString()}，仅记录本次插件运行期间的最近一次尝试。</p>
+            {pairing.status === 'running' ? <p>检查时申请尚未结束，可稍后再次检查。</p> : null}
+            {pairing.status === 'issued' ? <p>已取得首次配对凭据；这不代表手机已扫码成功或业务连接已建立。</p> : null}
+            {pairing.status === 'failed' ? <>
+              <p style={{ overflowWrap: 'anywhere' }}>未取得首次配对凭据：{pairingFailureDescription(pairing)}。
+                {pairing.httpStatus ? ` HTTP ${pairing.httpStatus}` : null}
+                {pairing.serverCode ? ` · ${pairing.serverCode}` : null}
+                {pairing.systemCode ? ` · ${pairing.systemCode}` : null}</p>
+              <p className={styles.helpText}>地址恢复码不能用于新手机首次配对。此处仅展示当次记录，不会自动修复、重试或更改连接。</p>
+              <button type="button" className={styles.secondaryButton} onClick={() => void copyReport()}>{copied === 'copied' ? '已复制报错' : '复制报错'}</button>
+              <p className={styles.helpText}>仅复制脱敏原因、错误码、时间和版本，不包含配对凭据；不会自动发送。</p>
+            </> : null}
+          </>}
+        </div>
         <p className={styles.helpText}>基础检查通过不等于首次配对成功；未单独测试 WebSocket 握手、手机认领或票据签名。</p>
         <button type="button" className={styles.secondaryButton} aria-expanded={preview} onClick={() => setPreview(!preview)}>{preview ? '收起报告' : '预览诊断报告'}</button>
         {preview ? <>

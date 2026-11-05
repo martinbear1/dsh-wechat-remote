@@ -61,6 +61,9 @@ if (process.argv.includes('--native-dispose-probe')) {
     const { createHash } = await import('node:crypto')
     const { component, ResourceStorage, nodeStorageDirectory } = await import(pathToFileURL(path.join(work, 'dsh/fixture.mjs')).href)
     const ctx = new Context(); ctx.baseUrl = pathToFileURL(path.join(work, 'dsh/')).href
+    // This fixture never mounts an Agent. New registry compositions explicitly
+    // require its provider, even when all native Agent roots are empty.
+    ctx.provide('agents', { roots: () => [], get: () => undefined })
     await ctx.plugin(Loader); await ctx.plugin(Projection); await ctx.plugin(AgentPresets, { default: 'standard' })
     const home = path.join(work, 'synthetic-home')
     ctx.provide('profileContext', { name: 'fixture', home, dir: path.join(home, 'profile'), installAnchor: path.join(work, 'dsh/node_modules/@deepseek-ai/dsh/package.json') })

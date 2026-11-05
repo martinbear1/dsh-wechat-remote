@@ -9,6 +9,8 @@ export interface ScheduledResult {
 export interface ScheduledChanged { readonly enabled: boolean }
 /** Lightweight live service state; no task/catalog/history read is needed. */
 export interface ScheduledStatus {
+  /** Optional native task presentation; old clients keep the released schema. */
+  readonly protocolVersion?: 2
   readonly supported: boolean
   readonly enabled: boolean
   readonly historyKind: 'delivery'
@@ -16,7 +18,11 @@ export interface ScheduledStatus {
     readonly create: boolean
     readonly update: boolean
     readonly delete: boolean
-    readonly pause: false
+    readonly pause: boolean
+    /** Additive opt-in: absent in released plugins and old native Hosts. */
+    readonly editor?: boolean
+    readonly run?: boolean
+    readonly clearEnded?: boolean
   }
 }
 export interface ScheduledReceipt { readonly scheduledAt: string; readonly deliveredAt: string; readonly messageId: string }

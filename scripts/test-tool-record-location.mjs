@@ -7,6 +7,17 @@ const source = await build({ entryPoints: [fileURLToPath(new URL('../src/tool-re
   bundle: true, write: false, platform: 'node', format: 'esm', target: 'node22' })
 const { toolRecordPresentation } = await import('data:text/javascript;base64,' + Buffer.from(source.outputFiles[0].text + '\n//# sourceURL=tool-record-location-fixture.mjs').toString('base64'))
 
+test('partial apply_patch result retains native stopped marker, actual text and successful diffs', () => {
+  const input = { event: { type: 'tool/result', data: { message: { content: [{ type: 'text', text: 'Partial changes' }] },
+    meta: { stopped: true, diffs: [{ path: '/changed.txt', oldText: 'old', newText: 'new' }], private: 'not forwarded' } } } }
+  const before = JSON.stringify(input), output = toolRecordPresentation(input)
+  assert.equal(output.event.data.meta.stopped, true)
+  assert.deepEqual(output.event.data.meta.diffs, input.event.data.meta.diffs)
+  assert.equal(output.event.data.meta.private, undefined)
+  assert.deepEqual(output.event.data.message, input.event.data.message)
+  assert.equal(JSON.stringify(input), before)
+})
+
 test('operation-time cwd survives mobile projection without exposing unrelated metadata or changing history', () => {
   for (const cwd of ['/work/sub', 'C:\\work\\sub', '\\\\host\\share\\sub']) {
     const input = { event: { seq: 7, type: 'tool/result', data: { turn: 1,

@@ -20,6 +20,8 @@ export declare class NativeScheduledTasks {
     private same;
     private catalog;
     control(action: string, input: unknown, signal: AbortSignal): Promise<unknown>;
+    private expectedRevision;
+    private modernTask;
 }
 export declare function scheduledError(error: unknown): {
     code: string;

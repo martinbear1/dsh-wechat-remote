@@ -76,7 +76,7 @@ try {
       assert.equal(inbox.length, 0, 'one one-shot task must not be delivered twice')
       inbox.push(message)
     } }
-    ctx.provide('agents', { roots: () => [], withoutInitiator: work => work() })
+    ctx.provide('agents', { roots: () => [], get: () => undefined, withoutInitiator: work => work() })
     ctx.provide('sessions', { get: id => id === syntheticSession.id ? syntheticSession : undefined,
       flush: async session => {
         assert(allowSyntheticDispatch); assert.equal(session, syntheticSession); assert.equal(inbox.length, 1)
@@ -97,6 +97,9 @@ try {
     const adapter = new WechatSchedulesService(ctx)
     const signal = new AbortController().signal
     new HostConnectionService(ctx, [], {})
+    const peer = ctx.connection.createPeer?.({ principal: { kind: 'owner' }, interactions: 'answer' })
+    const access = await load('@deepseek-ai/dsh-api-remote-access')
+    await ctx.plugin(access.default ?? access.RemoteAccessService)
     await ctx.plugin(TypertGatewayService, {})
     // Resolve external codecs from the actual extracted host, as profile
     // plugins do, rather than depending on the packing directory's modules.
@@ -111,14 +114,14 @@ try {
     assert.equal(descriptor.cancellation.parameter, 'signal')
     const call = async (action, input = {}) => {
       const response = await ctx.typertGateway.invoke({ namespace: 'wechatSchedules', method: 'control',
-        args: { request: { action, inputJson: JSON.stringify(input) } }, signal })
+        args: { request: { action, inputJson: JSON.stringify(input) } }, signal, ...(peer ? { peer } : {}) })
       assert.equal(response.ok, true, JSON.stringify(response))
       return JSON.parse(response.valueJson)
     }
     await ctx.plugin(remoteEvents)
     streamLife = new AbortController()
     const empty = { async *[Symbol.asyncIterator]() {} }
-    const stream = (await ctx.typertGateway.wireStream.open('$events', { args: {} }, empty, undefined, streamLife.signal))[Symbol.asyncIterator]()
+    const stream = (await ctx.typertGateway.wireStream.open('$events', { args: {} }, empty, peer, streamLife.signal))[Symbol.asyncIterator]()
     assert.equal((await stream.next()).value.type, 'ready')
     const wireFrames = []
     streamPump = (async () => { for (;;) { const value = await stream.next(); if (value.done) break; wireFrames.push(value.value) } })()

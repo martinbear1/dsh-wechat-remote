@@ -23,7 +23,7 @@ export function toolRecordPresentation<T extends Row>(entry: T): T {
   if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return entry
   const selected = fields(meta, ['path', 'cwd', 'offset', 'lines', 'totalLines', 'lang', 'diffs',
     'shape', 'files', 'paths', 'truncated', 'total', 'answer', 'sources', 'url', 'statusCode',
-    'pluginId', 'packageId', 'pluginRunId']) as Row
+    'pluginId', 'packageId', 'pluginRunId', 'stopped']) as Row
   const surface = humanSurface(meta.humanSurface)
   if (surface) selected.humanSurface = surface
   if (Object.hasOwn(selected, 'lines')) selected.lines = rows(selected.lines, ['number', 'text'])

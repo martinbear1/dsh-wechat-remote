@@ -72,11 +72,13 @@ if (!childStage) {
     ctx = new Context(); ctx.baseUrl = pathToFileURL(path.join(work, 'dsh/')).href
     await ctx.plugin(Loader); await ctx.plugin(Projection); await ctx.plugin(SystemPrompt, {})
     ctx.loader.builtins.privateResourcePrompt = ResourcePromptData
-    new SessionStore(ctx); new AgentRegistry(ctx); new ToolRuntime(ctx, { mode: 'native' }); new Typert(ctx)
+    await ctx.plugin(SessionStore); await ctx.plugin(AgentRegistry)
+    await ctx.plugin(ToolRuntime, {}); await ctx.plugin(Typert)
+    if (typeof ctx.tools.setExecutor === 'function') await ctx.plugin(await load('@deepseek-ai/dsh-tool-executor-native'))
     // Cordis accepts both the older default service class and the current
     // native { apply, Config } plugin; do not bypass provider lifecycle.
     await ctx.plugin(persistenceModule.default ?? persistenceModule, { root: path.join(work, 'synthetic-sessions'), compression: 'none' })
-    new SessionQuery(ctx)
+    await ctx.plugin(SessionQuery)
     const model = { provider: 'fixture', model: 'no-network' }
     ctx.provide('agentDefaultModel', { currentSelection: () => model })
     ctx.provide('llm', { listProviders: () => [{ id: 'fixture' }], resolveCallConfig: async value => value,
@@ -90,7 +92,14 @@ if (!childStage) {
       get: id => id === workspace.id ? workspace : undefined })
     ctx.provide('fs', { resolve() { throw Error('no filesystem tool in fixture') } })
     await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 10 })
-    const controller = new SessionController(ctx)
+    // Mount the controller as the real Host does; its asynchronous service
+    // initialization needs the authorization and Gateway providers.
+    const access = await load('@deepseek-ai/dsh-api-remote-access')
+    await ctx.plugin(access.default ?? access.RemoteAccessService)
+    const { TypertGatewayService } = await load('@deepseek-ai/dsh-api-gateway')
+    await ctx.plugin(TypertGatewayService, {})
+    await ctx.plugin(SessionController)
+    const controller = ctx.sessionController
     // Native session.create is a new/blank-session operation, not cold resume.
     // Use the same host resolver used by ordinary session activation.
     const resume = async id => {

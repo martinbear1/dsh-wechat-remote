@@ -1,0 +1,11 @@
+{
+  "repository": "https://github.com/deepseek-ai/deepseek-harness",
+  "tag": "dsh-v0.2.2-rc.1",
+  "commit": "66491b05e3f05ad35bcdd4f6cd7ed26041d9e3db",
+  "purpose": "Pinned pure native editor projections only. Actual Schedule service owns validation, persistence and dispatch.",
+  "transform": "Extract pure TaskEditorFields functions before React UI; bundle only used exports; replace dsh-util-time import with same-tag local source.",
+  "dependencies": {
+    "@js-temporal/polyfill": "0.5.1",
+    "rrule": "2.8.1"
+  }
+}

@@ -66,6 +66,37 @@ test('control reconnect baseline reconciles missed directory changes once', asyn
   assert.equal(changed(f.mux).length, 1, 'baseline invalidates once, not once per row or projection')
 })
 
+test('rc.1 batch keeps every key at its native sequence and invalidates the directory once', async t => {
+  const f = fixture(t), control = f.sources.get('session/control')
+  control.push({ type: 'projection', sessionId: 'desktop-new', seq: 42, changes: [
+    { key: 'title', val: 'Batch title' },
+    { key: 'sessionListMetadata', val: { blank: false, lastPromptAt: 123 } },
+    { key: 'tokenUsage', val: { inputTokens: 321 } },
+    { key: 'plan', val: null },
+  ] })
+  await tick()
+  const frames = f.mux.frames.filter(frame => frame.type === 'session/projection')
+  for (const [key, value] of [['title', 'Batch title'], ['sessionListMetadata', { blank: false, lastPromptAt: 123 }],
+    ['tokenUsage', { inputTokens: 321 }], ['plan', null]]) {
+    assert(frames.some(frame => frame.key === key && frame.seq === 42 && JSON.stringify(frame.value) === JSON.stringify(value)), key)
+  }
+  assert.equal(changed(f.mux).length, 1)
+  assert.equal(changed(f.host).length, 0)
+  assert.equal(frames.some(frame => frame.key === undefined), false)
+})
+
+test('batch streaming usage never triggers directory scans; malformed and private keys stay bounded', async t => {
+  const f = fixture(t), control = f.sources.get('session/control')
+  for (let seq = 1; seq <= 100; seq++) control.push({ type: 'projection', sessionId: 's', seq,
+    changes: [{ key: 'tokenUsage', val: {} }, null, { val: 'missing-key' }] })
+  control.push({ type: 'projection', sessionId: 's', seq: 101, key: 'title', value: 'must not fall back', changes: null })
+  await tick()
+  assert.equal(changed(f.mux).length, 0)
+  assert.equal(f.mux.frames.filter(frame => frame.type === 'session/projection' && frame.key === 'tokenUsage').length, 100)
+  assert.equal(f.mux.frames.some(frame => frame.key === undefined && frame.type === 'session/projection'), false)
+  assert.deepEqual(f.mux.closes, [])
+})
+
 test('a native old-session ownership error does not stop updates for a new session', async t => {
   const f = fixture(t)
   const message = 'session "web-old" is already owned by an active write handle'

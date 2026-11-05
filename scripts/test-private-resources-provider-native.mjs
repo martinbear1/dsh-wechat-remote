@@ -150,7 +150,8 @@ if (!childStage) {
     await root.plugin(Loader); root.loader.builtins.group = Group
     await root.plugin(Projection); await root.plugin(SystemPrompt, {})
     for (const plugin of [Llm, SessionStore, SessionQueryEngine, AgentRegistry, TokenMeter, Commands, Web]) await root.plugin(plugin)
-    await root.plugin(ToolRuntime, { mode: 'native' })
+    await root.plugin(ToolRuntime, {})
+    if (typeof root.tools.setExecutor === 'function') await root.plugin(await load('@deepseek-ai/dsh-tool-executor-native'))
     await root.plugin(AgentPresets, { default: 'standard' })
     const home = path.join(work, 'synthetic-home')
     root.provide('profileContext', { name: 'fixture', home, dir: path.join(home, 'profile'), installAnchor: anchor })

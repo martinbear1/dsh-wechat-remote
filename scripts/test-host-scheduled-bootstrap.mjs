@@ -10,6 +10,7 @@ const output = await build({
     export { remoteMethods } from '@deepseek-ai/dsh-typert-protocol';
     export { WechatHostInfoService } from './src/host-info-service.ts';
     export { WechatSchedulesService } from './src/scheduled-tasks/service.ts';
+    export { WechatPluginsService } from './src/plugin-manager/service.ts';
   `, resolveDir: process.cwd(), loader: 'ts' },
   bundle: true, write: false, platform: 'node', format: 'esm', target: 'node22',
   plugins: [{ name: 'isolated-host-descriptor', setup(builder) {
@@ -25,7 +26,7 @@ const output = await build({
     `, loader: 'js' }))
   } }],
 })
-const { Context, remoteMethods, WechatHostInfoService, WechatSchedulesService } =
+const { Context, remoteMethods, WechatHostInfoService, WechatSchedulesService, WechatPluginsService } =
   await import('data:text/javascript;base64,' + Buffer.from(output.outputFiles[0].contents).toString('base64'))
 const signal = new AbortController().signal
 function setup(t) {
@@ -104,4 +105,16 @@ test('aborted primary requests do not read optional schedule metadata', async t 
   f.ctx.provide('wechatSchedules', { status() { assert.fail('aborted primary request must exit') } })
   controller.abort()
   await assert.rejects(f.host.describe({}, controller.signal), { name: 'AbortError' })
+})
+
+test('plugin management is additive, native-capability checked and performs no bootstrap inventory read', async t => {
+  const f = setup(t), plugins = new WechatPluginsService(f.ctx)
+  assert(!(await f.describe()).capabilities.some(c => c.id === 'dsh.plugin-manager'))
+  const manager = await f.ctx.plugin(ctx => ctx.provide('pluginManager', Object.fromEntries(
+    ['listBundles', 'listPlugins', 'setPluginEnabled', 'setBundleEnabled'].map(k => [k, () => { assert.fail('bootstrap cannot enumerate or modify plugins') }]))))
+  assert((await f.describe()).capabilities.some(c => c.id === 'dsh.plugin-manager' && c.version === 1))
+  assert.deepEqual(remoteMethods(plugins).map(x => x.method), ['control'])
+  assert.equal((await plugins.control({action:'list',inputJson:'{'}, signal)).error.code,'invalid_request')
+  await manager.dispose()
+  assert(!(await f.describe()).capabilities.some(c => c.id === 'dsh.plugin-manager'))
 })

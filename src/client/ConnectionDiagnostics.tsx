@@ -80,6 +80,9 @@ function DiagnosticContent({ store }: { store: ConnectionDiagnosticStore }): JSX
             </> : null}
           </>}
         </div>
+      </> : null}
+      <p className={styles.helpText}>扫码配对失败或提示配对码无效时，可先检查电脑的日期、时间和时区，开启自动时间同步并立即同步一次，再生成新二维码重试。</p>
+      {diagnosticReport ? <>
         <p className={styles.helpText}>基础检查通过不等于首次配对成功；未单独测试 WebSocket 握手、手机认领或票据签名。</p>
         <button type="button" className={styles.secondaryButton} aria-expanded={preview} onClick={() => setPreview(!preview)}>{preview ? '收起报告' : '预览诊断报告'}</button>
         {preview ? <>

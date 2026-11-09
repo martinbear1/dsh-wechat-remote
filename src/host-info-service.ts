@@ -18,6 +18,7 @@ import { PLUGIN_VERSION } from './plugin-version.js'
 import { readOtherEndpointInfo, type OtherEndpointInfo } from './other-endpoint-info.js'
 import type { ScheduledStatus } from './scheduled-tasks/protocol.js'
 import { ACCOUNT_CAPABILITY } from './account-balance.js'
+import { PLUGINS_CAPABILITY } from './plugin-manager/protocol.js'
 import { resolveTypertGateway } from './dsh-protocol-compat.js'
 export type { OtherEndpointInfo } from './other-endpoint-info.js'
 
@@ -119,7 +120,9 @@ export class WechatHostInfoService extends TypertRemoteService {
     const schedulesService = this.ctx.get('wechatSchedules')
     let schedules: ScheduledStatus | undefined
     let accountAvailable = false
+    let pluginManagerAvailable = false
     try { accountAvailable = this.ctx.get('wechatAccount')?.available() === true } catch { /* optional only */ }
+    try { pluginManagerAvailable = this.ctx.get('wechatPlugins')?.status().supported === true } catch { /* optional only */ }
     // Auxiliary UI metadata must never block an otherwise healthy connection.
     // This local accessor does not touch tasks, storage or another endpoint.
     try { schedules = schedulesService?.status?.() } catch { /* fall back to the optional status RPC */ }
@@ -145,6 +148,7 @@ export class WechatHostInfoService extends TypertRemoteService {
           // Availability of our client adapter is separate from the native
           // automation plugin's switch, carried in the lightweight snapshot.
           ...(schedulesService ? [{ id: 'dsh.schedules', version: 1 }] : []),
+          ...(pluginManagerAvailable ? [{ id: PLUGINS_CAPABILITY, version: 1 }] : []),
           ...(accountAvailable ? [{ id: ACCOUNT_CAPABILITY, version: 1 }] : [])],
         ...(schedules ? { schedules } : {}),
         ...(this.gateRuntime ? { gate: this.gateRuntime() } : {}),

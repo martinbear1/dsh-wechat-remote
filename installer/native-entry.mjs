@@ -9,7 +9,9 @@ import { TYPERT } from './lib/typert.host.js'
 export const name = 'gate'
 export const inject = [...gateInject, 'typert']
 
-export function apply(ctx) {
+// Cordis treats constructible functions as classes and does not consume their
+// returned disposer. Keep this functional, like the standalone core entry.
+export const apply = (ctx) => {
   ctx.typert.register(TYPERT)
   return mountGate(ctx)
 }

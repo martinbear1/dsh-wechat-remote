@@ -282,8 +282,11 @@ test('installed native factory, cold reader, actual continuation, isolation and 
       const selected = ctx.pluginPackages.packageOf(name, pathToFileURL(generated).href)
       assert(selected.dir.startsWith(path.join(work, 'dsh', 'node_modules')))
     }
-    new SystemPrompt(ctx, { personaPrefix: 'Synthetic native host system prompt.' })
-    new SessionStore(ctx); new Projections(ctx); new Agents(ctx); new ToolRuntime(ctx, { mode: 'native' })
+    // Use the official lifecycle so current asynchronous projection/factory
+    // registration has settled before native Agent creation starts.
+    await ctx.plugin(SystemPrompt, { personaPrefix: 'Synthetic native host system prompt.' })
+    await ctx.plugin(SessionStore); await ctx.plugin(Projections); await ctx.plugin(Agents); await ctx.plugin(ToolRuntime, {})
+    if (typeof ctx.tools.setExecutor === 'function') await ctx.plugin(await load('dsh-tool-executor-native'))
     const execute = ctx.tools.execute.bind(ctx.tools)
     ctx.tools.execute = (...args) => { toolExecutions++; return execute(...args) }
     await ctx.plugin(persistenceModule.default ?? persistenceModule, { root: path.join(work, 'synthetic-sessions') })
@@ -306,7 +309,7 @@ test('installed native factory, cold reader, actual continuation, isolation and 
       presetMounts.push(id); agentCtx.systemPrompt.section({ name: 'fixture-preset', order: 90, text: 'Standard native preset.' })
       return { id }
     } })
-    new AgentLoop(ctx, { agents: [], maxParallelToolCalls: { get: () => 10 } })
+    await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 10 })
     assert.equal((await adapter.nativeCapabilities(ctx)).supported, true)
     const unrelated = await ctx.agents.create({ sessionId: 'unrelated-existing-session', meta: { cwd: work }, agentOptions: model })
     const unrelatedEvents = structuredClone(unrelated.agent.session.snapshotEvents())

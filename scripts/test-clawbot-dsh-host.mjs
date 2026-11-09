@@ -668,8 +668,11 @@ test('installed native prompt schema, SessionController and AgentLoop preserve r
       assert.equal(schema.parse({ sessionId: 'fixture', requestId: 'r', mode: 'queue',
         content: [{ type: 'text', text: 'fixture' }], expectedGeneration: 123 }).expectedGeneration, undefined)
       ctx = new Context()
-      new SystemPrompt(ctx, {}); new SessionStore(ctx); new Projections(ctx); new AgentRegistry(ctx)
-      new ToolRuntime(ctx, { mode: 'native' }); new Typert(ctx)
+      // Await official service initialization: newer hosts register projections
+      // and the Agent factory asynchronously through the native lifecycle.
+      await ctx.plugin(SystemPrompt, {}); await ctx.plugin(SessionStore); await ctx.plugin(Projections); await ctx.plugin(AgentRegistry)
+      await ctx.plugin(ToolRuntime, {}); await ctx.plugin(Typert)
+      if (typeof ctx.tools.setExecutor === 'function') await ctx.plugin(await load('@deepseek-ai/dsh-tool-executor-native'))
       // New hosts require their native access service even for the fixture's
       // direct internal calls. Do not replace it with an always-allow mock.
       let accessEntry
@@ -699,17 +702,20 @@ test('installed native prompt schema, SessionController and AgentLoop preserve r
       ctx.provide('sessionQuery', { listSessions: async () => agent ? [{ header: agent.session.header }] : [],
         async observeSession(sessionId) { assert.equal(sessionId, agent.id); return { header: agent.session.header,
           cursor: agent.session.seq - 1, get events() { throw Error('no old transcript reads') }, [Symbol.dispose]() {} } } })
-      const loop = new AgentLoop(ctx, { agents: [], maxParallelToolCalls: { get: () => 10 } })
-      const controller = new SessionController(ctx)
-      agent = await loop.create('clawbot-native-fixture', model, { cwd: work })
-      ctx.systemPrompt.context({ name: 'fixture-context', order: 1, text: () => 'Native runtime context, not user input.' })
-      timeContext.apply(ctx, { timeZone: 'UTC', refreshIntervalMs: 60000 })
+      await ctx.plugin(AgentLoop, { agents: [], maxParallelToolCalls: 10 })
+      const loop = ctx.agentLoop
+      let controller
       ctx.provide('typertGateway', { invoke({ namespace, method, args, signal }) {
         assert.equal(namespace, 'session')
         if (method === 'list') return controller.list(args._request, signal)
         assert.equal(method, 'prompt'); nativePrompts++
         return controller.prompt(schema.parse(args.request), signal)
       } })
+      await ctx.plugin(SessionController, {})
+      controller = ctx.sessionController
+      agent = await loop.create('clawbot-native-fixture', model, { cwd: work })
+      ctx.systemPrompt.context({ name: 'fixture-context', order: 1, text: () => 'Native runtime context, not user input.' })
+      timeContext.apply(ctx, { timeZone: 'UTC', refreshIntervalMs: 60000 })
       const host = new DshClawbotHost(ctx), beforeTools = JSON.stringify(ctx.tools.schemas(agent))
       const target = await host.describeSession(agent.id, AbortSignal.timeout(5000))
       const result = await host.run({ sessionId: agent.id, requestId: 'clawbot-native-request', text: 'fixture request', expectedGeneration: target.generation }, AbortSignal.timeout(5000))

@@ -14,6 +14,7 @@ import type { HistoryImportResult } from '@harness-remote/dsh-wechat-remote/hist
 import type { OtherEndpointInfo, WechatHostDescribeRequest, WechatHostDescribeResult } from '@harness-remote/dsh-wechat-remote/host-info'
 import type { AssistantDraftRequest, AssistantInstallRequest, AssistantVersionRequest, AutomationApproveRequest, AutomationPauseRequest, AutomationPreviewRequest, AutomationStatusRequest, AutomationTaskRequest, CoverPreviewRequest, HumanResult, ModeApprovalRequest, ModeVersionRequest } from '@harness-remote/dsh-wechat-remote/human-tools'
 import type { HumanAckWireRequest, HumanActionRequest } from '@harness-remote/dsh-wechat-remote/human-tools/protocol'
+import type { PluginRequest, PluginResult } from '@harness-remote/dsh-wechat-remote/plugin-manager/protocol'
 import type { ResourceRequest, ResourceResult } from '@harness-remote/dsh-wechat-remote/resource-library/protocol'
 import type { ResourceResult as ResourceResult$remote2 } from '@harness-remote/dsh-wechat-remote/resources'
 import type { ScheduledRequest, ScheduledResult } from '@harness-remote/dsh-wechat-remote/scheduled-tasks/protocol'
@@ -89,6 +90,9 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
   interface TypertRemoteNamespace$776563686174496d706f7274 {
     control: (request: { action: string; inputJson?: string; }, signal?: AbortSignal) => Promise<RemoteResult<HistoryImportResult>>
   }
+  interface TypertRemoteNamespace$776563686174506c7567696e73 {
+    control: (request: PluginRequest, signal?: AbortSignal) => Promise<RemoteResult<PluginResult>>
+  }
   interface TypertRemoteNamespace$7765636861745265736f7572636573 {
     control: (request: ResourceRequest, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
   }
@@ -144,6 +148,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'wechatHost/describe': (request: WechatHostDescribeRequest, signal?: AbortSignal) => Promise<RemoteResult<WechatHostDescribeResult>>
     'wechatHost/otherEndpoint': (request: WechatHostDescribeRequest, signal?: AbortSignal) => Promise<RemoteResult<OtherEndpointInfo>>
     'wechatImport/control': (request: { action: string; inputJson?: string; }, signal?: AbortSignal) => Promise<RemoteResult<HistoryImportResult>>
+    'wechatPlugins/control': (request: PluginRequest, signal?: AbortSignal) => Promise<RemoteResult<PluginResult>>
     'wechatResources/control': (request: ResourceRequest, signal?: AbortSignal) => Promise<RemoteResult<ResourceResult>>
     'wechatSchedules/control': (request: ScheduledRequest, signal?: AbortSignal) => Promise<RemoteResult<ScheduledResult>>
   }
@@ -159,6 +164,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'wechatHistory': TypertRemoteNamespace$776563686174486973746f7279
     'wechatHost': TypertRemoteNamespace$776563686174486f7374
     'wechatImport': TypertRemoteNamespace$776563686174496d706f7274
+    'wechatPlugins': TypertRemoteNamespace$776563686174506c7567696e73
     'wechatResources': TypertRemoteNamespace$7765636861745265736f7572636573
     'wechatSchedules': TypertRemoteNamespace$7765636861745363686564756c6573
   }

@@ -118,6 +118,7 @@ export async function verifyHistoryContinuation(work) {
     ctx.baseUrl = pathToFileURL(path.join(work, 'dsh/')).href
     await ctx.plugin(Loader); ctx.loader.builtins.group = Group
     for (const plugin of [Llm, SessionStore, Projection, SystemPrompt, Tools, Agents, TokenMeter, Commands, Web, Typert]) await ctx.plugin(plugin)
+    if (typeof ctx.tools.setExecutor === 'function') await ctx.plugin(await load('@deepseek-ai/dsh-tool-executor-native'))
     await ctx.plugin(JsonlPersistence.default ?? JsonlPersistence, { root, compression: 'none' })
     await ctx.plugin(SessionQuery, { path: ':memory:', openAt: 'never' })
     const adapter = new CaptureAdapter(inHistory)
@@ -135,7 +136,9 @@ export async function verifyHistoryContinuation(work) {
     ctx.provide('profileContext', { name: 'fixture', home: path.join(root, 'profile-home'), dir: path.join(root, 'profile-home/profiles/fixture'), installAnchor: anchor })
     ctx.provide('typertGateway', {})
     await ctx.plugin(AgentLoop, { agents: [] })
-    const controller = new SessionController(ctx, {})
+    ctx.provide('remoteAccess', {})
+    await ctx.plugin(SessionController, {})
+    const controller = ctx.sessionController
     await ctx.plugin(AgentPresets, { default: 'standard' })
     await ctx.plugin(AgentPreset, { id: 'standard', name: 'Synthetic independent native preset', plugins: [
       { id: 'persona', name: '@deepseek-ai/dsh-persona', config: { prefix: 'Independent native mode remains unchanged.' } },

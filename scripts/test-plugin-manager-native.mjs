@@ -76,12 +76,60 @@ try{
  const catalog=await call('list');assert.equal(catalog.catalogVersion,2);assert(catalog.items.some(x=>x.id==='bundle:sample'))
  assert(catalog.items.every(x=>x.kind==='bundle'||x.builtin===true),'raw Host inventory is not a desktop card')
  const hostVersion=JSON.parse(fs.readFileSync(anchor,'utf8')).version
+ const webModule = await load('@deepseek-ai/dsh-web')
+ const split = typeof webModule.default?.prototype?.listProviders === 'function' || typeof webModule.WebService?.prototype?.listProviders === 'function'
+ let removeOptionalProvider
+ if (split) {
+  await ctx.plugin(webModule.default,{})
+  const noNetwork=()=>{throw new Error('fixture service must not access the network')}
+  for (const id of ['deepseek-search-api','deepseek-official']) ctx.web.registerSearchProvider({id,available:()=>true,search:noNetwork})
+  for (const id of ['http','deepseek-fetch-api']) ctx.web.registerFetchProvider({id,available:()=>true,fetch:noNetwork})
+  removeOptionalProvider=ctx.web.registerFetchProvider({id:'optional-fixture',available:()=>true,fetch:noNetwork})
+ }
  const actualNames=new Set(catalog.items.map(item=>item.id))
  for(const name of ['experimental-terminal-bundle','experimental-tool-worktree']) {
   if(hostVersion==='0.2.1-rc.5') assert(actualNames.has('bundle:@deepseek-ai/dsh-'+name),'old native manager card retained: '+name)
   if(hostVersion==='0.2.2-rc.1') assert(!actualNames.has('bundle:@deepseek-ai/dsh-'+name),'new official successor catalog retires: '+name)
  }
  if(hostVersion==='0.2.2-rc.1') assert(actualNames.has('bundle:@deepseek-ai/dsh-experimental-forge-bundle'))
+ if (split) {
+  const card = catalog.items.find(i=>i.builtin && i.iconKey==='search')
+  const detail = await call('detail',{id:card.id})
+  assert.equal(detail.presentation.web,undefined)
+  assert.equal(detail.presentation.credential,undefined)
+  const [search,fetch] = ['searchProvider','fetchProvider'].map(k=>detail.presentation.fields.find(f=>f.ns==='web' && f.path[0]===k))
+  assert(search.options.some(o=>o.value==='deepseek-search-api') && fetch.options.some(o=>o.value==='http'))
+  if (process.env.HARNESS_MINI_DIR) {
+    const phone = createRequire(path.join(process.env.HARNESS_MINI_DIR,'app.js'))
+    assert(phone('./packages/plugin-manager/client.js').validate('detail',detail))
+    const fields = phone('./packages/plugin-manager/official.js').sections(detail).flatMap(s=>s.fields)
+    assert([search,fetch].every(field=>fields.some(f=>f.path[0]===field.path[0] && f.type==='enum')))
+  }
+  const section = detail.sections.find(s=>s.ns==='web')
+  const change = {ns:'web',expectedRevision:section.revision,ops:[{op:'set',path:['searchProvider'],value:'deepseek-search-api'}]}
+  const stale = await call('write-page',{id:card.id,sections:[change],credential:{value:'fixture',expectedRevision:'old'}})
+  assert.equal(stale.application,'failed');assert.deepEqual(stale.appliedNamespaces,[])
+  const mixed = await call('write-page',{id:card.id,sections:[change]})
+  assert.equal(mixed.application,'applied',JSON.stringify(mixed))
+  const actual = ctx.settings.describe().find(f=>f.ns==='web').value
+  assert.equal(actual.searchProvider,'deepseek-search-api');assert.equal(actual.fetchProvider,'http')
+  const refreshed = await call('detail',{id:card.id})
+  const group = refreshed.sections.find(s=>s.ns==='web')
+  await assert.rejects(call('write-config',{id:card.id,ns:'web',expectedRevision:group.revision,ops:[{op:'set',path:['fetchProvider'],value:'unknown-service'}]}))
+  assert(fetch.options.some(o=>o.value==='optional-fixture'))
+  removeOptionalProvider()
+  const expired={...change,expectedRevision:group.revision,ops:[{op:'set',path:['fetchProvider'],value:'optional-fixture'}]}
+  assert.equal((await call('write-page',{id:card.id,sections:[expired]})).application,'failed')
+  const billing=refreshed.sections.find(s=>s.ns==='web-deepseek-api')
+  const editBilling={ns:billing.ns,expectedRevision:billing.revision,ops:[{op:'set',path:['searchBilling'],value:'api-key'}]}
+  assert.equal((await call('write-page',{id:card.id,sections:[editBilling]})).application,'applied')
+  assert.equal(ctx.settings.describe().find(f=>f.ns===billing.ns).value.searchBilling,'api-key')
+  console.log('PASS registered service disposal, independent selectors, mobile rendering, mixed settings, stale credentials, billing and generic write guard')
+ } else {
+  const card=catalog.items.find(i=>i.builtin&&i.iconKey==='search')
+  const detail=await call('detail',{id:card.id})
+  assert.equal(detail.presentation.web?.switchAvailable,true,'preserve the old coupled search switch')
+ }
  const nativePage=catalog.items.find(x=>x.builtin&&x.iconKey==='subagent');assert(nativePage,'real companion + exact shipped Settings schemas produce the builtin page')
  const nativeDetail=await call('detail',{id:nativePage.id});assert(nativeDetail.presentation.models,'exact shipped object-route schema admitted')
  const modelSection=nativeDetail.sections.find(s=>s.ns==='subagent-model-selection-settings'),limitsSection=nativeDetail.sections.find(s=>s.ns==='subagent')

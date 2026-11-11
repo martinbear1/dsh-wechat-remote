@@ -1,6 +1,6 @@
 {
   "name": "@harness-remote/dsh-wechat-remote",
-  "version": "1.7.18",
+  "version": "1.7.19",
   "description": "连接微信小程序，随时与电脑上的助手协作。",
   "icon": "./lib/assets/wechat.svg",
   "private": true,
@@ -325,6 +325,8 @@
     "lib/dsh-runtime.d.ts",
     "lib/dsh-host-contract.js",
     "lib/dsh-host-contract.d.ts",
+    "lib/dsh-mobile-session-actions.js",
+    "lib/dsh-mobile-session-actions.d.ts",
     "lib/dsh-host-context.js",
     "lib/dsh-host-context.d.ts",
     "lib/dsh-subagent-projection.js",

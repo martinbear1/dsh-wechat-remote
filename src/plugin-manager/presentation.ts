@@ -1,6 +1,6 @@
 /** Audited native Client pages, projected as data. No Client JavaScript is imported or executed. */
 import { createHash } from 'node:crypto'
-import { plain, readPath, formSection } from './schema.js'
+import { plain, readPath, formSection, localized } from './schema.js'
 import type { PluginItem, PluginSection, PluginPresentation, PageField, SpeechPresentation } from './protocol.js'
 type Data = Record<string, any>
 export interface PresentationHost { get(name: string): unknown }
@@ -21,6 +21,41 @@ export function pageKind(item: PluginItem): string | undefined {
   if (item.builtin) return ({ subagent: 'subagent', search: 'web-search', loop: 'agent-loop', terminal: 'shell' } as Record<string, string>)[item.iconKey || '']
   if (item.kind === 'bundle' && item.category === 'experimental') return bundleKinds[item.name] || 'native-summary'
 }
+/** The provider registry and split billing schema supersede the coupled switch.
+ * A partially loaded modern Host must never fall back to the shared key. */
+export function independentWeb(host: PresentationHost, sections: PluginSection[]): boolean {
+  const registry = host.get('typert') as Data | undefined
+  const selection = sections.find(s => s.ns === 'web')
+  const shared = sections.find(s => s.ns === 'web-deepseek-api')
+  const has = (s: PluginSection | undefined, name: string) => s?.fields.some(f=>f.path.length === 1 && f.path[0] === name)
+  // A missing/partially loaded registry alone does not establish the old shared credential contract.
+  return !has(selection,'searchProvider') || !has(selection,'fetchProvider') || !has(shared,'apiKeyEnv')
+    || !!service(host, 'web', ['listProviders']) || !!registry?.local?.hasSeen?.('web/listProviders')
+    || !!registry?.local?.get?.('web/listProviders')
+    || sections.some(s => s.ns === 'web-deepseek-api' && s.fields.some(f => ['searchBilling','fetchBilling','searchApiKeyEnv','fetchApiKeyEnv'].includes(f.path[0])))
+}
+
+async function providerChoices(host: PresentationHost): Promise<Record<'search' | 'fetch', NonNullable<PageField['options']>> | undefined> {
+  const web = service(host, 'web', ['listProviders'])
+  if (!web) return
+  try {
+    const rows = await web.listProviders()
+    const choices = (items: unknown) => {
+      if (!Array.isArray(items) || items.length > 199) return
+      const ids = new Set<string>()
+      const result = [{label: '使用宿主默认设置', value: ''}]
+      for (const item of items) {
+        if (!plain(item) || !text(item.id) || ids.has(item.id)) return
+        ids.add(item.id)
+        result.push({label: localized(item.title, item.id) || item.id, value: item.id})
+      }
+      return result
+    }
+    const search = choices(rows?.search), fetch = choices(rows?.fetch)
+    if (search && fetch) return {search, fetch}
+  } catch { /* A provider registry may be reloading. */ }
+}
+
 export function webCredentialRef(forms: Data[], changes: Data[] = []): string {
   const selected = effective(forms, changes, 'web', ['searchProvider']) === 'deepseek-search-api' ? 'web-deepseek-api' : 'web-search-deepseek'
   const ref = forms.find(f => f.ns === selected)?.value?.apiKeyEnv
@@ -133,6 +168,32 @@ export async function presentation(host: PresentationHost, item: PluginItem, sec
     if (sections.some(s => s.ns === form?.ns) && hasModelRouteSchema(form)) result.models = await modelView(host, form!)
     result.notices = ['关闭模型选择后，子智能体使用配置的默认模型或继承父 Agent 的模型；已选模型会保留。']
   } else if (id === 'web-search') {
+    if (independentWeb(host, sections)) {
+      const choices = await providerChoices(host)
+      signal.throwIfAborted()
+      result.notices = ['自定义端点和凭据请在电脑端管理。']
+      if (!choices) {
+        result.notices.unshift('服务列表暂不可用，请刷新后再编辑。')
+        return result
+      }
+      const when = (path: string, value: string) => ({ns: 'web', path: [path], value})
+      for (const cap of ['search', 'fetch'] as const) {
+        const name = cap === 'search' ? '搜索' : '抓取'
+        const providerPath = cap + 'Provider'
+        add('web', providerPath, name + '服务', {options: choices[cap]})
+        const visibleWhen = when(providerPath, 'deepseek-' + cap + '-api')
+        const form = forms.find(f => f.ns === 'web-deepseek-api')
+        if (form?.value?.[cap + 'BaseURL'] || form?.value?.[cap + 'ApiKeyEnv'])
+          result.notices.push(name + '已使用电脑端配置的自定义服务参数，该设置优先于计费选择。')
+        add('web-deepseek-api', cap + 'Billing', name + '计费方式', {visibleWhen, options: [
+          {label: '自动', value: 'auto'}, {label: 'DeepSeek 账号', value: 'account'}, {label: 'API Key', value: 'api-key'},
+        ]})
+      }
+      add('web-deepseek-api','count','每次搜索结果数',{integer:true,minimum:1,maximum:50,visibleWhen:when('searchProvider','deepseek-search-api')})
+      add('web-search-deepseek','baseURL','Messages API 基础地址',{visibleWhen:when('searchProvider','deepseek-official')})
+      add('web-search-deepseek','maxUses','单次请求最多搜索次数',{visibleWhen:when('searchProvider','deepseek-official')})
+      return result
+    }
     const api = sections.some(s => s.ns === 'web-deepseek-api'), selection = sections.find(s => s.ns === 'web')
     result.web = { selectionNs:'web', searchPath:['searchProvider'], fetchPath:['fetchProvider'], useSearchApi: effective(forms, [], 'web', ['searchProvider']) === 'deepseek-search-api',
       switchAvailable: api && !!selection?.writable && ['searchProvider','fetchProvider'].every(k => selection.fields.some(f => f.path[0] === k && !f.readOnly)),

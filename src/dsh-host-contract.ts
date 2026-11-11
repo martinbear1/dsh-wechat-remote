@@ -1,6 +1,8 @@
 /** Host-only contract differences. No network probing or per-request retries. */
 import { hostRuntimeVersion, type HostContext } from './dsh-host-context.js'
 import { withNativePeer, withNativePeerStream, type NativePeer } from './dsh-native-peer.js'
+import { resolveDshSessionAddress } from './dsh-session-address.js'
+import { archiveMobileSession, interruptMobileChild, promptMobileChild } from './dsh-mobile-session-actions.js'
 import { resolveSubagentCatalogProjection } from './dsh-subagent-projection.js'
 export type { HostContext } from './dsh-host-context.js'
 type Row = Record<string, any>
@@ -131,7 +133,18 @@ export async function invokeHostRemote(ctx: HostContext, gateway: Row, request: 
 }
 
 async function invokeAdmittedHostRemote(ctx: HostContext, gateway: Row, request: Row): Promise<unknown> {
+  const resolveAddress = (sessionId: string) => resolveDshSessionAddress({
+    invoke: read => invokeAdmittedHostRemote(ctx, gateway, {...read, peer: request.peer}),
+  }, sessionId, request.signal ?? new AbortController().signal)
+  if (request.namespace === 'subagents' && request.method === 'interruptByParent') {
+    return interruptMobileChild(ctx, gateway, request, resolveAddress)
+  }
+  if (request.namespace === 'workspace' && request.method === 'archiveSession') {
+    return archiveMobileSession(ctx, gateway, request)
+  }
   if (request.namespace === 'session' && request.method === 'prompt' && typeof request.args?.request?.sessionId === 'string') {
+    const childReceipt = await promptMobileChild(ctx, gateway, request, resolveAddress)
+    if (childReceipt) return childReceipt
     await assertColdSessionPresetAvailable(ctx, request.args.request.sessionId, request.signal)
     request.signal?.throwIfAborted()
   }

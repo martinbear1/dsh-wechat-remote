@@ -14,6 +14,9 @@ export declare const route: (v: unknown) => v is {
 export declare const digest: (v: unknown) => string;
 export declare function service(host: PresentationHost, name: string, methods: string[]): Data | undefined;
 export declare function pageKind(item: PluginItem): string | undefined;
+/** The provider registry and split billing schema supersede the coupled switch.
+ * A partially loaded modern Host must never fall back to the shared key. */
+export declare function independentWeb(host: PresentationHost, sections: PluginSection[]): boolean;
 export declare function webCredentialRef(forms: Data[], changes?: Data[]): string;
 export declare function credentialRevision(forms: Data[]): string;
 export declare function effective(forms: Data[], changes: Data[], ns: string, path: string[]): unknown;

@@ -213,6 +213,7 @@ try {
     'gate-state.ts',
     'dsh-runtime.ts',
     'dsh-host-contract.ts',
+    'dsh-mobile-session-actions.ts',
     'dsh-host-context.ts',
     'dsh-native-peer.ts',
     'dsh-subagent-projection.ts',

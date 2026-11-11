@@ -150,6 +150,7 @@ test('resource registry owns Chat lifecycle without reading a base or consulting
 })
 
 class FakeNativeEngine {
+  static inject = ['llm', 'sessions', 'tokenMeter']
   constructor(ctx, config) { this.ctx = ctx; this.config = config }
   selectRegion() { return 'native-region-selection' }
   persistCheckpoint() { return 'native-persistence' }
@@ -193,6 +194,9 @@ function fixture({ config = {}, chunks = [{ blocks: [text('合成检查点')] }]
 test('factory inherits native transactions and customizes only public pressure/summarize hooks', () => {
   const f = fixture()
   assert(f.instance instanceof FakeNativeEngine)
+  for (const service of [...FakeNativeEngine.inject, 'agents', 'sessionQuery', 'tools']) {
+    assert(Plugin.inject.includes(service), 'missing native service dependency: ' + service)
+  }
   assert.deepEqual(Object.getOwnPropertyNames(Plugin.prototype).sort(), ['compactIfNeeded', 'constructor', 'summarize'])
   assert.equal(f.instance.selectRegion(), 'native-region-selection')
   assert.equal(f.instance.persistCheckpoint(), 'native-persistence')

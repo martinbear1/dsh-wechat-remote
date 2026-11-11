@@ -1,6 +1,6 @@
 # Agent远程管理助手
 
-**插件正式版：1.7.18，npm `latest`。** 配合小程序 1.7.14，可在手机管理电脑上的插件与常用设置；本版同时精简插件说明，补充扫码失败时的系统时间排查提示。
+**插件正式版 1.7.19** 修复了部分 DeepSeek 网页会话迁移后无法续聊的问题。更新后可直接打开已导入的会话继续聊天。本版也适配了 DSH 0.2.2-rc.2 的网页搜索设置、子代理操作和工作树归档。
 
 **在微信里，接着用自己电脑上的 DeepSeek Harness。**
 
@@ -8,14 +8,14 @@
 
 **手机端入口：微信搜索小程序「Agent远程管理助手」。** 电脑需保持开机、联网，并运行 DSH。支持局域网直连与端到端加密公网连接。
 
-源码正式版本号：**1.7.18** · [下载与更新说明](https://github.com/martinbear1/dsh-wechat-remote/releases)
+源码正式版本号：**1.7.19** · [下载与更新说明](https://github.com/martinbear1/dsh-wechat-remote/releases)
 
 ## 一、安装：在电脑 DSH 中添加插件
 
 打开电脑上的 **DSH → 插件 → 添加插件**，复制下面的包名，安装并启用。Web 与 Desktop 使用同一个包名：
 
 ```text
-dsh-wechat-remote@1.7.18
+dsh-wechat-remote@1.7.19
 ```
 
 按安装结果确认是否已生效；如提示需要重启，请结束任务后正常重启对应 DSH。然后打开 **设置 → 微信连接**，或进入 **微信连接插件详情**。
@@ -24,7 +24,7 @@ dsh-wechat-remote@1.7.18
 
 *图为已有版本的界面示例；安装请复制上方当前版本的包名。*
 
-本版可通过 [npm](https://www.npmjs.com/package/dsh-wechat-remote/v/1.7.18) 或 [GitHub Releases](https://github.com/martinbear1/dsh-wechat-remote/releases/tag/v1.7.18) 获取，也可使用 `dsh-wechat-remote@latest`。完整安装包为 `dsh-wechat-remote-1.7.18.tgz`；带 `harness-remote-` 前缀的包供更新器使用。新包可能受安装环境的等待策略影响，请核对实际安装版本。没有图形插件管理器的旧 Web 环境，见 [安装与更新说明](docs/NATIVE-INSTALL.md)。
+本版可通过 [npm](https://www.npmjs.com/package/dsh-wechat-remote/v/1.7.19) 或 [GitHub Releases](https://github.com/martinbear1/dsh-wechat-remote/releases/tag/v1.7.19) 获取，也可使用 `dsh-wechat-remote@latest`。完整安装包为 `dsh-wechat-remote-1.7.19.tgz`；带 `harness-remote-` 前缀的包供更新器使用。新包可能受安装环境的等待策略影响，请核对实际安装版本。没有图形插件管理器的旧 Web 环境，见 [安装与更新说明](docs/NATIVE-INSTALL.md)。
 
 ## 二、配对：在「Agent远程管理助手」小程序里扫码
 
@@ -49,7 +49,7 @@ dsh-wechat-remote@1.7.18
 <details>
 <summary>旧版升级与安装问题</summary>
 
-- Web 插件 `1.7.13` 若提示“请回到 DSH 原生插件管理页更新”，请正常停止 Web，在原系统用户及环境下运行 `npx -y dsh-wechat-remote@1.7.18`。安装器替换原插件并保留配对与会话，不修改 Desktop。详见 [Web 旧版升级说明](docs/NATIVE-INSTALL.md#web-旧版提示请回到-dsh-原生插件管理页更新)。Desktop `1.7.13` 继续使用插件内更新入口。
+- Web 插件 `1.7.13` 若提示“请回到 DSH 原生插件管理页更新”，请正常停止 Web，在原系统用户及环境下运行 `npx -y dsh-wechat-remote@1.7.19`。安装器替换原插件并保留配对与会话，不修改 Desktop。详见 [Web 旧版升级说明](docs/NATIVE-INSTALL.md#web-旧版提示请回到-dsh-原生插件管理页更新)。Desktop `1.7.13` 继续使用插件内更新入口。
 - 从旧 `1.7.14` 首次升级后，如连接暂时不可用或反复重连，请结束任务后完整退出并重开对应 DSH，无需反复安装或重新配对。
 - 重复添加相同包名可能提示“已安装”，不代表完成更新。历史命令行安装不要再叠加另一份插件。
 - 下载或安装失败时，按入口提示检查网络并重试；结果不明时先保留日志与数据，不要删除配对或降低 DSH 版本。

@@ -27,7 +27,7 @@ export function chatCompactionConfig(value: unknown): { instruction: string; nat
 export function createChatCompactionPlugin(native: { BasicCompactionEngine: NativeEngine }, llm: Row, instruction: string) {
   if (!resourcePromptValid(instruction)) throw resourceError('resource-prompt-invalid', 'Chat 摘要正文无效。')
   return class ChatCompaction extends native.BasicCompactionEngine {
-    static inject = [...new Set([...(native.BasicCompactionEngine.inject ?? []), 'agents', 'sessionQuery'])]
+    static inject = [...new Set([...(native.BasicCompactionEngine.inject ?? []), 'agents', 'sessionQuery', 'tools'])]
     readonly imported: ReturnType<typeof installImportedContinuation>
     constructor(ctx: Row, config: Row = {}) {
       super(ctx, config)

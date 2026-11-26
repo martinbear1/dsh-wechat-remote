@@ -1,4 +1,6 @@
 export declare const MAX_FILE_BYTES: number;
+export declare const MAX_ARCHIVE_BYTES: number;
+export declare const ARCHIVE_OBJECT_PART_BYTES: number;
 export declare const MAX_SHARE_BYTES: number;
 export declare const MAX_NORMALIZED_BYTES: number;
 export declare const MAX_FILE_NORMALIZED_BYTES: number;

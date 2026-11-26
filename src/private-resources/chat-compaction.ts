@@ -3,6 +3,7 @@
 import { resourceError, resourcePromptValid } from './contract.js'
 import { installImportedContinuation } from '../history-import/continuation.js'
 import { importedSession } from '../history-import/chat-session.js'
+import { conversationSummaryRoute } from '../history-import/summary-route.js'
 
 type Row = Record<string, any>
 type NativeEngine = {
@@ -42,14 +43,13 @@ export function createChatCompactionPlugin(native: { BasicCompactionEngine: Nati
     }
     async summarize(input: { messages: readonly Row[]; tools?: readonly Row[] }, agent: Row, signal?: AbortSignal) {
       signal?.throwIfAborted()
-      const latest = agent.session.requestHeader()?.config
-      const routed = latest?.provider && latest?.model ? latest : agent.options
-      const override = this.config.modelPolicies.find((policy: Row) => policy.provider === routed.provider && policy.model === routed.model)
+      const bounded = this.imported.get(agent)
+      const routed = bounded?.target ?? await conversationSummaryRoute(this.ctx, agent, signal)
+      const override = this.config.modelPolicies.find((policy: Row) => policy.provider === routed?.provider && policy.model === routed?.model)
       // Match native exact-route summary policy; the inherited engine already
       // resolved and validated all defaults and model-specific overrides.
       const provider = override?.summarizationProvider ?? this.config.summarizationProvider
       const model = override?.summarizationModel ?? this.config.summarizationModel
-      const bounded = this.imported.get(agent)
       const maxTokens = bounded?.maxTokens ?? override?.maxTokens ?? this.config.maxTokens
       const target = bounded?.target ?? (provider ? { provider, model } : routed)
       if (!target?.provider || !target?.model) throw new Error('No provider/model available for conversation compaction')

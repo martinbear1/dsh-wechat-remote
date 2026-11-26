@@ -46,6 +46,7 @@ try {
     'private-resources/chat-compaction.ts',
     'private-resources/chat-memory.ts',
     'history-import/continuation.ts',
+    'history-import/summary-route.ts',
     'history-import/chat-session.ts',
     'private-resources/bundled.ts',
     'private-resources/bundled/chat-mode.json',
@@ -62,6 +63,7 @@ try {
     'clawbot/dsh-host.ts',
     'collaboration.ts',
     'gate-runtime.ts',
+    'conversation-display.ts',
     'pairing-management.ts',
     'pairing-http.ts',
     'connection-diagnostics.ts',
@@ -194,6 +196,9 @@ try {
     'history-import/native.ts',
     'history-import/search.ts',
     'history-import/source.ts',
+    'history-import/source-v3.ts',
+    'history-import/zip-reader.ts',
+    'history-import/staging.ts',
     'history-import/source-zip.ts',
     'history-import/share.ts',
     'history-import/parse.ts',
@@ -218,6 +223,8 @@ try {
     'dsh-native-peer.ts',
     'dsh-subagent-projection.ts',
     'typert-schema-compat.ts',
+    'typert-input-bounds.ts',
+    'remote-input-limits.ts',
     'dsh-protocol-compat.ts',
     'legacy-model-identity.ts',
     'dsh-session-address.ts',
@@ -337,6 +344,7 @@ try {
   // Build-owned compatibility footer: regenerate on every bundle, never patch
   // a checked-in generated manifest or evaluate schemas at import time.
   writeFileSync(path.join(root, 'lib', 'typert.host.js'), host.js
+    + "\nimport { attachInputSizeBounds } from './typert-input-bounds.js'\nattachInputSizeBounds(TYPERT)\n"
     + "\nimport { attachLegacySchemaAccess } from './typert-schema-compat.js'\nattachLegacySchemaAccess(TYPERT)\n")
   writeFileSync(path.join(root, 'lib', 'typert.host.d.ts'), host.dts)
   writeFileSync(path.join(root, 'lib', 'typert.remote-client.js'), host.remote.js)

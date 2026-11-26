@@ -27,7 +27,27 @@ assert(path.basename(work).startsWith('history-continuation-native-'))
 if (!stage) {
   const fd = pinnedRuntime ? undefined : fs.openSync(archive, 'r')
   try {
-    if (pinnedRuntime) fs.cpSync(path.resolve(pinnedRuntime), path.join(work, 'dsh'), { recursive: true })
+    if (pinnedRuntime) {
+      // Share immutable official dependencies, but keep product bytes and all
+      // profiles/session writes inside this new fixture. Avoid copying the
+      // entire CLI dependency tree for each compatibility combination.
+      const source = path.resolve(pinnedRuntime), target = path.join(work, 'dsh')
+      fs.mkdirSync(path.join(target, 'node_modules'), { recursive: true })
+      for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
+        if (entry.name === 'node_modules') continue
+        fs.cpSync(path.join(source, entry.name), path.join(target, entry.name), { recursive: true })
+      }
+      const link = (from, to) => fs.symlinkSync(fs.realpathSync(from), to, process.platform === 'win32' ? 'junction' : 'dir')
+      for (const entry of fs.readdirSync(path.join(source, 'node_modules'), { withFileTypes: true })) {
+        if (entry.name === '.bin') continue
+        const from = path.join(source, 'node_modules', entry.name), to = path.join(target, 'node_modules', entry.name)
+        if (entry.name.startsWith('@')) {
+          fs.mkdirSync(to)
+          for (const name of fs.readdirSync(from)) link(path.join(from, name), path.join(to, name))
+        } else if (entry.isDirectory() || entry.isSymbolicLink()) link(from, to)
+        else fs.copyFileSync(from, to)
+      }
+    }
     else {
     const prefix = Buffer.alloc(16)
     fs.readSync(fd, prefix, 0, prefix.length, 0)
@@ -54,6 +74,7 @@ if (!stage) {
     extract(tree.files.dsh, 'dsh')
     }
     const product = path.join(work, packedProduct ? 'dsh/node_modules/dsh-wechat-remote' : 'dsh/node_modules/@harness-remote/dsh-wechat-remote')
+    assert(!fs.existsSync(product), 'Fixture product must not overlay a shared runtime dependency')
     fs.mkdirSync(product, { recursive: true })
     if (packedProduct) {
       // Extract actual release bytes without rewriting/bundling product code.

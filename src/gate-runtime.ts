@@ -46,6 +46,7 @@ import { AgentInputsService } from './agent-inputs.js'
 import { WechatImportService } from './history-import/service.js'
 import { WechatSchedulesService } from './scheduled-tasks/service.js'
 import { WechatPluginsService } from './plugin-manager/service.js'
+import { WechatDisplayService } from './conversation-display.js'
 import WechatAccountService from './account-balance.js'
 import { HumanToolsService } from './human-tools/service.js'
 import { WechatFeaturesService } from './feature-access.js'
@@ -71,7 +72,7 @@ import { hostPlatformDescriptor, selectLanIPv4 } from './host-platform.js'
 import { deriveGatePorts, describeGateListenFailure } from './gate-ports.js'
 import { isAllowedDshWebOrigin, resolveDshWebRuntime } from './dsh-runtime.js'
 import { hostRuntimeVersion, desktopOwnsLifecycle } from './dsh-host-context.js'
-import { mountPairingManagement } from './pairing-management.js'
+import { mountPairingManagement, observePairingManagement } from './pairing-management.js'
 import { DshCompatibilityApi } from './dsh-compatibility-api.js'
 import { loadGateState, saveGateState, type GateState } from './gate-state.js'
 import { prepareNodeStorage } from './node-storage.js'
@@ -671,6 +672,7 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
   // scheduler or a controller of the official plugin's enabled state.
   mountChild('scheduled-tasks', WechatSchedulesService, {})
   mountChild('plugin-manager', WechatPluginsService, {})
+  mountChild('conversation-display', WechatDisplayService, {})
   mountChild('account-balance', WechatAccountService, {})
   mountChild('history-import', WechatImportService, {
     receiptDirectory: path.join(path.dirname(defaultGateStatePath(ctx)), 'history-import-receipts'),
@@ -904,7 +906,7 @@ button{border:1px solid #596ec6;border-radius:10px;padding:10px 18px;background:
   }
   // Connection can arrive after webServer, and may be reloaded independently.
   // Use its native service lifetime, not polling or one-time startup discovery.
-  ctx.inject(['connection', 'webServer'], (pairingCtx) => {
+  observePairingManagement(ctx, (pairingCtx) => {
     if (disposed) return
     try {
       const mounted = mountPairingManagement(pairingCtx, {

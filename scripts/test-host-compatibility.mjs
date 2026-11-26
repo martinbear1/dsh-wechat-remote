@@ -11,7 +11,7 @@ import { nativeInstallSessions, quiesceNativeHost } from '../lib/install-control
 import { hostPlatformDescriptor } from '../lib/host-platform.js'
 
 test('final generated manifest exposes identical strict schemas to old and new loaders', () => {
-  assert.equal(TYPERT.invocations.filter(i => !['humanTools', 'wechatClawbot', 'wechatFeatures', 'wechatImport', 'wechatResources', 'wechatSchedules', 'wechatAccount', 'wechatPlugins'].includes(i.namespace)).length, 18)
+  assert.equal(TYPERT.invocations.filter(i => !['humanTools', 'wechatClawbot', 'wechatFeatures', 'wechatImport', 'wechatResources', 'wechatSchedules', 'wechatAccount', 'wechatPlugins', 'wechatDisplay'].includes(i.namespace)).length, 18)
   const plugins = TYPERT.invocations.filter(i => i.namespace === 'wechatPlugins')
   assert.deepEqual(plugins.map(i => i.method), ['control'])
   assert(plugins[0].parameters[0].codec.schema.safeParse({ action: 'list', inputJson: '{}' }).success)

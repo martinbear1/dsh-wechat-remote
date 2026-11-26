@@ -163,7 +163,7 @@ export async function presentation(host: PresentationHost, item: PluginItem, sec
   if (id === 'subagent') {
     add('subagent', 'maxDepth', '最大递归深度', { group: '运行限制', integer: true, minimum: 0, help: '限制 Agent 创建子智能体的递归层级。0 表示禁用，1 表示仅主 Agent 可以创建；工具自行设置的限制优先。' })
     add('subagent', 'maxActiveSubagents', '子智能体并行数量上限', { group: '运行限制', integer: true, minimum: 1, help: '同一主 Agent 下，所有递归层级同时存活的子智能体总数，主 Agent 不计入。达到上限时，新的启动请求会被拒绝。' })
-    add('subagent-model-selection-settings', 'enabled', '允许 Agent 为子智能体选择模型', {group:'模型选择', help:'开启后，Agent 可以从下方授权模型中，为每个子智能体选择提供方、模型和推理强度。仅影响新会话。'})
+    add('subagent-model-selection-settings', 'enabled', '允许 Agent 为子智能体选择模型', {group:'模型选择', help:'开启后，Agent 可以从下方授权模型中，为每个子智能体选择提供方、模型和推理强度。'})
     const form = forms.find(f => f.ns === 'subagent-model-selection-settings')
     if (sections.some(s => s.ns === form?.ns) && hasModelRouteSchema(form)) result.models = await modelView(host, form!)
     result.notices = ['关闭模型选择后，子智能体使用配置的默认模型或继承父 Agent 的模型；已选模型会保留。']

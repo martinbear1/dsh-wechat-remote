@@ -11,6 +11,8 @@ export interface NativeImportRequest {
     presetId?: string;
     title?: string;
     conversation: HistoryConversation;
+    /** Internal staging path, never accepted from the phone or persisted. */
+    archivePath?: string;
 }
 export type NativeImportIdentity = Pick<NativeImportRequest, 'sessionId' | 'workspaceId' | 'sourceHash' | 'branchId'>;
 export interface NativeImportInspection {
@@ -41,7 +43,7 @@ export declare function nativeCapabilities(ctx: ImportHost): Promise<{
 export declare function buildNativeImportSeed(request: NativeImportRequest, now?: number): Native[];
 export declare function buildNativeImportSeedScheduled(request: NativeImportRequest, signal?: AbortSignal, now?: number): Promise<Native[]>;
 export declare function inspectNativeImport(ctx: ImportHost, request: NativeImportIdentity, signal?: AbortSignal): Promise<NativeImportInspection>;
-export declare function commitNativeImport(ctx: ImportHost, request: NativeImportRequest, signal?: AbortSignal, beforeCreate?: () => void): Promise<{
+export declare function commitNativeImport(ctx: ImportHost, request: NativeImportRequest, signal?: AbortSignal, beforeCreate?: () => void, revalidate?: () => Promise<void>): Promise<{
     sessionId: string;
     workspaceId: string;
     title: string;

@@ -7,8 +7,8 @@ import { createRequire } from 'node:module'
 import { pathToFileURL, fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import { build } from 'esbuild'
-const archive=process.env.HARNESS_DSH_ASAR
-assert(archive,'HARNESS_DSH_ASAR must explicitly select an official archive')
+const archive=process.env.HARNESS_DSH_ASAR, runtime=process.env.HARNESS_DSH_ROOT
+assert(archive||runtime,'HARNESS_DSH_ASAR or HARNESS_DSH_ROOT must explicitly select an isolated official host')
 // Windows cannot delete a loaded .node DLL until its process exits. Own cleanup in a parent process.
 if(!process.env.HARNESS_PLUGIN_NATIVE_WORK){
  const directory=fs.mkdtempSync(path.join(os.tmpdir(),'plugins-native-'))
@@ -23,6 +23,7 @@ let fd,ctx,network=0
 const originalFetch=globalThis.fetch
 globalThis.fetch=async()=>{network++;throw Error('Network forbidden in native fixture')}
 try{
+ if(archive){
  fd=fs.openSync(archive,'r');const prefix=Buffer.alloc(16);fs.readSync(fd,prefix,0,16,0)
  const bytes=Buffer.alloc(prefix.readUInt32LE(12));fs.readSync(fd,bytes,0,bytes.length,16)
  const tree=JSON.parse(bytes),dataStart=8+prefix.readUInt32LE(4)
@@ -30,7 +31,8 @@ try{
   if(entry.files)for(const[name,child]of Object.entries(entry.files))extract(child,path.join(relative,name))
   else if(/\.(?:[mc]?js|json|node|dll|wasm|ya?ml|svg|png|jpe?g|webp)$/.test(relative)){fs.mkdirSync(path.dirname(target),{recursive:true});if(entry.unpacked)fs.copyFileSync(path.join(archive+'.unpacked',relative),target);else{const data=Buffer.alloc(entry.size);fs.readSync(fd,data,0,data.length,dataStart+Number(entry.offset));fs.writeFileSync(target,data)}}}
  extract(tree.files.dsh,'dsh')
- const anchor=path.join(work,'dsh/node_modules/@deepseek-ai/dsh/package.json'),require=createRequire(anchor),load=name=>import(pathToFileURL(require.resolve(name)).href)
+ }
+ const anchor=path.join(runtime??path.join(work,'dsh'),'node_modules/@deepseek-ai/dsh/package.json'),require=createRequire(anchor),load=name=>import(pathToFileURL(require.resolve(name)).href)
  const {boot,initProfile,readProfilePatches,loadProfileDirectory,composeEntries}=await load('@deepseek-ai/dsh-app-boot')
  const {default:PluginManager}=await load('@deepseek-ai/dsh-plugin-manager'),{default:Settings}=await load('@deepseek-ai/dsh-settings')
  const {default:ConfigEditor}=await load('@deepseek-ai/dsh-config-editor'),{default:Timer}=await load('@deepseek-ai/cordis-plugin-timer'),{default:Hmr}=await load('@deepseek-ai/dsh-hmr'),{default:z}=await load('@deepseek-ai/schemastery')
@@ -65,11 +67,11 @@ try{
  fs.mkdirSync(path.dirname(carrierEntry),{recursive:true})
  fs.writeFileSync(carrierEntry,`import z from ${JSON.stringify(pathToFileURL(require.resolve('@deepseek-ai/schemastery')).href)}; export const Config=z.object({enabled:z.boolean().volatile()});export const apply=()=>{};`)
  const manifest=JSON.parse(fs.readFileSync(path.join(dir,'package.json'),'utf8'));manifest.dependencies={sample:'1.0.0','dsh-wechat-remote':'1.0.0'};fs.writeFileSync(path.join(dir,'package.json'),JSON.stringify(manifest));fs.writeFileSync(path.join(dir,'cordis.yml'),'[]\n')
- const profile={name:'test',startedBundles:loadProfileDirectory('test',dir,anchor).layers.map(x=>x.packageName),dir,patchPath:path.join(dir,'cordis.patch.yml'),installAnchor:anchor,cwd:home,home,overlays:[],telemetryDisabledEnv:undefined}
+ const profile={name:'test',startedBundles:loadProfileDirectory('test',dir,anchor).layers.map(x=>x.packageName),dir,patchPath:path.join(dir,'cordis.patch.yml'),installAnchor:anchor,cwd:home,home,overlays:[],overlayPaths:[],telemetryDisabledEnv:undefined}
  const Probe={Config:z.object({ordinary:z.string().required(),count:z.number().min(1).default(2).volatile(),token:z.string().role('secret').volatile(),list:z.array(z.string()).volatile(),complex:z.array(z.object({name:z.string()})).volatile()}),apply:()=>{}}
  ctx=await boot('test',path.join(dir,'cordis.yml'),readProfilePatches('test',profile),c=>{c.provide('profileContext',profile);c.provide('appReady',{onReady:f=>{f();return()=>{}}});Object.assign(c.loader.builtins,{manager:PluginManager,editor:ConfigEditor,settings:Settings,probe:Probe})})
  await ctx.plugin(Timer);await ctx.plugin(Hmr,{root:[],ignored:[],debounce:0});await ctx.hmr.runExclusive(async()=>{})
- const out=path.join(work,'dsh/adapter.mjs');await build({entryPoints:['src/plugin-manager/native.ts'],outfile:out,bundle:true,packages:'external',platform:'node',format:'esm'})
+ const out=path.join(work,'dsh/adapter.mjs');await build({entryPoints:['src/plugin-manager/native.ts'],outfile:out,bundle:true,packages:'external',platform:'node',format:'esm',plugins:runtime?[{name:'isolated-host-externals',setup(api){api.onResolve({filter:/^@deepseek-ai\//},args=>({path:pathToFileURL(require.resolve(args.path)).href,external:true}))}}]:[]})
  const {NativePluginManager}=await import(pathToFileURL(out).href),adapter=new NativePluginManager(ctx),signal=new AbortController().signal,call=(action,input={})=>adapter.control(action,input,signal)
  ctx.provide('sessionController',{modelCatalog:async()=>({groups:[{id:'fixture',name:'Fixture',models:[{id:'model',name:'Synthetic catalog entry'}]}],failures:[]})})
  assert.equal((await call('status')).supported,true)

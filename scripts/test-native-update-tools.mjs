@@ -72,7 +72,13 @@ test('missing global tool uses persistent verified runtime, preserves config and
   const root=scratch(),home=path.join(root,'工具 空格 !百分% &括号()');fs.mkdirSync(home)
   const f=context(t,home,{inspectTimeoutMs:12345,registry:'https://registry.example.test'})
   cleanPath(t)
+  const rename=fs.renameSync;let transientLocks=0
+  t.mock.method(fs,'renameSync',(from,to)=>{
+    if(path.basename(from).startsWith('.stage-')&&transientLocks++===0)throw Object.assign(Error('synthetic transient executable lock'),{code:'EPERM'})
+    return rename(from,to)
+  })
   const replacement=await prepareNativeUpdateTools(f.ctx,home,'web',f.initial)
+  assert.equal(transientLocks,2,'transient lock retries once, then activates the same verified tool')
   assert.notEqual(replacement,f.initial)
   assert.equal(replacement,f.state.manager)
   assert.equal(f.state.edits,1)
@@ -94,6 +100,18 @@ test('missing global tool uses persistent verified runtime, preserves config and
   fs.appendFileSync(tool.command,'\nchanged\n')
   await assert.rejects(persistentUpdateTool(home),/校验失败/)
   assert(fs.readFileSync(tool.command,'utf8').includes('changed'),'never overwrite modified owned tools')
+})
+
+test('persistent filesystem lock is bounded and never changes native configuration',async t=>{
+  const home=scratch(),f=context(t,home)
+  cleanPath(t)
+  let attempts=0
+  t.mock.method(fs,'renameSync',()=>{attempts++;throw Object.assign(Error('synthetic persistent lock'),{code:'EPERM'})})
+  await assert.rejects(prepareNativeUpdateTools(f.ctx,home,'web',f.initial),{code:'EPERM'})
+  assert.equal(attempts,5)
+  assert.equal(f.state.edits,0)
+  assert.equal(f.state.manager,f.initial)
+  assert.deepEqual(fs.readdirSync(path.join(home,'harness-remote-tools')),[])
 })
 
 test('provider changed before preparation is not accepted or configured',async t=>{

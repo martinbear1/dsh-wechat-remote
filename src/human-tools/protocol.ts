@@ -1,4 +1,5 @@
 /** Agent-neutral, executable-code-free wire contract. No host/session authority is public. */
+import { REMOTE_INPUT_LIMITS } from '../remote-input-limits.js'
 import { humanInitialRound, type HumanInitialRound } from './form.js'
 import { humanCardAsset, type HumanCardAsset } from './card-cover.js'
 import { humanWorkflowInlinePreview, type HumanWorkflowInlinePreview } from '../human-workflow/inline-preview.js'
@@ -149,7 +150,7 @@ export function sameTaskRef(a: HumanTaskRef | undefined, b: HumanTaskRef | undef
   return a === undefined || b === undefined ? a === b : a.taskId === b.taskId && a.deliveryId === b.deliveryId
 }
 export function humanMemberRefs(value: unknown): value is readonly string[] {
-  return Array.isArray(value) && value.length > 0 && value.length <= 20 && new Set(value).size === value.length
+  return Array.isArray(value) && value.length > 0 && value.length <= REMOTE_INPUT_LIMITS.selectedMembers && new Set(value).size === value.length
     && [...value].every(id => typeof id === 'string' && TASK_REF_ID.test(id))
 }
 export function humanSelectionRef(value: unknown): HumanSelectionRef | undefined {

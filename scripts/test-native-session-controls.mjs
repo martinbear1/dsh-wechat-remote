@@ -31,6 +31,9 @@ try {
   const artifact = path.join(work, 'lib/native.mjs')
   fs.copyFileSync(path.join(packages.get('@deepseek-ai/dsh-app-boot'), 'package.json'), path.join(work, 'package.json'))
   const projection = path.join(source, 'packages/api/session-controller/src/model-selection-projection.ts').replaceAll('\\', '/')
+  const agentModel = path.join(source, 'packages/core/agent/src/model-selection.ts').replaceAll('\\', '/')
+  const usesAgentModel = !fs.existsSync(projection)
+  assert(!usesAgentModel || fs.existsSync(agentModel), 'pinned host must expose a known native model-selection owner')
   const sessionSource = path.join(source, 'packages/api/session-controller/src').replaceAll('\\', '/')
   await build({ stdin: { contents: `
     export { Context } from '@deepseek-ai/cordis';
@@ -40,7 +43,9 @@ try {
     export { default as Permissions } from '@deepseek-ai/dsh-permission-presets';
     export { default as Approval } from '@deepseek-ai/dsh-user-approval';
     export { createScope } from '@deepseek-ai/dsh-scope';
-    export { installModelSelectionProjection } from ${JSON.stringify(projection)};
+    ${usesAgentModel
+      ? `export { AgentModel, modelSelectionProjectionDefinition } from ${JSON.stringify(agentModel)};`
+      : `export { installModelSelectionProjection } from ${JSON.stringify(projection)};`}
     export { SessionCommandController } from ${JSON.stringify(sessionSource + '/commands.ts')};
     export { ApiSessionAgentController } from ${JSON.stringify(sessionSource + '/agent.ts')};
     export { buildModelCatalog } from ${JSON.stringify(sessionSource + '/catalog.ts')};
@@ -67,20 +72,28 @@ try {
     await ctx.plugin(native.SessionStore)
     await ctx.plugin(native.Projections)
     await ctx.plugin(native.Commands)
+    // Modern permission presets enumerate live Agents during initialization.
+    // This fixture deliberately owns no turn loop; keep that native dependency
+    // explicit instead of leaving the plugin in a dependency-waiting state.
+    ctx.provide('agents', { list: () => [] })
     ctx.provide('shell', { sandboxMode: 'workspace-write',
       resolve() { assert.fail('no real shell') }, run() { assert.fail('no real shell') }, start() { assert.fail('no real shell') } })
     await ctx.plugin(native.Approval)
     await ctx.plugin(native.Permissions, {})
-    native.installModelSelectionProjection(ctx)
+    const selectionProjection = usesAgentModel
+      ? await ctx.sessionProjections.register(native.modelSelectionProjectionDefinition)
+      : native.installModelSelectionProjection(ctx)
     const session = ctx.sessions.create(native.SessionId(name))
     // ApprovalService may narrate its own changed policy through inject();
     // capture that native context note without constructing an LLM/turn driver.
     const notices = []
     const agent = { id: session.id, session, inject(value) { notices.push(value) } }
+    ctx.emit('agent/created', { agent })
     await ctx.plugin(Object.assign(inner => { native.createScope(inner, agent) }, { inject: ['commands'] }))
     const calls = []
     const defaultSelection = { provider: 'deepseek-official', model: 'deepseek-flash' }
     const saved = [], selectionState = { current: defaultSelection }
+    if (usesAgentModel) agent.model = new native.AgentModel(() => selectionProjection.stateOf(session), session, defaultSelection)
     // Only the LLM adapter is a fixture: no paid model calls or credentials.
     // Catalog construction, command validation, selection append and projection
     // below are the pinned native implementations, not copied equivalents.
@@ -123,7 +136,7 @@ try {
       assert.equal(response.result.ok, true, JSON.stringify(response))
       return response.result.value.projections.values
     }
-    return { ctx, session, rpc, history, calls, notices, saved, selectionState }
+    return { ctx, session, agent, rpc, history, calls, notices, saved, selectionState }
   }
   const web = await host('web'), desktop = await host('desktop')
   const initial = await desktop.history()
@@ -167,7 +180,8 @@ try {
     assert.equal(response.result.value.selected.model, alias)
     const nativeChoice = { provider, model: 'deepseek-flash', reasoningEffort: 'low' }
     assert.deepEqual(desktop.saved.at(-1), nativeChoice, 'native default persistence receives real IDs only')
-    assert.deepEqual(desktop.selectionState.current, nativeChoice, 'native next-prompt selection is changed')
+    assert.deepEqual(usesAgentModel ? desktop.agent.model.current() : desktop.selectionState.current,
+      nativeChoice, 'native next-prompt selection is changed')
     assert.deepEqual(desktop.ctx.sessionProjections.snapshot(desktop.session).values.modelSelection.next, nativeChoice,
       'desktop-facing projection/history never receives the phone alias')
     const menu = (await desktop.rpc('session.models', {})).result.value

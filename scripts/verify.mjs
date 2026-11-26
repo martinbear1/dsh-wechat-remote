@@ -14,6 +14,7 @@ import { selectInstallTarget } from '../installer/bin/release-selection.mjs'
 import { nodeStorageDirectory } from '../lib/node-storage.js'
 import { gateStatePathForProfile } from '../lib/agent-metadata.js'
 import { PLUGIN_VERSION } from '../lib/plugin-version.js'
+import { REMOTE_INPUT_LIMITS } from '../lib/remote-input-limits.js'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const pkg = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'))
@@ -208,7 +209,9 @@ const attachment = readFileSync(path.join(root, 'lib/attachment-service.js'), 'u
 check(attachment.includes('super(ctx, "wechatAttachment")') || attachment.includes("super(ctx, 'wechatAttachment')"), '附件对象服务的 Typert key 不是 wechatAttachment')
 check(attachment.includes("method: 'session.attachment'") || attachment.includes('method: "session.attachment"'), '附件对象服务没有读取 DSH 原生 session.attachment')
 check(attachment.includes("host: '127.0.0.1'") || attachment.includes('host: "127.0.0.1"'), '附件对象服务数据源不是 loopback DSH')
-check(attachment.includes('MAX_BATCH_ATTACHMENTS = 6'), '附件对象服务缺少批量上限')
+check(REMOTE_INPUT_LIMITS.attachmentBatch === 6
+  && attachment.includes('MAX_BATCH_ATTACHMENTS = REMOTE_INPUT_LIMITS.attachmentBatch')
+  && attachment.includes('request.attachments.length > MAX_BATCH_ATTACHMENTS'), '附件对象服务缺少批量上限')
 check(attachment.includes('BATCH_CONCURRENCY = 2'), '附件对象服务缺少有界并发')
 check(typert.includes('wechatAttachment/prepareBatch'), '严格 Typert 契约缺少 wechatAttachment/prepareBatch')
 const metadata = readFileSync(path.join(root, 'lib/agent-metadata.js'), 'utf8')

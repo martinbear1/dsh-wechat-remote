@@ -24,7 +24,10 @@ export async function quiesceNativeHost(_ctx: Context, _read: (method: string) =
   throw legacyUpdateError()
 }
 export async function createInstallControl(context: Context, _config: InstallControlConfig): Promise<{ origin: string; close(): void }> {
-  if (desktopOwnsLifecycle(context.root || context)) throw new Error('请通过 DSH 桌面应用的插件管理页更新，未停止节点。')
+  // Cordis alpha exposes the root through its public symbol; reading `.root`
+  // on that host throws before this legacy entry can report its safe refusal.
+  const root = (context as any)[Symbol.for('cordis.root')] ?? context.root ?? context
+  if (desktopOwnsLifecycle(root)) throw new Error('请通过 DSH 桌面应用的插件管理页更新，未停止节点。')
   throw legacyUpdateError()
 }
 /** Old HMR callers fail before any host resource is acquired. */

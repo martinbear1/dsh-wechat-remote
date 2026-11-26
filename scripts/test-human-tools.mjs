@@ -317,8 +317,18 @@ test('real SDK and generated gateway execute all actions, preserve strict select
   const members = await execute(HUMAN_MEMBERS_TOOL_NAME, { sourceSurfaceId: share.id }, 'sdk-members')
   assert.equal((await invoke('claim', request(members))).ok, true)
   for (const key of ['roomid', 'group_openid', 'token', 'name']) {
-    const result = await invoke('ack', { ...request(members), outcome: 'success', selectionRef: { ...selectionRef, [key]: 'forbidden' } })
+    const before = await store.load(), writes = store.writes
+    // These six-key locators have always been invalid. Capacity is now checked
+    // by the native gateway before walking record values, without a receipt.
+    await assert.rejects(invoke('ack', { ...request(members), outcome: 'success', selectionRef: { ...selectionRef, [key]: 'forbidden' } }),
+      { code: 'input-invalid', endpoint: 'humanTools/ack', field: 'request' })
+    assert.deepEqual(await store.load(), before); assert.equal(store.writes, writes)
+    // An equally small forged locator still reaches the unchanged business
+    // validator: the gateway must not strip its forbidden key into a valid ref.
+    const forged = { ...selectionRef, [key]: 'forbidden' }; delete forged.revision
+    const result = await invoke('ack', { ...request(members), outcome: 'success', selectionRef: forged })
     assert.equal(result.ok, false); assert.equal(result.error.code, 'human-action-invalid')
+    assert.deepEqual(await store.load(), before); assert.equal(store.writes, writes)
   }
   assert.equal((await invoke('ack', { ...request(members), outcome: 'success', selectionRef })).ok, true)
   const reminder = await execute(HUMAN_REMIND_TOOL_NAME, { sourceSurfaceId: members.id, title: '确认' }, 'sdk-remind')
@@ -1016,7 +1026,7 @@ test('enabled owner RPC and scoped native tool validate codec and survive duplic
   assert.equal(host.tools.get(HUMAN_TOOL_NAME), undefined)
 })
 
-test('actual generated gateway preserves forbidden reference keys for rejection; native context keeps the valid locator', async t => {
+test('actual generated gateway bounds oversized locators and preserves in-bound forbidden keys for rejection; native context keeps the valid locator', async t => {
   const host = sdk(), store = memory()
   t.after(() => host.ctx.fiber.dispose())
   const registry = new TypertRegistry(host.ctx)
@@ -1031,9 +1041,15 @@ test('actual generated gateway preserves forbidden reference keys for rejection;
   assert.equal((await invoke('claim', req)).ok, true)
   const before = structuredClone(host.session.events)
   for (const key of ['roomid', 'memberID', 'token']) {
-    const result = await invoke('ack', { ...req, outcome: 'success', taskRef: { ...taskRef, [key]: 'forbidden' } })
+    const saved = await store.load(), writes = store.writes
+    await assert.rejects(invoke('ack', { ...req, outcome: 'success', taskRef: { ...taskRef, [key]: 'forbidden' } }),
+      { code: 'input-invalid', endpoint: 'humanTools/ack', field: 'request' })
+    assert.deepEqual(await store.load(), saved); assert.equal(store.writes, writes)
+    const forged = { ...taskRef, [key]: 'forbidden' }; delete forged.deliveryId
+    const result = await invoke('ack', { ...req, outcome: 'success', taskRef: forged })
     assert.equal(result.ok, false)
     assert.equal(result.error.code, 'human-action-invalid')
+    assert.deepEqual(await store.load(), saved); assert.equal(store.writes, writes)
   }
   const result = await invoke('ack', { ...req, outcome: 'success', taskRef })
   assert.equal(result.ok, true)

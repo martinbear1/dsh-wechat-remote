@@ -13,12 +13,13 @@
 import http from 'node:http'
 
 import type { Context } from '@deepseek-ai/cordis'
+import { REMOTE_INPUT_LIMITS } from './remote-input-limits.js'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { resolveTypertGateway } from './dsh-protocol-compat.js'
 import { OBJECT_PREPARE_BUDGET_MS } from './object-transfer-budget.js'
 import { imageReference, type DurableImageReference } from './attachment-native.js'
 
-const MAX_BATCH_ATTACHMENTS = 6
+const MAX_BATCH_ATTACHMENTS = REMOTE_INPUT_LIMITS.attachmentBatch
 const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
 const MAX_NATIVE_RESPONSE_BYTES = Math.ceil(MAX_ATTACHMENT_BYTES * 4 / 3) + 256 * 1024
 const DEFAULT_TIMEOUT_MS = OBJECT_PREPARE_BUDGET_MS

@@ -176,11 +176,13 @@ const Plugin = createChatCompactionPlugin({ BasicCompactionEngine: FakeNativeEng
 }, CONTINUATION_COMPACTION_INSTRUCTION)
 
 function fixture({ config = {}, chunks = [{ blocks: [text('合成检查点')] }], streamError, afterChunk,
-  latest = { provider: 'new-provider', model: 'new-model' }, options = { provider: 'old-provider', model: 'old-model' } } = {}) {
+  events = [], latest = { provider: 'new-provider', model: 'new-model' }, options = { provider: 'old-provider', model: 'old-model' } } = {}) {
   const calls = [], toolHistory = freeze([{ callId: 'search-1', name: 'search', input: { query: '合成问题' } }])
-  const agent = { options: freeze(options), session: { id: 'synthetic-session',
+  const agent = { id: 'synthetic-session', options: freeze(options), session: { id: 'synthetic-session', header: { id: 'synthetic-session' },
     requestHeader: () => latest === undefined ? undefined : { config: latest }, toolHistory: () => toolHistory } }
-  const ctx = { llm: { async* stream(request) {
+  const ctx = { agents: { get: id => id === agent.id ? agent : undefined }, sessions: { get: id => id === agent.id ? agent.session : undefined },
+    sessionQuery: { observeSession: async () => ({ source: 'live', header: agent.session.header, events, [Symbol.dispose]() {} }) },
+    llm: { async* stream(request) {
     calls.push(request)
     for (const chunk of chunks) { yield chunk; afterChunk?.() }
     if (streamError) throw streamError
@@ -251,6 +253,43 @@ test('latest complete session route wins over old agent options and is read anew
   const second = await f.instance.summarize({ messages: [] }, f.agent)
   assert.equal(second.provider, 'newer-provider'); assert.equal(second.model, 'newer-model')
   assert.deepEqual(f.agent.options, { provider: 'old-provider', model: 'old-model' })
+})
+
+test('a rejected model switch summarizes with the last model that answered, with its exact policy', async () => {
+  const events = [{ type: 'assistant/message', data: { message: { source: { kind: 'model', provider: 'answered', model: 'large' } } } },
+    { type: 'request/header', data: { config: { provider: 'new-provider', model: 'new-model' } } }]
+  const f = fixture({ events, config: { modelPolicies: [{ provider: 'answered', model: 'large', maxTokens: 777 }] } })
+  const result = await f.instance.summarize({ messages: [] }, f.agent)
+  assert.equal(result.provider, 'answered'); assert.equal(result.model, 'large'); assert.equal(result.maxTokens, 777)
+  assert.deepEqual(f.agent.session.requestHeader().config, { provider: 'new-provider', model: 'new-model' })
+})
+
+test('historical web export model labels never become a live compaction destination', async () => {
+  for (const provider of ['deepseek-web-history', 'deepseek-chat-export']) {
+    const events = [{ type: 'assistant/message', data: { message: { source: { kind: 'model', provider, model: 'export-only' } } } }]
+    const f = fixture({ events })
+    assert.equal((await f.instance.summarize({ messages: [] }, f.agent)).provider, 'new-provider')
+    events.push({ type: 'assistant/message', data: { message: { source: { kind: 'model', provider: 'answered', model: 'large' } } } })
+    assert.equal((await f.instance.summarize({ messages: [] }, f.agent)).provider, 'answered')
+  }
+})
+
+test('summary preserves ordered incremental system updates and retirement notices', async () => {
+  const messages = [ { role: 'system', content: [text('initial sections')] }, { role: 'user', content: [text('one')] },
+    { role: 'system', content: [text('updated section'), text('retired section notice')] },
+    { role: 'assistant', content: [text('two')] } ]
+  const f = fixture(); await f.instance.summarize({ messages }, f.agent)
+  assert.deepEqual(f.calls[0].messages.slice(0, messages.length), messages)
+})
+
+test('a stale session observation cannot choose a route or submit a summary', async () => {
+  const f = fixture(); let disposed = false
+  f.instance.ctx.sessionQuery.observeSession = async () => {
+    f.instance.ctx.agents.get = () => undefined
+    return { source: 'live', header: f.agent.session.header, events: [], [Symbol.dispose]() { disposed = true } }
+  }
+  await assert.rejects(f.instance.summarize({ messages: [] }, f.agent), { code: 'CHAT_HISTORY_SCOPE' })
+  assert.equal(disposed, true); assert.equal(f.calls.length, 0)
 })
 
 test('a different resource revision supplies its exact literal summary instruction', async () => {

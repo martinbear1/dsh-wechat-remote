@@ -7,7 +7,8 @@ import { createRequire } from 'node:module'
 import { pathToFileURL, fileURLToPath } from 'node:url'
 import { build } from 'esbuild'
 const archive = process.env.HARNESS_DSH_ASAR
-assert(archive, 'HARNESS_DSH_ASAR must explicitly select the official runtime')
+const runtime = process.env.HARNESS_DSH_RUNTIME
+assert(archive || runtime, 'HARNESS_DSH_ASAR must explicitly select the official runtime')
 const work = fs.mkdtempSync(path.join(os.tmpdir(), 'schedule-modern-native-'))
 assert.equal(path.dirname(path.resolve(work)), path.resolve(os.tmpdir()))
 assert(path.basename(work).startsWith('schedule-modern-native-'))
@@ -19,6 +20,7 @@ const receiver={session:syntheticSession,followup:message=>{assert(allowSyntheti
 const originalFetch = globalThis.fetch
 globalThis.fetch = async () => { network++; throw Error('Network is forbidden in this fixture') }
 try {
+  if (!runtime) {
   fd = fs.openSync(archive, 'r')
   const prefix = Buffer.alloc(16); fs.readSync(fd, prefix, 0, 16, 0)
   const bytes = Buffer.alloc(prefix.readUInt32LE(12)); fs.readSync(fd, bytes, 0, bytes.length, 16)
@@ -34,14 +36,17 @@ try {
     }
   }
   extract(tree.files.dsh, 'dsh')
-  const anchor = path.join(work, 'dsh/node_modules/@deepseek-ai/dsh/package.json')
+  }
+  const anchor = path.join(runtime || path.join(work, 'dsh'), 'node_modules/@deepseek-ai/dsh/package.json')
   const require = createRequire(anchor), load = name => import(pathToFileURL(require.resolve(name)).href)
   const hostVersion = JSON.parse(fs.readFileSync(anchor, 'utf8')).version
   const { Context } = await load('@deepseek-ai/cordis')
   const storage = await load('@deepseek-ai/dsh-storage'), json = await load('@deepseek-ai/dsh-storage-json'), domain = await load('@deepseek-ai/dsh-storage-domain')
   const { default: Schedule } = await load('@deepseek-ai/dsh-schedule')
   const output = await build({ entryPoints: [fileURLToPath(new URL('../src/scheduled-tasks/native.ts', import.meta.url))],
-    bundle: true, packages: 'external', write: false, platform: 'node', format: 'esm', target: 'node22' })
+    bundle: true, packages: 'external', write: false, platform: 'node', format: 'esm', target: 'node22',
+    plugins: [{ name: 'native-runtime', setup(b) { b.onResolve({filter:/^@deepseek-ai\//}, args => ({path:pathToFileURL(require.resolve(args.path)).href,external:true})) } }] })
+  fs.mkdirSync(path.join(work, 'dsh'), {recursive:true})
   const entry = path.join(work, 'dsh/test-adapter.mjs'); fs.writeFileSync(entry, output.outputFiles[0].contents)
   const { NativeScheduledTasks } = await import(pathToFileURL(entry).href)
   ctx = new Context()

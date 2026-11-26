@@ -8,6 +8,20 @@ const clientBuild = await build({ entryPoints: ['src/client/pairing-client.ts'],
 const { resolvePairingClient } = await import('data:text/javascript;base64,'
   + Buffer.from(clientBuild.outputFiles[0].contents).toString('base64'))
 const signal = () => new AbortController().signal
+
+test('provider-based hosts register an authenticated bounded route and dispose it exactly once', async () => {
+  let route, removed = 0
+  const connection = { authentication: { register() {} }, admit: () => ({ rejection: 401 }) }
+  const ctx = { get: name => name === 'connection' ? connection : { register(value) {
+    route = value; return () => { removed++ }
+  } }, effect: effect => effect() }
+  const mounted = mountPairingManagement(ctx, { status: () => ({}), pairCode: async () => ({}), unavailable: () => false })
+  assert(mounted)
+  assert.equal(route.path, '/wechat-remote-management')
+  assert.equal(route.auth, 'required')
+  await Promise.all([mounted.dispose(), mounted.dispose()])
+  assert.equal(removed, 1)
+})
 test('retired cross-endpoint operation is refused without invoking legacy callbacks', async () => {
   const h = createPairingHandler({ unavailable: () => false, status: () => ({}), pairCode: async () => ({}),
     companionDecision() { assert.fail('removed operation must never run') } })

@@ -51,7 +51,8 @@ async function quiesceNativeHost(_ctx, _read, _disposing) {
   throw legacyUpdateError();
 }
 async function createInstallControl(context, _config) {
-  if (desktopOwnsLifecycle(context.root || context)) throw new Error("\u8BF7\u901A\u8FC7 DSH \u684C\u9762\u5E94\u7528\u7684\u63D2\u4EF6\u7BA1\u7406\u9875\u66F4\u65B0\uFF0C\u672A\u505C\u6B62\u8282\u70B9\u3002");
+  const root = context[Symbol.for("cordis.root")] ?? context.root ?? context;
+  if (desktopOwnsLifecycle(root)) throw new Error("\u8BF7\u901A\u8FC7 DSH \u684C\u9762\u5E94\u7528\u7684\u63D2\u4EF6\u7BA1\u7406\u9875\u66F4\u65B0\uFF0C\u672A\u505C\u6B62\u8282\u70B9\u3002");
   throw legacyUpdateError();
 }
 var apply = async (ctx, config) => {

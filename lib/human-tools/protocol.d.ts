@@ -1,4 +1,3 @@
-/** Agent-neutral, executable-code-free wire contract. No host/session authority is public. */
 import { type HumanInitialRound } from './form.js';
 import { type HumanCardAsset } from './card-cover.js';
 import { type HumanWorkflowInlinePreview } from '../human-workflow/inline-preview.js';

@@ -146,15 +146,23 @@ test('realtime filtering does not remove the slow-consumer guard', async t => {
   assert.equal(peer.frames.length, 0)
 })
 
-// Optional native-source contract. Pin the reviewed rc.1/rc.2 outline source,
+// Optional native-source contract. Pin both reviewed native outline sources,
 // rather than silently using another workspace or fetching mutable upstream.
 // No actual LLM compact, user data or native session writes are performed.
+// 0.2.1-rc.5 -> 0.2.2-rc.1 adds only wire.summary:false (the session-list
+// summary-key filter). RC1 through RC5 retain exactly the same source; neither
+// preview/apply nor the full follow projection is changed by this declaration.
+const reviewedOutlineSources = new Map([
+  ['f665285cdaf35102e0b0b823eb4f47ba75bf86a23974ea5ebcf3130ca1fdec9e', false],
+  ['8645d96d7ffde00e6b12e09703fb8ccccb7c29105e9697a0de71a43def5ac824', true],
+])
 test('reviewed native outline fold is unchanged by manual compact events', {
   skip: !process.env.HARNESS_DSH_SOURCE_DIR && 'set HARNESS_DSH_SOURCE_DIR to a reviewed official source archive',
 }, async () => {
   const source = (await readFile(path.join(process.env.HARNESS_DSH_SOURCE_DIR,
     'packages/session/session-turn-outline/src/projection.ts'), 'utf8')).replaceAll('\r\n', '\n')
-  assert.equal(createHash('sha256').update(source).digest('hex'), 'f665285cdaf35102e0b0b823eb4f47ba75bf86a23974ea5ebcf3130ca1fdec9e',
+  const digest = createHash('sha256').update(source).digest('hex')
+  assert(reviewedOutlineSources.has(digest),
     'review the native contract before accepting a changed source version')
   const ts = (await import('typescript')).default
   const tree = ts.createSourceFile('projection.ts', source, ts.ScriptTarget.Latest, true)
@@ -163,10 +171,22 @@ test('reviewed native outline fold is unchanged by manual compact events', {
     .find(n => n.name.getText(tree) === 'turnOutlineProjectionDefinition')
   let expression = declaration.initializer
   while (ts.isSatisfiesExpression(expression) || ts.isAsExpression(expression)) expression = expression.expression
+  const wire = expression.properties.find(n => n.name?.getText(tree) === 'wire').initializer
+  const summary = wire.properties.find(n => n.name?.getText(tree) === 'summary')
+  assert.equal(summary?.initializer.getText(tree), reviewedOutlineSources.get(digest) ? 'false' : undefined)
   const apply = expression.properties.find(n => n.name?.getText(tree) === 'apply').initializer
   const js = ts.transpileModule(`${preview.getText(tree)}\nconst fold = ${apply.getText(tree)};`,
     { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText
   const fold = new Function('PROMPT_PREVIEW_LIMIT', 'RESPONSE_PREVIEW_LIMIT', `${js}\nreturn fold`)(50, 120)
+  // Exercise the actual official fold, not a local copy of its behavior.
+  let boundary = fold(freeze({ turns: [], draft: '' }), { type: 'turn/start', seq: 7, data: { turn: 1 } })
+  boundary = fold(boundary, { type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'first prompt' }] } })
+  assert.equal(fold(boundary, { type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'later steering' }] } }), boundary)
+  const middle = fold(boundary, { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'intermediate' }] } } })
+  const latest = fold(middle, { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'final answer' }] } } })
+  assert.equal(latest.turns, boundary.turns, 'draft-only changes retain the original turn index')
+  const completed = fold(latest, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+  assert.deepEqual(completed, { turns: [{ turn: 1, seq: 7, prompt: 'first prompt', response: 'final answer' }], draft: '' })
   const state = freeze({ turns: structuredClone(outline), draft: '' })
   const events = [
     { type: 'command/run', data: { name: 'compact', args: '' } },

@@ -7,6 +7,7 @@ import { HistorySourceError } from './source.js'
 import { MAX_MESSAGES, MAX_SEED_BYTES } from './limits.js'
 import type { HistoryConversation, HistoryFragment, HistoryMessage } from './source.js'
 import { historicalFragmentText, historicalSourceText, historySearchSources, renderHistoryResponse } from './search.js'
+import { parseImportImage } from './parse.js'
 
 type Native = Record<string, any>
 export interface ImportHost { get(name: string): any }
@@ -18,6 +19,8 @@ export interface NativeImportRequest {
   presetId?: string
   title?: string
   conversation: HistoryConversation
+  /** Internal staging path, never accepted from the phone or persisted. */
+  archivePath?: string
 }
 export type NativeImportIdentity = Pick<NativeImportRequest, 'sessionId' | 'workspaceId' | 'sourceHash' | 'branchId'>
 export interface NativeImportInspection {
@@ -140,7 +143,8 @@ function content(message: HistoryMessage): Native[] {
       if (search) blocks.push(search)
       else if (text) blocks.push({ type: 'text', text })
     }
-    for (const file of part.files ?? []) blocks.push({ type: 'text', text: `\n[原记录附件：${file.name}；源文件未包含在导出数据中]` })
+    for (const file of part.files ?? []) blocks.push(file.imageRef ? { type: 'image', attachment: file.imageRef }
+      : { type: 'text', text: `\n[原记录附件：${file.name}；${file.exportPath ? '本次没有可恢复的文件内容' : '源文件未包含在导出数据中'}]` })
     // TIP is web UI guidance, not an assistant response. It remains archived.
     const historical = part.type === 'TOOL_FIND' ? undefined : historicalFragmentText(part)
     if (historical) blocks.push({ type: 'text', text: historical })
@@ -179,7 +183,9 @@ function* buildSeedChunks(request: NativeImportRequest, now: number): Generator<
     ...(conversation.modelType ? { modelType: conversation.modelType } : {}), warnings: conversation.warnings }, now, false, true)
   let turn = 0, step = 0, opened = false, stepOpen = false, lastTime = now
   const closeStep = () => { if (stepOpen) { append('step/end', { turn, step }, lastTime); stepOpen = false } }
-  const closeTurn = () => { if (opened) { closeStep(); append('turn/end', { turn, reason: { kind: 'completed' } }, lastTime); opened = false } }
+  const closeTurn = (failure?: string) => { if (opened) { closeStep(); append('turn/end', { turn, reason: failure
+    ? { kind: 'error', error: { code: 'DEEPSEEK_EXPORT_UNFINISHED_REPLY', message: '原网页回答未完整结束；该回答未加入续聊上下文。' } }
+    : { kind: 'completed' } }, lastTime); opened = false } }
   for (const [index, message] of conversation.messages.entries()) {
     yield
     if (!['user', 'assistant'].includes(message.role)) fail('unsupported-message-role')
@@ -199,10 +205,11 @@ function* buildSeedChunks(request: NativeImportRequest, now: number): Generator<
     }
     append(RECORD, { index, id: message.id, parentId: message.parentId, ...(message.createdAt ? { createdAt: message.createdAt } : {}),
       fragments: message.fragments, metadata: message.metadata, warnings: message.warnings }, lastTime, false, true)
+    if (message.role === 'assistant' && message.importFailure) { closeTurn(message.importFailure); continue }
     const nativeMessage = { id: `${request.sessionId}:${index}`, role: message.role,
       source: message.role === 'user' ? { kind: 'user' } : { kind: 'model', provider: 'deepseek-web-history', model: message.model || 'unknown-from-source' } }
     const blocks = content(message)
-    if (message.role === 'user') append('user/message', { ...nativeMessage, content: blocks }, lastTime, true)
+    if (message.role === 'user') { append('user/message', { ...nativeMessage, content: blocks }, lastTime, true); if (message.importFailure) closeTurn(message.importFailure) }
     else {
       let pending: Native[] = [], segment = 0
       const flush = () => {
@@ -295,13 +302,15 @@ export async function inspectNativeImport(ctx: ImportHost, request: NativeImport
     return { ...result, state: 'succeeded', title: origin.data.title, messageCount: origin.data.messageCount }
   } finally { await handle.close() }
 }
-async function prepareNativeImport(ctx: ImportHost, request: NativeImportRequest, signal?: AbortSignal) {
+async function prepareNativeImport(ctx: ImportHost, request: NativeImportRequest, signal?: AbortSignal, beforeWrite?: () => void, revalidate?: () => Promise<void>) {
   identity(request); signal?.throwIfAborted()
   const native = services(ctx), modules = await nativeModules(), workspace = native.workspaceRegistry.get(request.workspaceId)
   if (!workspace || typeof workspace.attachSession !== 'function') fail('workspace-unavailable')
   // Never adopt, overwrite, append to, or dispose a pre-existing Session.
   if (native.agents.get(request.sessionId) || native.sessions.get(request.sessionId) || await native.sessionPersistence.stat(request.sessionId)) fail('session-exists')
-  const seed = await buildNativeImportSeedScheduled(request, signal)
+  // Validate the text-only seed and all native prerequisites before storing any
+  // archive image. Attachment storage has no rollback and may deduplicate data.
+  let seed = await buildNativeImportSeedScheduled(request, signal)
   const selection = native.agentDefaultModel.currentSelection()
   if (!row(selection) || typeof selection.provider !== 'string' || !selection.provider || typeof selection.model !== 'string' || !selection.model) fail('model-unavailable')
   const presets = native.agentPresets
@@ -318,17 +327,69 @@ async function prepareNativeImport(ctx: ImportHost, request: NativeImportRequest
   const preset = resolved?.id
   const meta = { cwd: workspace.path, ...(preset === undefined ? {} : { agentPreset: preset }) }
   await validateArchive(modules, request.sessionId, seed, { version: 4, id: request.sessionId, createdAt: Date.now(), isSeeded: false, delegationDepth: 0, ...meta })
+  if (request.archivePath) {
+    const attachments = ctx.get('attachments'), mapped = structuredClone(request.conversation)
+    // One immutable archive entry may be referenced repeatedly, including with
+    // different display names. Match the native importer's entry-based reuse:
+    // parse/normalize/store each entry once in THIS preflight, never across
+    // requests or owners. Cache references only, not decoded image bytes.
+    const imageRefs = new Map<string, Native>()
+    let stored = false
+    for (const message of mapped.messages) {
+      if (message.role !== 'user') continue
+      for (const part of message.fragments) for (const file of part.files ?? []) {
+        if (!file.isImage || !file.exportPath || typeof attachments?.saveImage !== 'function') continue
+        signal?.throwIfAborted()
+        const extension = /\.([a-z]+)$/i.exec(file.exportPath)?.[1]?.toLowerCase()
+        const mediaType = extension === 'jpg' || extension === 'jpeg' ? 'image/jpeg' : ['png', 'webp', 'gif'].includes(extension || '') ? 'image/' + extension : undefined
+        if (!mediaType) continue
+        const cached = imageRefs.get(file.exportPath)
+        const data = cached ? undefined : await parseImportImage(request.archivePath, file.exportPath, signal ?? new AbortController().signal)
+        signal?.throwIfAborted()
+        try { await revalidate?.() } catch { fail('authorization-changed') }
+        signal?.throwIfAborted()
+        try { beforeWrite?.() } catch { fail('authorization-changed') }
+        // Cache hits still cross both authority fences. Reusing an admitted
+        // reference must not let an expired/revoked operation finish its seed.
+        const ref = cached ?? await attachments.saveImage({ data, mediaType, name: file.name })
+        signal?.throwIfAborted()
+        try { await revalidate?.() } catch { fail('authorization-changed') }
+        signal?.throwIfAborted()
+        try { beforeWrite?.() } catch { fail('authorization-changed') }
+        // The native store may normalize/recompress an admitted image. Its
+        // durable reference describes the stored result, not the source bytes.
+        if (!ref || typeof ref.attachmentId !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(ref.attachmentId)
+          || !Number.isSafeInteger(ref.bytes) || ref.bytes < 1) fail('preflight-failed')
+        if (!cached) imageRefs.set(file.exportPath, ref)
+        // Names are per reference, not per stored image. Apply the native
+        // attachment-local displayName rule (both path separators, controls,
+        // trim and 255-character cap) while preserving its verified image facts.
+        const { name: _storedName, ...facts } = ref
+        const name = file.name.slice(Math.max(file.name.lastIndexOf('/'), file.name.lastIndexOf('\\')) + 1)
+          .replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 255)
+        file.imageRef = { ...facts, ...(name ? { name } : {}) }; stored = true
+      }
+    }
+    if (stored) {
+      seed = await buildNativeImportSeedScheduled({ ...request, conversation: mapped }, signal)
+      await validateArchive(modules, request.sessionId, seed, { version: 4, id: request.sessionId, createdAt: Date.now(), isSeeded: false, delegationDepth: 0, ...meta })
+    }
+  }
   signal?.throwIfAborted()
   if (native.workspaceRegistry.get(request.workspaceId) !== workspace) fail('workspace-changed')
   return { native, modules, workspace, seed, selection, presets, preset, meta }
 }
-export async function commitNativeImport(ctx: ImportHost, request: NativeImportRequest, signal?: AbortSignal, beforeCreate?: () => void): Promise<{ sessionId: string; workspaceId: string; title: string; messageCount: number }> {
-  const prepared = await prepareNativeImport(ctx, request, signal).catch((error: unknown) => {
+export async function commitNativeImport(ctx: ImportHost, request: NativeImportRequest, signal?: AbortSignal, beforeCreate?: () => void, revalidate?: () => Promise<void>): Promise<{ sessionId: string; workspaceId: string; title: string; messageCount: number }> {
+  const prepared = await prepareNativeImport(ctx, request, signal, beforeCreate, revalidate).catch((error: unknown) => {
     const known = error instanceof NativeImportError || error instanceof HistorySourceError
     throw new NativeImportPreflightError(known ? error.code : signal?.aborted ? 'aborted' : 'preflight-failed',
       known ? error.actualBytes : undefined, known ? error.limitBytes : undefined)
   })
   const { native, modules, workspace, seed, selection, presets, preset, meta } = prepared
+  // Long preflight can cross a natural lease expiry. Refresh only its original
+  // owner/intent, then retain the synchronous final admission fence below.
+  try { await revalidate?.(); signal?.throwIfAborted() } catch { throw new NativeImportPreflightError('authorization-changed') }
+  if (native.workspaceRegistry.get(request.workspaceId) !== workspace) throw new NativeImportPreflightError('workspace-changed')
   // The caller may fence authority changes while native preflight awaited IO.
   // This synchronous boundary is the LAST admission check. After create starts
   // the import owns its native write; revocation must not interrupt that write.

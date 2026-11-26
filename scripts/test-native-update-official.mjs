@@ -33,7 +33,7 @@ if (process.env.HARNESS_OFFICIAL_UPDATE_RECOVERY || process.env.HARNESS_OFFICIAL
   const continuation = Boolean(process.env.HARNESS_OFFICIAL_UPDATE_CONTINUATION)
   const recoveryFile = path.resolve(process.env.HARNESS_OFFICIAL_UPDATE_RECOVERY || process.env.HARNESS_OFFICIAL_UPDATE_CONTINUATION)
   assert(recoveryFile.startsWith(path.resolve(stage) + path.sep))
-  const { profile, nativeRoot, config, owner, version, release, registry } = JSON.parse(fs.readFileSync(recoveryFile, 'utf8'))
+  const { profile, nativeRoot, config, owner, version, release, registry, nativeAddOnly } = JSON.parse(fs.readFileSync(recoveryFile, 'utf8'))
   assert(path.resolve(profile.dir).startsWith(path.resolve(stage) + path.sep))
   process.env.DSH_HOME = stage
   const nativeRequire = createRequire(path.join(nativeRoot, 'package.json'))
@@ -66,8 +66,10 @@ if (process.env.HARNESS_OFFICIAL_UPDATE_RECOVERY || process.env.HARNESS_OFFICIAL
     }
     const status = await recovered.status()
     const expectedVersion = continuation ? release.version : installed.version
-    assert.equal(status.phase, continuation ? 'restart-required' : 'complete', JSON.stringify(status))
-    assert.equal(status.targetVersion, expectedVersion)
+    assert.equal(status.phase, continuation ? 'restart-required' : nativeAddOnly ? 'idle' : 'complete', JSON.stringify(status))
+    // A native Add has no plugin-updater receipt. Its installed manifest and
+    // manager row below prove the version; do not invent a completed update.
+    assert.equal(status.targetVersion, nativeAddOnly ? undefined : expectedVersion)
     assert.equal(recovered.isBusy(), false)
     const rows = (await manager.listBundles()).filter(row => ['dsh-wechat-remote', '@harness-remote/dsh-wechat-remote'].includes(row.name))
     assert.equal(rows.length, 1); assert.equal(rows[0].name, owner); assert.equal(rows[0].version, expectedVersion)
@@ -130,7 +132,6 @@ if (process.env.HARNESS_OFFICIAL_UPDATE_RECOVERY || process.env.HARNESS_OFFICIAL
     if (transitionManifest) {
       assert.equal(transitionManifest.name, outer)
       assert.notEqual(transitionManifest.version, oldManifest.version)
-      assert.notEqual(transitionManifest.version, targetManifest.version)
     }
     console.log(JSON.stringify({ baseline: oldManifest.version, target: targetManifest.version,
       oldSha256: createHash('sha256').update(oldBytes).digest('hex'), targetSha256: createHash('sha256').update(targetBytes).digest('hex') }))
@@ -205,7 +206,9 @@ if (process.env.HARNESS_OFFICIAL_UPDATE_RECOVERY || process.env.HARNESS_OFFICIAL
       const home = path.join(stage, name), dir = path.join(home, 'profiles', scope)
       fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(path.join(dir, 'package.json'), '{"private":true,"dependencies":{},"dsh":{"profile":{"bundles":[]}}}\n')
       const npmConfig = path.join(home, '.npmrc'); fs.writeFileSync(npmConfig, `registry=${origin}\nstore-dir=${path.join(stage, 'pnpm-store').replace(/\\/g, '/')}\n`)
-      const profile = { name: scope, dir, home, cwd: dir, installAnchor, patchPath: path.join(dir, 'cordis.patch.yml'), startedBundles: [], overlays: [],
+      // Match both launcher generations: alpha hosts re-read overlay files,
+      // while older hosts consume the captured overlay entries.
+      const profile = { name: scope, dir, home, cwd: dir, installAnchor, patchPath: path.join(dir, 'cordis.patch.yml'), startedBundles: [], overlays: [], overlayPaths: [],
         packageManager: { command: process.execPath, args: [pnpm], env: { npm_config_userconfig: npmConfig,
           npm_config_cache: path.join(stage, 'npm-cache'), PNPM_HOME: path.join(stage, 'pnpm-home'), XDG_CACHE_HOME: path.join(stage, 'xdg-cache') } } }
       current = await boot('native-update-test', config, [], async ctx => { ctx.provide('profileContext', profile) })
@@ -253,6 +256,16 @@ if (process.env.HARNESS_OFFICIAL_UPDATE_RECOVERY || process.env.HARNESS_OFFICIAL
         await current.fiber.dispose()
         current = undefined
         if (!originallyEnabled) continue
+        // When a retired management page cannot start its updater, native Add
+        // can install the final candidate directly. Verify a cold profile read
+        // without pretending the old plugin button worked or replaying update.
+        if (transitionManifest.version === targetManifest.version) {
+          const recoveryFile = path.join(home, 'cold-recovery.json')
+          fs.writeFileSync(recoveryFile, JSON.stringify({ profile, nativeRoot, config, owner, version: targetManifest.version, nativeAddOnly: true }))
+          execFileSync(process.execPath, [script], { env: { ...process.env, HARNESS_OFFICIAL_UPDATE_STAGE: stage,
+            HARNESS_OFFICIAL_UPDATE_RECOVERY: recoveryFile }, stdio: 'inherit', windowsHide: true, timeout: 60000 })
+          continue
+        }
         // Recreating Cordis in this process is NOT a cold restart: Node retains
         // module/symlink resolution for the old installed path. Use a genuinely
         // new process and keep this process's loopback registry serving it.

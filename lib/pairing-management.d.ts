@@ -3,6 +3,10 @@
 import type { Context } from '@deepseek-ai/cordis';
 import { type PairingHandler } from './pairing-http.js';
 export declare const PAIRING_MANAGEMENT_CHANNEL = "/wechat-remote-management";
+/** Follow the native service lifetime on both host generations. Alpha split
+ * authentication into a separate Cordis service; declaring it only on that
+ * branch keeps older hosts working without an unavailable dependency. */
+export declare function observePairingManagement(ctx: Pick<Context, 'inject'>, listener: (ctx: Context) => void | (() => void | Promise<void>)): import("@deepseek-ai/cordis").Fiber & PromiseLike<import("@deepseek-ai/cordis").Fiber>;
 export interface PairingOperations {
     status(): unknown;
     pairCode(): Promise<unknown>;

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
-import { MAX_SOURCE_BYTES, readExportZip } from './source-zip.js'
-import { MAX_SHARE_BYTES, MAX_MESSAGES } from './limits.js'
+import { MAX_SOURCE_BYTES } from './source-zip.js'
+import { MAX_SHARE_BYTES, MAX_MESSAGES, MAX_FILE_NORMALIZED_BYTES } from './limits.js'
 
 export type JsonValue = string | number | boolean | null | JsonValue[] | JsonObject
 export interface JsonObject { [key: string]: JsonValue }
@@ -10,6 +10,8 @@ export interface HistoryFile {
   size?: number
   isImage?: boolean
   metadata: JsonObject
+  exportPath?: string
+  imageRef?: JsonObject
 }
 export interface HistoryFragment { type: string; content?: string; files?: HistoryFile[]; data: JsonObject }
 export interface HistoryMessage {
@@ -23,6 +25,7 @@ export interface HistoryMessage {
   fragments: HistoryFragment[]
   metadata: JsonObject
   warnings: string[]
+  importFailure?: string
 }
 export interface HistoryConversation {
   id: string
@@ -35,6 +38,10 @@ export interface HistoryConversation {
   warnings: string[]
   metadata?: JsonObject
   publishedOrder?: { schema: 1; missingParents: number; nonAdjacentParents: number; unavailableParents: number; roots: number }
+  archiveEntry?: string
+  catalogMessages?: number
+  currentMessageId?: string
+  exportFormatVersion?: 3
 }
 export interface HistorySource { kind: 'share' | 'export'; sourceHash: string; conversations: HistoryConversation[] }
 export class HistorySourceError extends Error {
@@ -60,7 +67,7 @@ function metadata(value: Record<string, unknown>, omitted: string[]): JsonObject
   for (const [key, entry] of Object.entries(value)) if (!omitted.includes(key)) output[key] = entry as JsonValue
   return output
 }
-function validateNesting(value: unknown): void {
+export function validateNesting(value: unknown): void {
   const pending: { value: unknown; depth: number }[] = [{ value, depth: 0 }]
   let count = 0
   while (pending.length) {
@@ -98,7 +105,7 @@ function fragments(value: unknown, warnings: Set<string>): HistoryFragment[] {
     return item
   })
 }
-function message(value: Record<string, unknown>, id: string, parentId: string | null, share: boolean): HistoryMessage {
+export function normalizeHistoryMessage(value: Record<string, unknown>, id: string, parentId: string | null, share: boolean): HistoryMessage {
   const warnings = new Set<string>(), parts = fragments(value.fragments, warnings)
   const user = parts.some(part => part.type === 'REQUEST' || part.type === 'FILE')
   const assistant = parts.some(part => ['RESPONSE', 'THINK', 'SEARCH', 'TOOL_SEARCH', 'TOOL_OPEN', 'TOOL_FIND'].includes(part.type))
@@ -117,7 +124,7 @@ function message(value: Record<string, unknown>, id: string, parentId: string | 
   result.warnings = [...warnings]
   return result
 }
-function graph(conversation: HistoryConversation): HistoryConversation {
+export function validateHistoryGraph(conversation: HistoryConversation): HistoryConversation {
   const messages = conversation.messages, byId = new Map(messages.map(item => [item.id, item]))
   if (byId.size !== messages.length) return fail('duplicate-message-id')
   const parents = new Set<string>(), visited = new Set<string>()
@@ -165,9 +172,9 @@ function exportConversation(value: unknown): HistoryConversation {
     if (node.message === null) continue
     if (!record(node.message)) return fail('invalid-export-message')
     const parent = node.parent === null ? null : identifier(node.parent)
-    messages.push(message(node.message, id, parent !== null && roots.has(parent) ? null : parent, false))
+    messages.push(normalizeHistoryMessage(node.message, id, parent !== null && roots.has(parent) ? null : parent, false))
   }
-  return graph({ id: identifier(value.id), title: value.title, createdAt: timestamp(value.inserted_at), updatedAt: timestamp(value.updated_at),
+  return validateHistoryGraph({ id: identifier(value.id), title: value.title, createdAt: timestamp(value.inserted_at), updatedAt: timestamp(value.updated_at),
     messages, leafIds: [], metadata: metadata(value, ['id', 'title', 'mapping']), warnings: ['web-system-prompt-unavailable'] })
 }
 function shareConversation(value: Record<string, unknown>): HistoryConversation {
@@ -180,7 +187,7 @@ function shareConversation(value: Record<string, unknown>): HistoryConversation 
       if (!record(raw)) return fail('invalid-share-message')
       field = 'message_id'; const id = identifier(raw.message_id)
       const parent = shareParent(raw.parent_id) ?? null
-      field = 'fragments'; return message(raw, id, parent, true)
+      field = 'fragments'; return normalizeHistoryMessage(raw, id, parent, true)
     } catch (error) {
       if (error instanceof HistorySourceError) error.diagnostic = { messagePosition: index + 1, messageCount: rawMessages.length, field }
       throw error
@@ -215,20 +222,23 @@ function shareConversation(value: Record<string, unknown>): HistoryConversation 
     warnings.push('shared-earlier-history-unavailable')
   }
   if (publishedOrder.nonAdjacentParents || publishedOrder.unavailableParents) warnings.push('shared-published-order')
-  return graph({ id: 'shared-conversation', title: value.title, modelType: text(value.model_type), messages, leafIds: [],
+  return validateHistoryGraph({ id: 'shared-conversation', title: value.title, modelType: text(value.model_type), messages, leafIds: [],
     metadata: metadata(value, ['title', 'messages']), publishedOrder, warnings })
 }
 
 /** Pure source normalization. No networking, credentials, model calls, filesystem writes or host mutation. */
-export async function parseHistorySource(input: Buffer | string | unknown, sourceKind?: 'share'): Promise<HistorySource> {
+export async function parseHistorySource(input: Buffer | string | unknown, sourceKind?: 'share', expandedArchive = false): Promise<HistorySource> {
   let bytes: Buffer
   try { bytes = Buffer.isBuffer(input) ? input : Buffer.from(typeof input === 'string' ? input : JSON.stringify(input), 'utf8') } catch { return fail('invalid-json') }
-  const limit = sourceKind === 'share' ? MAX_SHARE_BYTES : MAX_SOURCE_BYTES
+  const limit = sourceKind === 'share' ? MAX_SHARE_BYTES : expandedArchive ? MAX_FILE_NORMALIZED_BYTES : MAX_SOURCE_BYTES
   if (bytes.length > limit) throw new HistorySourceError('source-too-large', bytes.length, limit)
   const sourceHash = createHash('sha256').update(bytes).digest('hex')
   if (bytes.length >= 4 && bytes.readUInt32LE(0) === 0x04034b50) {
     if (sourceKind === 'share') return fail('invalid-share')
-    try { bytes = await readExportZip(bytes) } catch { return fail('invalid-zip') }
+    try { return (await (await import('./source-v3.js')).parseArchiveCatalog(bytes)).source } catch (error) {
+      if (error instanceof HistorySourceError) throw error
+      return fail('invalid-zip')
+    }
   }
   let value: unknown
   try { value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes).replace(/^\uFEFF/, '')) } catch { return fail('invalid-json') }
@@ -277,5 +287,24 @@ export function selectHistoryBranch(conversation: HistoryConversation, leafId?: 
   // losses belong in its preview; another branch's missing file is irrelevant.
   const messageWarnings = new Set(conversation.messages.flatMap(m => m.warnings))
   const warnings = [...new Set([...conversation.warnings.filter(w => w !== 'branch-selection-required' && !messageWarnings.has(w)), ...path.flatMap(m => m.warnings)])]
-  return { ...conversation, messages: path.reverse(), leafIds: [selected], warnings }
+  const messages = path.reverse()
+  if (conversation.exportFormatVersion === 3) {
+    // Match native v3 import: withdrawn turns stay out of the model context;
+    // incomplete replies remain a closed failure, never an invented answer.
+    const kept: HistoryMessage[] = []
+    for (let index = 0; index < messages.length; index++) {
+      const user = messages[index]
+      if (user.role !== 'user') continue
+      const reply = messages[index + 1]?.role === 'assistant' ? messages[++index] : undefined
+      if (reply?.metadata.status === 'CONTENT_FILTER') { warnings.push('withdrawn-turn-unavailable'); continue }
+      const failure = !reply ? 'NO_REPLY' : reply.fragments.some(p => p.type === 'TEMPLATE_RESPONSE') ? 'TEMPLATE_RESPONSE'
+        : reply.metadata.status !== 'FINISHED' ? String(reply.metadata.status || 'UNFINISHED') : undefined
+      kept.push({ ...user, ...(reply ? {} : { importFailure: failure }) })
+      if (reply) kept.push({ ...reply, ...(failure ? { importFailure: failure } : {}) })
+      if (failure) warnings.push('unfinished-reply-unavailable')
+    }
+    if (!kept.length) return fail('empty-conversation')
+    return { ...conversation, messages: kept, leafIds: [selected], warnings: [...new Set(warnings)] }
+  }
+  return { ...conversation, messages, leafIds: [selected], warnings }
 }

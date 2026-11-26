@@ -1,4 +1,4 @@
-import { type HistorySource } from './source.js';
+import { type HistorySource, type HistoryConversation } from './source.js';
 import { ImportReceipts } from './receipts.js';
 export { importError } from './errors.js';
 import { type NativeImportRequest, type NativeImportIdentity, type NativeImportInspection } from './native.js';
@@ -18,12 +18,18 @@ export interface ImportPorts {
         source: HistorySource;
         bytes: number;
     }>;
+    parseArchive?(file: string, signal: AbortSignal): Promise<{
+        source: HistorySource;
+        bytes: number;
+    }>;
+    readConversation?(file: string, id: string, signal: AbortSignal): Promise<HistoryConversation>;
     share(url: unknown, signal: AbortSignal): Promise<Buffer>;
     loadObject?(descriptor: EncryptedCloudObjectDescriptor, signal: AbortSignal): Promise<Uint8Array>;
-    commit(request: NativeImportRequest, signal: AbortSignal, beforeCreate: () => void): Promise<unknown>;
+    commit(request: NativeImportRequest, signal: AbortSignal, beforeCreate: () => void, revalidate?: () => Promise<void>): Promise<unknown>;
     inspect(request: NativeImportIdentity, signal: AbortSignal): Promise<NativeImportInspection>;
     receipts: ImportReceipts;
     now?: () => number;
+    stagingDirectory?: string;
 }
 /** Entirely demand-driven. Constructing this controller never reads native
  * sessions, starts a timer, connects to the web, or writes any file. */
@@ -32,6 +38,7 @@ export declare class HistoryImportController {
     private readonly sources;
     private readonly previews;
     private readonly uploads;
+    private readonly archives;
     private readonly jobs;
     private readonly lifetime;
     private preparing;
@@ -42,6 +49,7 @@ export declare class HistoryImportController {
     constructor(ports: ImportPorts);
     private now;
     dispose(): void;
+    private releaseSource;
     private expireLater;
     private prune;
     private usage;

@@ -14,6 +14,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { build } from 'esbuild'
 import { largeShareFixture, fragmentedShareFixture } from './history-import-large-fixture.mjs'
+import { zip as archiveZip } from './history-import-v3-fixture.mjs'
 import { MAX_SEED_BYTES, MAX_SHARE_BYTES, MAX_MESSAGES } from '../lib/history-import/limits.js'
 
 const entry = fileURLToPath(new URL('../src/history-import/native.ts', import.meta.url))
@@ -248,6 +249,8 @@ test('installed native factory, cold reader, actual continuation, isolation and 
     fs.writeFileSync(path.join(profileDir, 'package.json'), JSON.stringify({ name: 'fixture-profile', private: true, dependencies: { '@harness-remote/import-fixture': '*' } }))
     const generated = path.join(pluginDir, 'import-adapter.mjs')
     await build({ entryPoints: [entry], outfile: generated, bundle: true, platform: 'node', format: 'esm', target: 'node22', external: ['@deepseek-ai/*'] })
+    await build({ entryPoints: [fileURLToPath(new URL('../src/history-import/source-worker.ts', import.meta.url))],
+      outfile: path.join(pluginDir, 'source-worker.js'), bundle: true, platform: 'node', format: 'esm', target: 'node22' })
     const adapter = await import(pathToFileURL(generated).href)
     const validate = (header, events) => {
       const restored = catalog.createRestore(catalog.encodeCurrentHeader(header, 0), { recovery: 'strict', validation: 'current' })
@@ -357,6 +360,96 @@ test('installed native factory, cold reader, actual continuation, isolation and 
     let finalAdmission = 0
     await assert.rejects(adapter.commitNativeImport(wrapped, request(), undefined, () => { finalAdmission++; throw Error('revoked during preflight') }), rejectedBeforeCreate('authorization-changed'))
     assert.equal(finalAdmission, 1); assert.equal(createCalls, 1, 'revocation at final admission must never call native create')
+    const imagePath = path.join(work, 'synthetic-images.zip'), imageBytes = Buffer.from('synthetic image bytes')
+    fs.writeFileSync(imagePath, archiveZip([['image-a.png', imageBytes], ['image-b.png', imageBytes]]))
+    const imageRequest = () => {
+      const value = request({ archivePath: imagePath })
+      value.conversation.messages[0].fragments = [{ type: 'FILE', data: {}, files: ['image-a.png', 'image-b.png'].map(name => ({
+        name, isImage: true, exportPath: name, metadata: {},
+      })) }]
+      return value
+    }
+    let imageWrites = 0, revoked = false
+    const imageHost = { get(name) { return name === 'attachments' ? { async saveImage() {
+      imageWrites++; await Promise.resolve(); revoked = true
+      return { attachmentId: 'sha256:' + 'c'.repeat(64), bytes: 3, width: 1, height: 1, mediaType: 'image/png' }
+    } } : wrapped.get(name) } }
+    await assert.rejects(adapter.commitNativeImport(imageHost, imageRequest(), undefined, () => { throw Error('revoked before image storage') }), rejectedBeforeCreate('authorization-changed'))
+    assert.equal(imageWrites, 0); assert.equal(createCalls, 1)
+    await assert.rejects(adapter.commitNativeImport(imageHost, imageRequest(), undefined, () => { if (revoked) throw Error('revoked during image storage') }), rejectedBeforeCreate('authorization-changed'))
+    assert.equal(imageWrites, 1); assert.equal(createCalls, 1, 'revocation during first image save prevents second image and session create')
+    // Actual native attachment admission/storage, including its own validation.
+    const attachmentModule = await load('dsh-attachment-local')
+    await ctx.plugin(attachmentModule.default ?? attachmentModule, { dshHome: path.join(work, 'image-home') })
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADElEQVQImWNgZGIGAAAOAAeCcsnOAAAAAElFTkSuQmCC', 'base64')
+    fs.writeFileSync(imagePath, archiveZip([['image-a.png', png], ['image-b.png', png]]))
+    const restoredImages = imageRequest()
+    let imageLeaseValid = true, imageRenewals = 0
+    const longImageHost = { get(name) { return name === 'attachments' ? { async saveImage(input) {
+      const ref = await ctx.attachments.saveImage(input); imageLeaseValid = false; return ref
+    } } : ctx.get(name) } }
+    await adapter.commitNativeImport(longImageHost, restoredImages, undefined,
+      () => { assert(imageLeaseValid, 'image storage must refresh natural expiry before final admission') },
+      async () => { imageRenewals++; imageLeaseValid = true })
+    assert.equal(imageRenewals, 5, 'two image write boundaries and final preflight revalidate captured authority')
+    const imageReader = await ctx.sessionPersistence.open(restoredImages.sessionId, 'read')
+    try {
+      const { events } = await imageReader.read()
+      const images = events.find(e => e.type === 'user/message').data.content.filter(block => block.type === 'image')
+      assert.equal(images.length, 2); assert(images.every(block => block.attachment.attachmentId.startsWith('sha256:')))
+    } finally { await imageReader.close() }
+    // A tiny archive can refer to the same entry hundreds of times. Native
+    // image decoding/storage is entry-scoped; names stay reference-scoped.
+    const aliases = imageRequest()
+    aliases.conversation.messages[0].fragments[0].files = [
+      { name: '../first.png', isImage: true, exportPath: 'image-a.png', metadata: {} },
+      { name: 'C:\\local\\second\u0000.png', isImage: true, exportPath: 'image-a.png', metadata: {} },
+      { name: 'directory/\n', isImage: true, exportPath: 'image-a.png', metadata: {} },
+      { name: 'other.png', isImage: true, exportPath: 'image-b.png', metadata: {} },
+    ]
+    let aliasWrites = 0, aliasFences = 0
+    const aliasHost = { get: name => name === 'attachments' ? { async saveImage(input) {
+      aliasWrites++; return ctx.attachments.saveImage(input)
+    } } : ctx.get(name) }
+    await adapter.commitNativeImport(aliasHost, aliases, undefined, undefined, async () => { aliasFences++ })
+    assert.equal(aliasWrites, 2, 'repeat references must not reread/decode/save the same archive entry')
+    assert.equal(aliasFences, 9, 'all four references, including cache hits, keep both fences plus final admission')
+    const aliasReader = await ctx.sessionPersistence.open(aliases.sessionId, 'read')
+    try {
+      const images = (await aliasReader.read()).events.find(e => e.type === 'user/message').data.content.filter(b => b.type === 'image')
+      assert.deepEqual(images.map(image => image.attachment.name), ['first.png', 'second.png', undefined, 'other.png'])
+      assert.equal(new Set(images.slice(0, 3).map(image => image.attachment.attachmentId)).size, 1)
+      assert(images.every(image => image.attachment.bytes > 0 && image.attachment.width === 1 && image.attachment.height === 1))
+    } finally { await aliasReader.close() }
+    assert(aliases.conversation.messages[0].fragments[0].files.every(file => file.imageRef === undefined), 'source preview is never mutated')
+    await adapter.commitNativeImport(aliasHost, { ...aliases, sessionId: `session-dsimport-${randomUUID()}` })
+    assert.equal(aliasWrites, 4, 'successful cache is private to one preflight, not shared across operations')
+    const cachedAdmission = imageRequest()
+    cachedAdmission.conversation.messages[0].fragments[0].files[1].exportPath = 'image-a.png'
+    let cachedWrites = 0, cachedFences = 0
+    const cachedHost = { get: name => name === 'attachments' ? { async saveImage(input) {
+      cachedWrites++; return ctx.attachments.saveImage(input)
+    } } : wrapped.get(name) }
+    await assert.rejects(adapter.commitNativeImport(cachedHost, cachedAdmission, undefined, undefined, async () => {
+      if (++cachedFences === 3) throw Error('revoked on the first cache hit')
+    }), rejectedBeforeCreate('authorization-changed'))
+    assert.equal(cachedWrites, 1); assert.equal(createCalls, 1, 'a cache hit cannot bypass revoked authority into native create')
+    let cachedSyncFences = 0
+    await assert.rejects(adapter.commitNativeImport(cachedHost, { ...cachedAdmission, sessionId: `session-dsimport-${randomUUID()}` }, undefined, () => {
+      if (++cachedSyncFences === 3) throw Error('owner changed immediately before cached assignment')
+    }), rejectedBeforeCreate('authorization-changed'))
+    assert.equal(cachedWrites, 2); assert.equal(createCalls, 1, 'synchronous authority fence is also retained for cached references')
+    const cachedAbort = new AbortController(); cachedFences = 0
+    await assert.rejects(adapter.commitNativeImport(cachedHost, { ...cachedAdmission, sessionId: `session-dsimport-${randomUUID()}` }, cachedAbort.signal, undefined, async () => {
+      if (++cachedFences === 3) cachedAbort.abort()
+    }), rejectedBeforeCreate('aborted'))
+    assert.equal(cachedWrites, 3); assert.equal(createCalls, 1)
+    let failedImageWrites = 0
+    const failedImageHost = { get: name => name === 'attachments' ? { async saveImage() {
+      failedImageWrites++; throw Error('synthetic native image failure')
+    } } : wrapped.get(name) }
+    for (let attempt = 0; attempt < 2; attempt++) await assert.rejects(adapter.commitNativeImport(failedImageHost, imageRequest()), rejectedBeforeCreate('preflight-failed'))
+    assert.equal(failedImageWrites, 2); assert.equal(createCalls, 1, 'failed image publication never creates a session or fills a shared cache')
     const missingModel = { get: name => name === 'agentDefaultModel' ? { currentSelection: () => ({}) } : wrapped.get(name) }
     await assert.rejects(adapter.commitNativeImport(missingModel, request()), rejectedBeforeCreate('model-unavailable'))
     assert.equal(createCalls, 1)
@@ -545,6 +638,8 @@ test('installed native factory, cold reader, actual continuation, isolation and 
       longImport: { rawBytes: longInput.length, turns: longRounds, messages: longReceipt.messageCount, exactBodyReasoningAndFragments: true,
         publishedOrder: longRequest.conversation.publishedOrder, originalParentsColdReadVerified: true, fragmented },
       officialProfileModuleResolution: true,
+      archiveImageCache: { twoEntriesFourReferences: true, namesPreservedAndSanitized: true, perOperationOnly: true,
+        revokedAtCachedRefresh: true, revokedAtCachedSyncFence: true, cancelledAtCachedRefresh: true, failureNeverCreatedSession: true },
       scopedWritesOnly: true, cancellationBeforeAttach: true, simultaneousCollisionSafe: true,
       coldReadAfterContinue: true, coldReadAfterSecondContinue: true, nativeSearchCard: true,
       exactHistoryInBothRequests: true, inHistorySystemAppend: true, emptySystemHeadReplaced: true, existingSessionUntouched: true }))

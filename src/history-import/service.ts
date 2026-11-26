@@ -3,9 +3,10 @@ import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { HistoryImportController, importError, type ImportPorts } from './controller.js'
 import { ImportReceipts } from './receipts.js'
 import { nativeCapabilities, commitNativeImport, inspectNativeImport } from './native.js'
-import { parseImportSource } from './parse.js'
+import { parseImportSource, parseImportArchive, parseImportConversation } from './parse.js'
 import { readPublicShare } from './share.js'
 import { FeatureAccessError, featureMessage, hostFeatureAccess } from '../feature-access.js'
+import path from 'node:path'
 
 export interface HistoryImportResult {
   readonly ok: boolean
@@ -31,10 +32,12 @@ export class WechatImportService extends TypertRemoteService {
       },
       authorize: signal => hostFeatureAccess(host).authorizeHistoryImport(signal),
       owner: async signal => { try { return await hostFeatureAccess(host).currentOwner(signal) } catch { signal.throwIfAborted(); return undefined } },
-      parse: parseImportSource, share: readPublicShare, loadObject: config.loadObject,
-      commit: (request, signal, beforeCreate) => commitNativeImport(host, request, signal, beforeCreate),
+      parse: parseImportSource, parseArchive: parseImportArchive, readConversation: parseImportConversation,
+      share: readPublicShare, loadObject: config.loadObject,
+      commit: (request, signal, beforeCreate, revalidate) => commitNativeImport(host, request, signal, beforeCreate, revalidate),
       inspect: (request, signal) => inspectNativeImport(host, request, signal),
       receipts: new ImportReceipts(config.receiptDirectory),
+      stagingDirectory: path.join(path.dirname(config.receiptDirectory), 'history-import-staging'),
     })
     host.effect(() => () => this.controller.dispose())
   }

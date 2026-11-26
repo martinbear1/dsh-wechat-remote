@@ -1,7 +1,78 @@
 import assert from 'node:assert/strict'
 import { createServer, request } from 'node:http'
 import { test } from 'node:test'
-import { pairingHttpHandler } from '../lib/pairing-http.js'
+import { pairingHttpHandler, pairingRequestRejection } from '../lib/pairing-http.js'
+
+test('provider-based management uses the admitted owner without authenticating twice', () => {
+  const request = { headers: { host: 'localhost' } }
+  const native = { authentication: { register() {} }, admit() { assert.fail('must not select a second identity') } }
+  const peer = kind => ({ principal: { kind }, signal: new AbortController().signal })
+  assert.equal(pairingRequestRejection(native, request, peer('owner')), undefined)
+  assert.equal(pairingRequestRejection(native, request), 401)
+  assert.equal(pairingRequestRejection(native, request, peer('session')), 403)
+  assert.equal(pairingRequestRejection(native, request, { principal: { kind: 'owner' }, signal: AbortSignal.abort() }), 403)
+  assert.equal(pairingRequestRejection({ admit() {} }, request, peer('owner')), 401)
+})
+
+test('alpha native management keeps the small body limit and rejects shared users before parsing', async () => {
+  let calls = 0
+  const handler = pairingHttpHandler('/manage', {
+    authentication: { register() {} }, admit() { assert.fail('must not authenticate twice') },
+  }, async () => { calls++; return { ok: true, value: 'owner-only' } })
+  const server = createServer((req, res) => handler(req, res,
+    req.headers.authorization ? { principal: { kind: req.headers.authorization === 'owner' ? 'owner' : 'session' }, signal: new AbortController().signal } : undefined))
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  const origin = 'http://127.0.0.1:' + server.address().port
+  const post = (authorization, body) => fetch(origin + '/manage/status', {
+    method: 'POST', headers: { authorization, 'content-type': 'application/json' }, body,
+  })
+  try {
+    assert.equal((await post('', 'invalid')).status, 401)
+    assert.equal((await post('shared', 'invalid')).status, 403)
+    assert.equal((await post('owner', 'x'.repeat(5000))).status, 400)
+    assert.equal(calls, 0)
+    const response = await post('owner', JSON.stringify({ type: 'client-request', rpcId: 'alpha', method: 'status', payload: {} }))
+    assert.equal(response.status, 200)
+    assert.equal((await response.json()).result.value, 'owner-only')
+    assert.equal(calls, 1)
+  } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)) }
+})
+
+test('revoking an admitted Peer while reading the body prevents every operation', async () => {
+  const lifetime = new AbortController()
+  let calls = 0
+  const handler = pairingHttpHandler('/manage', { authentication: { register() {} }, admit() {} },
+    async () => { calls++; return { ok: true, value: 'must-not-run' } })
+  const server = createServer((req, res) => {
+    void handler(req, res, { principal: { kind: 'owner' }, signal: lifetime.signal })
+    req.once('data', () => lifetime.abort())
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  try {
+    const response = await fetch('http://127.0.0.1:' + server.address().port + '/manage/pair-code', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ type: 'client-request', rpcId: 'revoked', method: 'pair-code', payload: {} }),
+    })
+    assert.equal(response.status, 503)
+    assert.equal(calls, 0)
+  } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)) }
+})
+
+test('revoking an admitted Peer during an operation suppresses the late result', async () => {
+  const lifetime = new AbortController()
+  const handler = pairingHttpHandler('/manage', { authentication: { register() {} }, admit() {} },
+    async () => { lifetime.abort(); return { ok: true, value: 'private-ticket' } })
+  const server = createServer((req, res) => handler(req, res, { principal: { kind: 'owner' }, signal: lifetime.signal }))
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  try {
+    const response = await fetch('http://127.0.0.1:' + server.address().port + '/manage/pair-code', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ type: 'client-request', rpcId: 'revoked', method: 'pair-code', payload: {} }),
+    })
+    assert.equal(response.status, 503)
+    assert.equal(await response.text(), '')
+  } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)) }
+})
 import { createPairingHandler } from '../lib/pairing-management.js'
 
 test('operator wire reaches current-endpoint update operations; auth and exact payload remain required', async () => {

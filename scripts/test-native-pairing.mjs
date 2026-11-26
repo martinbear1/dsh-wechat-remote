@@ -6,9 +6,13 @@ import { createServer } from 'node:http'
 import { createRequire } from 'node:module'
 import { execFileSync } from 'node:child_process'
 import { resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { build } from 'esbuild'
 import { Context } from '@deepseek-ai/cordis'
-import { mountPairingManagement } from '../lib/pairing-management.js'
+const pairingModule = await import(process.env.HARNESS_PAIRING_BASELINE_MODULE
+  ? pathToFileURL(resolve(process.env.HARNESS_PAIRING_BASELINE_MODULE)).href : '../lib/pairing-management.js')
+const { mountPairingManagement } = pairingModule
+const observePairingManagement = pairingModule.observePairingManagement ?? ((ctx, listener) => ctx.inject(['connection', 'webServer'], listener))
 
 const source = process.env.HARNESS_DSH_SOURCE
 assert(source, 'HARNESS_DSH_SOURCE is required; no silently skipped native auth test')
@@ -55,7 +59,7 @@ async function host(id, late = false) {
   }
   let provider = late ? undefined : await startProvider()
   const fiber = ctx.plugin({ name: 'native-pairing-fixture', inject: ['webServer'], apply(owner) {
-    owner.inject(['connection', 'webServer'], inner => {
+    observePairingManagement(owner, inner => {
       try {
         mounted = mountPairingManagement(inner, { status: () => ({ id }),
           pairCode: async () => { calls++; return { ticket: id } }, unavailable: () => false,

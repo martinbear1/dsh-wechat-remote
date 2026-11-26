@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto'
+import { REMOTE_INPUT_LIMITS } from '../remote-input-limits.js'
 import { humanTaskRef, humanWorkflowDraftRef, sameTaskRef, type HumanTaskRef } from '../human-tools/protocol.js'
 import { assertScope, bounded, copy, exact, fail, identifier, plain, revision, row, sameScope, scopeValid, StateQueue, version, type WorkflowScope } from './data.js'
 import { canonicalSubmission, sha256 } from './submission-crypto.js'
@@ -19,7 +20,7 @@ export function automationConfig(value: unknown): AutomationConfig {
     || !version(value.maxRuns) || value.maxRuns > 100 || !version(value.timeoutSeconds) || value.timeoutSeconds < 30 || value.timeoutSeconds > 600
     || value.concurrency !== 1) throw fail('automation-config-invalid', '处理规则无效；请选择手动、逐份或指定名单到齐，并发固定为 1')
   if (value.trigger === 'all-recipients') {
-    if (!Array.isArray(value.recipientRefs) || !value.recipientRefs.length || value.recipientRefs.length > 100
+    if (!Array.isArray(value.recipientRefs) || !value.recipientRefs.length || value.recipientRefs.length > REMOTE_INPUT_LIMITS.automationRecipients
       || value.recipientRefs.some(id => typeof id !== 'string' || !/^[A-Za-z0-9_-]{24,96}$/.test(id)) || new Set(value.recipientRefs).size !== value.recipientRefs.length
       || value.maxRuns < value.recipientRefs.length) throw fail('automation-config-invalid', '名单须为 1..100 个已知参与者；处理次数须覆盖完整名单')
   } else if (value.recipientRefs !== undefined) throw fail('automation-config-invalid', '只有名单到齐规则可携带指定名单')

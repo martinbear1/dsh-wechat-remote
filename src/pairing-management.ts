@@ -4,6 +4,18 @@ import type { Context } from '@deepseek-ai/cordis'
 import { pairingHttpHandler, type PairingConnection, type PairingHandler } from './pairing-http.js'
 
 export const PAIRING_MANAGEMENT_CHANNEL = '/wechat-remote-management'
+
+/** Follow the native service lifetime on both host generations. Alpha split
+ * authentication into a separate Cordis service; declaring it only on that
+ * branch keeps older hosts working without an unavailable dependency. */
+export function observePairingManagement(ctx: Pick<Context, 'inject'>,
+  listener: (ctx: Context) => void | (() => void | Promise<void>)) {
+  return ctx.inject(['connection', 'webServer'], (owner) => {
+    const connection = owner.get('connection') as Partial<PairingConnection> | undefined
+    if (typeof connection?.requestRejection === 'function') return listener(owner)
+    owner.inject(['connection.authentication'], listener)
+  })
+}
 export interface PairingOperations {
   status(): unknown
   pairCode(): Promise<unknown>
@@ -19,18 +31,19 @@ export interface PairingOperations {
 export function mountPairingManagement(ctx: Pick<Context, 'get' | 'effect'>, operations: PairingOperations):
   { dispose(): Promise<void> } | undefined {
   const value = ctx.get('connection') as Partial<PairingConnection> | undefined
-  const webServer = ctx.get('webServer') as { register(route: { kind: 'prefix'; path: string;
+  const webServer = ctx.get('webServer') as { register(route: { kind: 'prefix'; path: string; auth: 'required';
     handler: ReturnType<typeof pairingHttpHandler> }): () => void } | undefined
-  if (typeof value?.admit !== 'function' || typeof value?.requestRejection !== 'function'
+  if (typeof value?.admit !== 'function' || (typeof value?.requestRejection !== 'function'
+      && typeof value?.authentication?.register !== 'function')
       || typeof webServer?.register !== 'function') return
   const handler = createPairingHandler(operations)
   // COMPAT: 0.1.7-rc.2 Connection.rpc.handle captures a provider-shadow context
   // without webServer injection. Use the public WebServer registration and
-  // native requestRejection instead, never mutate the host or weaken auth.
+  // native requestRejection/admitted Peer, never mutate or reauthenticate the host.
   // Retire this small wire adapter only after the sibling-provider regression
   // and installed-host tests pass with the official RPC convenience method.
   const unregister = ctx.effect(() => webServer.register({ kind: 'prefix',
-    path: PAIRING_MANAGEMENT_CHANNEL,
+    path: PAIRING_MANAGEMENT_CHANNEL, auth: 'required',
     handler: pairingHttpHandler(PAIRING_MANAGEMENT_CHANNEL, value as PairingConnection, handler.call),
   }), 'wechat pairing management')
   let disposal: Promise<void> | undefined

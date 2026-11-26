@@ -8,6 +8,8 @@ export interface HistoryFile {
     size?: number;
     isImage?: boolean;
     metadata: JsonObject;
+    exportPath?: string;
+    imageRef?: JsonObject;
 }
 export interface HistoryFragment {
     type: string;
@@ -26,6 +28,7 @@ export interface HistoryMessage {
     fragments: HistoryFragment[];
     metadata: JsonObject;
     warnings: string[];
+    importFailure?: string;
 }
 export interface HistoryConversation {
     id: string;
@@ -44,6 +47,10 @@ export interface HistoryConversation {
         unavailableParents: number;
         roots: number;
     };
+    archiveEntry?: string;
+    catalogMessages?: number;
+    currentMessageId?: string;
+    exportFormatVersion?: 3;
 }
 export interface HistorySource {
     kind: 'share' | 'export';
@@ -61,8 +68,11 @@ export declare class HistorySourceError extends Error {
     };
     constructor(code: string, actualBytes?: number | undefined, limitBytes?: number | undefined);
 }
+export declare function validateNesting(value: unknown): void;
+export declare function normalizeHistoryMessage(value: Record<string, unknown>, id: string, parentId: string | null, share: boolean): HistoryMessage;
+export declare function validateHistoryGraph(conversation: HistoryConversation): HistoryConversation;
 /** Pure source normalization. No networking, credentials, model calls, filesystem writes or host mutation. */
-export declare function parseHistorySource(input: Buffer | string | unknown, sourceKind?: 'share'): Promise<HistorySource>;
+export declare function parseHistorySource(input: Buffer | string | unknown, sourceKind?: 'share', expandedArchive?: boolean): Promise<HistorySource>;
 /** Count one selected path, independent of export mapping order. Each user
  * message starts a turn; a leading assistant-only group is retained as a turn.
  * Unknown roles have no trustworthy count and must never be guessed from size. */

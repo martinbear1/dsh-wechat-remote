@@ -56,6 +56,7 @@ export async function verifyHistoryContinuation(work) {
   const user = text => createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } })
   class CaptureAdapter extends LlmAdapter {
     constructor(inHistory) { super(); this.inHistory = inHistory; this.requests = []; this.window = 1_000_000; this.overflowNext = false }
+    async listModels(provider) { return Promise.all(['synthetic-model', 'synthetic-new-model'].map(id => this.resolveModel(provider, id))) }
     async resolveModel(provider, id) {
       return { provider, id, name: id, context: { contextWindow: this.window }, inputModalities: ['text'],
         ...(this.inHistory ? { systemPromptUpdate: 'in-history' } : {}) }
@@ -95,7 +96,7 @@ export async function verifyHistoryContinuation(work) {
       if (turn === 1) append('system/message', { turn, step: 1, message: createSystemMessage('') }, true)
       append('user/message', user(turn === 1 ? firstUser : `${turn === 2 ? correction : ''}第${turn}轮：比较光照和浇水。${'已有园艺事实。'.repeat(long ? 1200 : 0)}`), true)
       append('assistant/message', { turn, step: 1, stream: [], message: createAssistantMessage({
-        source: { provider: 'source-web', model: 'source-unknown' }, content: [
+        source: { provider: 'deepseek-web-history', model: 'source-unknown' }, content: [
           ...(turn === 1 ? [{ type: 'reasoning', text: reasoning }] : []),
           { type: 'text', text: `源网页第${turn}轮完整答复。${'比较可选植物。'.repeat(long ? 1200 : 0)}` },
         ],
@@ -123,7 +124,7 @@ export async function verifyHistoryContinuation(work) {
     await ctx.plugin(SessionQuery, { path: ':memory:', openAt: 'never' })
     const adapter = new CaptureAdapter(inHistory)
     ctx.llm.registerAdapter(['fixture'], adapter)
-    ctx.provide('agentDefaultModel', { currentSelection: () => model })
+    ctx.provide('agentDefaultModel', { currentSelection: () => model, saveSelection: async () => {} })
     ctx.provide('attachments', { admitPromptContent: async content => structuredClone(content),
       imageLimits: { maxImageBytes: 1, maxImagesPerMessage: 1, maxMessageImageBytes: 1,
         maxImagePixels: 1, maxImageDimension: 1, mediaTypes: [] } })
@@ -132,7 +133,10 @@ export async function verifyHistoryContinuation(work) {
       async attachSession(id) { if (!this.sessionIds.includes(id)) this.sessionIds.push(id) } }
     ctx.provide('workspaceRegistry', { archivedSessionIds: [], list: () => [workspace],
       get: id => id === workspace.id ? workspace : undefined })
-    ctx.provide('fs', { resolve() { assert.fail('no file tools may execute') } })
+    ctx.provide('fs', {
+      async resolve(value) { assert.equal(path.resolve(value), path.resolve(work), 'only the fixture working directory may resolve'); return { path: fs.realpathSync(work) } },
+      processPath(target) { assert.equal(target.path, fs.realpathSync(work)); return target.path },
+    })
     ctx.provide('profileContext', { name: 'fixture', home: path.join(root, 'profile-home'), dir: path.join(root, 'profile-home/profiles/fixture'), installAnchor: anchor })
     ctx.provide('typertGateway', {})
     await ctx.plugin(AgentLoop, { agents: [] })
@@ -199,7 +203,10 @@ export async function verifyHistoryContinuation(work) {
       assert(requestText(first).includes(firstUser)); assert(requestText(first).includes(reasoning))
       assert.deepEqual(first.tools.map(row => row.name).sort(), ['web_fetch', 'web_search'])
       assert(!first.messages.filter(row => row.role === 'system').some(row => messageText(row).includes(firstUser)))
-      assert.equal(first.messages.findIndex(row => row.role === 'system'), inHistory ? 2 : 0)
+      const sections = typeof (await h.ctx.systemPrompt.assemble({ scope: agent, session: agent.session })).systemUpdates === 'function'
+      // Section-aware hosts rebuild the legacy unannotated imported head;
+      // older hosts append a whole prompt when the model supports in-history.
+      assert.equal(first.messages.findIndex(row => row.role === 'system'), sections ? 0 : inHistory ? 2 : 0)
       const systemCount = agent.session.snapshotEvents().filter(row => row.type === 'system/message').length
       agent.followup(user('第二次继续：比较两种方案。')); await agent.whenIdle()
       assert.equal(h.adapter.requests.length, 2)
@@ -209,9 +216,36 @@ export async function verifyHistoryContinuation(work) {
       const standard = await h.controller.create({ workspaceId: 'synthetic-workspace', agentPreset: 'standard' })
       assert.deepEqual(h.ctx.tools.schemas(h.ctx.agents.get(standard.sessionId)).map(row => row.name), [])
       checks.push({ scenario: `native-preset-cold-resume-${inHistory ? 'in-history' : 'leading-only'}`,
-        firstRoles: first.messages.map(row => row.role), secondRoles: h.adapter.requests[1].messages.map(row => row.role),
+        sectionAdmissions: sections, firstRoles: first.messages.map(row => row.role), secondRoles: h.adapter.requests[1].messages.map(row => row.role),
         tools: first.tools.map(row => row.name), originalSettingsAndPublishedReasoningRetained: true,
         otherPresetAndDefaultUnchanged: true })
+    } finally { await h.ctx.fiber.dispose() }
+  }
+  {
+    const h = await harness(path.join(work, 'section-updates'), true)
+    try {
+      const id = 'continuation-section-updates'
+      await createImported(h, id, seedHistory()); await resumeImported(h, id)
+      const agent = h.ctx.agents.get(id)
+      const sectionAdmissions = typeof (await h.ctx.systemPrompt.assemble({ scope: agent, session: agent.session })).systemUpdates === 'function'
+      let policy = 'SYNTHETIC POLICY FIRST'
+      const release = agent.ctx.systemPrompt.section({ name: 'synthetic-policy', order: 75, text: () => policy,
+        retirement: 'SYNTHETIC POLICY RETIRED' })
+      agent.followup(user('Read the current policy.')); await agent.whenIdle()
+      assert(requestText(h.adapter.requests.at(-1)).includes(policy))
+      policy = 'SYNTHETIC POLICY SECOND'
+      agent.followup(user('Read the changed policy.')); await agent.whenIdle()
+      assert(requestText(h.adapter.requests.at(-1)).includes(policy))
+      release()
+      agent.followup(user('Continue after policy removal.')); await agent.whenIdle()
+      assert.equal(agent.session.snapshotEvents().findLast(e => e.type === 'turn/end').data.reason.kind, 'completed')
+      if (sectionAdmissions) {
+        const text = requestText(h.adapter.requests.at(-1))
+        const first = text.indexOf('SYNTHETIC POLICY FIRST'), second = text.indexOf('SYNTHETIC POLICY SECOND'), retired = text.indexOf('SYNTHETIC POLICY RETIRED')
+        assert(first >= 0 && second > first && retired > second, 'section delta and retirement remain ordered in native requests')
+      }
+      checks.push({ scenario: 'native-system-section-update-retirement', sectionAdmissions,
+        nativeLoopOwnsAdmission: true, currentScopedInstructionsObserved: true, orderedSectionDeltas: sectionAdmissions })
     } finally { await h.ctx.fiber.dispose() }
   }
   const root = path.join(work, 'long-sessions'), id = 'continuation-long'
@@ -283,6 +317,29 @@ export async function verifyHistoryContinuation(work) {
         syntheticProvider: true, realModelSemanticFidelityTested: false })
     } finally { await h.ctx.fiber.dispose() }
   }
+  h = await harness(path.join(work, 'rejected-route-compaction'), true)
+  try {
+    const sessionId = 'continuation-rejected-route', seed = seedHistory(true)
+    await createImported(h, sessionId, seed)
+    await resumeImported(h, sessionId)
+    const agent = h.ctx.agents.get(sessionId)
+    agent.followup(user('Continue using the first model.')); await agent.whenIdle()
+    assert.equal(h.adapter.requests.length, 1)
+    assert.equal(h.adapter.requests[0].model, model.model)
+    const selected = { provider: 'fixture', model: 'synthetic-new-model' }
+    await h.controller.selectModel({ sessionId, ...selected })
+    h.adapter.overflowNext = true
+    agent.followup(user('Continue after changing model.')); await agent.whenIdle()
+    assert.equal(agent.session.snapshotEvents().findLast(e => e.type === 'turn/end').data.reason.kind, 'completed')
+    const calls = h.adapter.requests.filter(r => r.purpose === 'compaction')
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].model, model.model, 'summary uses the last model that answered, not the overflowing new route')
+    assert.equal(h.adapter.requests.at(-1).model, selected.model, 'successful continuation retains the new selection')
+    assert.equal(agent.session.requestHeader().config.model, selected.model)
+    assert.deepEqual(agent.session.snapshotEvents().slice(0, seed.length), seed)
+    checks.push({ scenario: 'native-rejected-route-summary-uses-last-answer', summaryModel: calls[0].model,
+      continuedModel: selected.model, importedArchiveLabelsNotResolved: true, originalEventsUnchanged: true })
+  } finally { await h.ctx.fiber.dispose() }
   h = await harness(path.join(work, 'failed-compaction'), true)
   try {
     const sessionId = 'continuation-failed-compaction', seed = seedHistory(true)
@@ -359,7 +416,30 @@ export async function verifyHistoryContinuation(work) {
   // Product importer -> real durable session/controller -> actual DeepSeek
   // Anthropic-compatible serializer. fetch is captured and immediately fails;
   // this verifies the request envelope, not remote API acceptance/semantics.
-  const { buildNativeImportSeed } = await import(pathToFileURL(path.join(productRoot, 'native.js')).href)
+  const { buildNativeImportSeed, commitNativeImport, inspectNativeImport, nativeCapabilities } = await import(pathToFileURL(path.join(productRoot, 'native.js')).href)
+  h = await harness(path.join(work, 'actual-import-adapter'), true)
+  try {
+    const sessionId = `session-dsimport-${randomUUID()}`
+    const request = { sessionId, workspaceId: 'synthetic-workspace', sourceHash: 'c'.repeat(64), presetId: definition.id,
+      conversation: { id: 'actual-import', title: 'Actual importer', leafIds: ['a'], warnings: [], messages: [
+        { id: 'u', parentId: null, role: 'user', text: firstUser, reasoning: '', fragments: [], metadata: {}, warnings: [] },
+        { id: 'a', parentId: 'u', role: 'assistant', text: 'Original archived reply.', reasoning, fragments: [], metadata: {}, warnings: [] },
+      ] } }
+    assert.equal((await nativeCapabilities(h.ctx)).supported, true)
+    const made = await commitNativeImport(h.ctx, request)
+    assert.equal(made.sessionId, sessionId); assert.equal(made.messageCount, 2)
+    assert.equal(h.ctx.agents.get(sessionId), undefined, 'import releases only its own new native handle')
+    assert.equal(h.adapter.requests.length, 0, 'import must not activate any model request')
+    assert.equal((await inspectNativeImport(h.ctx, request)).state, 'succeeded')
+    await assert.rejects(commitNativeImport(h.ctx, request), e => e.code === 'session-exists' && e.rejectedBeforeCreate)
+    await resumeImported(h, sessionId)
+    const agent = h.ctx.agents.get(sessionId)
+    agent.followup(user('Continue this imported conversation.')); await agent.whenIdle()
+    assert.equal(agent.session.snapshotEvents().findLast(e => e.type === 'turn/end').data.reason.kind, 'completed')
+    assert(requestText(h.adapter.requests[0]).includes(firstUser))
+    checks.push({ scenario: 'actual-product-import-commit-cold-read-resume', receiptVerified: true,
+      duplicateRejectedBeforeWrite: true, modelActivatedByImport: false, nativeVersion4CodecAndValidator: true })
+  } finally { await h.ctx.fiber.dispose() }
   {
     const root = path.join(work, 'large-actual-preset'), sessionId = `session-dsimport-${randomUUID()}`
     const messages = Array.from({ length: 7000 }, (_, i) => ({ id: `m-${i}`, parentId: i ? `m-${i-1}` : null,

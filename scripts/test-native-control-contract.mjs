@@ -6,6 +6,7 @@ import path from 'node:path'
 import ts from 'typescript'
 import { execFileSync } from 'node:child_process'
 import { planLegacyRpc, commandArguments, invokeLegacyRpc } from '../lib/dsh-protocol-compat.js'
+import { invokeHostRemote } from '../lib/dsh-host-contract.js'
 
 const source = process.env.HARNESS_DSH_SOURCE
 assert(source, 'HARNESS_DSH_SOURCE is required')
@@ -48,6 +49,29 @@ function contract(namespace, method, args) {
   for (const f of fields) if (!f.optional) assert(Object.hasOwn(args, f.name), `${key}: missing ${f.name}`)
   checked++
 }
+// Check the final native call AFTER the same host adapter used by production.
+// Retired mobile names may intentionally map to new native Remote methods.
+const profile = { name: 'web', home: source, dir: source,
+  installAnchor: path.join(source, 'apps/cli/package.json') }
+const ctx = { get(name) {
+  if (name === 'profileContext') return profile
+  if (name === 'typert') return { local: { get: endpoint => methods.has(endpoint) ? { parameters: [] } : undefined } }
+} }
+const rows = [{ sessionId: 's', origin: 'root', agentAvailable: true },
+  { sessionId: 'c', origin: 'subagent', parentSessionId: 's', agentAvailable: true }]
+const nativeGateway = { async invoke(call) {
+  contract(call.namespace, call.method, call.args)
+  if (call.namespace === 'session' && call.method === 'list') return { items: rows }
+  if (call.namespace === 'session' && call.method === 'projections') return {
+    kind: 'sequenced', asOfSeq: 0, values: { subagentCatalog: [{ id: 'c', mode: 'continuable' }] } }
+  if (call.namespace === 'settings' && call.method === 'describe') return {
+    namespaces: [{ ns: 'agent-preset-registry', revision: 1 }] }
+  if (call.namespace === 'session' && call.method === 'selectModel') return { selected: call.args.request }
+  if (call.namespace === 'agentPresets' && call.method === 'list') return { presets: [] }
+  return {}
+} }
+const adapterGateway = { invoke: call => invokeHostRemote(ctx, nativeGateway,
+  { ...call, signal: call.signal ?? new AbortController().signal }) }
 const examples = {
   'session.list': {}, 'session.prompt': { sessionId: 's', mode: 'queue', content: [] },
   'session.create': { workspaceId: 'w' }, 'session.selectModel': { sessionId: 's', provider: 'p', model: 'm' },
@@ -76,10 +100,7 @@ const examples = {
 for (const [method, payload] of Object.entries(examples)) {
   const plan = planLegacyRpc({ type: 'client-request', rpcId: 'contract', method, payload })
   if (plan.kind === 'session-select-model') {
-    const response = await invokeLegacyRpc({ async invoke(call) {
-      contract(call.namespace, call.method, call.args)
-      return { selected: call.args.request }
-    } }, { type: 'client-request', rpcId: 'contract', method, payload },
+    const response = await invokeLegacyRpc(adapterGateway, { type: 'client-request', rpcId: 'contract', method, payload },
     { signal: new AbortController().signal, describeHost: () => ({}) })
     assert.equal(response.result.ok, true)
     continue
@@ -87,7 +108,7 @@ for (const [method, payload] of Object.entries(examples)) {
   assert.equal(plan.kind, 'invoke', method)
   const args = method === 'commands/execute'
     ? commandArguments({ commandAttachmentField: () => 'submittedAttachments' }, plan.args) : plan.args
-  contract(plan.namespace, plan.method, args)
+  await adapterGateway.invoke({ namespace: plan.namespace, method: plan.method, args })
 }
 // Multi-step adapter reads, also shared by both Web and Desktop transports.
 contract('session', 'modelCatalog', {})
